@@ -63,6 +63,9 @@ def test_recorder_watch_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     assert settings.recorder_normalizer_max_lag_s == 600.0
     assert settings.recorder_normalizer_max_consecutive_failures == 5
     assert settings.recorder_compaction_max_delay_s == 10800.0
+    assert settings.recorder_startup_grace_s == 120.0
+    assert settings.recorder_prune_blocked_alert_after_s == 21600.0
+    assert settings.recorder_local_disk_budget_bytes == 8 * 1024**3
 
 
 def test_recorder_watch_env_override_and_validation(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -560,3 +563,20 @@ def test_recorder_health_field_validation() -> None:
         _Settings(recorder_persist_stale_s=0.0)
     with pytest.raises(ValidationError, match="recorder_reference_grace_s"):
         _Settings(recorder_reference_grace_s=-1.0)
+    with pytest.raises(ValidationError, match="recorder_startup_grace_s"):
+        _Settings(recorder_startup_grace_s=0.0)
+    with pytest.raises(ValidationError, match="recorder_prune_blocked_alert_after_s"):
+        _Settings(recorder_prune_blocked_alert_after_s=-5.0)
+    with pytest.raises(ValidationError, match="recorder_local_disk_budget_bytes"):
+        _Settings(recorder_local_disk_budget_bytes=0)
+
+
+def test_prune_block_alert_precedes_backup_status_staleness() -> None:
+    """A blocked prune must alert well before the backup status itself would be considered stale.
+
+    The two values live in different processes (daemon settings vs normalizer config); this guards
+    the relation between their defaults so they cannot drift apart silently.
+    """
+    from src.market_data.streams.normalizer import NormalizerConfig
+
+    assert LiveSettings().recorder_prune_blocked_alert_after_s < NormalizerConfig().backup_status_max_age_h * 3600.0

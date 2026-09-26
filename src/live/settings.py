@@ -171,6 +171,9 @@ class LiveSettings(BaseSettings):
     recorder_normalizer_max_lag_s: float = 600.0
     recorder_normalizer_max_consecutive_failures: int = 5
     recorder_compaction_max_delay_s: float = 10800.0
+    recorder_startup_grace_s: float = 120.0
+    recorder_prune_blocked_alert_after_s: float = 21600.0
+    recorder_local_disk_budget_bytes: int = 8 * 1024**3
     # Frozen strategy digest stamped onto execution-quality observations so
     # forward evidence can be attributed to an immutable strategy version.
     strategy_digest: str | None = None
@@ -258,6 +261,8 @@ class LiveSettings(BaseSettings):
         "recorder_capture_dual_active_max_s",
         "recorder_normalizer_max_lag_s",
         "recorder_compaction_max_delay_s",
+        "recorder_startup_grace_s",
+        "recorder_prune_blocked_alert_after_s",
     )
     @classmethod
     def _positive_recorder_seconds(cls, value: float, info: ValidationInfo) -> float:
@@ -271,6 +276,7 @@ class LiveSettings(BaseSettings):
         "recorder_max_consecutive_flush_failures",
         "recorder_rejected_max_consecutive_points",
         "recorder_normalizer_max_consecutive_failures",
+        "recorder_local_disk_budget_bytes",
     )
     @classmethod
     def _positive_recorder_counts(cls, value: int, info: ValidationInfo) -> int:

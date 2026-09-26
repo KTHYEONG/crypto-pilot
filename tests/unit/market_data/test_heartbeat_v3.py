@@ -102,7 +102,9 @@ def test_fold_and_refresh_window_states() -> None:
     assert states["force_order"]["frames_total"] == 3
     assert states["force_order"]["parse_failures_total"] == 4
     assert states["force_order"]["last_frame_recv_at"] is not None
-    refresh_window_states(states, outcomes, {"book_ticker": 60, "premium_index": 300}, 3600.0, int(now.value))
+    refresh_window_states(
+        states, outcomes, {"book_ticker": 60, "premium_index": 300}, 3600.0, int(now.value), derive_lag_s=45.0
+    )
     assert states["book_ticker"]["window_expected_points"] == 60
     assert states["book_ticker"]["window_captured_points"] == 2
     assert states["book_ticker"]["rejected_rows_last_sample"] == 2
@@ -167,3 +169,81 @@ def test_disk_usage_skips_vanished_files(tmp_path: Path, monkeypatch: pytest.Mon
 
     monkeypatch.setattr(_Path, "stat", _vanishing)
     assert disk_usage_bytes(tmp_path) == (0, 0)
+
+
+def _grid(text: str) -> int:
+    return int(pd.Timestamp(text).value)
+
+
+def test_window_excludes_points_not_yet_derived() -> None:
+    """A grid point captured seconds ago but still inside the derive lag is neither expected nor captured.
+
+    Regression: right after a restart the window floor undercounted expected points while the freshly
+    derived point was already counted as captured, which read as a malformed (captured > expected)
+    heartbeat and alerted a healthy sampler.
+    """
+    states = new_stream_states()
+    now = pd.Timestamp("2026-09-26T15:25:14Z")
+    outcomes = [
+        (_grid("2026-09-26T15:20:00Z"), "premium_index", True, 910, 0, 0.0),
+        (_grid("2026-09-26T15:25:00Z"), "premium_index", True, 910, 0, 0.0),
+    ]
+    refresh_window_states(
+        states,
+        outcomes,
+        {"book_ticker": 60, "premium_index": 300},
+        3600.0,
+        int(now.value),
+        derive_lag_s=60.0,
+        observed_since_ns=_grid("2026-09-26T15:16:43Z"),
+    )
+    state = states["premium_index"]
+    assert state["window_expected_points"] == 1
+    assert state["window_captured_points"] == 1
+    assert state["window_captured_points"] <= state["window_expected_points"]
+    assert state["last_grid"] == "2026-09-26T15:25:00+00:00"
+    assert state["interval_s"] == 300
+
+
+def test_window_is_empty_before_first_grid_point_after_start() -> None:
+    """Within one interval of start there is nothing to expect yet, so no ratio can be degraded."""
+    states = new_stream_states()
+    now = pd.Timestamp("2026-09-26T15:18:15Z")
+    refresh_window_states(
+        states,
+        [],
+        {"book_ticker": 60, "premium_index": 300},
+        3600.0,
+        int(now.value),
+        derive_lag_s=60.0,
+        observed_since_ns=_grid("2026-09-26T15:16:43Z"),
+    )
+    assert states["premium_index"]["window_expected_points"] == 0
+    assert states["premium_index"]["window_captured_points"] == 0
+    assert states["book_ticker"]["window_expected_points"] == 1
+
+
+def test_local_footprint_counts_finished_files_and_survives_vanishing_ones(tmp_path: Path, monkeypatch) -> None:
+    """Journals and parquet count; temp files are skipped; a file removed mid-walk never raises."""
+    from src.market_data.streams.heartbeat_v3 import local_footprint_bytes
+
+    (tmp_path / "raw" / "hot").mkdir(parents=True)
+    (tmp_path / "raw" / "hot" / "a.gz").write_bytes(b"12345")
+    (tmp_path / "raw" / "hot" / "b.partial").write_bytes(b"xxxxxxxxxx")
+    (tmp_path / "book_ticker").mkdir()
+    (tmp_path / "book_ticker" / "1.parquet").write_bytes(b"123")
+    liq = tmp_path / "liq"
+    liq.mkdir()
+    (liq / "l.parquet").write_bytes(b"1234567")
+    (liq / ".l.tmp").write_bytes(b"zz")
+    assert local_footprint_bytes(tmp_path, liq) == 5 + 3 + 7
+
+    real_stat = Path.stat
+
+    def _vanishing(self: Path, *args, **kwargs):
+        if self.name == "a.gz":
+            raise FileNotFoundError(self.name)
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", _vanishing)
+    assert local_footprint_bytes(tmp_path, liq) == 3 + 7

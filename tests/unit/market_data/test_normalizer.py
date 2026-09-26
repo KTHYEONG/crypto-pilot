@@ -715,7 +715,8 @@ def test_retention_stage_failures_are_counted(tmp_path: Path, monkeypatch) -> No
     out = _run_retention_pass(tmp_path, tmp_path / "liq", NormalizerConfig(), checkpoint,
                               tmp_path / "missing.json", compaction_state, retention_state,
                               now, checkpoint_path)
-    assert out[0] == checkpoint
+    assert out[0].files == checkpoint.files
+    assert out[0].coverage == checkpoint.coverage
     monkeypatch.undo()
     monkeypatch.setattr(normalizer_mod, "due_compactions", _boom)
     _run_retention_pass(tmp_path, tmp_path / "liq", NormalizerConfig(), checkpoint,
@@ -1056,3 +1057,210 @@ def test_retention_pass_sweeps_before_pruning(tmp_path: Path) -> None:
     assert not doomed.exists()
     assert retention_state["prune_blocked"] is True
     assert retention_state["blocked_reason"] == "status_missing"
+
+
+def _write_backup_status(path: Path, *, finished: pd.Timestamp, rc: int = 0) -> None:
+    path.write_text(
+        json.dumps(
+            {
+                "started_at": (finished - pd.Timedelta(minutes=1)).isoformat(),
+                "finished_at": finished.isoformat(),
+                "rc": rc,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_blocked_since_is_set_kept_persisted_and_cleared(tmp_path: Path) -> None:
+    """The block start survives passes and restarts, and clears with the block."""
+    from src.market_data.streams.normalizer import _run_retention_pass, load_checkpoint
+
+    ckpt_path = tmp_path / "raw" / "normalizer_checkpoint.json"
+    status_path = tmp_path / "last_success.json"
+    first = _now()
+    checkpoint, _, state = _run_retention_pass(
+        tmp_path,
+        tmp_path / "liq",
+        NormalizerConfig(),
+        _empty(),
+        status_path,
+        {},
+        {"pruned_files_total": 0},
+        first,
+        ckpt_path,
+    )
+    assert state["prune_blocked"] is True
+    assert state["blocked_since"] == first.isoformat()
+    assert checkpoint.retention_blocked_since == first.isoformat()
+    assert load_checkpoint(ckpt_path).retention_blocked_since == first.isoformat()
+
+    later = first + pd.Timedelta(hours=2)
+    checkpoint, _, state = _run_retention_pass(
+        tmp_path,
+        tmp_path / "liq",
+        NormalizerConfig(),
+        load_checkpoint(ckpt_path),
+        status_path,
+        {},
+        state,
+        later,
+        ckpt_path,
+    )
+    assert state["blocked_since"] == first.isoformat()
+
+    _write_backup_status(status_path, finished=later)
+    checkpoint, _, state = _run_retention_pass(
+        tmp_path,
+        tmp_path / "liq",
+        NormalizerConfig(),
+        checkpoint,
+        status_path,
+        {},
+        state,
+        later,
+        ckpt_path,
+    )
+    assert state["prune_blocked"] is False
+    assert state["blocked_since"] is None
+    assert checkpoint.retention_blocked_since is None
+    assert load_checkpoint(ckpt_path).retention_blocked_since is None
+    assert isinstance(state["footprint_bytes"], int)
+
+
+def test_checkpoint_rejects_malformed_blocked_since(tmp_path: Path) -> None:
+    """A checkpoint with a non-ISO block start fails closed instead of resetting the timer."""
+    from src.market_data.streams.normalizer import load_checkpoint
+
+    path = tmp_path / "ckpt.json"
+    path.write_text(json.dumps({"files": {}, "coverage": {}, "retention_blocked_since": "not-a-time"}))
+    with pytest.raises(DataIntegrityError):
+        load_checkpoint(path)
+
+
+def test_retention_due_only_when_block_can_clear(tmp_path: Path) -> None:
+    """Between cadence ticks the pass re-runs only if it is blocked and a fresh success status exists."""
+    from src.market_data.streams.normalizer import _retention_due
+
+    config = NormalizerConfig()
+    status_path = tmp_path / "last_success.json"
+    now = _now()
+    recent = now - pd.Timedelta(seconds=60)
+    blocked: dict[str, Any] = {"prune_blocked": True}
+    assert _retention_due(None, blocked, config, status_path, now) is True
+    assert _retention_due(recent, blocked, config, status_path, now) is False
+    _write_backup_status(status_path, finished=now)
+    assert _retention_due(recent, blocked, config, status_path, now) is True
+    assert _retention_due(recent, {"prune_blocked": False}, config, status_path, now) is False
+    _write_backup_status(status_path, finished=now - pd.Timedelta(hours=100))
+    assert _retention_due(recent, blocked, config, status_path, now) is False
+    assert _retention_due(now - pd.Timedelta(hours=2), {"prune_blocked": False}, config, status_path, now) is True
+
+
+def test_run_clears_prune_block_within_one_cycle_of_status_appearing(tmp_path: Path) -> None:
+    """The loop re-evaluates a blocked prune every cycle, not once per retention interval."""
+    import src.market_data.streams.normalizer as normalizer_mod
+    from src.live.lifecycle import ShutdownFlag
+
+    status_path = tmp_path / "last_success.json"
+    clock = [_now()]
+    flag = ShutdownFlag()
+    sleeps = 0
+    seen: list[bool] = []
+
+    def _sleep(delay: float) -> None:
+        nonlocal sleeps
+        sleeps += 1
+        clock[0] += pd.Timedelta(seconds=delay)
+        heartbeat = tmp_path / "recorder_heartbeat.json"
+        if heartbeat.exists():
+            seen.append(json.loads(heartbeat.read_text())["retention"]["prune_blocked"])
+        if sleeps == 40:
+            _write_backup_status(status_path, finished=clock[0])
+        if sleeps >= 120:
+            flag.requested = True
+
+    normalizer_mod.run_normalizer(
+        tmp_path,
+        tmp_path / "liq",
+        NormalizerConfig(heartbeat_interval_s=30.0),
+        backup_status_path=status_path,
+        shutdown=flag,
+        now_fn=lambda: clock[0],
+        sleep_fn=_sleep,
+    )
+    assert True in seen
+    assert seen[-1] is False
+    heartbeat = json.loads((tmp_path / "recorder_heartbeat.json").read_text())
+    assert heartbeat["retention"]["blocked_since"] is None
+    assert (
+        normalizer_mod.load_checkpoint(tmp_path / "raw" / "normalizer_checkpoint.json").retention_blocked_since is None
+    )
+
+
+def test_restart_keeps_blocked_since_from_checkpoint(tmp_path: Path) -> None:
+    """A restarted normalizer publishes the persisted block start instead of restarting the clock."""
+    import src.market_data.streams.normalizer as normalizer_mod
+    from src.live.lifecycle import ShutdownFlag
+
+    started = _now()
+    ckpt_path = tmp_path / "raw" / "normalizer_checkpoint.json"
+    normalizer_mod.save_checkpoint(
+        ckpt_path,
+        NormalizerCheckpoint(
+            files={},
+            coverage={},
+            retention_blocked_since=(started - pd.Timedelta(hours=5)).isoformat(),
+        ),
+    )
+    clock = [started]
+    flag = ShutdownFlag()
+
+    def _sleep(delay: float) -> None:
+        clock[0] += pd.Timedelta(seconds=delay)
+        flag.requested = True
+
+    normalizer_mod.run_normalizer(
+        tmp_path,
+        tmp_path / "liq",
+        NormalizerConfig(heartbeat_interval_s=30.0),
+        backup_status_path=tmp_path / "missing.json",
+        shutdown=flag,
+        now_fn=lambda: clock[0],
+        sleep_fn=_sleep,
+    )
+    heartbeat = json.loads((tmp_path / "recorder_heartbeat.json").read_text())
+    assert heartbeat["retention"]["prune_blocked"] is True
+    assert heartbeat["retention"]["blocked_since"] == (started - pd.Timedelta(hours=5)).isoformat()
+
+
+def test_config_rejects_derive_lag_shorter_than_cycle() -> None:
+    """The derive-lag allowance must cover at least one normalize cycle."""
+    with pytest.raises(ValidationError):
+        NormalizerConfig(normalize_interval_s=30.0, derive_lag_allowance_s=10.0)
+
+
+def test_successful_compaction_drops_only_that_days_cursors(tmp_path: Path, monkeypatch) -> None:
+    """A compacted day's hot cursors are removed while other days and the block start survive."""
+    from src.market_data.streams import normalizer as normalizer_mod
+    from src.market_data.streams.normalizer import FileCursor, _run_retention_pass
+
+    monkeypatch.setattr(normalizer_mod, "due_compactions", lambda *a, **k: [("book_ticker", "20260920")])
+    monkeypatch.setattr(normalizer_mod, "compact_day", lambda *a, **k: True)
+    since = (_now() - pd.Timedelta(hours=1)).isoformat()
+    checkpoint = NormalizerCheckpoint(
+        files={
+            "book_ticker/20260920/00.blue.jsonl.gz": FileCursor(offset=5, final=True),
+            "book_ticker/20260921/00.blue.jsonl.gz": FileCursor(offset=7, final=False),
+        },
+        coverage={},
+        retention_blocked_since=since,
+    )
+    out, compaction_state, retention_state = _run_retention_pass(
+        tmp_path, tmp_path / "liq", NormalizerConfig(), checkpoint, tmp_path / "missing.json",
+        {}, {"pruned_files_total": 0}, _now(), tmp_path / "raw" / "normalizer_checkpoint.json",
+    )
+    assert set(out.files) == {"book_ticker/20260921/00.blue.jsonl.gz"}
+    assert compaction_state["last_result"] == "ok"
+    assert out.retention_blocked_since == since
+    assert retention_state["blocked_since"] == since

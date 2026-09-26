@@ -38,6 +38,9 @@ def _thresholds(**overrides: Any) -> RecorderWatchThresholds:
         "normalizer_max_lag_s": 600.0,
         "normalizer_max_consecutive_failures": 5,
         "compaction_max_delay_s": 10800.0,
+        "startup_grace_s": 120.0,
+        "prune_blocked_alert_after_s": 21600.0,
+        "local_disk_budget_bytes": 8 * 1024**3,
     }
     values.update(overrides)
     return RecorderWatchThresholds(**values)
@@ -510,3 +513,92 @@ def test_reference_stale_and_incomplete_days() -> None:
         payload, now=early, watch_started_at=early - pd.Timedelta(hours=3),
         thresholds=_thresholds())
     assert "reference_missing:reference" in {finding.key for finding in early_findings}
+
+
+def _restarted_payload(*, up_s: float, premium_persisted: str | None) -> dict[str, Any]:
+    """A payload from a normalizer that started ``up_s`` seconds ago with nothing persisted yet."""
+    now = _now()
+    payload = _payload(started_at=(now - pd.Timedelta(seconds=up_s)).isoformat())
+    payload["streams"]["premium_index"].update(
+        {
+            "interval_s": 300,
+            "last_persisted_at": premium_persisted,
+            "window_expected_points": 0,
+            "window_captured_points": 0,
+        }
+    )
+    return payload
+
+
+def _watch(payload: dict[str, Any], **thresholds: Any) -> set[str]:
+    return _keys(
+        evaluate_recorder_heartbeat(
+            payload,
+            now=_now(),
+            watch_started_at=_now() - pd.Timedelta(hours=3),
+            thresholds=_thresholds(**thresholds),
+        )
+    )
+
+
+def test_startup_transient_yields_no_sampler_findings() -> None:
+    """Within one interval plus grace of start, an unpersisted dataset is warming up, not failing."""
+    assert _watch(_restarted_payload(up_s=90.0, premium_persisted=None)) == set()
+
+
+def test_startup_grace_ends_after_interval_plus_slack() -> None:
+    """Once interval (300 s) + grace (120 s) has passed without any persist, the dataset alerts."""
+    keys = _watch(_restarted_payload(up_s=421.0, premium_persisted=None))
+    assert "sampler_stale:premium_index" in keys
+
+
+def test_genuine_stale_after_first_persist_is_never_graced() -> None:
+    """A dataset that persisted earlier and then went silent alerts even seconds after a start."""
+    stale = (_now() - pd.Timedelta(seconds=4000)).isoformat()
+    keys = _watch(_restarted_payload(up_s=90.0, premium_persisted=stale))
+    assert "sampler_stale:premium_index" in keys
+
+
+def test_missing_interval_disables_grace_fail_closed() -> None:
+    """Without ``interval_s`` the grace cannot be computed, so the finding is not suppressed."""
+    payload = _restarted_payload(up_s=90.0, premium_persisted=None)
+    del payload["streams"]["premium_index"]["interval_s"]
+    assert "sampler_stale:premium_index" in _watch(payload)
+
+
+def _retention(**overrides: Any) -> dict[str, Any]:
+    now = _now()
+    entry: dict[str, Any] = {
+        "prune_blocked": True,
+        "blocked_reason": "status_missing",
+        "blocked_since": (now - pd.Timedelta(seconds=600)).isoformat(),
+        "footprint_bytes": 5 * 1024**2,
+        "backup_started_at": None,
+        "last_run_at": now.isoformat(),
+        "pruned_files_total": 0,
+    }
+    entry.update(overrides)
+    return entry
+
+
+def test_young_prune_block_is_silent() -> None:
+    """A block right after the first deploy, small footprint, does not alert."""
+    assert _watch(_payload(retention=_retention())) == set()
+
+
+def test_prune_block_alerts_after_duration_threshold() -> None:
+    """Blocked longer than ``prune_blocked_alert_after_s`` (measured from blocked_since) alerts."""
+    since = (_now() - pd.Timedelta(seconds=21601)).isoformat()
+    assert "prune_blocked:retention" in _watch(_payload(retention=_retention(blocked_since=since)))
+
+
+def test_prune_block_alerts_on_disk_budget_before_duration() -> None:
+    """A footprint over the disk budget alerts a young block immediately."""
+    payload = _payload(retention=_retention(footprint_bytes=9 * 1024**3))
+    assert "prune_blocked:retention" in _watch(payload)
+
+
+def test_prune_block_without_blocked_since_is_malformed() -> None:
+    """A blocked entry must carry blocked_since and footprint_bytes; otherwise fail closed."""
+    payload = _payload(retention=_retention(blocked_since=None))
+    assert "prune_blocked:retention" in _watch(payload)
