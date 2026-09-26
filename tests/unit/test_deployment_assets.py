@@ -562,3 +562,14 @@ def test_liveness_units_are_well_formed() -> None:
     assert "set -uo pipefail" in script
     assert "stage=liveness" in script
     assert subprocess.run(["/bin/bash", "-n", str(root / "deploy" / "liveness" / "crypto-pilot-liveness.sh")], capture_output=True, timeout=30).returncode == 0  # noqa: S603
+
+
+def test_deploy_workflow_installs_and_enables_liveness_unit() -> None:
+    """The host liveness watcher must be shipped and enabled by CI, or a dead daemon goes unreported."""
+    root = Path(__file__).resolve().parents[2]
+    workflow = (root / ".github" / "workflows" / "deploy.yml").read_text(encoding="utf-8")
+    assert 'deploy/liveness/crypto-pilot-liveness.sh "$REMOTE_USER@$HOST:~/crypto-pilot/deploy/liveness/crypto-pilot-liveness.sh.new"' in workflow
+    assert "deploy/liveness/crypto-pilot-liveness.service" in workflow
+    assert "deploy/liveness/crypto-pilot-liveness.timer" in workflow
+    assert workflow.index("mv -f ~/crypto-pilot/deploy/liveness/crypto-pilot-liveness.sh.new") < workflow.index("systemctl --user daemon-reload")
+    assert workflow.index("systemctl --user daemon-reload") < workflow.index("systemctl --user enable --now crypto-pilot-liveness.timer")
