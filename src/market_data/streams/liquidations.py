@@ -1,175 +1,18 @@
 from __future__ import annotations
 
-import asyncio
-import contextlib
 import json
 import logging
-import time
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, Protocol
+from typing import Any
 
-import aiohttp
 import pandas as pd
 
 from src.common.parquet_io import read_parquet_or_quarantine, write_parquet_atomic
 from src.common.paths import DATA_DIR
 
-if TYPE_CHECKING:
-    from src.market_data.streams.coverage import CoverageTracker
-
 _logger = logging.getLogger(__name__)
-
-# Binance USD-M 웹소켓은 카테고리 경로로 분리되었다. 청산 스트림은 `market` 경로에서만 이벤트가 온다.
-# 레거시 `/ws/` 경로는 연결·핑퐁은 정상이면서 이벤트가 0건이라 겉보기로는 "조용한 시장"과 구분되지 않는다.
-FORCE_ORDER_STREAM_URL: str = "wss://fstream.binance.com/market/ws/!forceOrder@arr"
-
-
-@dataclass(frozen=True, slots=True)
-class FeedFrame:
-    """One observation from a liquidation feed.
-
-    ``kind`` semantics:
-      * ``"events"``  — one or more raw forceOrder payloads arrived at ``received_at``.
-      * ``"alive"``   — a control frame (pong, or server ping that was answered) arrived at
-        ``received_at``; proves the connection was live at that instant without carrying events.
-      * ``"timeout"`` — nothing arrived within the requested timeout; carries no liveness evidence.
-      * ``"closed"``  — the connection ended (server close, transport error, heartbeat loss).
-    """
-
-    kind: Literal["events", "alive", "timeout", "closed"]
-    received_at: pd.Timestamp | None
-    payloads: tuple[Mapping[str, Any], ...] = ()
-    detail: str = ""
-
-
-class LiquidationFeed(Protocol):
-    """Minimal surface a liquidation transport must provide."""
-
-    async def receive(self, timeout_s: float) -> FeedFrame: ...
-    async def close(self) -> None: ...
-
-
-class BinanceForceOrderFeed:
-    """Binance USD-M all-market liquidation stream over a raw WebSocket.
-
-    Binance pushes at most one forceOrder snapshot per symbol per second on ``!forceOrder@arr``; the
-    payload shape is ``{"e": "forceOrder", "E": ..., "o": {...}}`` which ``parse_liquidation``
-    already accepts. Automatic ping handling is disabled so control frames surface as liveness
-    evidence: the feed sends a client ping every ``ping_interval_s`` and answers server pings itself.
-    """
-
-    def __init__(
-        self,
-        ws: aiohttp.ClientWebSocketResponse,
-        *,
-        ping_interval_s: float,
-        now_fn: Callable[[], pd.Timestamp],
-    ) -> None:
-        self._ws = ws
-        self._ping_interval_s = ping_interval_s
-        self._now_fn = now_fn
-        self._last_ping = time.monotonic()
-        self._closed = False
-
-    @classmethod
-    async def connect(
-        cls,
-        session: aiohttp.ClientSession,
-        *,
-        url: str = FORCE_ORDER_STREAM_URL,
-        ping_interval_s: float,
-        now_fn: Callable[[], pd.Timestamp],
-    ) -> BinanceForceOrderFeed:
-        """Open the all-market forceOrder stream; raises on handshake failure."""
-        ws = await session.ws_connect(url, autoping=False, heartbeat=None)
-        return cls(ws, ping_interval_s=ping_interval_s, now_fn=now_fn)
-
-    def _handle_text(self, text: str) -> FeedFrame:
-        try:
-            decoded = json.loads(text)
-        except Exception as exc:  # noqa: BLE001
-            _logger.warning("[DATA] stage=liquidation_stream status=BAD_FRAME detail=%s", exc)
-            return FeedFrame(kind="alive", received_at=self._now_fn())
-        if isinstance(decoded, Mapping):
-            return FeedFrame(kind="events", received_at=self._now_fn(), payloads=(decoded,))
-        if isinstance(decoded, list):
-            usable = tuple(item for item in decoded if isinstance(item, Mapping))
-            if usable:
-                if len(usable) != len(decoded):
-                    _logger.warning(
-                        "[DATA] stage=liquidation_stream status=BAD_FRAME detail=%d of %d items dropped",
-                        len(decoded) - len(usable),
-                        len(decoded),
-                    )
-                return FeedFrame(kind="events", received_at=self._now_fn(), payloads=usable)
-            _logger.warning("[DATA] stage=liquidation_stream status=BAD_FRAME detail=no usable payloads")
-            return FeedFrame(kind="alive", received_at=self._now_fn())
-        _logger.warning("[DATA] stage=liquidation_stream status=BAD_FRAME detail=non-mapping payload")
-        return FeedFrame(kind="alive", received_at=self._now_fn())
-
-    async def receive(self, timeout_s: float) -> FeedFrame:
-        """Wait at most ``timeout_s`` for the next frame, sending a client ping when due."""
-        if self._closed:
-            return FeedFrame(kind="closed", received_at=None, detail="already closed")
-        if time.monotonic() - self._last_ping >= self._ping_interval_s:
-            try:
-                await self._ws.ping()
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:  # noqa: BLE001
-                return FeedFrame(kind="closed", received_at=None, detail=f"ping failed: {exc}")
-            self._last_ping = time.monotonic()
-        try:
-            msg = await self._ws.receive(timeout=timeout_s)
-        except TimeoutError:
-            return FeedFrame(kind="timeout", received_at=None)
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:  # noqa: BLE001
-            return FeedFrame(kind="closed", received_at=None, detail=f"receive failed: {exc}")
-        try:
-            if msg.type == aiohttp.WSMsgType.TEXT:
-                return self._handle_text(str(msg.data))
-            if msg.type == aiohttp.WSMsgType.BINARY:
-                try:
-                    text = bytes(msg.data).decode("utf-8")
-                except Exception as exc:  # noqa: BLE001
-                    _logger.warning("[DATA] stage=liquidation_stream status=BAD_FRAME detail=%s", exc)
-                    return FeedFrame(kind="alive", received_at=self._now_fn())
-                return self._handle_text(text)
-            if msg.type == aiohttp.WSMsgType.PONG:
-                return FeedFrame(kind="alive", received_at=self._now_fn())
-            if msg.type == aiohttp.WSMsgType.PING:
-                try:
-                    await self._ws.pong(msg.data)
-                except asyncio.CancelledError:
-                    raise
-                except Exception as exc:  # noqa: BLE001
-                    return FeedFrame(kind="closed", received_at=None, detail=f"pong failed: {exc}")
-                return FeedFrame(kind="alive", received_at=self._now_fn())
-            if msg.type in (
-                aiohttp.WSMsgType.CLOSE,
-                aiohttp.WSMsgType.CLOSED,
-                aiohttp.WSMsgType.CLOSING,
-                aiohttp.WSMsgType.ERROR,
-            ):
-                return FeedFrame(kind="closed", received_at=None, detail=f"ws {msg.type.name}: {msg.data}")
-            return FeedFrame(kind="closed", received_at=None, detail=f"unexpected ws type: {msg.type}")
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:  # noqa: BLE001
-            return FeedFrame(kind="closed", received_at=None, detail=f"dispatch failed: {exc}")
-
-    async def close(self) -> None:
-        """Close the socket; idempotent and never raises."""
-        if self._closed:
-            return
-        self._closed = True
-        with contextlib.suppress(Exception):
-            await self._ws.close()
-
 
 @dataclass(frozen=True, slots=True)
 class LiquidationEvent:
@@ -425,13 +268,12 @@ def append_liquidation_events(
 ) -> list[Path]:
     """Merge liquidation events into hourly ``liquidations_<YYYYMMDD>_<HH>.parquet`` partitions.
 
-    Partitions are keyed by the UTC hour of ``event_time`` so each flush rewrites at most one hour of
-    rows and every closed hour becomes an immutable file that the nightly backup copies once. Each
-    touched hour is read, merged, deduplicated on (symbol, event_time_ms, price, orig_qty,
-    filled_accum_qty) keeping the last copy, and atomically replaced; an undecodable hour file is
-    quarantined and the hour restarts from the new events. Legacy daily files
-    (``liquidations_<YYYYMMDD>.parquet``) are never modified; ``load_liquidation_events`` reads both
-    layouts. Assumes a single writer process per ``directory``.
+    Partitions are keyed by the UTC hour of ``event_time``. Each touched hour is read, merged,
+    deduplicated on (symbol, event_time_ms, price, orig_qty, filled_accum_qty) and atomically
+    replaced. The copy with the earliest ``ingested_at`` survives: two capture slots receive the same
+    frame, and a checkpoint replay re-parses it, and neither may move the recorded receipt time later.
+    An undecodable hour file is quarantined and the hour restarts from the new events. Legacy daily
+    files are never modified. Assumes a single writer process per ``directory``.
 
     Args:
         events: Parsed events; an empty batch writes nothing.
@@ -441,8 +283,7 @@ def append_liquidation_events(
         Sorted hourly partition paths written.
 
     Raises:
-        Exception: Merge failures and OS-level read/write failures propagate with every existing
-            partition unchanged; the caller keeps its buffer and retries on the next flush.
+        Exception: Merge and OS-level failures propagate with every existing partition unchanged.
     """
     if not events:
         return []
@@ -462,23 +303,49 @@ def append_liquidation_events(
         grp = _apply_compact_dtypes(grp)
         grp["event_time"] = pd.to_datetime(grp["event_time"], utc=True)
         grp["ingested_at"] = pd.to_datetime(grp["ingested_at"], utc=True)
-        grp = grp.drop_duplicates(subset=dedup_subset, keep="last")
         existing = read_parquet_or_quarantine(path, stage="liquidations")
         if existing is not None:
             if "event_time_ms" not in existing.columns and "event_time" in existing.columns:
                 existing["event_time_ms"] = pd.to_datetime(existing["event_time"], utc=True).astype("int64") // 1_000_000
-            combined = pd.concat([existing, grp], ignore_index=True)
-            combined = _apply_compact_dtypes(combined)
-            combined["event_time"] = pd.to_datetime(combined["event_time"], utc=True)
-            combined["ingested_at"] = pd.to_datetime(combined["ingested_at"], utc=True)
-            combined = combined.drop_duplicates(subset=dedup_subset, keep="last")
+            combined = _earliest_ingest_merge(existing, grp, dedup_subset)
             write_parquet_atomic(combined, path, compression="zstd")
         else:
-            write_parquet_atomic(grp, path, compression="zstd")
+            write_parquet_atomic(_earliest_ingest_merge(grp.iloc[0:0], grp, dedup_subset), path, compression="zstd")
         written.append(path)
     # sort and dedup written
     written = sorted(set(written))
     return written
+
+
+def _earliest_ingest_merge(
+    existing: pd.DataFrame, chunk: pd.DataFrame, dedup_subset: list[str]
+) -> pd.DataFrame:
+    """Combine on-disk events with new events so the earliest receipt per key sorts first.
+
+    The surviving row keeps the minimum ``ingested_at`` (ties go to the row already on disk),
+    but it never loses a non-null ``raw_order_json`` to a null duplicate: a non-null payload
+    from any duplicate is patched onto the survivor.
+    """
+    prior = pd.DataFrame({"_on_disk": [0] * len(existing) + [1] * len(chunk)})
+    combined = pd.concat([existing, chunk], ignore_index=True)
+    combined = _apply_compact_dtypes(combined)
+    combined["event_time"] = pd.to_datetime(combined["event_time"], utc=True)
+    combined["ingested_at"] = pd.to_datetime(combined["ingested_at"], utc=True)
+    combined["_on_disk"] = prior["_on_disk"].to_numpy()
+    combined = combined.sort_values(["ingested_at", "_on_disk"], na_position="last")
+    best_raw = (
+        combined.dropna(subset=["raw_order_json"])
+        .drop_duplicates(subset=dedup_subset, keep="first")
+        .set_index(dedup_subset)["raw_order_json"]
+    )
+    survivors = combined.drop_duplicates(subset=dedup_subset, keep="first")
+    needs_raw = survivors["raw_order_json"].isna()
+    patched = survivors[needs_raw].set_index(dedup_subset).index.map(best_raw).astype("string")
+    survivors.loc[needs_raw, "raw_order_json"] = patched.to_numpy()
+    combined = survivors.drop(columns=["_on_disk"])
+    if "event_time" in combined.columns:
+        combined = combined.sort_values("event_time").reset_index(drop=True)
+    return combined
 
 
 def load_liquidation_events(
@@ -537,391 +404,3 @@ def default_liquidations_dir() -> Path:
     return DATA_DIR / "futures" / "liquidations"
 
 
-def _utc_now() -> pd.Timestamp:
-    return pd.Timestamp.now(tz="UTC")
-
-
-@dataclass(slots=True)
-class LiquidationHealth:
-    """Mutable liveness facts of the liquidation stream, published through the recorder heartbeat.
-
-    Updated in place by ``run_liquidation_stream`` on the event loop thread and snapshotted by the
-    recorder's heartbeat task; a pong-answering socket that delivers no events is invisible to
-    coverage, so an external watchdog needs the time of the last *parseable* event and the count of
-    connections that ended without delivering one.
-
-    Attributes:
-        last_event_at: Wall-clock receipt time of the latest parseable forceOrder event (UTC).
-        last_connected_at: Wall-clock time the latest connection was established (UTC).
-        consecutive_failed_connections: Connection attempts in a row that failed to open or closed
-            without delivering a parseable event; reset to 0 by the next parseable event.
-        last_disconnect_reason: Status token and detail of the latest connection end or connect failure.
-        last_persisted_at: Wall-clock instant of the latest successful event flush (UTC).
-        consecutive_flush_failures: Flushes in a row that raised.
-        pending_events: Events buffered in memory and not yet persisted.
-        dropped_events_total: Events discarded by the pending bound since process start.
-    """
-
-    last_event_at: pd.Timestamp | None = None
-    last_connected_at: pd.Timestamp | None = None
-    consecutive_failed_connections: int = 0
-    last_disconnect_reason: str | None = None
-    last_persisted_at: pd.Timestamp | None = None
-    consecutive_flush_failures: int = 0
-    pending_events: int = 0
-    dropped_events_total: int = 0
-
-    def as_heartbeat_entry(self) -> dict[str, Any]:
-        """JSON-ready snapshot: timestamps as ISO-8601 UTC strings (or ``None``), counters as ``int``."""
-
-        def _iso(ts: pd.Timestamp | None) -> str | None:
-            if ts is None:
-                return None
-            out = pd.Timestamp(ts)
-            out = out.tz_localize("UTC") if out.tzinfo is None else out.tz_convert("UTC")  # noqa: SIM108
-            return str(out.isoformat())
-
-        return {
-            "last_event_at": _iso(self.last_event_at),
-            "last_connected_at": _iso(self.last_connected_at),
-            "consecutive_failed_connections": int(self.consecutive_failed_connections),
-            "last_disconnect_reason": self.last_disconnect_reason,
-            "last_persisted_at": _iso(self.last_persisted_at),
-            "consecutive_flush_failures": int(self.consecutive_flush_failures),
-            "pending_events": int(self.pending_events),
-            "dropped_events_total": int(self.dropped_events_total),
-        }
-
-
-async def run_liquidation_stream(
-    *,
-    symbols: list[str] | None,
-    directory: Path,
-    flush_interval_s: float = 60.0,
-    max_buffer: int = 5000,
-    shutdown: Any | None = None,
-    feed_factory: Callable[[], Awaitable[LiquidationFeed]] | None = None,
-    clock: Callable[[], float] = time.monotonic,
-    coverage: CoverageTracker | None = None,
-    now_fn: Callable[[], pd.Timestamp] | None = None,
-    receive_timeout_s: float = 1.0,
-    liveness_timeout_s: float = 15.0,
-    ping_interval_s: float = 5.0,
-    max_backoff_s: float = 60.0,
-    event_stall_timeout_s: float = 600.0,
-    health: LiquidationHealth | None = None,
-    max_pending_events: int = 100_000,
-) -> None:
-    """Stream Binance forceOrder liquidations into hourly parquet partitions until shutdown.
-
-    Binance pushes at most one liquidation snapshot per symbol per second, so stored events are a lower
-    bound of liquidation flow. Coverage is attested only by parseable forceOrder events: within one
-    connection the attested segment spans its first to its latest event, so quiet stretches between
-    events stay attested while a connection that only answers pings (wrong endpoint, dropped
-    subscription) attests nothing. Control frames are liveness evidence for reconnect decisions only.
-    Shutdown is observed at least every ``receive_timeout_s`` so SIGTERM completes the final flush
-    well inside the container stop grace period.
-
-    Args:
-        symbols: optional client-side filter on the all-market stream (normalized symbol names);
-            ``None`` keeps every symbol. Filtered-out events still count as evidence that the
-            subscription delivers.
-        feed_factory: opens a connected feed; defaults to ``BinanceForceOrderFeed.connect`` on a
-            session owned (and closed) by this function.
-        receive_timeout_s: upper bound on shutdown observation latency.
-        liveness_timeout_s: a connection with no event/control frame for this long is treated as dead.
-        ping_interval_s: client ping cadence passed to the default feed.
-        max_backoff_s: cap of the exponential reconnect backoff.
-        event_stall_timeout_s: a connection that answers pings but delivers no parseable event for
-            this long is treated as a silently broken subscription and reconnected. Market-wide
-            liquidations arrive ~0.3/s and the largest observed quiet gap is ~107 s, so 600 s never
-            fires on a healthy feed.
-        health: optional liveness record updated in place for the recorder heartbeat.
-        max_pending_events: memory bound on unpersisted events; oldest events are dropped
-            beyond it after a failed flush.
-
-    Raises:
-        ValueError: when ``receive_timeout_s``/``ping_interval_s`` are not positive or
-            ``liveness_timeout_s`` is not greater than ``ping_interval_s`` or ``event_stall_timeout_s``
-            is not greater than ``liveness_timeout_s``.
-        Exception: any unexpected error, re-raised after buffered events and coverage are flushed and
-            the feed/session are closed, so the caller's supervisor restarts the stream.
-    """
-    if receive_timeout_s <= 0:
-        raise ValueError("receive_timeout_s must be positive")
-    if ping_interval_s <= 0:
-        raise ValueError("ping_interval_s must be positive")
-    if liveness_timeout_s <= ping_interval_s:
-        raise ValueError("liveness_timeout_s must be greater than ping_interval_s")
-    if event_stall_timeout_s <= liveness_timeout_s:
-        raise ValueError("event_stall_timeout_s must be greater than liveness_timeout_s")
-    if max_pending_events < 1:
-        raise ValueError("max_pending_events must be >= 1")
-    directory = Path(directory)
-    directory.mkdir(parents=True, exist_ok=True)
-    wanted = {_normalize_symbol(s) for s in symbols} if symbols else None
-    _now = now_fn if now_fn is not None else _utc_now
-
-    owned_session: aiohttp.ClientSession | None = None
-    factory: Callable[[], Awaitable[LiquidationFeed]]
-    if feed_factory is not None:
-        factory = feed_factory
-    else:
-        owned_session = aiohttp.ClientSession()
-
-        async def _default_factory() -> LiquidationFeed:
-            assert owned_session is not None
-            return await BinanceForceOrderFeed.connect(
-                owned_session, ping_interval_s=ping_interval_s, now_fn=_now
-            )
-
-        factory = _default_factory
-
-    buffer: list[LiquidationEvent] = []
-    last_flush = clock()
-    last_coverage_flush = last_flush
-    backoff = 1.0
-
-    def _is_shutdown() -> bool:
-        try:
-            return bool(getattr(shutdown, "requested", False))
-        except Exception:  # noqa: BLE001
-            return False
-
-    async def _sleep_shutdown_aware(delay: float) -> bool:
-        """Sleep in ≤1 s chunks; return True when shutdown was observed."""
-        remaining = delay
-        while remaining > 0:
-            if _is_shutdown():
-                return True
-            try:
-                await asyncio.sleep(min(1.0, remaining))
-            except asyncio.CancelledError:
-                raise
-            remaining -= 1.0
-        return _is_shutdown()
-
-    def _mark_ok(ts: pd.Timestamp) -> None:
-        if coverage is None:
-            return
-        try:
-            coverage.mark_ok(ts)
-        except Exception as exc:  # noqa: BLE001
-            _logger.warning("[DATA] stage=liquidation_stream status=COVERAGE_MARK_FAILED detail=%s", exc)
-
-    def _mark_error() -> None:
-        if coverage is None:
-            return
-        try:
-            coverage.mark_error(_now())
-        except Exception as exc:  # noqa: BLE001
-            _logger.warning("[DATA] stage=liquidation_stream status=COVERAGE_MARK_FAILED detail=%s", exc)
-
-    def _flush_coverage() -> None:
-        if coverage is None:
-            return
-        try:
-            coverage.flush()
-        except Exception as exc:  # noqa: BLE001
-            _logger.warning("[DATA] stage=liquidation_stream status=COVERAGE_FLUSH_FAILED detail=%s", exc)
-
-    def _flush_events() -> bool:
-        """Persist buffered events; return True when the buffer is empty afterwards."""
-        nonlocal last_flush
-        if not buffer:
-            return True
-        try:
-            append_liquidation_events(buffer, directory)
-        except Exception as exc:  # noqa: BLE001
-            _logger.warning("[DATA] stage=liquidation_stream status=FLUSH_FAILED detail=%s", exc)
-            if health is not None:
-                health.consecutive_flush_failures += 1
-                health.pending_events = len(buffer)
-            if len(buffer) > max_pending_events:
-                dropped = len(buffer) - max_pending_events
-                del buffer[:dropped]
-                if health is not None:
-                    health.dropped_events_total += dropped
-                    health.pending_events = len(buffer)
-                _logger.error(
-                    "[DATA] stage=liquidation_stream status=BUFFER_OVERFLOW dropped=%d pending=%d",
-                    dropped, len(buffer),
-                )
-                if coverage is not None:
-                    try:
-                        coverage.discard_unflushed(_now())
-                    except Exception as exc:  # noqa: BLE001
-                        _logger.warning(
-                            "[DATA] stage=liquidation_stream status=COVERAGE_MARK_FAILED detail=%s", exc
-                        )
-            return False
-        buffer.clear()
-        last_flush = clock()
-        if health is not None:
-            health.last_persisted_at = _now()
-            health.consecutive_flush_failures = 0
-            health.pending_events = 0
-        return True
-
-    async def _close_feed(feed: LiquidationFeed | None) -> None:
-        if feed is None:
-            return
-        try:
-            await feed.close()
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:  # noqa: BLE001
-            _logger.warning("[DATA] stage=liquidation_stream status=CLOSE_FAILED detail=%s", exc)
-
-    feed: LiquidationFeed | None = None
-    try:
-        while not _is_shutdown():
-            try:
-                feed = await factory()
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:  # noqa: BLE001
-                _logger.warning(
-                    "[DATA] stage=liquidation_stream status=CONNECT_FAILED detail=%s backoff=%.1f",
-                    exc,
-                    backoff,
-                )
-                if health is not None:
-                    health.consecutive_failed_connections += 1
-                    health.last_disconnect_reason = f"CONNECT_FAILED: {exc}"
-                _mark_error()
-                if not buffer:
-                    _flush_coverage()
-                if await _sleep_shutdown_aware(backoff):
-                    break
-                backoff = min(max_backoff_s, backoff * 2.0)
-                continue
-            if health is not None:
-                health.last_connected_at = _now()
-            has_evidence = False
-            connection_event_evidence = False
-            disconnect_reason: str | None = None
-            last_evidence = clock()
-            last_event_at = last_evidence
-
-            def _note_stall(elapsed: float) -> None:
-                nonlocal disconnect_reason
-                _logger.warning(
-                    "[DATA] stage=liquidation_stream status=EVENT_STALL detail=no event for %.0fs "
-                    "while connection answers",
-                    elapsed,
-                )
-                disconnect_reason = f"EVENT_STALL: no parseable event for {elapsed:.0f}s"
-                _mark_error()
-                if not buffer:
-                    _flush_coverage()
-
-            while not _is_shutdown():
-                try:
-                    frame = await feed.receive(receive_timeout_s)
-                except asyncio.CancelledError:
-                    raise
-                except Exception as exc:  # noqa: BLE001
-                    frame = FeedFrame(kind="closed", received_at=None, detail=f"receive raised: {exc}")
-                if frame.kind == "events":
-                    # Event evidence is evaluated before the symbol filter: a parseable
-                    # forceOrder payload proves the subscription delivers, even when the
-                    # event itself is filtered out of storage.
-                    evidence: list[LiquidationEvent] = []
-                    for msg in frame.payloads:
-                        if not isinstance(msg, Mapping):
-                            continue
-                        received_at = frame.received_at
-                        assert received_at is not None
-                        ev = parse_liquidation(msg, ingested_at=received_at)
-                        if ev is not None:
-                            evidence.append(ev)
-                    has_evidence = True
-                    last_evidence = clock()
-                    if evidence:
-                        last_event_at = clock()
-                        connection_event_evidence = True
-                        received_at = frame.received_at
-                        assert received_at is not None
-                        _mark_ok(received_at)
-                        if health is not None:
-                            health.last_event_at = received_at
-                            health.consecutive_failed_connections = 0
-                        for ev in evidence:
-                            if wanted is not None and ev.symbol not in wanted:
-                                continue
-                            buffer.append(ev)
-                    elif clock() - last_event_at >= event_stall_timeout_s:
-                        _note_stall(clock() - last_event_at)
-                        break
-                elif frame.kind == "alive":
-                    has_evidence = True
-                    last_evidence = clock()
-                    if clock() - last_event_at >= event_stall_timeout_s:
-                        _note_stall(clock() - last_event_at)
-                        break
-                elif frame.kind == "timeout":
-                    if clock() - last_event_at >= event_stall_timeout_s:
-                        _note_stall(clock() - last_event_at)
-                        break
-                    if clock() - last_evidence >= liveness_timeout_s:
-                        elapsed = clock() - last_evidence
-                        _logger.warning(
-                            "[DATA] stage=liquidation_stream status=LIVENESS_TIMEOUT detail=no evidence for "
-                            "%.1fs",
-                            elapsed,
-                        )
-                        disconnect_reason = f"LIVENESS_TIMEOUT: no evidence for {elapsed:.1f}s"
-                        _mark_error()
-                        if not buffer:
-                            _flush_coverage()
-                        break
-                else:  # "closed"
-                    _logger.warning(
-                        "[DATA] stage=liquidation_stream status=DISCONNECTED detail=%s", frame.detail
-                    )
-                    disconnect_reason = f"DISCONNECTED: {frame.detail}"
-                    _mark_error()
-                    if not buffer:
-                        _flush_coverage()
-                    break
-                now_c = clock()
-                if buffer and (len(buffer) >= max_buffer or now_c - last_flush >= flush_interval_s):
-                    if _flush_events():
-                        _flush_coverage()
-                        last_coverage_flush = now_c
-                elif not buffer and now_c - last_coverage_flush >= flush_interval_s:
-                    # 조용한 구간은 프레임(핑 5초)마다가 아니라 flush 주기마다만 기록한다(레코드 폭증 방지).
-                    _flush_coverage()
-                    last_coverage_flush = now_c
-            await _close_feed(feed)
-            feed = None
-            if disconnect_reason is not None and health is not None:
-                health.last_disconnect_reason = disconnect_reason
-                if not _is_shutdown() and not connection_event_evidence:
-                    health.consecutive_failed_connections += 1
-            if _is_shutdown():
-                break
-            if has_evidence:
-                backoff = 1.0
-                continue
-            if await _sleep_shutdown_aware(backoff):
-                break
-            backoff = min(max_backoff_s, backoff * 2.0)
-    except asyncio.CancelledError:
-        raise
-    except Exception as exc:  # noqa: BLE001
-        _logger.error("[DATA] stage=liquidation_stream status=FATAL detail=%s", exc, exc_info=True)
-        raise
-    finally:
-        _flush_events()
-        if not buffer:
-            _flush_coverage()
-        await _close_feed(feed)
-        if owned_session is not None:
-            try:
-                await owned_session.close()
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:  # noqa: BLE001
-                _logger.warning("[DATA] stage=liquidation_stream status=SESSION_CLOSE_FAILED detail=%s", exc)

@@ -161,3 +161,37 @@ def test_coverage_discard_unflushed_rejects_naive_timestamp(tmp_path: Path) -> N
     tracker = CoverageTracker("liquidations", tmp_path)
     with pytest.raises(ValueError, match="tz-aware"):
         tracker.discard_unflushed(pd.Timestamp("2026-09-22 10:00:00"))
+
+
+def test_snapshot_state_requires_flushed_segments(tmp_path) -> None:
+    """snapshot_state raises while closed segments are unflushed."""
+    tracker = CoverageTracker("liquidations", tmp_path)
+    tracker.mark_ok(pd.Timestamp("2026-09-26T10:00:00Z"))
+    tracker.mark_ok(pd.Timestamp("2026-09-26T10:01:00Z"))
+    tracker.flush()
+    tracker.mark_ok(pd.Timestamp("2026-09-26T10:02:00Z"))
+    tracker.mark_error(pd.Timestamp("2026-09-26T10:03:00Z"))
+    with pytest.raises(ValueError, match="unflushed closed"):
+        tracker.snapshot_state()
+    tracker.flush()
+    state = tracker.snapshot_state()
+    assert state.open_last is None
+    assert state.cursor is None
+
+
+def test_restore_continues_open_segment(tmp_path) -> None:
+    """A restored tracker extends from the cursor; a fresh state opens anew."""
+    tracker = CoverageTracker("liquidations", tmp_path)
+    tracker.mark_ok(pd.Timestamp("2026-09-26T10:00:00Z"))
+    tracker.mark_ok(pd.Timestamp("2026-09-26T10:01:00Z"))
+    tracker.flush()
+    state = tracker.snapshot_state()
+    assert state.open_last == pd.Timestamp("2026-09-26T10:01:00Z")
+    restored = CoverageTracker.restore("liquidations", tmp_path, state)
+    restored.mark_ok(pd.Timestamp("2026-09-26T10:02:00Z"))
+    restored.flush()
+    merged = load_coverage(tmp_path, "liquidations", start=pd.Timestamp("2026-09-26T10:00:00Z"),
+                           end=pd.Timestamp("2026-09-26T11:00:00Z"))
+    assert len(merged) == 1
+    assert merged.iloc[0]["start"] == pd.Timestamp("2026-09-26T10:00:00Z")
+    assert merged.iloc[0]["end"] == pd.Timestamp("2026-09-26T10:02:00Z")

@@ -324,8 +324,10 @@ def test_source_module_size_budget() -> None:
         "src/mhs/report/persist.py": 800,
         "src/cli/commands/research/mhs.py": 750,
         "src/mhs/evaluation/windows.py": 900,
+        # 체크포인트 전진 불변식(설정·체크포인트·사이클·루프)은 한 모듈에서 검토 가능해야 하므로
+        # 모듈 대신 함수 단위(250줄 예산)로 쪼갠다.
+        "src/market_data/streams/normalizer.py": 1100,
     }
-
     offenders: dict[str, int] = {}
     for path in Path("src").rglob("*.py"):
         lines = len(path.read_text(encoding="utf-8").splitlines())
