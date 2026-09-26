@@ -57,7 +57,9 @@ slot_config_match() {
   local container="$2"
   local expected=""
   local actual=""
-  expected="$($C config --hash "$service" 2>/dev/null || true)"
+  # 슬롯 서비스는 프로파일이 걸려 있어 --profile 없이는 "no such service"로 빈 값이 나오고,
+  # 그러면 매 배포마다 설정 변경으로 오판해 불필요한 인계가 일어난다.
+  expected="$($C --profile "$service" config --hash "$service" 2>/dev/null || true)"
   actual="$(docker inspect -f '{{index .Config.Labels "com.docker.compose.config-hash"}}' "$container" 2>/dev/null || true)"
   [ -n "$expected" ] && [ "$expected" = "$actual" ]
 }
