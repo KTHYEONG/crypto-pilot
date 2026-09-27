@@ -57,6 +57,12 @@ jobs:
 
   deploy:
     needs: [gate, build-and-push]
+    # 결정 창 게이트에서 대기하던 배포들이 창 종료 시 동시에 풀려 서버에서 컨테이너 교체가
+    # 겹치지 않도록 한 번에 하나만 실행한다. 대기 중인 이전 배포는 최신 배포로 대체된다
+    # (모두 main의 :latest 이미지를 배포하므로 최신 하나만 적용하면 충분하다).
+    concurrency:
+      group: oracle-deploy
+      cancel-in-progress: false
     if: ${{ needs.gate.outputs.paused != 'true' }}
     runs-on: ubuntu-latest
     steps:
