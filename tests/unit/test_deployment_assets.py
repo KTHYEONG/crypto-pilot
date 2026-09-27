@@ -889,3 +889,11 @@ def test_recreate_script_hashes_profile_gated_slot_services_with_their_profile()
     for slot in ("blue", "green"):
         assert f'profiles: ["capture-{slot}"]' in compose
 
+
+def test_deploy_job_is_serialized_by_concurrency_group() -> None:
+    """Deploys released together when the decision window ends must not recreate containers concurrently."""
+    root = Path(__file__).resolve().parents[2]
+    workflow = (root / ".github" / "workflows" / "deploy.yml").read_text(encoding="utf-8")
+    deploy_block = workflow[workflow.index("\n  deploy:\n"):]
+    head = deploy_block[: deploy_block.index("steps:")]
+    assert "concurrency:\n      group: oracle-deploy\n      cancel-in-progress: false" in head
