@@ -38,6 +38,43 @@ FUNDING_BURST: int = 5  # Binance 문서상 fundingRate는 fundingInfo와 IP당 
 # Binance 앞단 AWS WAF가 fundingRate limit>=300 요청만 IP당 5분 ~124회로 차단(403)하므로 계수 대상이 아닌 기본값 100을 쓴다.
 FUNDING_RATE_REQUEST_LIMIT: int = 100
 
+# klines는 IP당 분당 요청 가중치 2400을 fundingRate·레코더·집행과 공유한다. 한 번에 수백 심볼을
+# 병렬로 꼬리 갱신하면 limit=1000(가중치 5) 요청만으로 한도를 넘어 429 → IP 차단이 되므로,
+# 필요한 봉 수만큼만 요청해 가중치를 낮추고 전역 가중치 버킷으로 분당 사용량을 한도의 절반에 묶는다.
+REQUEST_WEIGHT_LIMIT_PER_MINUTE: int = 2400
+KLINE_WEIGHT_UTILIZATION: float = 0.5
+KLINE_WEIGHT_PER_SECOND: float = REQUEST_WEIGHT_LIMIT_PER_MINUTE * KLINE_WEIGHT_UTILIZATION / 60.0
+KLINE_WEIGHT_BURST: int = 60
+KLINE_MAX_LIMIT: int = 1000
+_KLINE_INTERVAL_MS: dict[str, int] = {
+    "1m": 60_000, "3m": 180_000, "5m": 300_000, "15m": 900_000, "30m": 1_800_000,
+    "1h": 3_600_000, "2h": 7_200_000, "4h": 14_400_000, "6h": 21_600_000, "8h": 28_800_000,
+    "12h": 43_200_000, "1d": 86_400_000, "3d": 259_200_000, "1w": 604_800_000,
+}
+
+
+def kline_request_weight(limit: int) -> int:
+    """Binance USD-M ``/fapi/v1/klines`` request weight for ``limit`` (documented tiers)."""
+    if limit < 100:
+        return 1
+    if limit < 500:
+        return 2
+    if limit <= 1000:
+        return 5
+    return 10
+
+
+def kline_page_limit(interval: str, since_ms: int, end_ms: int) -> int:
+    """Bars needed to cover ``[since_ms, end_ms]`` plus one, capped at ``KLINE_MAX_LIMIT``.
+
+    A daily tail refresh needs ~25 hourly bars; asking for 1000 would cost weight 5 instead of 1.
+    Unknown intervals fall back to the cap (correct, just more expensive).
+    """
+    step = _KLINE_INTERVAL_MS.get(interval)
+    if step is None or end_ms <= since_ms:
+        return KLINE_MAX_LIMIT
+    return max(1, min(KLINE_MAX_LIMIT, (end_ms - since_ms) // step + 2))
+
 
 @dataclass(eq=False)
 class BinanceIpBlockedError(RuntimeError):
@@ -78,23 +115,27 @@ class TokenBucket:
     def rate_per_s(self) -> float:
         return self._rate
 
-    def acquire(self) -> float:
+    def acquire(self, tokens: float = 1.0) -> float:
+        """Take ``tokens`` (e.g. a request's weight), sleeping until they are available; returns the wait."""
+        if tokens <= 0 or tokens > self._capacity:
+            raise ValueError(f"tokens must be in (0, {self._capacity}], got {tokens}")
         with self._lock:
             now = self._clock()
             self._tokens = min(self._capacity, self._tokens + (now - self._last) * self._rate)
             self._last = now
             waited = 0.0
-            if self._tokens < 1.0:
-                waited = (1.0 - self._tokens) / self._rate
+            if self._tokens < tokens:
+                waited = (tokens - self._tokens) / self._rate
                 self._sleep(waited)
                 now = self._clock()
                 self._tokens = min(self._capacity, self._tokens + (now - self._last) * self._rate)
                 self._last = now
-            self._tokens -= 1.0
+            self._tokens -= tokens
             return waited
 
 
 FUNDING_RATE_LIMITER: TokenBucket = TokenBucket(FUNDING_REQUESTS_PER_SECOND, FUNDING_BURST)
+KLINE_WEIGHT_LIMITER: TokenBucket = TokenBucket(KLINE_WEIGHT_PER_SECOND, KLINE_WEIGHT_BURST)
 
 
 class BinanceClient:
@@ -171,15 +212,17 @@ class BinanceClient:
             used_weight = 0
             data = None
             while retry_count < 5:
+                page_limit = min(limit, kline_page_limit(interval, int(since), int(end_timestamp)))
                 params = {
                     "symbol": binance_symbol,
                     "interval": interval,
                     "startTime": since,
                     "endTime": end_timestamp,
-                    "limit": limit,
+                    "limit": page_limit,
                 }
                 qs = urllib.parse.urlencode(params)
                 url = f"{base_url}?{qs}"
+                KLINE_WEIGHT_LIMITER.acquire(kline_request_weight(page_limit))
                 if not url.startswith(("http://", "https://")):
                     raise ValueError(f"Invalid URL scheme: {url}")
                 headers = {
