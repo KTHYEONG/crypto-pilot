@@ -586,6 +586,24 @@ def _default_expected_by(
     return base + pd.Timedelta(seconds=grace)
 
 
+def default_step_fns(settings: LiveSettings, weights_path: Path) -> dict[str, Callable[[pd.Timestamp], Any]]:
+    """Bind the production step functions so each takes only the decision time.
+
+    ``run_daemon`` invokes every step as ``fn(target)``. The decision time must therefore land on
+    the parameter named for it: binding ``settings``/``weights_path`` by keyword to a function
+    whose first positional parameter is ``settings`` makes the positional ``target`` collide with
+    it ("got multiple values for argument 'settings'"), which HALTed every attempt of a day. Tests
+    inject fakes for these steps, so this binding is the only place the real signatures meet the
+    call convention and is verified directly.
+    """
+    return {
+        "signal": functools.partial(_default_frozen_step, settings=settings, weights_path=weights_path),
+        "refresh": functools.partial(_default_data_refresh, settings, weights_path),
+        "venue": functools.partial(_default_venue_capture, settings),
+        "prefetch": functools.partial(_default_funding_prefetch, settings, weights_path),
+    }
+
+
 def run_daemon(
     settings: LiveSettings,
     weights_path: Path,
@@ -606,15 +624,16 @@ def run_daemon(
     ``refresh_fn`` / ``signal_step_fn`` / ``venue_fn`` / ``prefetch_fn`` default to the live
     wiring and are injected only by tests -- there is no path-sniffing test detection.
     """
+    defaults = default_step_fns(settings, weights_path)
     if signal_step_fn is None:
-        signal_step_fn = functools.partial(_default_frozen_step, settings=settings, weights_path=weights_path)
+        signal_step_fn = defaults["signal"]
     if refresh_fn is None:
-        refresh_fn = functools.partial(_default_data_refresh, settings=settings, weights_path=weights_path)
+        refresh_fn = defaults["refresh"]
     refresh_step: Callable[[pd.Timestamp], Any] = refresh_fn
     if venue_fn is None:
-        venue_fn = functools.partial(_default_venue_capture, settings)
+        venue_fn = defaults["venue"]
     if prefetch_fn is None:
-        prefetch_fn = functools.partial(_default_funding_prefetch, settings=settings, weights_path=weights_path)
+        prefetch_fn = defaults["prefetch"]
     iteration = 0
     wait_fn: Callable[[float], object] = sleep_fn if sleep_fn is not None else (shutdown.wait if shutdown is not None else time.sleep)
     heartbeat_path = _resolve_heartbeat_path(settings)
