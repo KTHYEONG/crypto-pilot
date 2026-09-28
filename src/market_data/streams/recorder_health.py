@@ -536,9 +536,11 @@ def evaluate_recorder_heartbeat(
 
     Fail-closed as before: a missing or malformed entry fails its check. A schema version other than
     3 yields only ``heartbeat_schema``, and a stale heartbeat yields only ``heartbeat_stale``, because
-    every other field describes the past. Capture health is judged from the slot heartbeats embedded
-    by the normalizer, so a dead normalizer surfaces as ``heartbeat_stale`` while a dead capture with
-    a live normalizer surfaces as ``capture_missing``.
+    every other field describes the past. Capture health is judged from the ``capture`` section of
+    ``payload``, which callers refresh from the slot files (``overlay_capture_slots``) so a busy
+    normalizer does not age it. A normalizer silent beyond ``heartbeat_stale_s`` surfaces as
+    ``heartbeat_stale`` (only), while a dead capture with a live normalizer surfaces as
+    ``capture_missing``.
 
     Args:
         payload: Decoded heartbeat or ``None`` when unavailable.

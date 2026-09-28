@@ -485,3 +485,71 @@ def test_settings_reject_inconsistent_capture_window() -> None:
         LiveSettings(recorder_capture_stale_s=600.0, recorder_heartbeat_stale_s=600.0)
     with pytest.raises(ValidationError, match="recorder_capture_dual_active_max_s"):
         LiveSettings(recorder_capture_dual_active_max_s=100.0, recorder_capture_ready_grace_s=900.0)
+
+
+def _write_slot(root: Path, slot: str, entry: dict[str, Any] | None) -> None:
+    raw = root / "raw"
+    raw.mkdir(exist_ok=True)
+    if entry is None:
+        return
+    (raw / f"capture_{slot}.json").write_text(json.dumps(entry), encoding="utf-8")
+
+
+def test_busy_normalizer_does_not_raise_capture_missing(tmp_path: Path) -> None:
+    """A stale embedded slot refreshed by a fresh slot file stays healthy."""
+    now = pd.Timestamp(_NOW)
+    old_ts = (now - pd.Timedelta(seconds=130)).isoformat()
+    path = tmp_path / "recorder_heartbeat.json"
+    payload = _heartbeat(ts=old_ts)
+    payload["capture"] = {"blue": _fresh_slot(old_ts), "green": None}
+    _write(path, payload)
+    _write_slot(tmp_path, "blue", _fresh_slot(_NOW))
+    calls: list[tuple[str, str]] = []
+    watch = _watch(path, calls)
+    assert watch.check_once() == ()
+    assert calls == []
+
+
+def test_dead_capture_is_still_detected(tmp_path: Path) -> None:
+    """A dead capture with a live normalizer still reports capture_missing once."""
+    now = pd.Timestamp(_NOW)
+    old_ts = (now - pd.Timedelta(seconds=300)).isoformat()
+    path = tmp_path / "recorder_heartbeat.json"
+    payload = _heartbeat(ts=_NOW)
+    payload["capture"] = {"blue": _fresh_slot(old_ts), "green": None}
+    _write(path, payload)
+    _write_slot(tmp_path, "blue", _fresh_slot(old_ts))
+    calls: list[tuple[str, str]] = []
+    watch = _watch(path, calls)
+    findings = watch.check_once()
+    assert [f.key for f in findings] == ["capture_missing:capture"]
+    assert [event for event, _ in calls] == ["recorder_unhealthy"]
+
+
+def test_missing_slot_files_stay_fail_closed(tmp_path: Path) -> None:
+    """Without slot files the stale embedded entry still reports capture_missing."""
+    now = pd.Timestamp(_NOW)
+    old_ts = (now - pd.Timedelta(seconds=300)).isoformat()
+    path = tmp_path / "recorder_heartbeat.json"
+    payload = _heartbeat(ts=_NOW)
+    payload["capture"] = {"blue": _fresh_slot(old_ts), "green": None}
+    _write(path, payload)
+    calls: list[tuple[str, str]] = []
+    watch = _watch(path, calls)
+    findings = watch.check_once()
+    assert [f.key for f in findings] == ["capture_missing:capture"]
+
+
+def test_dead_normalizer_with_fresh_capture_reports_only_heartbeat_stale(tmp_path: Path) -> None:
+    """A silent normalizer surfaces only as heartbeat_stale even with fresh slots."""
+    now = pd.Timestamp(_NOW)
+    old_ts = (now - pd.Timedelta(seconds=700)).isoformat()
+    path = tmp_path / "recorder_heartbeat.json"
+    payload = _heartbeat(ts=old_ts)
+    payload["capture"] = {"blue": _fresh_slot(old_ts), "green": None}
+    _write(path, payload)
+    _write_slot(tmp_path, "blue", _fresh_slot(_NOW))
+    calls: list[tuple[str, str]] = []
+    watch = _watch(path, calls)
+    findings = watch.check_once()
+    assert [f.key for f in findings] == ["heartbeat_stale:recorder"]

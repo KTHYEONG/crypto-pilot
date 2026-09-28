@@ -16,6 +16,7 @@ from src.market_data.streams.heartbeat_v3 import (
     disk_usage_bytes,
     fold_cycle_report,
     new_stream_states,
+    overlay_capture_slots,
     read_capture_heartbeats,
     reference_section,
     refresh_window_states,
@@ -247,3 +248,62 @@ def test_local_footprint_counts_finished_files_and_survives_vanishing_ones(tmp_p
 
     monkeypatch.setattr(Path, "stat", _vanishing)
     assert local_footprint_bytes(tmp_path, liq) == 3 + 7
+
+
+def test_overlay_capture_slots_prefers_fresh_slot_file(tmp_path: Path) -> None:
+    """Embedded stale entry is replaced by the freshly read slot file."""
+    now = _now()
+    stale_ts = (now - pd.Timedelta(seconds=200)).isoformat()
+    fresh_entry = {"ts": now.isoformat(), "ready": True}
+    (tmp_path / "raw").mkdir()
+    (tmp_path / "raw" / "capture_blue.json").write_text(json.dumps(fresh_entry))
+    payload = {"capture": {"blue": {"ts": stale_ts}, "green": None}, "ts": now.isoformat()}
+    result = overlay_capture_slots(payload, tmp_path)
+    assert result is not None
+    assert result["capture"]["blue"] == fresh_entry
+
+
+def test_overlay_capture_slots_falls_back_to_embedded(tmp_path: Path) -> None:
+    """Missing or undecodable slot files reuse the embedded entry without raising."""
+    embedded = {"ts": "2026-09-26T11:00:00+00:00"}
+    payload = {"capture": {"blue": embedded, "green": embedded}}
+    result = overlay_capture_slots(payload, tmp_path)
+    assert result is not None
+    assert result["capture"]["blue"] == embedded
+    (tmp_path / "raw").mkdir()
+    (tmp_path / "raw" / "capture_blue.json").write_text("{oops")
+    result = overlay_capture_slots(payload, tmp_path)
+    assert result is not None
+    assert result["capture"]["blue"] == embedded
+
+
+def test_overlay_capture_slots_absent_everywhere_yields_none(tmp_path: Path) -> None:
+    """Neither a slot file nor an embedded entry maps the slot to None."""
+    result = overlay_capture_slots({"capture": {}}, tmp_path)
+    assert result is not None
+    assert result["capture"]["green"] is None
+
+
+def test_overlay_capture_slots_preserves_non_slot_keys(tmp_path: Path) -> None:
+    """Embedded capture keys outside CAPTURE_SLOTS survive the overlay."""
+    payload = {"capture": {"blue": None, "green": None, "custom": {"v": 1}}}
+    result = overlay_capture_slots(payload, tmp_path)
+    assert result is not None
+    assert result["capture"]["custom"] == {"v": 1}
+
+
+def test_overlay_capture_slots_never_mutates_input(tmp_path: Path) -> None:
+    """The original payload is unchanged and non-capture keys are identical."""
+    payload = {"ts": "x", "capture": {"blue": {"ts": "old"}, "green": None}}
+    snapshot = json.loads(json.dumps(payload))
+    result = overlay_capture_slots(payload, tmp_path)
+    assert payload == snapshot
+    assert result is not payload
+    assert result is not None
+    assert result["ts"] == "x"
+    assert result["capture"] is not payload["capture"]
+
+
+def test_overlay_capture_slots_passthrough_non_mapping(tmp_path: Path) -> None:
+    """None payload passes through as None."""
+    assert overlay_capture_slots(None, tmp_path) is None

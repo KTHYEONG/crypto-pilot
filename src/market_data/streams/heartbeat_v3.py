@@ -38,6 +38,46 @@ def read_capture_heartbeats(capture_root: Path) -> dict[str, Mapping[str, Any] |
     return heartbeats
 
 
+def overlay_capture_slots(
+    payload: Mapping[str, Any] | None,
+    capture_root: Path,
+) -> Mapping[str, Any] | None:
+    """Return ``payload`` with its ``capture`` section refreshed from the slot heartbeat files.
+
+    The normalizer embeds the slot heartbeats verbatim when it publishes
+    ``recorder_heartbeat.json``, so every embedded ``ts`` is as old as the last publish plus the
+    capture's own write cadence. A normalizer busy in compaction or catch-up therefore makes a
+    healthy capture look silent. Capture liveness belongs to the capture process, so it is judged
+    from the slot files the capture writes itself; normalizer liveness stays judged by the
+    heartbeat's own ``ts``.
+
+    Args:
+        payload: Decoded ``recorder_heartbeat.json``, or ``None`` when unavailable.
+        capture_root: Capture root holding ``raw/capture_<slot>.json`` and the heartbeat file.
+
+    Returns:
+        ``payload`` itself when it is not a mapping. Otherwise a shallow copy whose ``capture``
+        maps every slot in ``CAPTURE_SLOTS`` to the freshly read slot mapping, falling back per
+        slot to the embedded entry (``None`` when absent) when the slot file is missing or
+        undecodable. Embedded entries for other keys are preserved.
+    """
+    if not isinstance(payload, Mapping):
+        return payload
+    fresh = read_capture_heartbeats(capture_root)
+    embedded = payload.get("capture")
+    embedded_map: Mapping[str, Any] = embedded if isinstance(embedded, Mapping) else {}
+    capture: dict[str, Any] = dict(embedded_map)
+    for slot in CAPTURE_SLOTS:
+        file_entry = fresh[slot]
+        if file_entry is not None:
+            capture[slot] = file_entry
+        else:
+            capture[slot] = embedded_map.get(slot)
+    result = dict(payload)
+    result["capture"] = capture
+    return result
+
+
 def write_heartbeat_atomic(capture_root: Path, payload: Mapping[str, Any]) -> Path:
     """Atomically replace ``<capture_root>/recorder_heartbeat.json`` (same-dir ``.partial`` + fsync + os.replace)."""
     dest = Path(capture_root) / HEARTBEAT_NAME
