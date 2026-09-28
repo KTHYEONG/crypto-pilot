@@ -335,7 +335,10 @@
     "testing": "tests/unit/market_data/test_normalizer.py"
   },
   "src/market_data/streams/heartbeat_v3.py": {
-    "testing": "tests/unit/market_data/test_heartbeat_v3.py"
+    "testing": [
+      "tests/unit/market_data/test_heartbeat_v3.py",
+      "tests/unit/live/test_recorder_watch.py"
+    ]
   },
   "src/market_data/streams/liquidations.py": {
     "testing": "tests/unit/market_data/test_liquidations.py"

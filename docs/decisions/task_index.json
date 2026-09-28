@@ -1,6 +1,17 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_RECORDER_LIVENESS_DECOUPLE",
+      "date": "2026-09-28",
+      "adr_id": "ADR_20260928_RECORDER_LIVENESS_DECOUPLE",
+      "domain": "infra",
+      "title": "Recorder 캡처 생존 판정을 슬롯 파일 직접 판독으로 분리",
+      "why": "normalizer가 compaction으로 2분 이상 하트비트를 못 내면 임베드된 캡처 ts가 낡아 정상 캡처가 capture_missing(CRITICAL)으로 오탐됐다(2026-09-28 01:30 UTC).",
+      "resolution": "감시자가 raw/capture_<slot>.json을 직접 읽어 capture 섹션을 덮어쓰고(overlay_capture_slots), normalizer는 compaction 단위마다 하트비트를 발행한다.",
+      "impact": "캡처 생존과 normalizer 생존이 독립 신호가 되어 일별 compaction 중 오탐이 사라지고 다일치 적체에도 heartbeat_stale 위험이 단일 단위로 제한된다.",
+      "caveat": "슬롯 파일을 읽을 수 없으면 임베드 값으로 폴백하므로 fail-closed는 유지되며 compaction 소요 시간 자체는 줄이지 않는다."
+    },
+    {
       "task_id": "TASK_LIVE_CAPTURE_RAW_FIRST",
       "date": "2026-09-27",
       "adr_id": "ADR_20260927_LIVE_CAPTURE_RAW_FIRST",
@@ -1028,16 +1039,6 @@
       "why": "분기(16-fold) 재구성 이후 실측에서 FOLD_BLEND_PATH_DIVERGENCE(deployed_gross_log_ratio 최대 0.836, tolerance 0.25 초과)가 새로 발생했다. 근본 원인은 _exante_vol_target_scale의 EWMA burn-in(PNL_VOL_TARGET_BURN_IN_DAYS=90일)이 분기 fold 길이(83~91일)와 거의 같아 fold 검증구간 전체가 min_periods dead-zone에 걸려 scale이 fallback 1.0으로 주저앉는 반면, blend는 2021년부터 연속 실행돼 이미 워밍업이 끝나 있었다는 것. _constant_risk_scale에는 이미 warmup_returns concat+reindex 패턴(I-WARM)이 있었으나 growth_budget/exante_target 분기에는 배선되지 않았다(호출부는 이미 warmup_returns를 계산해 넘기고 있었음).",
       "resolution": "_exante_vol_target_scale(scaling.py)에 warmup_returns 키워드 인자를 추가해 _constant_risk_scale과 동일한 concat+ewm+reindex 계약(워밍업 행은 reference 첫 행 이전만 허용, 위반 시 ValueError)을 구현했다. _replay_exposure_scale의 growth_budget 분기와 비-conservative exante_target 분기에서 이미 받고 있던 warmup_returns를 실제로 전달하도록 배선했다. I4로 보호된 conservative exante_target 특례는 건드리지 않았다. tests/unit/mhs/test_compounding_growth.py에 TestExanteVolTargetScaleWarmup(4개 테스트: burn-in dead-zone 해소, 연속 히스토리와 bit-identical, backward-compat, leak guard)을 추가했다. 합성 데이터로 먼저 수학적 증명(85일 fold 100% fallback -> fix 후 연속 추정치와 Series.equals()==True) 후 적용.",
       "impact": "실제 파이프라인 재실행으로 확인: fold_blend_parity.max_abs_log_deployed_gross_ratio 0.836 -> 0.180(허용치 0.25 이내), research_go.reason_codes/data_integrity_reason_codes에서 FOLD_BLEND_PATH_DIVERGENCE 완전 소멸. 배포되는 blend 전략 성과(CAGR 318.4%, MDD -38.9%, Sharpe 2.36)는 수정 전후 bit-identical -- 이 fix는 fold 고립 리플레이 내부 노출스케일만 교정했고 실제 배포 전략에는 영향 없음. fold 자체의 고립 리플레이 성과(내부 검증용, 이전엔 flat 1.0x 폴백으로 저평가돼 있었음)는 정상 레버리지 반영으로 큰 폭 상향(예: fold15 CAGR 663%->2380%). 남은 Research-GO 차단 사유는 DEFLATED_SHARPE_BELOW_THRESHOLD(0.943<0.95, run_history 누적 trial 문제로 이번 수정과 무관, 수정 전후 값 동일 확인)와 관측전용 SELECTION_WINDOW_OVERLAP뿐 -- fold 관련 차단 사유는 완전 해소."
-    },
-    {
-      "task_id": "TASK_MHS_QUARTERLY_FOLD_RESTRUCTURE",
-      "date": "2026-08-26",
-      "adr_id": "ADR_20260826_MHS_QUARTERLY_FOLD_RESTRUCTURE",
-      "domain": "mhs",
-      "title": "MHS anchored-purged fold를 연간 4개에서 분기 16개로 재구성",
-      "why": "phase_1_anchored_purged_folds()의 4개 연간 fold는 통계적 설계가 아니라 5년 데이터(2021-2025)를 1년 검증 블록으로 나눈 산술적 상한이었다. FOLD_GROWTH_CONCENTRATION 등 분산 계열 게이트는 n=4의 낮은 검정력 때문에 실제로 2025년 fold가 자기교정 null의 92.6퍼센타일까지 근접해 억울한 탈락 직전이었고, 코드에는 이를 우회하기 위한 수작업 상수 패치(share threshold 0.40 하향, 고정 target-vol) 흔적이 남아 있었다(evidence.py:312-330).",
-      "resolution": "phase_1_anchored_purged_folds()를 연간 리터럴 4블록에서 quarter-end 경계 루프(pd.date_range, freq=QE-DEC) 기반 16-fold 생성으로 교체했다. train_start=DISCOVERY_START 앵커, purge_hours=168, validation_start=train_end+8일 관례는 그대로 유지했고 마지막 validation_end는 기존 sealed holdout(2025-12-31)과 bit-identical하다. 하위 소비자(_pooled_fold_evidence, _fold_growth_concentration, calibrate_max_share_null, DSR fold_proxy 등)는 len(folds)/fold span을 제네릭하게 읽어 단일 seam 변경으로 끝났다. tests/unit/mhs/test_evaluation.py, test_contracts.py의 4-fold 하드코딩 assertion을 16-fold 스케줄로 갱신했다.",
-      "impact": "실측(uv run research run portfolio mhs-horizon-diagnostic) 결과 max_fold_share가 0.558(92.6퍼센타일)에서 0.284(57.5퍼센타일)로 개선되어 concentration 게이트의 위양성 위험이 실제로 줄었다. 다만 fold 창이 짧아지며(83~91일) fold-local 노출스케일 EWMA 워밍업이 blend의 연속 추정치를 따라가지 못해 FOLD_BLEND_PATH_DIVERGENCE(deployed_gross_log_ratio -0.54~-0.84, 기존 -0.05~-0.12 대비 5~8배)가 신규로 발생했다 -- 후속 스펙에서 fold-local vol 워밍업 보강이 필요하다. pooled_sharpe_lcb는 purge 오버헤드 증가(32일→128일)로 1.378→1.073로 소폭 보수화됐으나 여전히 하한 위. Research-GO는 두 구성 모두 이미 불합격 상태였고 최종 판정을 뒤집지는 않았다. wall-clock은 360초→696초(가용 워커 제약 포함)."
     }
   ]
 }
