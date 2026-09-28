@@ -17,7 +17,7 @@ import pandas as pd
 
 from src.common.paths import LIVE_CAPTURE_DIR
 from src.live.settings import LiveSettings
-from src.market_data.streams.heartbeat_v3 import HEARTBEAT_NAME
+from src.market_data.streams.heartbeat_v3 import HEARTBEAT_NAME, overlay_capture_slots
 from src.market_data.streams.recorder_health import (
     RecorderFinding,
     RecorderWatchThresholds,
@@ -57,7 +57,8 @@ class RecorderWatchdog:
     ) -> None:
         """
         Args:
-            heartbeat_path: ``LIVE_CAPTURE_DIR / HEARTBEAT_NAME`` in production.
+            heartbeat_path: ``LIVE_CAPTURE_DIR / HEARTBEAT_NAME`` in production. Its parent
+                directory is the capture root whose ``raw/capture_<slot>.json`` files are read.
             thresholds: Evaluation thresholds.
             interval_s: Seconds between checks; the first check runs one interval after ``start``.
             alert: ``(event, detail) -> delivered``; must not raise for delivery failures.
@@ -81,7 +82,9 @@ class RecorderWatchdog:
         """Evaluate the heartbeat now, send any due alert, and return the current findings."""
         with self._state_lock:
             try:
-                payload = read_recorder_heartbeat(self._heartbeat_path)
+                payload = overlay_capture_slots(
+                    read_recorder_heartbeat(self._heartbeat_path), self._heartbeat_path.parent
+                )
                 findings = evaluate_recorder_heartbeat(
                     payload,
                     now=self._now_fn(),

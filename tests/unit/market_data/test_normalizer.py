@@ -1264,3 +1264,157 @@ def test_successful_compaction_drops_only_that_days_cursors(tmp_path: Path, monk
     assert compaction_state["last_result"] == "ok"
     assert out.retention_blocked_since == since
     assert retention_state["blocked_since"] == since
+
+
+def test_retention_pass_pulse_precedes_each_unit_in_order(tmp_path: Path, monkeypatch) -> None:
+    """Pulse fires exactly once before each due unit, in due order."""
+    import src.market_data.streams.normalizer as normalizer_mod
+    from src.market_data.streams.normalizer import _run_retention_pass
+
+    units = [("book_ticker", "20260920"), ("premium_index", "20260920"), ("book_ticker", "20260921")]
+    monkeypatch.setattr(normalizer_mod, "due_compactions", lambda *a, **k: list(units))
+    events: list[tuple] = []
+
+    def _fake_compact(capture_root: Path, stream: str, day: str, **kwargs: object) -> bool:
+        events.append(("compact", stream, day))
+        return True
+
+    monkeypatch.setattr(normalizer_mod, "compact_day", _fake_compact)
+
+    def _pulse(checkpoint: object, compaction_state: object) -> None:
+        events.append(("pulse",))
+
+    _run_retention_pass(
+        tmp_path, tmp_path / "liq", NormalizerConfig(), _empty(), tmp_path / "missing.json",
+        {}, {"pruned_files_total": 0}, _now(), tmp_path / "raw" / "normalizer_checkpoint.json",
+        pulse=_pulse,
+    )
+    assert events == [
+        ("pulse",), ("compact", "book_ticker", "20260920"),
+        ("pulse",), ("compact", "premium_index", "20260920"),
+        ("pulse",), ("compact", "book_ticker", "20260921"),
+    ]
+
+
+def test_retention_pass_pulse_sees_completed_unit_state(tmp_path: Path, monkeypatch) -> None:
+    """A pulse observes compaction state from units already finished in the pass."""
+    import src.market_data.streams.normalizer as normalizer_mod
+    from src.market_data.streams.normalizer import _run_retention_pass
+
+    units = [("book_ticker", "20260920"), ("book_ticker", "20260921")]
+    monkeypatch.setattr(normalizer_mod, "due_compactions", lambda *a, **k: list(units))
+    monkeypatch.setattr(normalizer_mod, "compact_day", lambda *a, **k: True)
+    seen: list[dict] = []
+
+    def _pulse(checkpoint: object, compaction_state: object) -> None:
+        assert isinstance(compaction_state, dict)
+        seen.append(dict(compaction_state))
+
+    initial = {"last_day": "input", "last_result": None}
+    _run_retention_pass(
+        tmp_path, tmp_path / "liq", NormalizerConfig(), _empty(), tmp_path / "missing.json",
+        dict(initial), {"pruned_files_total": 0}, _now(),
+        tmp_path / "raw" / "normalizer_checkpoint.json", pulse=_pulse,
+    )
+    assert len(seen) == 2
+    assert seen[0] == initial
+    assert seen[1]["last_day"] == "20260920"
+    assert seen[1]["last_result"] == "ok"
+
+
+def test_retention_pass_failing_pulse_never_aborts(tmp_path: Path, monkeypatch, caplog) -> None:
+    """A raising pulse logs PULSE_FAILED while every unit still compacts."""
+    import logging
+
+    import src.market_data.streams.normalizer as normalizer_mod
+    from src.market_data.streams.normalizer import _run_retention_pass
+
+    units = [("book_ticker", "20260920"), ("book_ticker", "20260921")]
+    monkeypatch.setattr(normalizer_mod, "due_compactions", lambda *a, **k: list(units))
+    compacted: list[tuple] = []
+    monkeypatch.setattr(
+        normalizer_mod, "compact_day",
+        lambda *a, **k: compacted.append((a[1] if len(a) > 1 else k.get("stream"), a[2] if len(a) > 2 else k.get("day"))) or True,
+    )
+
+    def _boom(checkpoint: object, compaction_state: object) -> None:
+        raise RuntimeError("pulse down")
+
+    now = _now()
+    ckpt_path = tmp_path / "raw" / "normalizer_checkpoint.json"
+    with caplog.at_level(logging.ERROR, logger="src.market_data.streams.normalizer"):
+        with_pulse = _run_retention_pass(
+            tmp_path, tmp_path / "liq", NormalizerConfig(), _empty(), tmp_path / "missing.json",
+            {}, {"pruned_files_total": 0}, now, ckpt_path, pulse=_boom,
+        )
+    assert len(compacted) == 2
+    assert "PULSE_FAILED" in caplog.text
+    without_pulse = _run_retention_pass(
+        tmp_path, tmp_path / "liq", NormalizerConfig(), _empty(), tmp_path / "missing.json",
+        {}, {"pruned_files_total": 0}, now, tmp_path / "raw" / "ckpt2.json",
+    )
+    assert with_pulse[1] == without_pulse[1]
+    assert with_pulse[2]["prune_blocked"] == without_pulse[2]["prune_blocked"]
+
+
+def _run_with_unit_clock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, unit_gap_s: float, heartbeat_interval_s: float
+) -> list[str]:
+    """Run one normalizer cycle where each of three compactions advances the fake clock."""
+    import src.market_data.streams.normalizer as normalizer_mod
+    from src.live.lifecycle import ShutdownFlag
+    from src.market_data.streams.normalizer import NormalizerConfig
+
+    units = [("book_ticker", "20260920"), ("premium_index", "20260920"), ("book_ticker", "20260921")]
+    monkeypatch.setattr(normalizer_mod, "due_compactions", lambda *a, **k: list(units))
+    clock = [_now()]
+
+    def _fake_compact(capture_root: Path, stream: str, day: str, **kwargs: object) -> bool:
+        clock[0] += pd.Timedelta(seconds=unit_gap_s)
+        return True
+
+    monkeypatch.setattr(normalizer_mod, "compact_day", _fake_compact)
+    published: list[str] = []
+    real_write = normalizer_mod.write_heartbeat_atomic
+
+    def _recording_write(root: Path, payload: object) -> Path:
+        assert isinstance(payload, dict)
+        published.append(str(payload["ts"]))
+        return real_write(root, payload)
+
+    monkeypatch.setattr(normalizer_mod, "write_heartbeat_atomic", _recording_write)
+    flag = ShutdownFlag()
+    sleeps = 0
+
+    def _sleep(delay: float) -> None:
+        nonlocal sleeps
+        sleeps += 1
+        if sleeps >= 2:
+            flag.requested = True
+
+    normalizer_mod.run_normalizer(
+        tmp_path, tmp_path / "liq",
+        NormalizerConfig(heartbeat_interval_s=heartbeat_interval_s, normalize_interval_s=30.0),
+        backup_status_path=tmp_path / "missing.json", shutdown=flag,
+        now_fn=lambda: clock[0], sleep_fn=_sleep,
+    )
+    return published
+
+
+def test_heartbeat_advances_during_long_pass(tmp_path: Path, monkeypatch) -> None:
+    """Three 150 s units publish increasingly fresh heartbeats bounding the silence."""
+    published = _run_with_unit_clock(tmp_path, monkeypatch, unit_gap_s=150.0, heartbeat_interval_s=60.0)
+    assert len(published) >= 3
+    stamps = [pd.Timestamp(ts) for ts in published]
+    from itertools import pairwise as _pairwise
+
+    for earlier, later in _pairwise(stamps):
+        assert later > earlier
+    gaps = [(later - earlier).total_seconds() for earlier, later in _pairwise(stamps)]
+    assert max(gaps) <= 150.0 + 1.0
+
+
+def test_heartbeat_interval_gate_still_applies(tmp_path: Path, monkeypatch) -> None:
+    """Units inside one heartbeat interval do not write extra heartbeats."""
+    published = _run_with_unit_clock(tmp_path, monkeypatch, unit_gap_s=5.0, heartbeat_interval_s=3600.0)
+    assert len(published) == 1

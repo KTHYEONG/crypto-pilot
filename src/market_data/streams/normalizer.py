@@ -821,6 +821,18 @@ def run_normalizer(
     last_retention_run: pd.Timestamp | None = None
     last_heartbeat_run: pd.Timestamp | None = None
     intervals = {"book_ticker": config.book_ticker_interval_s, "premium_index": config.premium_index_interval_s}
+
+    def _pulse_heartbeat(
+        pulse_checkpoint: NormalizerCheckpoint,
+        pulse_compaction: Mapping[str, Any],
+    ) -> None:
+        nonlocal last_heartbeat_run
+        last_heartbeat_run = _maybe_publish_heartbeat(
+            capture_root, config, states, intervals, dedupe, pulse_checkpoint,
+            consecutive_failures, last_success_at, last_error, last_report,
+            pulse_compaction, retention_state, started_at, now_fn(), last_heartbeat_run,
+        )
+
     while not shutdown.requested:
         now = now_fn()
         if checkpoint is None:
@@ -876,6 +888,7 @@ def run_normalizer(
             checkpoint, compaction_state, retention_state = _run_retention_pass(
                 capture_root, liquidations_dir, config, checkpoint,
                 backup_status_path, compaction_state, retention_state, now, checkpoint_path,
+                pulse=_pulse_heartbeat,
             )
             last_retention_run = now
         last_heartbeat_run = _maybe_publish_heartbeat(
@@ -935,8 +948,32 @@ def _run_retention_pass(
     retention_state: dict[str, Any],
     now: pd.Timestamp,
     checkpoint_path: Path,
+    *,
+    pulse: Callable[[NormalizerCheckpoint, Mapping[str, Any]], None] | None = None,
 ) -> tuple[NormalizerCheckpoint, dict[str, Any], dict[str, Any]]:
-    """Sweep temps, compact due days and prune backed-up units; each stage guarded separately."""
+    """Sweep temps, compact due days and prune backed-up units; each stage guarded separately.
+
+    Compaction of one closed stream-day is CPU-bound and blocks the single normalizer loop, so
+    ``pulse`` is invoked immediately before each compaction unit. It lets the caller keep
+    publishing the heartbeat, which bounds the silence of a long or backlogged pass to a single
+    unit instead of the whole pass.
+
+    Args:
+        capture_root: Capture root directory.
+        liquidations_dir: Liquidation event directory.
+        config: Normalizer configuration.
+        checkpoint: Current derivation checkpoint.
+        backup_status_path: Backup status file gating pruning.
+        compaction_state: Last compaction outcome carried into the heartbeat.
+        retention_state: Mutable retention counters carried into the heartbeat.
+        now: Pass start instant.
+        checkpoint_path: Where the checkpoint is persisted after each compaction.
+        pulse: Called with the current checkpoint and compaction state before each compaction
+            unit; failures are logged and never abort the pass. ``None`` disables pulsing.
+
+    Returns:
+        The updated ``(checkpoint, compaction_state, retention_state)``.
+    """
     try:
         swept = sweep_partials(
             capture_root, liquidations_dir, now=now, max_age_s=config.partial_sweep_age_s
@@ -947,6 +984,11 @@ def _run_retention_pass(
         _logger.exception("[DATA] stage=retention status=SWEEP_FAILED error=%s", exc)
     try:
         for stream, day in due_compactions(capture_root, config=config, now=now):
+            if pulse is not None:
+                try:
+                    pulse(checkpoint, compaction_state)
+                except Exception as exc:
+                    _logger.exception("[DATA] stage=retention status=PULSE_FAILED error=%s", exc)
             try:
                 compact_day(capture_root, stream, day, checkpoint=checkpoint, config=config, now=now)
             except DataIntegrityError as exc:
