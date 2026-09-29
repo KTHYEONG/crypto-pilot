@@ -1,5 +1,6 @@
 # scratch directory for AI experimentation
 scratch/
+docs/specs/
 
 # project-local machine/tool temp roots (pytest, tempfile, etc.)
 tmp/
