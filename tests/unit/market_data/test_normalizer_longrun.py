@@ -80,6 +80,23 @@ def _write_status(path: Path, now: pd.Timestamp) -> None:
     path.write_text(json.dumps({"started_at": started, "finished_at": finished, "rc": 0}))
 
 
+def _align_output_mtimes_to_fake_clock(root: Path, liq: Path, now: pd.Timestamp) -> None:
+    """Backdate pass outputs to the fake clock so backup gating stays deterministic.
+
+    Retention compares filesystem mtimes (wall clock) against the backup
+    status window (fake clock). Fresh archives/parquet would otherwise look
+    newer than any fake backup run and never prune, letting the archive count
+    grow with the real wall-clock date.
+    """
+    stamp = now.tz_convert("UTC").timestamp()
+    for base in (root / "raw" / "archive", root / "book_ticker", root / "premium_index", Path(liq)):
+        if not base.is_dir():
+            continue
+        for path in base.rglob("*"):
+            if path.is_file():
+                os.utime(path, (stamp, stamp))
+
+
 def test_week_leaves_only_bounded_state(tmp_path: Path) -> None:
     """Eight simulated days keep hot to current, archives to retention, and zero residue."""
     config = NormalizerConfig(
@@ -110,6 +127,7 @@ def test_week_leaves_only_bounded_state(tmp_path: Path) -> None:
             tmp_path, liq, config, backup_status_path=status_path, shutdown=flag,
             now_fn=clock, sleep_fn=_sleep,
         )
+        _align_output_mtimes_to_fake_clock(tmp_path, liq, clock.now)
     hot_book = tmp_path / "raw" / "hot" / "book_ticker"
     hot_days = sorted(p.name for p in hot_book.iterdir()) if hot_book.is_dir() else []
     assert set(hot_days) <= {"20260927"}

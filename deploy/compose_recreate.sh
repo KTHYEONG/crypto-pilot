@@ -35,8 +35,6 @@ else
   HELPER="deploy/capture_handover.py"
 fi
 
-$C pull
-
 slot_running() {
   local container="$1"
   local out=""
@@ -224,7 +222,6 @@ else
   $C up -d --no-deps --force-recreate market-normalizer
 fi
 $C up -d --no-deps --force-recreate mhs-live
-docker image prune -f
 
 if [ "$HANDOVER_FAILED" = "1" ] || [ "$LEGACY_FAILED" = "1" ]; then
   exit 3
