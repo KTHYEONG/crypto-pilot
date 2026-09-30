@@ -13,7 +13,8 @@ jobs:
   # 잡 레벨 if: 는 워크플로 env 컨텍스트를 읽지 못한다(GitHub Actions 제약:
   # "Unrecognized named-value: 'env'"). 셸 스텝에서 값을 읽어 job output으로 넘긴다.
   gate:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
     outputs:
       paused: ${{ steps.check.outputs.paused }}
     steps:
@@ -24,12 +25,13 @@ jobs:
     needs: gate
     if: ${{ needs.gate.outputs.paused != 'true' }}
     runs-on: ubuntu-24.04-arm
+    timeout-minutes: 20
     permissions:
       contents: read
       packages: write
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
@@ -51,12 +53,34 @@ jobs:
           tags: |
             ${{ env.IMAGE }}:latest
             ${{ env.IMAGE }}:sha-${{ github.sha }}
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
           build-args: GIT_SHA=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+  test:
+    needs: gate
+    if: ${{ needs.gate.outputs.paused != 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Sync dependencies
+        run: uv sync --frozen
+
+      - name: Run test suite
+        run: uv run pytest -q -n auto
+
   deploy:
-    needs: [gate, build-and-push]
+    needs: [gate, test, build-and-push]
     # 결정 창 게이트에서 대기하던 배포들이 창 종료 시 동시에 풀려 서버에서 컨테이너 교체가
     # 겹치지 않도록 한 번에 하나만 실행한다. 대기 중인 이전 배포는 최신 배포로 대체된다
     # (모두 main의 :latest 이미지를 배포하므로 최신 하나만 적용하면 충분하다).
@@ -64,10 +88,11 @@ jobs:
       group: oracle-deploy
       cancel-in-progress: false
     if: ${{ needs.gate.outputs.paused != 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       # GitHub 러너(Azure 대역)는 Oracle Cloud 인바운드가 드롭되므로 Tailscale 사설망으로 접속한다.
       - name: Connect to Tailscale
@@ -86,6 +111,8 @@ jobs:
           GHCR_PAT: ${{ secrets.GHCR_PAT }}
         run: |
           set -euo pipefail
+          STAGE=idle_gate
+          trap 'rc=$?; echo "::error title=vps-deploy/crypto-pilot/${STAGE}::rc=${rc} line=${LINENO} side=runner"' ERR
           mkdir -p ~/.ssh
           printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
@@ -99,11 +126,16 @@ jobs:
             rc=$?
             set -e
             if [ "$rc" -eq 0 ]; then break; fi
-            if [ "$rc" -ne 10 ]; then exit "$rc"; fi
+            if [ "$rc" -ne 10 ]; then
+              # An explicit exit bypasses the ERR trap, so annotate here.
+              echo "::error title=vps-deploy/crypto-pilot/idle_gate::rc=${rc} waited_s=${waited} reason=idle_gate_failed side=runner"
+              exit "$rc"
+            fi
             sleep 60
             waited=$((waited + 60))
           done
 
+          STAGE=stage_upload
           ssh $SSH_OPTS "$REMOTE_USER@$HOST" "mkdir -p ~/crypto-pilot/$PARAMS"
 
           scp $SSH_OPTS docker-compose.yml "$REMOTE_USER@$HOST:~/crypto-pilot/"
@@ -115,6 +147,7 @@ jobs:
           # repo-owned 백업 유닛이 소비하는 필터. 공용 타이머가 아닌 crypto-pilot-backup.service가
           # --filter-from으로 참조하므로, 이 scp는 그 경로의 파일 내용만 최신으로 유지한다.
           scp $SSH_OPTS deploy/crypto-pilot.rclone-filter "$REMOTE_USER@$HOST:~/crypto-pilot/deploy/crypto-pilot.rclone-filter.new"
+          scp $SSH_OPTS deploy/vps-deploy-lib.sh "$REMOTE_USER@$HOST:~/crypto-pilot/deploy/vps-deploy-lib.sh.new"
           scp $SSH_OPTS deploy/compose_recreate.sh "$REMOTE_USER@$HOST:~/crypto-pilot/deploy/"
           scp $SSH_OPTS src/application/ops/capture_handover.py "$REMOTE_USER@$HOST:~/crypto-pilot/deploy/capture_handover.py.new"
           ssh $SSH_OPTS "$REMOTE_USER@$HOST" "mkdir -p ~/crypto-pilot/deploy/backup ~/crypto-pilot/deploy/backup/status ~/.config/systemd/user"
@@ -126,9 +159,14 @@ jobs:
           scp $SSH_OPTS deploy/liveness/crypto-pilot-liveness.service deploy/liveness/crypto-pilot-liveness.timer "$REMOTE_USER@$HOST:~/.config/systemd/user/"
 
           # PAT/USER는 로컬에서 확장해 원격 스크립트에 주입(GitHub PAT 문자셋은 셸 안전).
+          STAGE=remote
           ssh $SSH_OPTS "$REMOTE_USER@$HOST" bash -s <<EOF
           set -e
+          mv -f ~/crypto-pilot/deploy/vps-deploy-lib.sh.new ~/crypto-pilot/deploy/vps-deploy-lib.sh
+          source ~/crypto-pilot/deploy/vps-deploy-lib.sh
+          vps_deploy_init crypto-pilot '$GITHUB_SHA'
           cd ~/crypto-pilot
+          vps_stage units
           mv -f ~/crypto-pilot/deploy/crypto-pilot.rclone-filter.new ~/crypto-pilot/deploy/crypto-pilot.rclone-filter
           mv -f ~/crypto-pilot/deploy/capture_handover.py.new ~/crypto-pilot/deploy/capture_handover.py
           mv -f ~/crypto-pilot/deploy/backup/crypto-pilot-backup.sh.new ~/crypto-pilot/deploy/backup/crypto-pilot-backup.sh
@@ -138,7 +176,12 @@ jobs:
           systemctl --user daemon-reload
           systemctl --user enable --now crypto-pilot-backup.timer
           systemctl --user enable --now crypto-pilot-liveness.timer
+          vps_stage pull
           echo '$GHCR_PAT' | docker login ghcr.io -u '$GHCR_USER' --password-stdin
-          if docker compose version >/dev/null 2>&1; then C="docker compose"; else C="docker-compose"; fi
+          vps_pull_verified '$IMAGE' '$GITHUB_SHA'
+          vps_promote_latest '$IMAGE' '$GITHUB_SHA'
+          vps_stage recreate
           bash ~/crypto-pilot/deploy/compose_recreate.sh '$IMAGE:latest'
+          vps_stage verify
+          vps_verify_stable 45 mhs-live-daemon market-normalizer
           EOF

@@ -897,3 +897,89 @@ def test_deploy_job_is_serialized_by_concurrency_group() -> None:
     deploy_block = workflow[workflow.index("\n  deploy:\n"):]
     head = deploy_block[: deploy_block.index("steps:")]
     assert "concurrency:\n      group: oracle-deploy\n      cancel-in-progress: false" in head
+
+
+def _workflow_job_headers(workflow: str) -> dict[str, str]:
+    """Map job name to its header text (up to ``steps:``)."""
+    import re
+
+    headers: dict[str, str] = {}
+    body = workflow[workflow.index("\njobs:\n"):]
+    for match in re.finditer(r"^  ([A-Za-z0-9_-]+):\n(.*?)^    steps:", body, re.M | re.S):
+        headers[match.group(1)] = match.group(2)
+    return headers
+
+
+def test_vendored_kit_matches_contract() -> None:
+    root = Path(__file__).resolve().parents[2]
+    lib = (root / "deploy" / "vps-deploy-lib.sh").read_text(encoding="utf-8")
+    assert "VPS_DEPLOY_CONTRACT_VERSION=1" in lib
+    # The canonical kit composes the lock path from the state root plus
+    # `/image.lock`; assert both fragments (byte-identical vendoring forbids
+    # local edits to join them into one literal).
+    assert ".local/state/vps-deploy" in lib
+    assert "/image.lock" in lib
+
+
+def test_deploy_pins_commit_image_before_recreate() -> None:
+    root = Path(__file__).resolve().parents[2]
+    workflow = (root / ".github" / "workflows" / "deploy.yml").read_text(encoding="utf-8")
+    pull = workflow.index("vps_pull_verified")
+    promote = workflow.index("vps_promote_latest")
+    recreate = workflow.index("compose_recreate.sh '$IMAGE:latest'")
+    verify = workflow.index("vps_verify_stable 45 mhs-live-daemon market-normalizer")
+    assert pull < promote < recreate < verify
+
+
+def test_build_stamps_revision_label() -> None:
+    root = Path(__file__).resolve().parents[2]
+    workflow = (root / ".github" / "workflows" / "deploy.yml").read_text(encoding="utf-8")
+    assert "org.opencontainers.image.revision=${{ github.sha }}" in workflow
+
+
+def test_recreate_script_never_pulls_or_prunes(tmp_path) -> None:
+    root = Path(__file__).resolve().parents[2]
+    script = (root / "deploy" / "compose_recreate.sh").read_text(encoding="utf-8")
+    assert "pull" not in script
+    assert "image prune" not in script
+    assert "rmi" not in script
+    env = _base_recreate_env()
+    env["FAKE_BLUE_RUNNING"] = "true"
+    _write_ready_heartbeat(tmp_path, "blue", _shift_iso(env["FAKE_STARTED_AT"], 10))
+    result, argv_log = _run_compose_recreate(tmp_path, env)
+    assert result.returncode == 0
+    assert not any("pull" in line or "prune" in line for line in argv_log)
+
+
+def test_deploy_waits_for_tests_and_build() -> None:
+    root = Path(__file__).resolve().parents[2]
+    workflow = (root / ".github" / "workflows" / "deploy.yml").read_text(encoding="utf-8")
+    headers = _workflow_job_headers(workflow)
+    assert "test" in headers["deploy"]
+    assert "build-and-push" in headers["deploy"]
+    assert "test" not in headers["build-and-push"]
+
+
+def test_every_job_is_time_bounded_and_pinned() -> None:
+    root = Path(__file__).resolve().parents[2]
+    workflow = (root / ".github" / "workflows" / "deploy.yml").read_text(encoding="utf-8")
+    headers = _workflow_job_headers(workflow)
+    assert set(headers) >= {"gate", "build-and-push", "test", "deploy"}
+    for name, header in headers.items():
+        assert "timeout-minutes:" in header, name
+    assert "ubuntu-latest" not in workflow
+    assert "actions/checkout@v4" not in workflow
+
+
+def test_idle_gate_precedes_remote_mutation() -> None:
+    root = Path(__file__).resolve().parents[2]
+    workflow = (root / ".github" / "workflows" / "deploy.yml").read_text(encoding="utf-8")
+    assert workflow.index("python3 -m src.application.ops.daemon_idle_gate") < workflow.index("vps_pull_verified")
+
+
+def test_idle_gate_failure_emits_stage_annotation() -> None:
+    workflow = (ROOT / ".github" / "workflows" / "deploy.yml").read_text(encoding="utf-8")
+
+    annotation = "::error title=vps-deploy/crypto-pilot/idle_gate::rc=${rc}"
+    assert annotation in workflow
+    assert workflow.index(annotation) < workflow.index('exit "$rc"')
