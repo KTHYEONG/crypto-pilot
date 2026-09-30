@@ -212,6 +212,9 @@ def test_run_manifest_written_once_on_first_cycle(tmp_path, monkeypatch) -> None
 
     record_run_id = "frozen_top20_v2_bayes_maker_20260922"
     settings, weights_path, decision_time, now = _seed_run_cycle_artifact(tmp_path, monkeypatch, record_run_id)
+    bootstrap = tmp_path / "unit_bootstrap.parquet"
+    bootstrap.write_bytes(b"bootstrap")
+    settings = settings.model_copy(update={"unit_bootstrap_path": str(bootstrap)})
     captured: dict = {}
     _install_policy_cycle_stubs(tmp_path, monkeypatch, captured)
     report = runner_mod.run_shadow_cycle(settings, decision_time, weights_path, now=now)
