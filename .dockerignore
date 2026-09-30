@@ -26,6 +26,7 @@ results/*.json
 
 # Workspace caches (local-first: never enter the build context)
 scratch/
+tests/
 tmp/
 .mypy_cache
 .ruff_cache

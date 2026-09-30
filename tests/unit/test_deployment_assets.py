@@ -983,3 +983,25 @@ def test_idle_gate_failure_emits_stage_annotation() -> None:
     annotation = "::error title=vps-deploy/crypto-pilot/idle_gate::rc=${rc}"
     assert annotation in workflow
     assert workflow.index(annotation) < workflow.index('exit "$rc"')
+
+
+def test_docker_context_excludes_tests() -> None:
+    lines = [
+        line.strip()
+        for line in (ROOT / ".dockerignore").read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
+
+    assert "tests/" in lines
+    assert "src/" not in lines
+    assert "src" not in lines
+
+
+def test_runtime_code_never_reads_tests_tree() -> None:
+    offenders = sorted(
+        str(path.relative_to(ROOT))
+        for path in (ROOT / "src").rglob("*.py")
+        if any(literal in path.read_text(encoding="utf-8") for literal in ('"tests/', "'tests/"))
+    )
+
+    assert offenders == []
