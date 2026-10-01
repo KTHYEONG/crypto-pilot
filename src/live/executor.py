@@ -145,15 +145,23 @@ class PassiveExecutionPolicy:
     max_margin_rejects: int = 3
     fee_schedule: FeeSchedule = FeeSchedule(maker_fee_bps=ExecutionSpec().maker_fee_bps, taker_fee_bps=ExecutionSpec().taker_fee_bps)
     taker_slippage_bps: float = ExecutionSpec().taker_slippage_bps
-    passive_pricing: Literal["touch_chase", "anchored"] = "touch_chase"
+    passive_pricing: Literal["touch_chase", "anchored", "anchored_repeg"] = "touch_chase"
+    repeg_interval_s: float = EXECUTION_BAR_SECONDS
 
     def __post_init__(self) -> None:
-        if self.passive_pricing not in ("touch_chase", "anchored"):
-            raise ValueError(f"passive_pricing must be 'touch_chase' or 'anchored', got {self.passive_pricing!r}")
+        if self.passive_pricing not in ("touch_chase", "anchored", "anchored_repeg"):
+            raise ValueError(f"passive_pricing must be 'touch_chase', 'anchored' or 'anchored_repeg', got {self.passive_pricing!r}")
         if self.passive_deadline_s >= self.window_deadline_s:
             raise ValueError(
                 f"passive_deadline_s ({self.passive_deadline_s}) must be strictly less than "
                 f"window_deadline_s ({self.window_deadline_s})"
+            )
+        if self.passive_pricing == "anchored_repeg" and not (
+            0 < self.repeg_interval_s < self.passive_deadline_s
+        ):
+            raise ValueError(
+                f"repeg_interval_s ({self.repeg_interval_s}) must be strictly less than "
+                f"passive_deadline_s ({self.passive_deadline_s})"
             )
         if self.poll_interval_s <= 0:
             raise ValueError(f"poll_interval_s must be > 0, got {self.poll_interval_s}")
@@ -220,6 +228,37 @@ def strict_passive_execution_policy(
         fee_schedule=fee_schedule,
         taker_slippage_bps=taker_slippage_bps,
         passive_pricing="anchored",
+    )
+
+
+def strict_passive_repeg_execution_policy(
+    fee_schedule: FeeSchedule,
+    taker_slippage_bps: float,
+    passive_timeout_minutes: int,
+    repeg_interval_s: float = EXECUTION_BAR_SECONDS,
+) -> PassiveExecutionPolicy:
+    """Live policy matching the canonical strict passive (maker) backtest plus re-pegging.
+
+    The anchored GTX limit rests for ``passive_timeout_minutes`` (the same timeout the
+    OHLCV strict proxy uses), re-pegging to the live touch every ``repeg_interval_s``
+    during the passive phase (band-capped on the adverse side only); then any remainder
+    crosses through the capped IOC backstop within two replay bars; the IOC cap is taker
+    fee + taker slippage, as in the taker parity policy.
+
+    Raises:
+        ValueError: passive_timeout_minutes < 1.
+    """
+    if passive_timeout_minutes < 1:
+        raise ValueError(f"passive_timeout_minutes must be >= 1, got {passive_timeout_minutes}")
+    passive_deadline_s = float(passive_timeout_minutes) * 60.0
+    return PassiveExecutionPolicy(
+        passive_deadline_s=passive_deadline_s,
+        window_deadline_s=passive_deadline_s + 2 * EXECUTION_BAR_SECONDS,
+        taker_cap_bps=fee_schedule.taker_fee_bps + taker_slippage_bps,
+        fee_schedule=fee_schedule,
+        taker_slippage_bps=taker_slippage_bps,
+        passive_pricing="anchored_repeg",
+        repeg_interval_s=repeg_interval_s,
     )
 
 
@@ -487,6 +526,30 @@ def _anchored_gtx_price(
         price = quantize_to_multiple(raw, tick, ROUND_UP)
     if price <= _ZERO:
         return None
+    return price
+
+
+def _band_capped_peg_price(
+    own_touch: Decimal,
+    *,
+    is_buy: bool,
+    filters: SymbolFilters,
+    band_low: Decimal,
+    band_high: Decimal,
+) -> Decimal:
+    """Bar-cadence repeg price for ``passive_pricing="anchored_repeg"``.
+
+    Quantize ``own_touch`` to one post-only tick (ROUND_DOWN for a buy, ROUND_UP for a
+    sell), then clamp into ``[band_low, band_high]`` on the adverse side only: a buy's
+    result is capped at ``band_high``, a sell's result is floored at ``band_low``, while
+    a favourable excursion posts unclamped. Unlike ``_gtx_candidate``, never returns
+    ``None``: an adverse excursion beyond the band saturates at the band edge.
+    """
+    price = quantize_to_multiple(own_touch, filters.tick_size, ROUND_DOWN if is_buy else ROUND_UP)
+    if is_buy:
+        price = min(price, quantize_to_multiple(band_high, filters.tick_size, ROUND_DOWN))
+    else:
+        price = max(price, quantize_to_multiple(band_low, filters.tick_size, ROUND_UP))
     return price
 
 
@@ -769,6 +832,7 @@ class _IntentRuntime:
     # 패시브 단계 진입 시각(phase-level 타임아웃 기준). 첫 _poll_or_post 호출에 기록되며
     # 재게시 때마다 갱신되는 posted_at 과 달리 리포스트로 리셋되지 않는다.
     passive_started_at: float = 0.0
+    last_repeg_at: float = 0.0
     # 실행 상태 미확인 제출(lookup-before-resend): 재게시 금지, 조회로 해소한다.
     journal: OrderJournal | None = None
     unresolved_id: str | None = None
@@ -1390,7 +1454,7 @@ def _poll_active(
     own_touch = bid if is_buy else ask
     if rt.paper_active:
         if (
-            policy.passive_pricing == "anchored"
+            policy.passive_pricing in ("anchored", "anchored_repeg")
             and rt.phase == "passive"
             and rt.active_price > _ZERO
         ):
@@ -1440,8 +1504,10 @@ def _poll_active(
         rt.finalized_at = now
         return
     if rt.phase == "passive":
+        band_low, band_high = _band(rt.intent, policy)
         timed_out = now - rt.passive_started_at >= policy.passive_deadline_s
         exhausted = rt.chases >= policy.max_chases
+        repeg_due = policy.passive_pricing == "anchored_repeg" and now - rt.last_repeg_at >= policy.repeg_interval_s
         moved = abs(own_touch - rt.active_price) >= rt.filters.tick_size * policy.chase_ticks
         slice_done = rt.active_post_qty > _ZERO and rt.reported_executed >= rt.active_post_qty and (rt.intent.quantity - rt.filled_total) > _ZERO
         if timed_out:
@@ -1451,7 +1517,16 @@ def _poll_active(
             _cancel_and_settle(client, rt, audit, "slice_done", touch, now=now)
         elif exhausted:
             return
-        elif moved and policy.passive_pricing != "anchored":
+        elif repeg_due:
+            candidate = _band_capped_peg_price(
+                own_touch, is_buy=is_buy, filters=rt.filters, band_low=band_low, band_high=band_high
+            )
+            rt.last_repeg_at = now
+            if candidate != rt.active_price:
+                _cancel_and_settle(client, rt, audit, "repeg", touch, now=now)
+            else:
+                return
+        elif moved and policy.passive_pricing == "touch_chase":
             _cancel_and_settle(client, rt, audit, "chase", touch, now=now)
             rt.chases += 1
         else:
@@ -1508,6 +1583,8 @@ def _poll_or_post(
     assert rt.filters is not None  # filters 부재 intent 는 생성 시 즉시 RESIDUAL 처리된다
     if rt.passive_started_at == 0.0:
         rt.passive_started_at = now
+    if rt.last_repeg_at == 0.0:
+        rt.last_repeg_at = now
     is_buy = rt.intent.side == "BUY"
     bid, ask = touch
     own_touch = bid if is_buy else ask
@@ -1564,6 +1641,13 @@ def _poll_or_post(
     if rt.phase == "passive":
         if policy.passive_pricing == "anchored":
             price = _anchored_gtx_price(rt.intent, touch, is_buy=is_buy, filters=rt.filters)
+        elif policy.passive_pricing == "anchored_repeg":
+            if rt.active_price <= _ZERO:
+                price = _anchored_gtx_price(rt.intent, touch, is_buy=is_buy, filters=rt.filters)
+            else:
+                price = _band_capped_peg_price(
+                    own_touch, is_buy=is_buy, filters=rt.filters, band_low=band_low, band_high=band_high
+                )
         else:
             price = _gtx_candidate(
                 own_touch, is_buy=is_buy, filters=rt.filters, band_low=band_low, band_high=band_high

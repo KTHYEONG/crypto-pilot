@@ -580,3 +580,41 @@ def test_prune_block_alert_precedes_backup_status_staleness() -> None:
     from src.market_data.streams.normalizer import NormalizerConfig
 
     assert LiveSettings().recorder_prune_blocked_alert_after_s < NormalizerConfig().backup_status_max_age_h * 3600.0
+
+
+def test_paper_strict_passive_repeg_requires_loop_simulator() -> None:
+    """PAPER strict_passive_repeg needs the loop simulator, like strict_passive."""
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="strict_passive_repeg"):
+        LiveSettings(
+            mode=ExecutionMode.PAPER, execution_policy="strict_passive_repeg",
+            paper_fill_model="immediate_taker",
+        )
+    ok = LiveSettings(
+        mode=ExecutionMode.PAPER, execution_policy="strict_passive_repeg",
+        paper_fill_model="peg_chase",
+    )
+    assert ok.execution_policy == "strict_passive_repeg"
+
+
+def test_strict_passive_repeg_interval_must_fit_inside_window() -> None:
+    """A repeg interval at the deadline boundary never fires, so it fails closed."""
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="repeg_interval_s"):
+        LiveSettings(
+            execution_policy="strict_passive_repeg",
+            passive_timeout_minutes=1, repeg_interval_s=60.0,
+        )
+    ok = LiveSettings(
+        execution_policy="strict_passive_repeg",
+        passive_timeout_minutes=1, repeg_interval_s=30.0,
+    )
+    assert ok.repeg_interval_s == 30.0
+
+
+def test_repeg_interval_inert_for_other_policies() -> None:
+    """An out-of-range repeg interval is ignored unless strict_passive_repeg is set."""
+    ok = LiveSettings(execution_policy="taker_parity", repeg_interval_s=60.0)
+    assert ok.execution_policy == "taker_parity"
