@@ -811,3 +811,23 @@ def test_live_tax_retention_gap_alerts(tmp_path, monkeypatch) -> None:
     gap = [a for a in alerts if a["event"] == "tax_income_gap"]
     assert len(gap) == 1
     assert gap[0]["detail"] == "uncovered [a..b]"
+
+
+def test_runner_selects_strict_passive_repeg_policy_from_settings(tmp_path, monkeypatch) -> None:
+    import src.live.runner as runner_mod
+    from src.live.settings import LiveSettings
+    from tests.unit.live._runner_stubs import DECISION_TIME, NOW
+
+    path, _, _ = _seed_policy_cycle_artifact(tmp_path)
+    captured: dict = {}
+    _install_policy_cycle_stubs(tmp_path, monkeypatch, captured)
+    settings = LiveSettings(
+        ledger_path=str(tmp_path / "ledger_repeg.json"),
+        execution_policy="strict_passive_repeg",
+        repeg_interval_s=30.0,
+    )
+    runner_mod.run_shadow_cycle(settings, DECISION_TIME, path, now=NOW)
+
+    assert captured["policy"].passive_pricing == "anchored_repeg"
+    assert captured["policy"].repeg_interval_s == 30.0
+    assert captured["policy"].passive_deadline_s == 1800.0
