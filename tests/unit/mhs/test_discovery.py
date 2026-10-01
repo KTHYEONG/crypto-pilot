@@ -124,6 +124,32 @@ def _run(log_close, opens, bar_funding, eligible, idx, sign: int = _SIGN):
     )
 
 
+# np.exp (used by _build_panel) is not bit-reproducible across CPU SIMD dispatch (AVX2 vs
+# AVX512), so cross-machine golden values are compared with a tolerance far above ulp noise
+# (~1e-14) and far below any real logic change. Same-process bit-identity is asserted by the
+# *_preserves_raw_fields tests.
+_BASELINE_REL = 1e-9
+
+
+def _assert_default_off_raw_baseline(result) -> None:
+    assert result.selected_horizon == 48
+    assert result.admitted is True
+    assert result.qualification_sign_consistent is True
+    assert [h for h, _ in result.discovery_scores] == [24, 48]
+    assert [t for _, t in result.discovery_scores] == pytest.approx(
+        [16.43401479542989, 25.517515748645305], rel=_BASELINE_REL,
+    )
+    assert result.discovery_aggregate_net_t == pytest.approx(23.145363968299133, rel=_BASELINE_REL)
+    assert result.qualification_net_t == pytest.approx(66.88810950782543, rel=_BASELINE_REL)
+    assert [(h, [y for y, _ in yearly]) for h, yearly in result.yearly_net_t] == [
+        (24, [2021, 2022]), (48, [2021, 2022]),
+    ]
+    assert [t for _, yearly in result.yearly_net_t for _, t in yearly] == pytest.approx(
+        [39.39252393058957, 16.43401479542989, 25.517515748645305, 37.86453888754656],
+        rel=_BASELINE_REL,
+    )
+
+
 class TestDiscoveryQualificationGate:
     """Worst-year-robust selection, qualification single re-check, and fail-closed behavior."""
 
@@ -655,27 +681,16 @@ class TestDiscoveryAdjustedOptIn:
     """The Bartlett/HAC-adjusted fields are opt-in-only diagnostics that never
     perturb the admission path."""
 
-    def test_discovery_default_off_bit_identical(self) -> None:
+    def test_discovery_default_off_matches_baseline(self) -> None:
         """With the flag omitted (default False) the gate returns the
-        pre-change baseline on the admitted worst-year-robust fixture -- every
-        raw field bit-identical -- and every new field sits at its empty/None
+        pre-change baseline (within float tolerance) on the admitted
+        worst-year-robust fixture, and every new field sits at its empty/None
         default."""
         log_close, opens, bar_funding, eligible, idx = _build_panel(
             24, phi=0.85, k1=2.0, k2=0.2, kq=1.0,
         )
         result = _run(log_close, opens, bar_funding, eligible, idx)
-        assert result.selected_horizon == 48
-        assert result.admitted is True
-        assert result.discovery_scores == (
-            (24, 16.43401479542989), (48, 25.517515748645305),
-        )
-        assert result.discovery_aggregate_net_t == 23.145363968299133
-        assert result.qualification_net_t == 66.88810950782543
-        assert result.qualification_sign_consistent is True
-        assert result.yearly_net_t == (
-            (24, ((2021, 39.39252393058957), (2022, 16.43401479542989))),
-            (48, ((2021, 25.517515748645305), (2022, 37.86453888754656))),
-        )
+        _assert_default_off_raw_baseline(result)
         assert result.yearly_adjusted_net_t == ()
         assert result.discovery_scores_adjusted == ()
         assert result.discovery_aggregate_adjusted_net_t is None
@@ -785,25 +800,14 @@ class TestRegimeScaledNetTDiagnostic:
 
     def test_discovery_default_off_regime_fields_empty(self) -> None:
         """SCENARIO_DISCOVERY_DEFAULT_OFF_REGIME_FIELDS_EMPTY: with the flag
-        omitted (default False) the gate returns the pre-change baseline on the
-        admitted worst-year-robust fixture -- every raw field bit-identical --
-        and all five new regime fields sit at their empty/None defaults."""
+        omitted (default False) the gate returns the pre-change baseline (within
+        float tolerance) on the admitted worst-year-robust fixture, and all
+        five new regime fields sit at their empty/None defaults."""
         log_close, opens, bar_funding, eligible, idx = _build_panel(
             24, phi=0.85, k1=2.0, k2=0.2, kq=1.0,
         )
         result = _run(log_close, opens, bar_funding, eligible, idx)
-        assert result.selected_horizon == 48
-        assert result.admitted is True
-        assert result.discovery_scores == (
-            (24, 16.43401479542989), (48, 25.517515748645305),
-        )
-        assert result.discovery_aggregate_net_t == 23.145363968299133
-        assert result.qualification_net_t == 66.88810950782543
-        assert result.qualification_sign_consistent is True
-        assert result.yearly_net_t == (
-            (24, ((2021, 39.39252393058957), (2022, 16.43401479542989))),
-            (48, ((2021, 25.517515748645305), (2022, 37.86453888754656))),
-        )
+        _assert_default_off_raw_baseline(result)
         assert result.yearly_regime_scaled_net_t == ()
         assert result.discovery_scores_regime_scaled == ()
         assert result.discovery_aggregate_regime_scaled_net_t is None
