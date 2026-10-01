@@ -103,8 +103,13 @@ class LiveSettings(BaseSettings):
     taker_slippage_bps: float = ExecutionSpec().taker_slippage_bps
     # 등록 백테스트 집행 방식과 같아야 한다. taker 원장 = taker_parity, maker 원장 =
     # strict_passive. env는 LIVE_EXECUTION_POLICY.
-    execution_policy: Literal["taker_parity", "strict_passive"] = "taker_parity"
+    execution_policy: Literal["taker_parity", "strict_passive", "strict_passive_repeg"] = "taker_parity"
     passive_timeout_minutes: int = ExecutionSpec().passive_timeout_minutes
+    # Bar-cadence re-peg interval for execution_policy="strict_passive_repeg"; ignored
+    # otherwise. env: LIVE_REPEG_INTERVAL_S. Default mirrors
+    # src.live.executor.EXECUTION_BAR_SECONDS (imported lazily to avoid a
+    # settings<->executor/rest circular import).
+    repeg_interval_s: float = 180.0
     paper_fill_model: str = "immediate_taker"
     orderbook_capture_enabled: bool = True
     orderbook_capture_interval_s: float = 10.0
@@ -540,12 +545,19 @@ class LiveSettings(BaseSettings):
             )
         if (
             self.mode is ExecutionMode.PAPER
-            and self.execution_policy == "strict_passive"
+            and self.execution_policy in ("strict_passive", "strict_passive_repeg")
             and self.paper_fill_model == "immediate_taker"
         ):
             raise ValueError(
-                "execution_policy='strict_passive' requires a loop fill simulator;"
+                f"execution_policy={self.execution_policy!r} requires a loop fill simulator;"
                 " paper_fill_model='immediate_taker' bypasses the passive loop"
+            )
+        if self.execution_policy == "strict_passive_repeg" and not (
+            0 < self.repeg_interval_s < self.passive_timeout_minutes * 60
+        ):
+            raise ValueError(
+                f"repeg_interval_s ({self.repeg_interval_s}) must be strictly less than "
+                f"passive_deadline_s ({self.passive_timeout_minutes * 60})"
             )
         return self
 

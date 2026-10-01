@@ -4835,3 +4835,197 @@ def test_default_unknown_outcome_horizon_ignores_environment(monkeypatch) -> Non
     monkeypatch.setenv("LIVE_RECV_WINDOW_MS", "not-a-number")
     expected = LiveSettings.model_fields["recv_window_ms"].default / 1000
     assert _default_unknown_outcome_horizon_s() > expected
+
+
+def _repeg_policy(**overrides: object) -> PassiveExecutionPolicy:
+    base: dict[str, object] = {
+        "poll_interval_s": 3.0,
+        "passive_deadline_s": 500.0,
+        "window_deadline_s": 600.0,
+        "taker_cap_bps": 8.0,
+        "max_slices": 1,
+        "passive_pricing": "anchored_repeg",
+        "repeg_interval_s": 180.0,
+    }
+    base.update(overrides)
+    return PassiveExecutionPolicy(**base)  # type: ignore[arg-type]
+
+
+def _repeg_runtime(price: str = "100.0", *, started_at: float = 1000.0, last_repeg_at: float = 1000.0):
+    from src.live.executor import _IntentRuntime
+
+    rt = _IntentRuntime(intent=_intent(), filters=_filters(tick_size="0.10"))
+    rt.phase = "passive"
+    rt.active_id = "repeg-oid-1"
+    rt.active_price = Decimal(price)
+    rt.active_post_qty = Decimal("1.000")
+    rt.passive_started_at = started_at
+    rt.last_repeg_at = last_repeg_at
+    return rt
+
+
+def _repeg_audit(tmp_path, name: str = "repeg.jsonl") -> AuditLog:
+    return AuditLog(tmp_path / name)
+
+
+def test_anchored_repeg_first_post_matches_anchored(tmp_path) -> None:
+    """First post under anchored_repeg is bit-identical to anchored (backtest peg[0]=anchor)."""
+    anchored_client = StubClient(touches=[("99.00", "101.00")])
+    execute_intent(
+        anchored_client, _intent(), _filters(tick_size="0.10"), _anchored_policy(),
+        _repeg_audit(tmp_path, "repeg_first_anchored.jsonl"), SteppingClock(15.0),
+    )
+    repeg_client = StubClient(touches=[("99.00", "101.00")])
+    execute_intent(
+        repeg_client, _intent(), _filters(tick_size="0.10"), _repeg_policy(),
+        _repeg_audit(tmp_path, "repeg_first_repeg.jsonl"), SteppingClock(15.0),
+    )
+    assert repeg_client.orders[0]["price"] == anchored_client.orders[0]["price"] == "100"
+    assert repeg_client.orders[0]["timeInForce"] == "GTX"
+
+
+def test_anchored_repeg_no_early_repeg(tmp_path) -> None:
+    """A tick before repeg_interval_s elapses leaves the resting order untouched."""
+    from src.live.executor import _poll_active
+
+    client = StubClient()
+    rt = _repeg_runtime()
+    _poll_active(
+        client, rt, (Decimal("100.05"), Decimal("100.25")), 1010.0,
+        _repeg_policy(repeg_interval_s=180.0), _repeg_audit(tmp_path),
+    )
+    assert rt.active_id == "repeg-oid-1"
+    assert rt.last_repeg_at == 1000.0
+    assert client.cancels == []
+
+
+def test_anchored_repeg_adverse_drift_caps_at_band_edge(tmp_path) -> None:
+    """Adverse drift beyond the band repegs to the band edge, never HOLDs (no None)."""
+    from src.live.executor import _band, _band_capped_peg_price, _poll_active
+
+    policy = _repeg_policy(repeg_interval_s=180.0)
+    band_low, band_high = _band(_intent(), policy)
+    candidate = _band_capped_peg_price(
+        Decimal("100.50"), is_buy=True, filters=_filters(tick_size="0.10"),
+        band_low=band_low, band_high=band_high,
+    )
+    assert candidate == Decimal("100.1")
+
+    client = StubClient()
+    rt = _repeg_runtime()
+    _poll_active(
+        client, rt, (Decimal("100.50"), Decimal("100.70")), 1200.0,
+        policy, _repeg_audit(tmp_path),
+    )
+    assert client.cancels == ["repeg-oid-1"]
+    assert rt.active_id is None
+    assert rt.last_repeg_at == 1200.0
+
+
+def test_anchored_repeg_favourable_drift_tracks_unclamped(tmp_path) -> None:
+    """Favourable excursion past the band tracks own_touch, not pulled back to the edge."""
+    from src.live.executor import _band, _band_capped_peg_price
+
+    policy = _repeg_policy(repeg_interval_s=180.0)
+    band_low, band_high = _band(_sell_intent(), policy)
+    candidate = _band_capped_peg_price(
+        Decimal("101.00"), is_buy=False, filters=_filters(tick_size="0.10"),
+        band_low=band_low, band_high=band_high,
+    )
+    assert candidate == Decimal("101.00")
+
+
+def test_anchored_repeg_noop_preserves_resting_order(tmp_path) -> None:
+    """An unchanged candidate advances last_repeg_at without cancel or repost."""
+    from src.live.executor import _poll_active
+
+    client = StubClient()
+    rt = _repeg_runtime()
+    _poll_active(
+        client, rt, (Decimal("100.05"), Decimal("100.25")), 1200.0,
+        _repeg_policy(repeg_interval_s=180.0), _repeg_audit(tmp_path),
+    )
+    assert rt.active_id == "repeg-oid-1"
+    assert rt.last_repeg_at == 1200.0
+    assert client.cancels == []
+
+
+def test_anchored_repeg_never_feeds_chase_counter(tmp_path) -> None:
+    """Repeated repegs across the window leave outcome.chases at zero."""
+    touches = [(f"{100.00 + 0.05 * i:.2f}", f"{100.20 + 0.05 * i:.2f}") for i in range(40)]
+    client = StubClient(touches=touches)
+    outcome = execute_intent(
+        client, _intent(), _filters(tick_size="0.10"),
+        _repeg_policy(passive_deadline_s=60.0, repeg_interval_s=6.0),
+        _repeg_audit(tmp_path, "repeg_chases.jsonl"), SteppingClock(3.0),
+    )
+    assert outcome.chases == 0
+    assert len([o for o in client.orders if o["timeInForce"] == "GTX"]) >= 2
+
+
+def test_touch_chase_and_anchored_behaviour_frozen(tmp_path) -> None:
+    """Widened literal keeps the two legacy modes on their pre-change paths."""
+    touches = [(f"{99.50 + 0.05 * i:.2f}", f"{99.70 + 0.05 * i:.2f}") for i in range(60)]
+    chase_kwargs: dict[str, object] = {
+        "passive_pricing": "touch_chase", "chase_ticks": 2, "max_chases": 8,
+        "chase_band_bps": 50.0, "max_cross_bps": 100.0,
+    }
+    chase_client = StubClient(touches=list(touches))
+    chase_outcome = execute_intent(
+        chase_client, _intent(), _filters(tick_size="0.10"), _policy(**chase_kwargs),
+        _repeg_audit(tmp_path, "frozen_chase.jsonl"), SteppingClock(3.0),
+    )
+    assert chase_outcome.chases >= 1
+    assert all(o["type"] == "LIMIT" for o in chase_client.orders)
+
+    anchored_client = StubClient(touches=list(touches))
+    anchored_outcome = execute_intent(
+        anchored_client, _intent(), _filters(tick_size="0.10"),
+        _anchored_policy(chase_band_bps=50.0, max_cross_bps=100.0),
+        _repeg_audit(tmp_path, "frozen_anchored.jsonl"), SteppingClock(3.0),
+    )
+    assert len([o for o in anchored_client.orders if o["timeInForce"] == "GTX"]) == 1
+    assert anchored_outcome.chases == 0
+
+
+def test_anchored_repeg_timeout_outranks_pending_repeg(tmp_path) -> None:
+    """A tick past the passive deadline takes the IOC path even when a repeg is due."""
+    from src.live.executor import _poll_active
+
+    client = StubClient()
+    rt = _repeg_runtime()
+    _poll_active(
+        client, rt, (Decimal("100.50"), Decimal("100.70")), 1600.0,
+        _repeg_policy(passive_deadline_s=500.0, repeg_interval_s=180.0),
+        _repeg_audit(tmp_path),
+    )
+    assert rt.phase == "ioc"
+    assert rt.active_id is None
+    assert rt.last_repeg_at == 1000.0
+
+
+def test_strict_passive_repeg_policy_matches_strict_timing() -> None:
+    """The repeg factory shares strict timing/cap; only pricing and interval differ."""
+    from src.live.executor import strict_passive_repeg_execution_policy
+
+    schedule = FeeSchedule(maker_fee_bps=2.0, taker_fee_bps=5.0)
+    strict = strict_passive_execution_policy(schedule, 3.0, 30)
+    repeg = strict_passive_repeg_execution_policy(schedule, 3.0, 30)
+    assert repeg.passive_pricing == "anchored_repeg"
+    assert repeg.passive_deadline_s == strict.passive_deadline_s == 1800.0
+    assert repeg.window_deadline_s == strict.window_deadline_s == 1800.0 + 2 * EXECUTION_BAR_SECONDS
+    assert repeg.taker_cap_bps == strict.taker_cap_bps == 8.0
+    assert repeg.repeg_interval_s == EXECUTION_BAR_SECONDS
+
+
+def test_strict_passive_repeg_policy_rejects_deadline_interval() -> None:
+    """An interval at or beyond the passive deadline (or non-positive) fails closed."""
+    from src.live.executor import strict_passive_repeg_execution_policy
+
+    schedule = FeeSchedule(maker_fee_bps=2.0, taker_fee_bps=5.0)
+    with pytest.raises(ValueError, match="repeg_interval_s"):
+        strict_passive_repeg_execution_policy(schedule, 3.0, 5, 300.0)
+    with pytest.raises(ValueError, match="repeg_interval_s"):
+        strict_passive_repeg_execution_policy(schedule, 3.0, 5, 0.0)
+    with pytest.raises(ValueError, match="passive_timeout_minutes"):
+        strict_passive_repeg_execution_policy(schedule, 3.0, 0)
