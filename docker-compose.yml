@@ -7,7 +7,7 @@ services:
     env_file: /home/ubuntu/quant-secrets/crypto-pilot.env
     environment:
       - LIVE_MODE=paper
-      - LIVE_EXECUTION_POLICY=strict_passive
+      - LIVE_EXECUTION_POLICY=strict_passive_repeg
       - LIVE_PAPER_FILL_MODEL=peg_chase
       - LIVE_NOTIONAL_EQUITY_USDT=2100
       - LIVE_RECORD_RUN_ID=frozen_top20_v2_bayes_maker_20260922
