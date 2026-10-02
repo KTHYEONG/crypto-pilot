@@ -12,7 +12,7 @@ import json
 import math
 import os
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -44,6 +44,18 @@ POSITION_HISTORY_MAX: int = 4
 
 def default_ledger_path() -> Path:
     return DATA_DIR / "state" / "live_position_ledger.json"
+
+
+def _evolve(base_state: LedgerState, **changes: Any) -> LedgerState:
+    """Return a state transition without aliasing the base state's mutable mappings."""
+    positions = dict(changes.pop("positions", base_state.positions))
+    funding_watermarks = dict(changes.pop("funding_watermarks", base_state.funding_watermarks))
+    return replace(
+        base_state,
+        positions=positions,
+        funding_watermarks=funding_watermarks,
+        **changes,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -386,24 +398,18 @@ def commit_journal_fills(
     hwm = base_state.equity_high_water_mark
     if equity is not None and Decimal(equity) > hwm:
         hwm = Decimal(equity)
-    new_state = LedgerState(
+    new_state = _evolve(
+        base_state,
         positions=positions,
         equity_high_water_mark=hwm,
         cash_usdt=cash,
-        funding_accrued_through=base_state.funding_accrued_through,
         last_executed_decision_time=(
             executed_decision_time
             if executed_decision_time is not None
             else base_state.last_executed_decision_time
         ),
-        funding_watermarks=dict(base_state.funding_watermarks),
         position_history=history,
-        funding_accrual_started_at=base_state.funding_accrual_started_at,
-        funding_backfilled_through=base_state.funding_backfilled_through,
         journal_applied_fill_seq=seqs[-1],
-        journal_recorded_fill_seq=base_state.journal_recorded_fill_seq,
-        derisk_since=base_state.derisk_since,
-        derisk_reasons=base_state.derisk_reasons,
     )
     save_ledger(path, new_state)
     return new_state
@@ -426,20 +432,9 @@ def mark_fills_recorded(
         )
     if through == base_state.journal_recorded_fill_seq:
         return base_state
-    new_state = LedgerState(
-        positions=dict(base_state.positions),
-        equity_high_water_mark=base_state.equity_high_water_mark,
-        cash_usdt=base_state.cash_usdt,
-        funding_accrued_through=base_state.funding_accrued_through,
-        last_executed_decision_time=base_state.last_executed_decision_time,
-        funding_watermarks=dict(base_state.funding_watermarks),
-        position_history=tuple(base_state.position_history),
-        funding_accrual_started_at=base_state.funding_accrual_started_at,
-        funding_backfilled_through=base_state.funding_backfilled_through,
-        journal_applied_fill_seq=base_state.journal_applied_fill_seq,
+    new_state = _evolve(
+        base_state,
         journal_recorded_fill_seq=through,
-        derisk_since=base_state.derisk_since,
-        derisk_reasons=base_state.derisk_reasons,
     )
     save_ledger(path, new_state)
     return new_state
@@ -454,23 +449,14 @@ def enter_derisk(
         raise ValueError("now must be tz-aware")
     now_ts = now_ts.tz_convert("UTC")
     merged = tuple(sorted(set(base_state.derisk_reasons) | {str(item) for item in reasons}))
-    new_state = LedgerState(
-        positions=dict(base_state.positions),
-        equity_high_water_mark=base_state.equity_high_water_mark,
-        cash_usdt=base_state.cash_usdt,
-        funding_accrued_through=base_state.funding_accrued_through,
-        last_executed_decision_time=base_state.last_executed_decision_time,
-        funding_watermarks=dict(base_state.funding_watermarks),
-        position_history=tuple(base_state.position_history),
-        funding_accrual_started_at=base_state.funding_accrual_started_at,
-        funding_backfilled_through=base_state.funding_backfilled_through,
-        journal_applied_fill_seq=base_state.journal_applied_fill_seq,
-        journal_recorded_fill_seq=base_state.journal_recorded_fill_seq,
+    if base_state.derisk_since is not None and merged == base_state.derisk_reasons:
+        return base_state
+    new_state = _evolve(
+        base_state,
         derisk_since=base_state.derisk_since if base_state.derisk_since is not None else now_ts,
         derisk_reasons=merged,
     )
-    if new_state is not base_state:
-        save_ledger(path, new_state)
+    save_ledger(path, new_state)
     return new_state
 
 
@@ -478,18 +464,8 @@ def clear_derisk(path: Path, base_state: LedgerState) -> LedgerState:
     """Remove the flag; called only by the operator resync after the ledger was adopted from the venue snapshot and verified."""
     if base_state.derisk_since is None and not base_state.derisk_reasons:
         return base_state
-    new_state = LedgerState(
-        positions=dict(base_state.positions),
-        equity_high_water_mark=base_state.equity_high_water_mark,
-        cash_usdt=base_state.cash_usdt,
-        funding_accrued_through=base_state.funding_accrued_through,
-        last_executed_decision_time=base_state.last_executed_decision_time,
-        funding_watermarks=dict(base_state.funding_watermarks),
-        position_history=tuple(base_state.position_history),
-        funding_accrual_started_at=base_state.funding_accrual_started_at,
-        funding_backfilled_through=base_state.funding_backfilled_through,
-        journal_applied_fill_seq=base_state.journal_applied_fill_seq,
-        journal_recorded_fill_seq=base_state.journal_recorded_fill_seq,
+    new_state = _evolve(
+        base_state,
         derisk_since=None,
         derisk_reasons=(),
     )

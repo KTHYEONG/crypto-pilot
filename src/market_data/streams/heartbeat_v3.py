@@ -12,6 +12,8 @@ from typing import Any
 
 import pandas as pd
 
+from src.capture.config import CaptureConfig
+
 HEARTBEAT_NAME: str = "recorder_heartbeat.json"
 HEARTBEAT_SCHEMA_VERSION: int = 3
 CAPTURE_SLOTS: tuple[str, str] = ("blue", "green")
@@ -248,14 +250,17 @@ def reference_section(capture_root: Path, cutoff_utc: str, now: Any) -> dict[str
     today_ts = pd.Timestamp(now).tz_convert("UTC").normalize()
     yesterday_ts = today_ts - pd.Timedelta(days=1)
     today = today_ts.strftime("%Y%m%d")
-    endpoints = {}
-    for name in ("exchange_info", "funding_info", "asset_index"):
-        endpoints[name] = {
+    reference_names = tuple(name for name, _url in CaptureConfig().reference_urls)
+    endpoints = {
+        name: {
             "captured": (Path(capture_root) / "reference" / name / f"{today}.json.gz").is_file()
         }
+        for name in reference_names
+    }
+    previous_day = yesterday_ts.strftime("%Y%m%d")
     previous_complete = all(
-        (Path(capture_root) / "reference" / name / f"{yesterday_ts.strftime('%Y%m%d')}.json.gz").is_file()
-        for name in ("exchange_info", "funding_info", "asset_index")
+        (Path(capture_root) / "reference" / name / f"{previous_day}.json.gz").is_file()
+        for name in reference_names
     )
     return {
         "day": today,

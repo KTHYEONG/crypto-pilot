@@ -87,7 +87,20 @@ def _check_record(record: Any, path: Path, offset: int) -> dict[str, Any]:
     for key in _REQUIRED_KEYS:
         if key not in record:
             raise ValueError(f"record at offset {offset} in {path} lacks {key!r}")
+    if record["v"] != RECORD_VERSION:
+        raise ValueError(
+            f"record at offset {offset} in {path} has unsupported version {record['v']!r}; "
+            f"expected {RECORD_VERSION}"
+        )
     return record
+
+
+def is_successful_rest_status(status: object) -> bool:
+    """Whether a raw REST status is accepted by the normalizer.
+
+    Exactly HTTP 200, represented as an integer rather than a boolean, is successful.
+    """
+    return type(status) is int and status == 200
 
 
 def iter_complete_records(path: Path, start_offset: int = 0) -> Iterator[tuple[dict[str, Any], int]]:

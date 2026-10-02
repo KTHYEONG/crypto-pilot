@@ -164,7 +164,6 @@ def build_recorder_watchdog(
         min_capture_ratio=settings.recorder_min_capture_ratio,
         capture_ratio_min_points=settings.recorder_capture_ratio_min_points,
         persist_stale_s=settings.recorder_persist_stale_s,
-        max_consecutive_flush_failures=settings.recorder_max_consecutive_flush_failures,
         reference_grace_s=settings.recorder_reference_grace_s,
         rejected_fraction_alert=settings.recorder_rejected_fraction_alert,
         rejected_max_consecutive_points=settings.recorder_rejected_max_consecutive_points,

@@ -699,7 +699,7 @@ def test_run_shadow_cycle_paper_mode_records_immediate_taker_fills(tmp_path, mon
 
     ledger_path = tmp_path / "ledger.json"
     fills_dir = tmp_path / "fills"
-    settings = LiveSettings(mode=ExecutionMode.PAPER, notional_equity_usdt=2000.0, ledger_path=str(ledger_path), fills_dir=str(fills_dir), orderbook_capture_enabled=False, microstructure_dir=str(tmp_path / "micro"), execution_quality_dir=str(tmp_path / "eq"), portfolio_state_dir=str(tmp_path / "port"), tax_ledger_dir=str(tmp_path / "tax"), order_journal_path=str(tmp_path / "journal_12.jsonl"))
+    settings = LiveSettings(mode=ExecutionMode.PAPER, notional_equity_usdt=2000.0, ledger_path=str(ledger_path), fills_dir=str(fills_dir), microstructure_dir=str(tmp_path / "micro"), execution_quality_dir=str(tmp_path / "eq"), portfolio_state_dir=str(tmp_path / "port"), tax_ledger_dir=str(tmp_path / "tax"), order_journal_path=str(tmp_path / "journal_12.jsonl"))
     # fees: default maker 2 taker 5 slippage 3 => 8
     report = run_shadow_cycle(settings, decision_time, artifact, now=now)
     assert report.status == "COMPLETE"
@@ -810,7 +810,7 @@ def test_run_shadow_cycle_shadow_mode_does_not_use_immediate_taker(tmp_path, mon
         execution_quality_dir=str(tmp_path / "eq"),
         portfolio_state_dir=str(tmp_path / "port"),
         tax_ledger_dir=str(tmp_path / "tax"),
-        orderbook_capture_enabled=False, order_journal_path=str(tmp_path / "journal_13.jsonl"))
+        order_journal_path=str(tmp_path / "journal_13.jsonl"))
     report = run_shadow_cycle(settings, decision_time, artifact, now=now)
     assert report.status == "COMPLETE"
     # outcomes should be SHADOW
@@ -902,7 +902,7 @@ def test_run_shadow_cycle_paper_accrues_funding_and_uses_parity_policy(tmp_path,
     monkeypatch.setattr(runner_mod, "resolve_sizing_equity", equity_spy)
     monkeypatch.setattr(runner_mod, "execute_intents", _wrap_with_journal(fake_execute))
 
-    settings = LiveSettings(mode=ExecutionMode.PAPER, notional_equity_usdt=2000.0, ledger_path=str(ledger_path), fills_dir=str(tmp_path / "fills"), orderbook_capture_enabled=False, microstructure_dir=str(tmp_path / "micro"), execution_quality_dir=str(tmp_path / "eq"), portfolio_state_dir=str(tmp_path / "port"), tax_ledger_dir=str(tmp_path / "tax"), order_journal_path=str(tmp_path / "journal_14.jsonl"))
+    settings = LiveSettings(mode=ExecutionMode.PAPER, notional_equity_usdt=2000.0, ledger_path=str(ledger_path), fills_dir=str(tmp_path / "fills"), microstructure_dir=str(tmp_path / "micro"), execution_quality_dir=str(tmp_path / "eq"), portfolio_state_dir=str(tmp_path / "port"), tax_ledger_dir=str(tmp_path / "tax"), order_journal_path=str(tmp_path / "journal_14.jsonl"))
     report = runner_mod.run_shadow_cycle(settings, decision_time, artifact, now=now)
     assert report.status == "COMPLETE"
     assert captured["cash_usdt"] == Decimal("1899.899")
@@ -1264,7 +1264,7 @@ def test_run_shadow_cycle_paper_halts_on_delisted_holding_without_synthetic_sett
     ledger_path = tmp_path / "ledger.json"
     settings = LiveSettings(
         mode=ExecutionMode.PAPER, notional_equity_usdt=2000.0, ledger_path=str(ledger_path),
-        fills_dir=str(tmp_path / "fills"), orderbook_capture_enabled=False, microstructure_dir=str(tmp_path / "micro"),
+        fills_dir=str(tmp_path / "fills"), microstructure_dir=str(tmp_path / "micro"),
         execution_quality_dir=str(tmp_path / "eq"), portfolio_state_dir=str(tmp_path / "port"), tax_ledger_dir=str(tmp_path / "tax"), order_journal_path=str(tmp_path / "journal_16.jsonl"))
     weights_path = tmp_path / "deployed_target_weights.parquet"
     pd.DataFrame({"BUSDT": [-0.02]}, index=pd.DatetimeIndex([DECISION_TIME])).to_parquet(weights_path, index=True)
@@ -1349,7 +1349,7 @@ def test_run_shadow_cycle_paper_halts_when_held_funding_lag_exceeds_24h(tmp_path
     ledger_path = tmp_path / "ledger.json"
     settings = LiveSettings(
         mode=ExecutionMode.PAPER, notional_equity_usdt=2000.0, ledger_path=str(ledger_path),
-        fills_dir=str(tmp_path / "fills"), orderbook_capture_enabled=False, microstructure_dir=str(tmp_path / "micro"),
+        fills_dir=str(tmp_path / "fills"), microstructure_dir=str(tmp_path / "micro"),
         execution_quality_dir=str(tmp_path / "eq"), portfolio_state_dir=str(tmp_path / "port"), tax_ledger_dir=str(tmp_path / "tax"), order_journal_path=str(tmp_path / "journal_17.jsonl"))
     weights_path = tmp_path / "deployed_target_weights.parquet"
     pd.DataFrame({"BUSDT": [-0.02]}, index=pd.DatetimeIndex([DECISION_TIME])).to_parquet(weights_path, index=True)
@@ -1515,7 +1515,7 @@ def test_run_shadow_cycle_wires_one_order_journal_into_orphan_cleanup_and_execut
         mode=ExecutionMode.SHADOW, notional_equity_usdt=2000.0, ledger_path=str(tmp_path / "ledger.json"),
         fills_dir=str(tmp_path / "fills"), microstructure_dir=str(tmp_path / "micro"),
         execution_quality_dir=str(tmp_path / "eq"), portfolio_state_dir=str(tmp_path / "port"),
-        tax_ledger_dir=str(tmp_path / "tax"), orderbook_capture_enabled=False)
+        tax_ledger_dir=str(tmp_path / "tax"))
 
     report = run_shadow_cycle(settings, decision_time, artifact, now=now)
 
@@ -1551,7 +1551,7 @@ def test_run_shadow_cycle_paper_halts_when_held_symbol_absent_from_exchange(tmp_
     ledger_path = tmp_path / "ledger.json"
     settings = LiveSettings(
         mode=ExecutionMode.PAPER, notional_equity_usdt=2000.0, ledger_path=str(ledger_path),
-        fills_dir=str(tmp_path / "fills"), orderbook_capture_enabled=False, microstructure_dir=str(tmp_path / "micro"),
+        fills_dir=str(tmp_path / "fills"), microstructure_dir=str(tmp_path / "micro"),
         execution_quality_dir=str(tmp_path / "eq"), portfolio_state_dir=str(tmp_path / "port"), tax_ledger_dir=str(tmp_path / "tax"), order_journal_path=str(tmp_path / "journal_20.jsonl"))
     weights_path = tmp_path / "deployed_target_weights.parquet"
     pd.DataFrame({"BUSDT": [-0.02]}, index=pd.DatetimeIndex([DECISION_TIME])).to_parquet(weights_path, index=True)
@@ -1931,7 +1931,7 @@ def test_run_shadow_cycle_paper_books_evidenced_delisting_settlement(tmp_path, m
     ledger_path = tmp_path / "ledger.json"
     settings = LiveSettings(
         mode=ExecutionMode.PAPER, notional_equity_usdt=2000.0, ledger_path=str(ledger_path),
-        fills_dir=str(tmp_path / "fills"), orderbook_capture_enabled=False, microstructure_dir=str(tmp_path / "micro"),
+        fills_dir=str(tmp_path / "fills"), microstructure_dir=str(tmp_path / "micro"),
         execution_quality_dir=str(tmp_path / "eq"), portfolio_state_dir=str(tmp_path / "port"), tax_ledger_dir=str(tmp_path / "tax"), order_journal_path=str(tmp_path / "journal_17.jsonl"))
     weights_path = tmp_path / "deployed_target_weights.parquet"
     pd.DataFrame({"BUSDT": [-0.02]}, index=pd.DatetimeIndex([DECISION_TIME])).to_parquet(weights_path, index=True)

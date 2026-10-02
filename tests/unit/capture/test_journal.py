@@ -13,6 +13,7 @@ import pytest
 from src.capture.journal import (
     SegmentWriter,
     hot_segment_path,
+    is_successful_rest_status,
     iter_complete_records,
     last_complete_offset,
     repair_torn_tail,
@@ -74,6 +75,34 @@ def test_flush_appends_one_complete_member(tmp_path: Path) -> None:
     assert len(replayed) == 5
     assert [item[0]["recv_ns"] for item in replayed] == [base + index for index in range(5)]
     assert replayed[-1][1] == dest.stat().st_size
+
+
+def test_unknown_record_version_fails_closed(tmp_path: Path) -> None:
+    path = hot_segment_path(tmp_path, "book_ticker", "blue", _ns(2026, 9, 26, 10))
+    writer = SegmentWriter(tmp_path, "book_ticker", "blue")
+    writer.add(_record("book_ticker", "blue", _ns(2026, 9, 26, 10)))
+    writer.flush()
+    with open(path, "ab") as handle:
+        handle.write(gzip.compress(b'{"v":2,"stream":"book_ticker","slot":"blue","kind":"rest","recv_ns":1}\n'))
+
+    with pytest.raises(ValueError, match=r"version 2.*expected 1") as error:
+        list(iter_complete_records(path))
+    assert str(path) in str(error.value)
+    assert "offset" in str(error.value)
+
+    v1_path = hot_segment_path(tmp_path / "v1", "book_ticker", "blue", _ns(2026, 9, 26, 10))
+    v1_writer = SegmentWriter(tmp_path / "v1", "book_ticker", "blue")
+    v1_writer.add(_record("book_ticker", "blue", _ns(2026, 9, 26, 10)))
+    v1_writer.flush()
+    assert [record["v"] for record, _ in iter_complete_records(v1_path)] == [1]
+
+
+@pytest.mark.parametrize(
+    ("status", "expected"),
+    [(200, True), (201, False), (204, False), (429, False), (500, False), (None, False), ("200", False), (True, False)],
+)
+def test_successful_rest_status_matches_record_contract(status: object, expected: bool) -> None:
+    assert is_successful_rest_status(status) is expected
 
 
 def test_resume_from_checkpoint_offset(tmp_path: Path) -> None:

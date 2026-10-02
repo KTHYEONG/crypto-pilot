@@ -2,25 +2,12 @@
 
 from __future__ import annotations
 
-import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
 
 import pandas as pd
 
 from src.common.parquet_io import read_parquet_or_quarantine, write_parquet_atomic
-
-
-def monthly_partition_path(
-    directory: Path, prefix: str, when: pd.Timestamp, *, suffix: str = ".parquet"
-) -> Path:
-    ts = pd.Timestamp(when)
-    if ts.tzinfo is None:
-        raise ValueError("when must be tz-aware UTC")
-    ts_utc = ts.tz_convert("UTC")
-    yyyymm = ts_utc.strftime("%Y%m")
-    return Path(directory) / f"{prefix}_{yyyymm}{suffix}"
 
 
 def _enforce_dtypes(df: pd.DataFrame, dtypes: Mapping[str, str]) -> pd.DataFrame:
@@ -97,91 +84,5 @@ def append_typed_frame(
             write_parquet_atomic(combined, path, compression=compression)
         else:
             write_parquet_atomic(grp, path, compression=compression)
-        written.append(path)
-    return sorted(written)
-
-
-def load_partitions(
-    directory: Path,
-    prefix: str,
-    *,
-    since: pd.Timestamp | None = None,
-    suffix: str = ".parquet",
-) -> pd.DataFrame:
-    directory = Path(directory)
-    if not directory.exists():
-        return pd.DataFrame()
-    pattern = f"{prefix}_*{suffix}"
-    shards = sorted(directory.glob(pattern))
-    if not shards:
-        return pd.DataFrame()
-    frames: list[pd.DataFrame] = []
-    for shard in shards:
-        try:
-            df = pd.read_parquet(shard)
-            if not df.empty:
-                frames.append(df)
-        except Exception:  # noqa: S112 - 읽을 수 없는 shard는 건너뛰고 나머지 로드
-            continue
-    if not frames:
-        return pd.DataFrame()
-    combined = pd.concat(frames, ignore_index=True)
-    if since is not None:
-        try:
-            since_ts = pd.Timestamp(since)
-            since_ts = since_ts.tz_localize("UTC") if since_ts.tzinfo is None else since_ts.tz_convert("UTC")
-            # find datetime column to filter
-            dt_col: str | None = None
-            for col in combined.columns:
-                if pd.api.types.is_datetime64_any_dtype(combined[col]):
-                    dt_col = col
-                    break
-                # try parse as datetime
-                try:
-                    parsed = pd.to_datetime(combined[col], utc=True, errors="coerce")
-                    if parsed.notna().any():
-                        dt_col = col
-                        combined[col] = parsed
-                        break
-                except Exception:  # noqa: S112 - datetime 파싱 불가 컬럼은 후보에서 제외
-                    continue
-            if dt_col is not None:
-                mask = pd.to_datetime(combined[dt_col], utc=True, errors="coerce") >= since_ts
-                combined = combined[mask]
-        except Exception:  # noqa: S110, BLE001 - since 필터 실패 시 원본 결합 결과를 그대로 반환
-            pass
-    return combined
-
-
-def append_jsonl_partition(
-    rows: Sequence[Mapping[str, Any]],
-    directory: Path,
-    prefix: str,
-    *,
-    time_key: str,
-) -> list[Path]:
-    if not rows:
-        return []
-    directory = Path(directory)
-    directory.mkdir(parents=True, exist_ok=True)
-    buckets: dict[str, list[Mapping[str, Any]]] = {}
-    for r in rows:
-        ts = pd.Timestamp(r[time_key])
-        ts = ts.tz_localize("UTC") if ts.tzinfo is None else ts.tz_convert("UTC")
-        yyyymm = ts.strftime("%Y%m")
-        buckets.setdefault(yyyymm, []).append(r)
-    written: list[Path] = []
-    for yyyymm in sorted(buckets.keys()):
-        path = directory / f"{prefix}_{yyyymm}.jsonl"
-        with path.open("a", encoding="utf-8") as f:
-            for r in buckets[yyyymm]:
-                # ensure time_key is isoformat for json
-                rec = dict(r)
-                val = rec.get(time_key)
-                if isinstance(val, pd.Timestamp):
-                    rec[time_key] = val.isoformat()
-                # handle pd NaT or Timestamp
-                line = json.dumps(rec, ensure_ascii=False, default=str)
-                f.write(line + "\n")
         written.append(path)
     return sorted(written)

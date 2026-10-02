@@ -111,12 +111,6 @@ class LiveSettings(BaseSettings):
     # settings<->executor/rest circular import).
     repeg_interval_s: float = 180.0
     paper_fill_model: str = "immediate_taker"
-    orderbook_capture_enabled: bool = True
-    orderbook_capture_interval_s: float = 10.0
-    orderbook_capture_duration_s: float = 1800.0
-    orderbook_capture_depth_limit: int = 20
-    orderbook_capture_max_symbols: int = 40
-    orderbook_capture_dir: str | None = None
     exec_depth_capture_enabled: bool = True
     exec_depth_stream_url: str = "wss://fstream.binance.com/stream"
     exec_depth_levels: int = 5
@@ -166,7 +160,6 @@ class LiveSettings(BaseSettings):
     recorder_min_capture_ratio: float = 0.9
     recorder_capture_ratio_min_points: int = 10
     recorder_persist_stale_s: float = 1200.0
-    recorder_max_consecutive_flush_failures: int = 3
     recorder_reference_grace_s: float = 3600.0
     recorder_rejected_fraction_alert: float = 0.01
     recorder_rejected_max_consecutive_points: int = 60
@@ -226,6 +219,13 @@ class LiveSettings(BaseSettings):
     journal_recovery_lookback_hours: float = 72.0
     execution_shutdown_cleanup_budget_s: float = 20.0
 
+    @field_validator("daemon_max_attempts_per_day")
+    @classmethod
+    def _positive_daemon_attempt_cap(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("daemon_max_attempts_per_day must be at least 1")
+        return value
+
     @field_validator("venue_force_close_lookback_hours")
     @classmethod
     def _bounded_force_close_lookback(cls, value: float) -> float:
@@ -278,7 +278,6 @@ class LiveSettings(BaseSettings):
     @field_validator(
         "recorder_sampler_max_consecutive_failures",
         "recorder_capture_ratio_min_points",
-        "recorder_max_consecutive_flush_failures",
         "recorder_rejected_max_consecutive_points",
         "recorder_normalizer_max_consecutive_failures",
         "recorder_local_disk_budget_bytes",
@@ -628,19 +627,3 @@ class LiveSettings(BaseSettings):
         if self.record_run_id is None:
             return None
         return DATA_DIR / "state" / "runs" / self.record_run_id
-
-
-def refresh_settings_fields() -> tuple[str, ...]:
-    return (
-        "refresh_max_workers",
-        "refresh_lookback_days",
-        "refresh_deadline_s",
-        "refresh_max_fail_fraction",
-        "funding_prefetch_enabled",
-        "funding_prefetch_offset_hours",
-        "refresh_decision_bar_max_missing_fraction",
-        "max_market_data_staleness_hours",
-    )
-
-
-_refresh_settings_fields_ref = refresh_settings_fields()

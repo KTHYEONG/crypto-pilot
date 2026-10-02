@@ -15,7 +15,6 @@ from src.common.errors import DataIntegrityError
 from src.live.errors import StaleSignalError, ArtifactSealError
 
 EXPOSURE_SCALE_COLUMN: str = "exposure_scale"
-EXPOSURE_SCALE_KEEP_ROWS: int = 1_000_000
 
 
 def _sibling_with_token(weights_path: Path, replacement: str) -> Path:

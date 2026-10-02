@@ -1560,7 +1560,7 @@ def test_edge06_prefetch_leaves_nightly_funding_fresh(tmp_path) -> None:
 def test_edge06_settings_refresh_and_venue_fields() -> None:
     import pytest
 
-    from src.live.settings import LiveSettings, refresh_settings_fields
+    from src.live.settings import LiveSettings
 
     settings = LiveSettings()
     assert settings.funding_prefetch_enabled is True
@@ -1569,7 +1569,6 @@ def test_edge06_settings_refresh_and_venue_fields() -> None:
     assert settings.venue_rules_warn_age_days == 2.0
     assert settings.venue_rules_max_age_days == 7.0
     assert settings.venue_rules_max_rejected_fraction == 0.05
-    assert "refresh_decision_bar_max_missing_fraction" in refresh_settings_fields()
 
     with pytest.raises(Exception):
         LiveSettings(funding_prefetch_offset_hours=22.5)

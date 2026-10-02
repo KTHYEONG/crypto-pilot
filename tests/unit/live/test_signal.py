@@ -73,3 +73,21 @@ def test_signal_freshness_rejects_stale_decision() -> None:
 COVERED_SCENARIOS: tuple[str, ...] = (
     "SCENARIO_LIVE_07_CAUSALITY_GATE",
 )
+
+
+def test_latest_target_weights_loads_artifact_once(artifact, monkeypatch: pytest.MonkeyPatch) -> None:
+    import src.live.deployed_weights as deployed_weights
+
+    original = deployed_weights.load_weights_frame
+    calls = 0
+
+    def counted_load(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(deployed_weights, "load_weights_frame", counted_load)
+    weights = latest_target_weights(artifact, pd.Timestamp("2026-08-24 00:00Z"))
+
+    assert calls == 1
+    assert weights["AAAUSDT"] == pytest.approx(0.2)

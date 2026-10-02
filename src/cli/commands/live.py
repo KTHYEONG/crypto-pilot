@@ -18,8 +18,6 @@ from src.live.deployed_weights import default_weights_path
 
 logger = logging.getLogger("LiveCli")
 
-#: 프로덕션 기본값은 봉인된 아티팩트다(I-SEAL). 평문 .parquet 을 쓰려면 --artifact 로 명시한다.
-_DEFAULT_ARTIFACT = str(default_weights_path())
 _DEFAULT_DAEMON_STATE_PATH = str(DATA_DIR / "state" / "live_daemon_last_run.json")
 
 _LIVE_LOG_DIR: Path = LOG_DIR / "live"
@@ -70,8 +68,6 @@ def _run_shadow_cycle(args: argparse.Namespace) -> None:
     from src.live.settings import LiveSettings
 
     settings = _settings_with_mode(args)
-    if args.dry_run:
-        logger.info("[SYS] live shadow-cycle dry-run requested; mode=%s", settings.mode.value)
     report = run_shadow_cycle(
         settings,
         args.decision_time,
@@ -187,12 +183,6 @@ def _run_status(args: argparse.Namespace) -> None:
     raise SystemExit(1 if unhealthy else 0)
 
 
-def _run_deploy_check(args: argparse.Namespace) -> None:
-    import sys
-    sys.stderr.write("deploy-check removed in v2\n")
-    raise SystemExit(1)
-
-
 def _run_execution_quality_summary(args: argparse.Namespace) -> None:  # noqa: ARG001
     from src.live.execution_quality import summarize_execution_quality
 
@@ -262,7 +252,7 @@ def _run_preflight(args: argparse.Namespace) -> None:
     from src.live.settings import LiveSettings
 
     settings = _settings_with_mode(args)
-    report = run_preflight(settings, Path(args.artifact))
+    report = run_preflight(settings, _resolve_weights_path(args.artifact, settings))
     for check in report.checks:
         logger.info("[SYS] %s passed=%s detail=%s", check.name, check.passed, check.detail)
     if not report.passed:
@@ -373,14 +363,8 @@ def add_live_commands(live_parser: argparse.ArgumentParser) -> None:
         default=None,
         help="Path to the deployed_target_weights.parquet(.enc) artifact to consume (.enc requires LIVE_ARTIFACT_KEY)",
     )
-    shadow.add_argument(
-        "--dry-run",
-        action="store_true",
-        default=False,
-        help="Log the cycle without any state-changing intent beyond SHADOW suppression",
-    )
     shadow.add_argument("--mode", choices=["shadow", "paper", "live_testnet", "live_mainnet"], default=None, help="Override LIVE_MODE for this run")
-    shadow.set_defaults(handler=_run_shadow_cycle, dry_run=False)
+    shadow.set_defaults(handler=_run_shadow_cycle)
 
     daemon = subparsers.add_parser("daemon", help="Run the 24/7 unattended shadow-cycle scheduler")
     daemon.add_argument(
@@ -418,8 +402,8 @@ def add_live_commands(live_parser: argparse.ArgumentParser) -> None:
     preflight.add_argument(
         "--artifact",
         type=str,
-        default=_DEFAULT_ARTIFACT,
-        help="Path to the deployed_target_weights.parquet(.enc) artifact to consume (.enc requires LIVE_ARTIFACT_KEY)",
+        default=None,
+        help="Weights artifact path (default: LIVE_WEIGHTS_PATH or run-scoped settings; .enc requires LIVE_ARTIFACT_KEY)",
     )
     preflight.add_argument("--mode", choices=["shadow", "paper", "live_testnet", "live_mainnet"], default=None, help="Override LIVE_MODE for this run")
     preflight.set_defaults(handler=_run_preflight)
@@ -447,17 +431,12 @@ def add_live_commands(live_parser: argparse.ArgumentParser) -> None:
     resync.add_argument("--mode", choices=["live_testnet", "live_mainnet"], default=None, help="Override LIVE_MODE for this run")
     resync.set_defaults(handler=_run_ledger_resync)
 
-    from src.live.tax_ledger import summarize_tax_year as _summarize_tax_year_ref  # noqa: F401
-
     tax_collect = subparsers.add_parser("tax-collect", help="Collect tax ledger from venue")
     tax_collect.set_defaults(handler=_run_tax_collect)
 
     tax_summary = subparsers.add_parser("tax-summary", help="Summarize tax year")
     tax_summary.add_argument('--year', type=int, required=True, help='Tax year to aggregate (UTC calendar year)')
     tax_summary.set_defaults(handler=_run_tax_summary)
-
-    micro = subparsers.add_parser("microstructure-summary", help="Summarize microstructure")
-    micro.set_defaults(handler=_run_execution_quality_summary)
 
     ob = subparsers.add_parser("orderbook-capture", help="Capture order book snapshots")
     ob.add_argument("--symbols", type=str, required=True, help="Comma-separated symbols")
