@@ -112,16 +112,34 @@ def test_fold_and_refresh_window_states() -> None:
     assert states["book_ticker"]["consecutive_rejecting_points"] == 1
 
 
-def test_reference_and_disk_sections(tmp_path: Path) -> None:
-    """Reference completeness reads capture files; disk walks skip partials."""
-    ref = tmp_path / "reference" / "exchange_info"
-    ref.mkdir(parents=True)
-    (ref / "20260926.json.gz").write_bytes(b"x")
+def test_reference_section_follows_capture_config(tmp_path: Path) -> None:
+    """Every configured reference endpoint is checked for today and yesterday."""
+    from src.capture.config import CaptureConfig
+
+    names = tuple(name for name, _url in CaptureConfig().reference_urls)
+    today = "20260926"
+    yesterday = "20260925"
+    for name in names:
+        endpoint_dir = tmp_path / "reference" / name
+        endpoint_dir.mkdir(parents=True)
+        (endpoint_dir / f"{today}.json.gz").write_bytes(b"x")
+        (endpoint_dir / f"{yesterday}.json.gz").write_bytes(b"x")
+
     section = reference_section(tmp_path, "00:05", _now())
-    assert section["day"] == "20260926"
-    assert section["endpoints"]["exchange_info"]["captured"] is True
-    assert section["endpoints"]["funding_info"]["captured"] is False
-    assert section["previous_day"] == "20260925"
+    assert section["day"] == today
+    assert set(section["endpoints"]) == set(names)
+    assert all(status["captured"] for status in section["endpoints"].values())
+    assert section["previous_day_complete"] is True
+
+    missing = names[0]
+    endpoint_dir = tmp_path / "reference" / missing
+    (endpoint_dir / f"{today}.json.gz").unlink()
+    section = reference_section(tmp_path, "00:05", _now())
+    assert {name for name, status in section["endpoints"].items() if not status["captured"]} == {missing}
+    assert section["previous_day_complete"] is True
+
+    (endpoint_dir / f"{yesterday}.json.gz").unlink()
+    section = reference_section(tmp_path, "00:05", _now())
     assert section["previous_day_complete"] is False
     hot = tmp_path / "raw" / "hot"
     hot.mkdir(parents=True)

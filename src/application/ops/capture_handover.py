@@ -12,7 +12,6 @@ from pathlib import Path
 from typing import Literal
 
 Slot = Literal["blue", "green"]
-LEGACY_CONTAINER: str = "market-recorder"
 
 EXIT_OK: int = 0
 EXIT_NOT_READY: int = 10
@@ -48,16 +47,14 @@ class CaptureDecision:
             ``reconcile`` (both slots run; retire ``old_slot`` and keep ``new_slot`` without a start).
         new_slot: Slot to start or keep; ``None`` only for ``keep``.
         old_slot: Slot to retire; ``None`` when nothing must be retired.
-        retire_legacy: The legacy ``market-recorder`` container runs and must be retired after READY.
         reason: Machine-readable reason (``not_running``, ``unchanged``, ``fingerprint_changed``,
             ``fingerprint_unreadable``, ``image_fingerprint_unreadable``, ``compose_config_changed``,
-            ``both_running``, ``legacy_migration``).
+            ``both_running``).
     """
 
     action: Literal["keep", "start", "handover", "reconcile"]
     new_slot: Slot | None
     old_slot: Slot | None
-    retire_legacy: bool
     reason: str
 
 
@@ -66,12 +63,12 @@ def _is_current(fp: str | None, image_fp: str | None) -> bool:
 
 
 def decide_capture_action(
-    slots: Sequence[SlotObservation], *, image_fingerprint: str | None, legacy_running: bool
+    slots: Sequence[SlotObservation], *, image_fingerprint: str | None
 ) -> CaptureDecision:
     """Choose the capture deploy action from observed state; pure and total.
 
     Why: the bash script must not embed branching logic that tests cannot reach; every combination
-    of (0/1/2 running slots, readable/unreadable fingerprints, config drift, legacy recorder) maps to
+    of (0/1/2 running slots, readable/unreadable fingerprints, config drift) maps to
     exactly one action here.
 
     Raises:
@@ -93,7 +90,7 @@ def decide_capture_action(
             keep = ready[0] if len(ready) == 1 else by_slot["blue"]
         old = by_slot["green"] if keep.slot == "blue" else by_slot["blue"]
         return CaptureDecision(
-            action="reconcile", new_slot=keep.slot, old_slot=old.slot, retire_legacy=legacy_running, reason="both_running"
+            action="reconcile", new_slot=keep.slot, old_slot=old.slot, reason="both_running"
         )
     if len(running) == 1:
         obs = running[0]
@@ -105,7 +102,7 @@ def decide_capture_action(
             and obs.heartbeat_ready
         ):
             return CaptureDecision(
-                action="keep", new_slot=None, old_slot=None, retire_legacy=legacy_running, reason="unchanged"
+                action="keep", new_slot=None, old_slot=None, reason="unchanged"
             )
         if obs.fingerprint is None:
             reason = "fingerprint_unreadable"
@@ -118,13 +115,9 @@ def decide_capture_action(
         else:
             reason = "not_ready"
         return CaptureDecision(
-            action="handover", new_slot=idle, old_slot=obs.slot, retire_legacy=legacy_running, reason=reason
+            action="handover", new_slot=idle, old_slot=obs.slot, reason=reason
         )
-    if legacy_running:
-        return CaptureDecision(
-            action="start", new_slot="blue", old_slot=None, retire_legacy=True, reason="legacy_migration"
-        )
-    return CaptureDecision(action="start", new_slot="blue", old_slot=None, retire_legacy=False, reason="not_running")
+    return CaptureDecision(action="start", new_slot="blue", old_slot=None, reason="not_running")
 
 
 def _parse_ts(value: object) -> datetime | None:
@@ -246,8 +239,8 @@ def _normalize_image_fp(value: str | None) -> str | None:
 def main(argv: Sequence[str] | None = None) -> int:
     """CLI.
 
-    ``decide --image-fp FP [--legacy-running] --slot NAME:RUNNING:FP:CFG_MATCH:READY ...`` prints one
-    line ``action=<a> new=<slot|-> old=<slot|-> legacy=<0|1> reason=<r>`` and returns 0.
+    ``decide --image-fp FP --slot NAME:RUNNING:FP:CFG_MATCH:READY ...`` prints one
+    line ``action=<a> new=<slot|-> old=<slot|-> reason=<r>`` and returns 0.
     ``ready --heartbeat PATH --container-started-at ISO [--now ISO] --stale-s S`` returns 0 when READY,
     10 when waiting, and prints nothing. Malformed arguments return 2.
     """
@@ -259,7 +252,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     if command == "decide":
         parser = argparse.ArgumentParser(prog="capture_handover decide")
         parser.add_argument("--image-fp", default=None)
-        parser.add_argument("--legacy-running", action="store_true")
         parser.add_argument("--slot", action="append", default=[])
         try:
             parsed = parser.parse_args(rest)
@@ -270,14 +262,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             decision = decide_capture_action(
                 observations,
                 image_fingerprint=_normalize_image_fp(parsed.image_fp),
-                legacy_running=bool(parsed.legacy_running),
             )
         except ValueError:
             return EXIT_USAGE
         new = decision.new_slot if decision.new_slot is not None else "-"
         old = decision.old_slot if decision.old_slot is not None else "-"
-        legacy = "1" if decision.retire_legacy else "0"
-        sys.stdout.write(f"action={decision.action} new={new} old={old} legacy={legacy} reason={decision.reason}\n")
+        sys.stdout.write(f"action={decision.action} new={new} old={old} reason={decision.reason}\n")
         return EXIT_OK
     parser = argparse.ArgumentParser(prog="capture_handover ready")
     parser.add_argument("--heartbeat", required=True)

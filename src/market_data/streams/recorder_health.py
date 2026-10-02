@@ -51,7 +51,6 @@ class RecorderWatchThresholds:
     min_capture_ratio: float
     capture_ratio_min_points: int
     persist_stale_s: float
-    max_consecutive_flush_failures: int
     reference_grace_s: float
     rejected_fraction_alert: float
     rejected_max_consecutive_points: int

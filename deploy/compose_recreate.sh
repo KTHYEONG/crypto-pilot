@@ -11,7 +11,6 @@
 #   CAPTURE_HANDOVER_POLL_S=5       Heartbeat poll period.
 #   CAPTURE_HEARTBEAT_STALE_S=30    A heartbeat older than this is not READY.
 #   CAPTURE_STOP_GRACE_S=20         Graceful stop of the old capture slot.
-#   LEGACY_RECORDER_STOP_GRACE_S=30 Graceful stop of the legacy market-recorder.
 set -euo pipefail
 
 IMAGE="${1:?Usage: compose_recreate.sh <image>}"
@@ -20,7 +19,6 @@ CAPTURE_HANDOVER_TIMEOUT_S="${CAPTURE_HANDOVER_TIMEOUT_S:-900}"
 CAPTURE_HANDOVER_POLL_S="${CAPTURE_HANDOVER_POLL_S:-5}"
 CAPTURE_HEARTBEAT_STALE_S="${CAPTURE_HEARTBEAT_STALE_S:-30}"
 CAPTURE_STOP_GRACE_S="${CAPTURE_STOP_GRACE_S:-20}"
-LEGACY_RECORDER_STOP_GRACE_S="${LEGACY_RECORDER_STOP_GRACE_S:-30}"
 
 if docker compose version >/dev/null 2>&1; then
   C="docker compose"
@@ -98,24 +96,17 @@ case "$image_fp" in
   *) image_fp="" ;;
 esac
 
-legacy_running="0"
-if slot_running "market-recorder"; then legacy_running="1"; else legacy_running="0"; fi
-
 decide_args=(decide --slot "$blue_obs" --slot "$green_obs")
 if [ -n "$image_fp" ]; then
   decide_args+=(--image-fp "$image_fp")
-fi
-if [ "$legacy_running" = "1" ]; then
-  decide_args+=(--legacy-running)
 fi
 decision="$(python3 "$HELPER" "${decide_args[@]}")"
 action="$(printf '%s' "$decision" | sed -n 's/.*action=\([^ ]*\).*/\1/p')"
 new_slot="$(printf '%s' "$decision" | sed -n 's/.*new=\([^ ]*\).*/\1/p')"
 old_slot="$(printf '%s' "$decision" | sed -n 's/.*old=\([^ ]*\).*/\1/p')"
-legacy_flag="$(printf '%s' "$decision" | sed -n 's/.*legacy=\([^ ]*\).*/\1/p')"
 reason="$(printf '%s' "$decision" | sed -n 's/.*reason=\([^ ]*\).*/\1/p')"
 
-echo "[SYS] stage=deploy_recreate capture_action=${action} new=${new_slot} old=${old_slot} legacy=${legacy_flag} reason=${reason}"
+echo "[SYS] stage=deploy_recreate capture_action=${action} new=${new_slot} old=${old_slot} reason=${reason}"
 
 HANDOVER_FAILED=0
 
@@ -144,26 +135,6 @@ retire_container() {
   local grace="$3"
   $C stop -t "$grace" "$service" >/dev/null 2>&1 || docker stop -t "$grace" "$container" >/dev/null 2>&1 || true
   $C rm -f "$service" >/dev/null 2>&1 || docker rm "$container" >/dev/null 2>&1 || true
-}
-
-retire_legacy() {
-  docker stop -t "$LEGACY_RECORDER_STOP_GRACE_S" market-recorder >/dev/null 2>&1 || true
-  docker rm market-recorder >/dev/null 2>&1 || true
-  ! docker inspect market-recorder >/dev/null 2>&1
-}
-
-any_slot_ready() {
-  local slot container started_at
-  for slot in blue green; do
-    container="market-capture-${slot}"
-    if slot_running "$container"; then
-      started_at="$(slot_started_at "$container" || true)"
-      if [ -n "$started_at" ] && slot_ready "$slot" "$started_at"; then
-        return 0
-      fi
-    fi
-  done
-  return 1
 }
 
 case "$action" in
@@ -197,33 +168,10 @@ case "$action" in
     ;;
 esac
 
-# 레거시 market-recorder는 결정 결과와 무관하게, READY 캡처 슬롯이 있으면 매 배포마다 퇴역시킨다.
-LEGACY_FAILED=0
-if docker inspect market-recorder >/dev/null 2>&1; then
-  if any_slot_ready; then
-    if retire_legacy; then
-      echo "[SYS] stage=deploy_recreate legacy_recorder=retired"
-    else
-      echo "[SYS] stage=deploy_recreate legacy_recorder=retire_failed"
-      LEGACY_FAILED=1
-    fi
-  else
-    echo "[SYS] stage=deploy_recreate legacy_recorder=kept reason=no_ready_capture"
-  fi
-fi
-
-# 레거시 레코더가 살아 있으면 normalizer와 같은 청산 파일에 동시에 쓰게 되므로 normalizer를 올리지 않는다.
-if slot_running "market-recorder"; then
-  echo "[SYS] stage=deploy_recreate normalizer_action=skipped reason=legacy_active"
-  $C stop market-normalizer >/dev/null 2>&1 || true
-  $C rm -f market-normalizer >/dev/null 2>&1 || true
-  LEGACY_FAILED=1
-else
-  $C up -d --no-deps --force-recreate market-normalizer
-fi
+$C up -d --no-deps --force-recreate market-normalizer
 $C up -d --no-deps --force-recreate mhs-live
 
-if [ "$HANDOVER_FAILED" = "1" ] || [ "$LEGACY_FAILED" = "1" ]; then
+if [ "$HANDOVER_FAILED" = "1" ]; then
   exit 3
 fi
 exit 0

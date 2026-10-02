@@ -14,7 +14,6 @@ import src.live.scheduler as scheduler_mod
 from src.live.audit import AUDIT_LOG_ROOT
 from src.live.runner import CycleReport
 from src.live.scheduler import (
-    DAEMON_CATCHUP_BUFFER,  # noqa: F401
     next_decision_time,
     run_daemon,
 )

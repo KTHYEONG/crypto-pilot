@@ -132,19 +132,15 @@ def test_paper_fill_model_default_and_validation() -> None:
         LiveSettings(paper_fill_model="bogus")  # type: ignore[arg-type]
 
 
-def test_orderbook_capture_settings_defaults() -> None:
-    from src.mhs.types import ExecutionSpec
+def test_removed_live_settings_are_rejected() -> None:
+    from pydantic import ValidationError
 
-    from src.live.settings import LiveSettings
-
-    s = LiveSettings()
-    assert s.orderbook_capture_enabled is True
-    assert s.orderbook_capture_interval_s == 10.0
-    assert s.orderbook_capture_duration_s == 1800.0
-    assert s.orderbook_capture_depth_limit == 20
-    assert s.orderbook_capture_max_symbols == 40
-    assert s.orderbook_capture_dir is None
-    assert s.taker_slippage_bps == ExecutionSpec().taker_slippage_bps
+    orderbook_field = "orderbook_capture" + "_enabled"
+    flush_field = "recorder_max_consecutive_flush" + "_failures"
+    with pytest.raises(ValidationError, match=orderbook_field):
+        LiveSettings.model_validate({orderbook_field: False})
+    with pytest.raises(ValidationError, match=flush_field):
+        LiveSettings.model_validate({flush_field: 3})
 
 
 def test_settings_data_retention_below_floor_rejected() -> None:
@@ -533,7 +529,6 @@ def test_recorder_health_field_defaults() -> None:
     assert settings.recorder_min_capture_ratio == 0.9
     assert settings.recorder_capture_ratio_min_points == 10
     assert settings.recorder_persist_stale_s == 1200.0
-    assert settings.recorder_max_consecutive_flush_failures == 3
     assert settings.recorder_reference_grace_s == 3600.0
     assert settings.recorder_rejected_fraction_alert == 0.01
     assert settings.recorder_rejected_max_consecutive_points == 60
@@ -549,8 +544,6 @@ def test_recorder_health_field_validation() -> None:
         _Settings(recorder_sampler_max_consecutive_failures=0)
     with pytest.raises(ValidationError, match="recorder_capture_ratio_min_points"):
         _Settings(recorder_capture_ratio_min_points=0)
-    with pytest.raises(ValidationError, match="recorder_max_consecutive_flush_failures"):
-        _Settings(recorder_max_consecutive_flush_failures=0)
     with pytest.raises(ValidationError, match="recorder_rejected_max_consecutive_points"):
         _Settings(recorder_rejected_max_consecutive_points=0)
     with pytest.raises(ValidationError, match="recorder_min_capture_ratio"):

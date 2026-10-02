@@ -28,7 +28,6 @@ def _thresholds(**overrides: Any) -> RecorderWatchThresholds:
         "min_capture_ratio": 0.9,
         "capture_ratio_min_points": 10,
         "persist_stale_s": 1200.0,
-        "max_consecutive_flush_failures": 3,
         "reference_grace_s": 3600.0,
         "rejected_fraction_alert": 0.01,
         "rejected_max_consecutive_points": 60,
@@ -444,15 +443,17 @@ def test_slot_without_book_ticker_never_ready() -> None:
     assert "capture_not_ready:blue" in {finding.key for finding in findings}
 
 
-def test_slot_flush_failures_counted() -> None:
-    """A non-zero flush failure count on a fresh slot raises its finding."""
+def test_any_slot_flush_failure_is_reported() -> None:
+    """A single failed flush on a fresh slot raises one finding."""
     slot = _slot()
-    slot["flush_failures"] = 2
+    slot["flush_failures"] = 1
     payload = _payload(capture={"blue": slot, "green": None})
     findings = evaluate_recorder_heartbeat(payload, now=_now(),
                                            watch_started_at=_now() - pd.Timedelta(hours=3),
                                            thresholds=_thresholds())
-    assert "capture_flush_failing:blue" in {finding.key for finding in findings}
+    flush_findings = [finding for finding in findings if finding.check == "capture_flush_failing"]
+    assert len(flush_findings) == 1
+    assert flush_findings[0].subject == "blue"
 
 
 @pytest.mark.parametrize("pending", [None, "absent"])

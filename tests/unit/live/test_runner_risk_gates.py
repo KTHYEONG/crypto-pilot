@@ -254,7 +254,7 @@ def test_deep_drawdown_keeps_book(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(runner_mod, "_load_paper_funding", lambda symbols: {s: pd.Series(dtype="float64", index=pd.DatetimeIndex([], tz="UTC")) for s in symbols})
     monkeypatch.setattr(runner_mod, "execute_intents", fake_execute)
 
-    settings = LiveSettings(mode=ExecutionMode.PAPER, notional_equity_usdt=2000.0, ledger_path=str(tmp_path / "drawdown.json"), fills_dir=str(tmp_path / "drawdown_fills"), orderbook_capture_enabled=False, microstructure_dir=str(tmp_path / "drawdown_micro"), execution_quality_dir=str(tmp_path / "drawdown_eq"), portfolio_state_dir=str(tmp_path / "drawdown_port"), tax_ledger_dir=str(tmp_path / "drawdown_tax"))
+    settings = LiveSettings(mode=ExecutionMode.PAPER, notional_equity_usdt=2000.0, ledger_path=str(tmp_path / "drawdown.json"), fills_dir=str(tmp_path / "drawdown_fills"), microstructure_dir=str(tmp_path / "drawdown_micro"), execution_quality_dir=str(tmp_path / "drawdown_eq"), portfolio_state_dir=str(tmp_path / "drawdown_port"), tax_ledger_dir=str(tmp_path / "drawdown_tax"))
     weights_path = tmp_path / "deployed_target_weights_drawdown.parquet"
     pd.DataFrame({"AAAUSDT": [0.02]}, index=pd.DatetimeIndex([decision_time])).to_parquet(weights_path, index=True)
     from src.live.deployed_weights import decision_ohlcv_close_path

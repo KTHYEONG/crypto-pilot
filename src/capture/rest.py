@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from .config import CaptureConfig
-from .journal import RECORD_VERSION, SegmentWriter, write_bytes_once
+from .journal import RECORD_VERSION, SegmentWriter, is_successful_rest_status, write_bytes_once
 
 logger = logging.getLogger(__name__)
 
@@ -192,7 +192,7 @@ class GridSampler:
                 "body": body,
             }
         )
-        if 200 <= status_code < 300:
+        if is_successful_rest_status(status_code):
             if self._status.first_ok_at_ns is None:
                 self._status.first_ok_at_ns = recv_ns
             self._status.last_ok_at_ns = recv_ns

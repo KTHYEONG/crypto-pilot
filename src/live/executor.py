@@ -503,26 +503,26 @@ def _gtx_candidate(
     return price
 
 
-def _anchored_gtx_price(
-    intent: OrderIntent,
+def _post_only_quote_price(
+    anchor: Decimal,
     touch: tuple[Decimal, Decimal],
     *,
     is_buy: bool,
     filters: SymbolFilters,
 ) -> Decimal | None:
-    """Anchored GTX 게시 가격: anchor 고정, opposite 터치 안쪽 한 틱으로만 양보한다.
+    """GTX 게시 가격: quote 수준 ``anchor`` 고정, opposite 터치 안쪽 한 틱으로만 양보한다.
 
-    매수는 ``min(decision_price, ask - tick)`` 을 tick 아래로, 매도는
-    ``max(decision_price, bid + tick)`` 을 tick 위로 양자화한다. 결과는 항상
+    매수는 ``min(anchor, ask - tick)`` 을 tick 아래로, 매도는
+    ``max(anchor, bid + tick)`` 을 tick 위로 양자화한다. 결과는 항상
     post-only 이며 anchor 보다 유리한 방향으로만 벗어난다. 0 이하면 None(HOLD).
     """
     bid, ask = touch
     tick = filters.tick_size
     if is_buy:
-        raw = min(intent.decision_price, ask - tick)
+        raw = min(anchor, ask - tick)
         price = quantize_to_multiple(raw, tick, ROUND_DOWN)
     else:
-        raw = max(intent.decision_price, bid + tick)
+        raw = max(anchor, bid + tick)
         price = quantize_to_multiple(raw, tick, ROUND_UP)
     if price <= _ZERO:
         return None
@@ -672,31 +672,11 @@ def _cancel_and_settle(
         fields["ask"] = str(touch[1])
     audit.record("order_cancelled", **fields)
     if rt.paper_active:
-        rt.paper_active = False
-        order_id = rt.active_id
-        rt.active_id = None
-        rt.active_post_qty = _ZERO
-        _journal_terminal(rt, order_id, "CANCELED")
+        _release_active(rt, "CANCELED")
         return
     _cancel_tolerating_benign(client, rt.intent.symbol, rt.active_id)
-    payload = client.query_order(rt.intent.symbol, rt.active_id)
-    status = str(payload.get("status", "") or "")
-    executed = Decimal(str(payload.get("executedQty", "0")))
-    avg_raw = payload.get("avgPrice") if "avgPrice" in payload else payload.get("avg_price")
-    avg_price: Decimal | None = None
-    if avg_raw is not None and str(avg_raw) not in ("", "0", "0.0", "0.00"):
-        try:
-            avg_price = Decimal(str(avg_raw))
-            if avg_price == _ZERO:
-                avg_price = None
-        except Exception:
-            avg_price = None
-    # fee schedule from active runtime? use default if not tracked
-    order_id = rt.active_id
-    _record_fill(rt, executed, now=now, avg_price=avg_price, audit=audit, touch=touch)
-    _journal_terminal(rt, order_id, status or "CANCELED")
-    rt.active_id = None
-    rt.active_post_qty = _ZERO
+    status = _sync_venue_order(client, rt, now=now, audit=audit, touch=touch)
+    _release_active(rt, status or "CANCELED")
 
 
 def _emit_fill_event(
@@ -729,58 +709,104 @@ def _fill_time(now: float) -> pd.Timestamp:
     return pd.Timestamp(now, unit="s", tz="UTC")
 
 
-def _record_fill(
+def _parse_avg_price(payload: Mapping[str, Any]) -> Decimal | None:
+    """Return a positive venue average fill price when the payload contains one."""
+    raw = payload.get("avgPrice") if "avgPrice" in payload else payload.get("avg_price")
+    if raw is None or str(raw).strip() == "":
+        return None
+    try:
+        price = Decimal(str(raw))
+    except Exception:
+        return None
+    return price if price.is_finite() and price > _ZERO else None
+
+
+def _apply_fill(
     rt: _IntentRuntime,
-    executed: Decimal,
     *,
+    quantity: Decimal,
+    price: Decimal,
+    liquidity: Literal["maker", "taker"],
+    client_order_id: str,
+    order_cumulative_qty: Decimal,
+    simulated: bool,
     now: float,
-    avg_price: Decimal | None = None,
-    fee_schedule: FeeSchedule | None = None,
-    audit: AuditLog | None = None,
+    audit: AuditLog,
     touch: tuple[Decimal, Decimal] | None = None,
 ) -> None:
-    delta_fill = executed - rt.reported_executed
-    if delta_fill <= _ZERO:
-        # even if no delta, update reported to executed for tracking
-        if executed != rt.reported_executed:
-            rt.reported_executed = executed
-        return
-    price = avg_price if avg_price is not None else rt.active_price
-    if price is None or price <= _ZERO:
-        price = rt.active_price
-    # Determine liquidity: GTX->maker, IOC->taker based on phase or active timeInForce
-    # Use phase as proxy: passive => maker, ioc => taker
-    # If active timeInForce was tracked, use it; fallback phase.
-    liquidity = "maker" if rt.phase == "passive" else "taker"
-    fee_bps = fee_schedule.bps_for(liquidity) if fee_schedule is not None else (2.0 if liquidity == "maker" else 5.0)  # noqa: SIM108
+    if quantity <= _ZERO or price <= _ZERO:
+        raise ValueError("fill quantity and price must be positive")
+    fee_bps = rt.fee_schedule.bps_for(liquidity)
     reason = "maker_fill" if liquidity == "maker" else "timeout_taker"
     filled_at = _fill_time(now)
-    # WAL first: the journal write precedes any in-memory state. If it raises, the attempt
-    # aborts through the BaseException cleanup path with no in-memory fill.
-    if rt.journal is not None and rt.journal_enabled and rt.active_id is not None:
+    if rt.journal is not None and rt.journal_enabled:
         _journal_execution_fill(
             rt.journal,
             attempt_seq=rt.attempt_seq,
             symbol=rt.intent.symbol,
             side=rt.intent.side,
-            quantity=delta_fill,
+            quantity=quantity,
             price=price,
             fee_bps=float(fee_bps),
             liquidity=liquidity,
             reason=reason,
             filled_at=filled_at,
-            client_order_id=rt.active_id,
+            client_order_id=client_order_id,
             leg_index=rt.intent.leg_index,
-            cumulative_executed_qty=executed,
-            simulated=False,
+            cumulative_executed_qty=None if simulated else order_cumulative_qty,
+            simulated=simulated,
         )
-    rt.filled_total += delta_fill
-    rt.fill_notional += delta_fill * price
-    rt.reported_executed = executed
-    rt.fills.append((delta_fill, price, fee_bps, reason, liquidity, filled_at))
-    if audit is not None:
-        # Live venue query path only (paper fills are simulated by the caller).
-        _emit_fill_event(audit, rt, delta_fill, price, liquidity, False, touch)
+    rt.filled_total += quantity
+    rt.fill_notional += quantity * price
+    rt.reported_executed = order_cumulative_qty
+    rt.fills.append((quantity, price, fee_bps, reason, liquidity, filled_at))
+    _emit_fill_event(audit, rt, quantity, price, liquidity, simulated, touch, client_order_id)
+
+
+def _sync_venue_order(
+    client: Any,
+    rt: _IntentRuntime,
+    *,
+    now: float,
+    audit: AuditLog,
+    touch: tuple[Decimal, Decimal] | None,
+) -> str:
+    """Query and apply new execution quantity for the current LIVE order."""
+    assert rt.active_id is not None
+    assert not rt.paper_active
+    payload = client.query_order(rt.intent.symbol, rt.active_id)
+    status = str(payload.get("status", "") or "")
+    executed = Decimal(str(payload.get("executedQty", "0")))
+    if executed > rt.active_post_qty:
+        raise DataIntegrityError(
+            f"order {rt.active_id} executed {executed} exceeds submitted quantity {rt.active_post_qty}"
+        )
+    if executed > rt.reported_executed:
+        delta = executed - rt.reported_executed
+        _apply_fill(
+            rt,
+            quantity=delta,
+            price=_parse_avg_price(payload) or rt.active_price,
+            liquidity="maker" if rt.phase == "passive" else "taker",
+            client_order_id=rt.active_id,
+            order_cumulative_qty=executed,
+            simulated=False,
+            now=now,
+            audit=audit,
+            touch=touch,
+        )
+    return status
+
+
+def _release_active(rt: _IntentRuntime, status: str) -> None:
+    """Journal the current order terminal and clear its active-order state."""
+    order_id = rt.active_id
+    _journal_terminal(rt, order_id, status)
+    rt.active_id = None
+    rt.active_price = _ZERO
+    rt.active_post_qty = _ZERO
+    rt.reported_executed = _ZERO
+    rt.paper_active = False
 
 
 def _simulate_paper_fill(
@@ -812,10 +838,11 @@ class _IntentRuntime:
 
     intent: OrderIntent
     filters: SymbolFilters | None
+    fee_schedule: FeeSchedule
     phase: str = "passive"  # 'passive' | 'ioc'
     active_id: str | None = None
     active_price: Decimal = _ZERO
-    reported_executed: Decimal = _ZERO
+    reported_executed: Decimal = _ZERO  # current active order cumulative quantity; venue-reported or simulated
     filled_total: Decimal = _ZERO
     fill_notional: Decimal = _ZERO
     chases: int = 0
@@ -833,6 +860,10 @@ class _IntentRuntime:
     # 재게시 때마다 갱신되는 posted_at 과 달리 리포스트로 리셋되지 않는다.
     passive_started_at: float = 0.0
     last_repeg_at: float = 0.0
+    # anchored_repeg quote level: decision price until the first bar-cadence re-peg, then the last
+    # re-peg price. Slicing, fills and post-only rejections never move it, so order splitting cannot
+    # create an off-cadence re-quote.
+    passive_quote: Decimal = _ZERO
     # 실행 상태 미확인 제출(lookup-before-resend): 재게시 금지, 조회로 해소한다.
     journal: OrderJournal | None = None
     unresolved_id: str | None = None
@@ -1153,7 +1184,12 @@ def execute_intents(
             )
         return outcomes
     runtimes = [
-        _IntentRuntime(intent=intent, filters=filters.get(intent.symbol), journal=journal)
+        _IntentRuntime(
+            intent=intent,
+            filters=filters.get(intent.symbol),
+            fee_schedule=policy.fee_schedule,
+            journal=journal,
+        )
         for intent in intents
     ]
     for rt in runtimes:
@@ -1458,55 +1494,41 @@ def _poll_active(
             and rt.phase == "passive"
             and rt.active_price > _ZERO
         ):
-            resting_qty = rt.intent.quantity - rt.filled_total
+            resting_qty = rt.active_post_qty - rt.reported_executed
             if resting_qty > _ZERO:
                 resting_fill = _simulate_paper_fill(rt, touch, "GTX", rt.active_price, resting_qty)
                 if resting_fill > _ZERO:
-                    fee_bps = policy.fee_schedule.bps_for("maker")
-                    if rt.journal is not None and rt.journal_enabled and rt.active_id is not None:
-                        _journal_execution_fill(
-                            rt.journal,
-                            attempt_seq=rt.attempt_seq,
-                            symbol=rt.intent.symbol,
-                            side=rt.intent.side,
-                            quantity=resting_fill,
-                            price=rt.active_price,
-                            fee_bps=float(fee_bps),
-                            liquidity="maker",
-                            reason="maker_fill",
-                            filled_at=_fill_time(now),
-                            client_order_id=rt.active_id,
-                            leg_index=rt.intent.leg_index,
-                            cumulative_executed_qty=None,
-                            simulated=True,
-                        )
-                    rt.filled_total += resting_fill
-                    rt.fill_notional += resting_fill * rt.active_price
-                    rt.reported_executed = rt.filled_total
-                    rt.fills.append((resting_fill, rt.active_price, fee_bps, "maker_fill", "maker", _fill_time(now)))
-                    _emit_fill_event(audit, rt, resting_fill, rt.active_price, "maker", True, touch)
+                    order_cumulative = rt.reported_executed + resting_fill
+                    _apply_fill(
+                        rt,
+                        quantity=resting_fill,
+                        price=rt.active_price,
+                        liquidity="maker",
+                        client_order_id=rt.active_id,
+                        order_cumulative_qty=order_cumulative,
+                        simulated=True,
+                        now=now,
+                        audit=audit,
+                        touch=touch,
+                    )
+                    if rt.reported_executed >= rt.active_post_qty:
+                        _release_active(rt, "FILLED")
+                        if rt.intent.quantity - rt.filled_total <= _ZERO:
+                            rt.terminal_status = "FILLED"
+                            rt.finalized_at = now
+                        return
     else:
-        payload = client.query_order(rt.intent.symbol, rt.active_id)
-        executed = Decimal(str(payload.get("executedQty", "0")))
-        avg_raw = payload.get("avgPrice") if "avgPrice" in payload else payload.get("avg_price")
-        avg_price: Decimal | None = None
-        if avg_raw is not None and str(avg_raw) not in ("", "0", "0.0", "0.00"):
-            try:
-                avg_price = Decimal(str(avg_raw))
-                if avg_price == _ZERO:
-                    avg_price = None
-            except Exception:
-                avg_price = None
-        _record_fill(rt, executed, now=now, avg_price=avg_price, fee_schedule=policy.fee_schedule, audit=audit, touch=touch)
+        _sync_venue_order(client, rt, now=now, audit=audit, touch=touch)
     if rt.intent.quantity - rt.filled_total <= _ZERO:
-        _journal_terminal(rt, rt.active_id, "FILLED")
+        if rt.active_id is not None:
+            _release_active(rt, "FILLED")
         rt.terminal_status = "FILLED"
         rt.finalized_at = now
         return
     if rt.phase == "passive":
         band_low, band_high = _band(rt.intent, policy)
         timed_out = now - rt.passive_started_at >= policy.passive_deadline_s
-        exhausted = rt.chases >= policy.max_chases
+        exhausted = policy.passive_pricing == "touch_chase" and rt.chases >= policy.max_chases
         repeg_due = policy.passive_pricing == "anchored_repeg" and now - rt.last_repeg_at >= policy.repeg_interval_s
         moved = abs(own_touch - rt.active_price) >= rt.filters.tick_size * policy.chase_ticks
         slice_done = rt.active_post_qty > _ZERO and rt.reported_executed >= rt.active_post_qty and (rt.intent.quantity - rt.filled_total) > _ZERO
@@ -1522,6 +1544,7 @@ def _poll_active(
                 own_touch, is_buy=is_buy, filters=rt.filters, band_low=band_low, band_high=band_high
             )
             rt.last_repeg_at = now
+            rt.passive_quote = candidate
             if candidate != rt.active_price:
                 _cancel_and_settle(client, rt, audit, "repeg", touch, now=now)
             else:
@@ -1639,15 +1662,9 @@ def _poll_or_post(
         # 캡 적용 IOC 백스톱으로 상승시킨다(리포스트 리셋 없음).
         rt.phase = "ioc"
     if rt.phase == "passive":
-        if policy.passive_pricing == "anchored":
-            price = _anchored_gtx_price(rt.intent, touch, is_buy=is_buy, filters=rt.filters)
-        elif policy.passive_pricing == "anchored_repeg":
-            if rt.active_price <= _ZERO:
-                price = _anchored_gtx_price(rt.intent, touch, is_buy=is_buy, filters=rt.filters)
-            else:
-                price = _band_capped_peg_price(
-                    own_touch, is_buy=is_buy, filters=rt.filters, band_low=band_low, band_high=band_high
-                )
+        if policy.passive_pricing in ("anchored", "anchored_repeg"):
+            anchor = rt.passive_quote if rt.passive_quote > _ZERO else rt.intent.decision_price
+            price = _post_only_quote_price(anchor, touch, is_buy=is_buy, filters=rt.filters)
         else:
             price = _gtx_candidate(
                 own_touch, is_buy=is_buy, filters=rt.filters, band_low=band_low, band_high=band_high
@@ -1789,46 +1806,30 @@ def _poll_or_post(
         return
     if isinstance(response, PaperResponse):
         executed_qty = _simulate_paper_fill(rt, touch, time_in_force, price, post_qty)
+        rt.active_id = order_id
+        rt.active_price = price
+        rt.active_post_qty = post_qty
+        rt.reported_executed = _ZERO
+        rt.paper_active = True
+        rt.posted_at = now
         if executed_qty > _ZERO:
-            # Use _record_fill for fee-aware notional and fills tuple
-            # For paper, we directly record delta without query
-            # Need to set active_price temporarily for _record_fill price fallback
-            # Simulate by setting active_price = price and using executed_qty as delta
-            # We bypass query, so we manually append fill
-            # Set up active_price before record
-            prev_active_price = rt.active_price
-            rt.active_price = price
-            liquidity = "maker" if time_in_force == "GTX" else "taker"
-            fee_bps = policy.fee_schedule.bps_for(liquidity)
-            reason = "maker_fill" if liquidity == "maker" else "timeout_taker"
-            if rt.journal is not None and rt.journal_enabled:
-                _journal_execution_fill(
-                    rt.journal,
-                    attempt_seq=rt.attempt_seq,
-                    symbol=rt.intent.symbol,
-                    side=rt.intent.side,
-                    quantity=executed_qty,
-                    price=price,
-                    fee_bps=float(fee_bps),
-                    liquidity=liquidity,
-                    reason=reason,
-                    filled_at=_fill_time(now),
-                    client_order_id=order_id,
-                    leg_index=rt.intent.leg_index,
-                    cumulative_executed_qty=None,
-                    simulated=True,
-                )
-            rt.filled_total += executed_qty
-            rt.fill_notional += executed_qty * price
-            rt.reported_executed = rt.filled_total
-            rt.fills.append((executed_qty, price, fee_bps, reason, liquidity, _fill_time(now)))
-            _emit_fill_event(audit, rt, executed_qty, price, liquidity, True, touch, order_id)
-            rt.active_price = prev_active_price
+            liquidity: Literal["maker", "taker"] = "maker" if time_in_force == "GTX" else "taker"
+            _apply_fill(
+                rt,
+                quantity=executed_qty,
+                price=price,
+                liquidity=liquidity,
+                client_order_id=order_id,
+                order_cumulative_qty=executed_qty,
+                simulated=True,
+                now=now,
+                audit=audit,
+                touch=touch,
+            )
+            if executed_qty >= post_qty:
+                _release_active(rt, "FILLED")
             if rt.intent.quantity - rt.filled_total <= _ZERO:
-                _journal_terminal(rt, order_id, "FILLED")
                 rt.terminal_status = "FILLED"
-                if rt.posted_at == 0.0:
-                    rt.posted_at = now
                 rt.finalized_at = now
                 audit.record(
                     "paper_filled",
@@ -1841,13 +1842,6 @@ def _poll_or_post(
                 return
         if time_in_force == "IOC":
             rt.ioc_attempts += 1
-        rt.active_id = order_id
-        rt.active_price = price
-        rt.active_post_qty = post_qty
-        rt.paper_active = True
-        # For paper, reported_executed should reflect per-order executed already counted
-        # Keep it as filled_total for slice tracking; active_post_qty tracks slice
-        rt.posted_at = now
         audit.record("order_posted", symbol=rt.intent.symbol, client_order_id=order_id, time_in_force=time_in_force, price=str(price), quantity=str(post_qty), simulated=True, bid=str(bid), ask=str(ask), phase="passive" if time_in_force == "GTX" else "ioc")
         return
     rt.active_id = order_id
@@ -1946,26 +1940,10 @@ def _finalize(
                     client_order_id=rt.active_id,
                     reason="window_end",
                 )
-                payload = client.query_order(rt.intent.symbol, rt.active_id)
-                status = str(payload.get("status", "") or "")
-                executed = Decimal(str(payload.get("executedQty", "0")))
-                avg_raw = payload.get("avgPrice") if "avgPrice" in payload else payload.get("avg_price")
-                avg_price: Decimal | None = None
-                if avg_raw is not None and str(avg_raw) not in ("", "0", "0.0", "0.00"):
-                    try:
-                        avg_price = Decimal(str(avg_raw))
-                        if avg_price == _ZERO:
-                            avg_price = None
-                    except Exception:
-                        avg_price = None
-                order_id = rt.active_id
-                _record_fill(rt, executed, now=now, avg_price=avg_price, audit=audit)
-                _journal_terminal(rt, order_id, status or "CANCELED")
+                status = _sync_venue_order(client, rt, now=now, audit=audit, touch=None)
+                _release_active(rt, status or "CANCELED")
             else:
-                _journal_terminal(rt, rt.active_id, "CANCELED")
-            rt.active_id = None
-            rt.active_post_qty = _ZERO
-            rt.paper_active = False
+                _release_active(rt, "CANCELED")
         if rt.intent.quantity - rt.filled_total > _ZERO:
             rt.terminal_status = "RESIDUAL"
             rt.finalized_at = now

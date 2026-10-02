@@ -129,7 +129,7 @@ exclude = [
 ]
 
 [tool.pytest.ini_options]
-testpaths = ["tests/unit"]
+testpaths = ["tests/unit", "tests/contract"]
 python_files = ["test_*.py"]
 addopts = "-ra -q -m \"not slow\" --import-mode=importlib"
 pythonpath = ["."]

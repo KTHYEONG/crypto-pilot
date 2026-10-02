@@ -3,12 +3,8 @@ all-symbol top-of-book, premium index / predicted funding, and raw daily referen
 
 from __future__ import annotations
 
-import gzip
-import json
 import logging
 import math
-import os
-import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -24,15 +20,8 @@ _logger = logging.getLogger(__name__)
 
 BOOK_TICKER_URL: str = "https://fapi.binance.com/fapi/v1/ticker/bookTicker"
 PREMIUM_INDEX_URL: str = "https://fapi.binance.com/fapi/v1/premiumIndex"
-REFERENCE_URLS: Mapping[str, str] = {
-    "exchange_info": "https://fapi.binance.com/fapi/v1/exchangeInfo",
-    "funding_info": "https://fapi.binance.com/fapi/v1/fundingInfo",
-    "asset_index": "https://fapi.binance.com/fapi/v1/assetIndex",
-}
-
 BOOK_TICKER_DATASET: str = "book_ticker"
 PREMIUM_INDEX_DATASET: str = "premium_index"
-REFERENCE_DIRNAME: str = "reference"
 
 BOOK_TICKER_COLUMNS: tuple[str, ...] = (
     "captured_at",
@@ -87,31 +76,6 @@ class SnapshotParse:
     rejected_rows: int
     rejected_reasons: Mapping[str, int] = field(default_factory=lambda: MappingProxyType({}))
     rejected_symbols: tuple[str, ...] = ()
-
-
-def next_grid_time(now: pd.Timestamp, interval_s: int) -> pd.Timestamp:
-    """Earliest UTC instant strictly after ``now`` lying on the ``interval_s`` wall-clock grid.
-
-    Snapshots are sampled on a fixed epoch-aligned grid so samples from different days, restarts and
-    datasets share timestamps; a missed grid point is an observable gap, never a shifted sample.
-
-    Args:
-        now: tz-aware timestamp.
-        interval_s: grid spacing in seconds; must divide 86400.
-
-    Raises:
-        ValueError: naive ``now`` or ``interval_s`` not a positive divisor of 86400.
-    """
-    ts = pd.Timestamp(now)
-    if ts.tzinfo is None:
-        raise ValueError("next_grid_time requires tz-aware now")
-    if interval_s <= 0 or 86400 % interval_s != 0:
-        raise ValueError("interval_s must be a positive divisor of 86400")
-    utc = ts.tz_convert("UTC")
-    interval_ns = int(interval_s) * 1_000_000_000
-    ns = int(utc.value)
-    nxt = (ns // interval_ns + 1) * interval_ns
-    return pd.Timestamp(nxt, unit="ns", tz="UTC")
 
 
 def _utc_captured(captured_at: pd.Timestamp) -> pd.Timestamp:
@@ -640,52 +604,3 @@ def load_snapshot_dataset(
     out["captured_at"] = pd.to_datetime(out["captured_at"], utc=True)
     out = out.sort_values(["captured_at", "symbol"]).reset_index(drop=True)
     return out
-
-
-def reference_snapshot_path(root: Path, name: str, day: str) -> Path:
-    """Path of the byte-exact daily reference file ``<root>/reference/<name>/<day>.json.gz``.
-
-    Raises:
-        DataIntegrityError: ``name`` not in ``REFERENCE_URLS`` or ``day`` not ``YYYYMMDD``.
-    """
-    if name not in REFERENCE_URLS:
-        raise DataIntegrityError(f"unknown reference {name}")
-    if not re.fullmatch(r"\d{8}", day):
-        raise DataIntegrityError(f"reference day must be YYYYMMDD, got {day!r}")
-    return Path(root) / REFERENCE_DIRNAME / name / f"{day}.json.gz"
-
-
-def write_reference_snapshot(
-    raw: bytes, root: Path, name: str, *, captured_at: pd.Timestamp
-) -> Path | None:
-    """Persist the exact response bytes as ``<root>/reference/<name>/<YYYYMMDD>.json.gz`` once per UTC day.
-
-    The payload is stored byte-for-byte (gzip only, no re-serialization) so fields unknown today
-    (status, onboardDate, deliveryDate, filters, underlyingType, ...) remain recoverable for
-    point-in-time universe reconstruction.
-
-    Returns:
-        The written path, or None when that day's file already exists.
-
-    Raises:
-        DataIntegrityError: ``raw`` is empty or not valid JSON; ``name`` not in ``REFERENCE_URLS``.
-    """
-    if name not in REFERENCE_URLS:
-        raise DataIntegrityError(f"unknown reference {name}")
-    if not raw:
-        raise DataIntegrityError("reference payload empty")
-    try:
-        json.loads(raw.decode("utf-8") if isinstance(raw, (bytes, bytearray)) else raw)
-    except Exception as exc:
-        raise DataIntegrityError("reference payload is not valid JSON") from exc
-    cap = _utc_captured(captured_at)
-    day = cap.strftime("%Y%m%d")
-    target = reference_snapshot_path(root, name, day)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    if target.exists():
-        return None
-    blob = gzip.compress(bytes(raw), compresslevel=9, mtime=0)
-    tmp = target.with_name(f".{target.name}.tmp")
-    tmp.write_bytes(blob)
-    os.replace(tmp, target)
-    return target
