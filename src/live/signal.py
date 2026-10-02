@@ -31,12 +31,9 @@ def latest_target_weights(
     decision_time: pd.Timestamp,
     *,
     artifact_key: SecretStr | None = None,
-    artifact_path: Path | None = None,
     max_staleness: pd.Timedelta | None = None,
 ) -> pd.Series:
     """deployed_target_weights.parquet(.enc)에서 가장 최근 행을 읽는다 (weights_asof)."""
-    if artifact_path is not None:
-        weights_path = artifact_path
     decision_ts = _as_utc(decision_time)
     if (decision_ts.hour, decision_ts.minute, decision_ts.second) != (0, 0, 0):
         raise ValueError("decision_time must lie on the 24h grid (00:00 UTC)")
@@ -45,8 +42,7 @@ def latest_target_weights(
     frame = load_weights_frame(Path(weights_path), artifact_key=artifact_key)
     if frame.empty:
         raise DataIntegrityError(f"target weights artifact missing: {weights_path}")
-    return weights_asof(load_weights_frame(Path(weights_path), artifact_key=artifact_key), decision_ts, max_staleness=max_staleness or pd.Timedelta(hours=96))
-    # wiring: return weights_asof(load_weights_frame(Path(weights_path), artifact_key=artifact_key), decision_ts, max_staleness=max_staleness or pd.Timedelta(hours=96))
+    return weights_asof(frame, decision_ts, max_staleness=max_staleness or pd.Timedelta(hours=96))
 
 
 def assert_signal_available(decision_time: pd.Timestamp, now: pd.Timestamp) -> None:

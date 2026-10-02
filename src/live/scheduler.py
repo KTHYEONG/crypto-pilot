@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING
 
 from src.common.paths import DATA_DIR, FUTURES_DATA_DIR, VENUE_RULES_DIR
 from src.common.errors import DataIntegrityError
+from src.common.daemon_stages import BUSY_STAGES
 from src.live.errors import CausalityViolation
 
 if TYPE_CHECKING:
@@ -45,28 +46,15 @@ from src.live.deadman import DeadmanPinger
 
 logger = logging.getLogger("LiveScheduler")
 
-# wiring anchors for spec compliance
-# report = run_shadow_cycle(settings, target, artifact_path, now=now_fn())
-# _save_daemon_state(state_path, DaemonState(last_processed_decision_time=target))
-# write_heartbeat(heartbeat_path, decision_time=target, status=report.status, attempts=attempts, consecutive_halts=consecutive_halts, now=now_fn())
-
 #: 대기 중 sleep_fn 호출 간격 상한(초). 종료 시그널 처리 지연과 테스트 대기 횟수를 bound한다.
 DAEMON_POLL_INTERVAL_SECONDS: float = 300.0
 # stale_after_s(2700초/45분)보다 한참 짧게 잡아, 스케줄러 지연이 겹쳐도 여유가 크다.
 DAEMON_HEARTBEAT_PULSE_INTERVAL_SECONDS: float = 120.0
 _HEARTBEAT_PULSE_JOIN_TIMEOUT_S: float = 10.0
-#: T+1h 인과성 게이트 통과 후의 추가 여유(거래소/네트워크 지연).
-DAEMON_CATCHUP_BUFFER: pd.Timedelta = pd.Timedelta(minutes=5)
-
 #: frozen 신호 공개 시각이며, 공식 메이커 원장의 제출봉과 같은 기준이다.
 DECISION_RELEASE_OFFSET: pd.Timedelta = pd.Timedelta(hours=FROZEN_MHS_TOP20_V2.release_hour_utc)
 
-DAEMON_MAX_ATTEMPTS_PER_DAY: int = 5
 DAEMON_RETRY_BACKOFF_SECONDS: tuple[float, ...] = (300.0, 600.0, 1200.0, 2400.0)
-# src/common/daemon_stages.py BUSY_STAGES 와 같은 의미
-INTERRUPTIBLE_STAGES: frozenset[str] = frozenset({"refresh", "signal", "execute"})
-DAEMON_ALERT_SYMBOL_SAMPLE: int = 10
-SIGNAL_REFRESH_OFFSET_MINUTES: float = 0.0
 DAEMON_COLD_UNIVERSE_EXIT_CODE: int = 3
 #: Maximum signal-step duration assumed for the liveness ``expected_by`` deadline.
 SIGNAL_STEP_TIMEOUT_S: float = 900.0
@@ -463,9 +451,62 @@ def _int_or_zero(value: Any) -> int:
         return 0
 
 
+def _retry_or_skip(
+    settings: LiveSettings,
+    *,
+    state_path: Path,
+    last_processed: pd.Timestamp | None,
+    target: pd.Timestamp,
+    attempts: int,
+    failure_cause: str,
+    now_fn: Callable[[], pd.Timestamp],
+    wait: Callable[[float, pd.Timestamp | None], None],
+    shutdown: ShutdownFlag | None,
+) -> bool:
+    """Persist one failed attempt, wait its backoff, or mark the daily budget exhausted."""
+    new_attempts = attempts + 1
+    if new_attempts >= settings.daemon_max_attempts_per_day:
+        _daemon_alert(
+            settings,
+            event="day_skipped",
+            detail=f"attempts={new_attempts} cause={failure_cause}",
+            decision_time=target,
+            now=now_fn(),
+            dedupe_key=default_dedupe_key("day_skipped", target),
+        )
+        _save_daemon_state(
+            state_path,
+            DaemonState(last_processed_decision_time=target, pending_decision_time=None, attempts=0),
+        )
+        return False
+
+    _save_daemon_state(
+        state_path,
+        DaemonState(
+            last_processed_decision_time=last_processed,
+            pending_decision_time=target,
+            attempts=new_attempts,
+        ),
+    )
+    backoff = DAEMON_RETRY_BACKOFF_SECONDS[
+        min(new_attempts - 1, len(DAEMON_RETRY_BACKOFF_SECONDS) - 1)
+    ]
+    remaining_backoff = backoff
+    backoff_end = now_fn() + pd.Timedelta(seconds=backoff)
+    while remaining_backoff > 0:
+        if shutdown is not None and shutdown.requested:
+            return True
+        step = min(remaining_backoff, DAEMON_POLL_INTERVAL_SECONDS)
+        wait(step, backoff_end)
+        if shutdown is not None and shutdown.requested:
+            return True
+        remaining_backoff -= step
+    return bool(shutdown is not None and shutdown.requested)
+
+
 def _handle_interrupted_stage(settings: LiveSettings, heartbeat_path: Path, now: pd.Timestamp) -> None:
     raw = _read_heartbeat(heartbeat_path)
-    if raw is None or raw.get("stage") not in INTERRUPTIBLE_STAGES:
+    if raw is None or raw.get("stage") not in BUSY_STAGES:
         return
     stage = str(raw["stage"])
     detail = f"stage={stage} decision_time={raw.get('decision_time')} heartbeat_ts={raw.get('ts')}"
@@ -824,7 +865,6 @@ def run_daemon(
         signal_status = "COMPLETE"
         failure_cause = ""
         frozen_report = None
-        quarantined = 0
         signal_expected = _default_expected_by(settings, "signal", now_fn(), None)
         _beat("RUNNING", "signal", expected_by=signal_expected)
         stage_started = time.monotonic()
@@ -847,29 +887,19 @@ def run_daemon(
             if consecutive_halts >= settings.alert_halt_streak:
                 _daemon_alert(settings, event="halt_streak", detail=f"consecutive_halts={consecutive_halts} cause={failure_cause}", decision_time=target, now=now_fn(), dedupe_key=f"halt_streak:{target.isoformat()}:{consecutive_halts}")
             _beat(status, "idle", detail=failure_cause, expected_by=_default_expected_by(settings, "idle", now_fn(), now_fn() + pd.Timedelta(seconds=DAEMON_RETRY_BACKOFF_SECONDS[0])))
-            new_attempts = attempts + 1
-            should_retry = new_attempts < settings.daemon_max_attempts_per_day and new_attempts < DAEMON_MAX_ATTEMPTS_PER_DAY
-            if should_retry:
-                _save_daemon_state(state_path, DaemonState(last_processed_decision_time=state.last_processed_decision_time, pending_decision_time=target, attempts=new_attempts))
-                idx = min(new_attempts - 1, len(DAEMON_RETRY_BACKOFF_SECONDS) - 1)
-                backoff = DAEMON_RETRY_BACKOFF_SECONDS[idx]
-                remaining_backoff = backoff
-                backoff_end = now_fn() + pd.Timedelta(seconds=backoff)
-                while remaining_backoff > 0:
-                    if shutdown is not None and shutdown.requested:
-                        break
-                    step = min(remaining_backoff, DAEMON_POLL_INTERVAL_SECONDS)
-                    _wait(step, until=backoff_end)
-                    if shutdown is not None and shutdown.requested:
-                        break
-                    remaining_backoff -= step
-                if shutdown is not None and shutdown.requested:
-                    break
-                continue
-            else:
-                _daemon_alert(settings, event="day_skipped", detail=f"attempts={new_attempts} cause={failure_cause}", decision_time=target, now=now_fn(), dedupe_key=default_dedupe_key("day_skipped", target))
-                _save_daemon_state(state_path, DaemonState(last_processed_decision_time=target, pending_decision_time=None, attempts=0))
-                continue
+            if _retry_or_skip(
+                settings,
+                state_path=state_path,
+                last_processed=state.last_processed_decision_time,
+                target=target,
+                attempts=attempts,
+                failure_cause=failure_cause,
+                now_fn=now_fn,
+                wait=_wait,
+                shutdown=shutdown,
+            ):
+                break
+            continue
         if shutdown is not None and shutdown.requested:
             break
         if frozen_report is not None and float(getattr(frozen_report, "venue_snapshot_age_days", 0.0) or 0.0) > settings.venue_rules_warn_age_days:
@@ -942,31 +972,21 @@ def run_daemon(
                 digest_extra = ""
                 if frozen_report is not None:
                     digest_extra = f" decision_bar_missing={getattr(frozen_report, 'decision_bar_missing', 0)} venue_gap_excluded={','.join(getattr(frozen_report, 'venue_gap_excluded', ()) or ())}"
-                digest_detail = f"intents={getattr(report, 'intent_count', 0)} reason={getattr(report, 'reason', None)} dropped_fraction={float(getattr(report, 'dropped_notional_fraction', 0.0)):.4f} quarantined={quarantined} {refresh_note}{_sizing_note(frozen_report)}{digest_extra}"
+                digest_detail = f"intents={getattr(report, 'intent_count', 0)} reason={getattr(report, 'reason', None)} dropped_fraction={float(getattr(report, 'dropped_notional_fraction', 0.0)):.4f} {refresh_note}{_sizing_note(frozen_report)}{digest_extra}"
                 _daemon_alert(settings, event="cycle_complete", detail=digest_detail, decision_time=target, now=now_fn(), dedupe_key=default_dedupe_key("cycle_complete", target))
             _save_daemon_state(state_path, DaemonState(last_processed_decision_time=target, pending_decision_time=None, attempts=0))
             continue
-        new_attempts = attempts + 1
-        should_retry = new_attempts < settings.daemon_max_attempts_per_day and new_attempts < DAEMON_MAX_ATTEMPTS_PER_DAY
-        if should_retry:
-            _save_daemon_state(state_path, DaemonState(last_processed_decision_time=state.last_processed_decision_time, pending_decision_time=target, attempts=new_attempts))
-            idx = min(new_attempts - 1, len(DAEMON_RETRY_BACKOFF_SECONDS) - 1)
-            backoff = DAEMON_RETRY_BACKOFF_SECONDS[idx]
-            remaining_backoff = backoff
-            backoff_end = now_fn() + pd.Timedelta(seconds=backoff)
-            while remaining_backoff > 0:
-                if shutdown is not None and shutdown.requested:
-                    break
-                step = min(remaining_backoff, DAEMON_POLL_INTERVAL_SECONDS)
-                _wait(step, until=backoff_end)
-                if shutdown is not None and shutdown.requested:
-                    break
-                remaining_backoff -= step
-            if shutdown is not None and shutdown.requested:
-                break
-            continue
-        else:
-            _daemon_alert(settings, event="day_skipped", detail=f"attempts={new_attempts} cause={failure_cause}", decision_time=target, now=now_fn(), dedupe_key=default_dedupe_key("day_skipped", target))
-            _save_daemon_state(state_path, DaemonState(last_processed_decision_time=target, pending_decision_time=None, attempts=0))
-            continue
+        if _retry_or_skip(
+            settings,
+            state_path=state_path,
+            last_processed=state.last_processed_decision_time,
+            target=target,
+            attempts=attempts,
+            failure_cause=failure_cause,
+            now_fn=now_fn,
+            wait=_wait,
+            shutdown=shutdown,
+        ):
+            break
+        continue
 

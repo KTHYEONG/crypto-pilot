@@ -24,7 +24,7 @@ from typing import Any
 import pandas as pd
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
-from src.capture.journal import iter_complete_records, last_complete_offset
+from src.capture.journal import is_successful_rest_status, iter_complete_records, last_complete_offset
 from src.common.errors import DataIntegrityError
 from src.live.lifecycle import ShutdownFlag
 from src.market_data.streams.compaction import compact_day, due_compactions
@@ -553,7 +553,7 @@ def _parse_rest_record(
     record: Mapping[str, Any], stream: str, grid_ns: int, recv_ns: int, config: NormalizerConfig
 ) -> tuple[pd.DataFrame, int, float] | None:
     """Parse one successful REST sample; ``None`` for failed attempts (never raises)."""
-    if record.get("kind") != "rest" or record.get("status") != 200:
+    if record.get("kind") != "rest" or not is_successful_rest_status(record.get("status")):
         return None
     payload = _parse_rest_body(record.get("body"))
     if payload is None:
@@ -1109,5 +1109,4 @@ def _maybe_publish_heartbeat(
     except OSError as exc:
         _logger.warning("[SYS] stage=normalizer status=HEARTBEAT_FAILED error=%s", exc)
     return now
-
 

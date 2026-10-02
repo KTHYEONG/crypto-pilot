@@ -27,7 +27,6 @@ def _thresholds() -> RecorderWatchThresholds:
         min_capture_ratio=0.9,
         capture_ratio_min_points=10,
         persist_stale_s=1200.0,
-        max_consecutive_flush_failures=3,
         reference_grace_s=3600.0,
         rejected_fraction_alert=0.01,
         rejected_max_consecutive_points=60,
@@ -283,7 +282,6 @@ def test_enabled_setting_builds_production_watchdog(tmp_path: Path, monkeypatch:
         recorder_min_capture_ratio=0.8,
         recorder_capture_ratio_min_points=5,
         recorder_persist_stale_s=900.0,
-        recorder_max_consecutive_flush_failures=2,
         recorder_reference_grace_s=1800.0,
         recorder_rejected_fraction_alert=0.02,
         recorder_rejected_max_consecutive_points=30,
@@ -306,7 +304,6 @@ def test_enabled_setting_builds_production_watchdog(tmp_path: Path, monkeypatch:
         min_capture_ratio=0.8,
         capture_ratio_min_points=5,
         persist_stale_s=900.0,
-        max_consecutive_flush_failures=2,
         reference_grace_s=1800.0,
         rejected_fraction_alert=0.02,
         rejected_max_consecutive_points=30,
@@ -410,7 +407,6 @@ def test_production_thresholds_wired_from_settings() -> None:
         recorder_min_capture_ratio=0.8,
         recorder_capture_ratio_min_points=5,
         recorder_persist_stale_s=900.0,
-        recorder_max_consecutive_flush_failures=2,
         recorder_reference_grace_s=1800.0,
         recorder_rejected_fraction_alert=0.02,
         recorder_rejected_max_consecutive_points=30,
@@ -430,7 +426,6 @@ def test_production_thresholds_wired_from_settings() -> None:
     assert watch._thresholds.min_capture_ratio == 0.8
     assert watch._thresholds.capture_ratio_min_points == 5
     assert watch._thresholds.persist_stale_s == 900.0
-    assert watch._thresholds.max_consecutive_flush_failures == 2
     assert watch._thresholds.reference_grace_s == 1800.0
     assert watch._thresholds.rejected_fraction_alert == 0.02
     assert watch._thresholds.rejected_max_consecutive_points == 30

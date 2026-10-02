@@ -1012,11 +1012,7 @@ def run_shadow_cycle(
     *,
     now: pd.Timestamp | None = None,
     shutdown: ShutdownFlag | None = None,
-    artifact_path: Path | None = None,
 ) -> CycleReport:
-    # backwards compat: artifact_path alias
-    if artifact_path is not None:
-        weights_path = artifact_path
     """게이트 순서: 인과성/스테일 -> 거래소 메타 -> 계좌 -> 고아 정리 -> 재조정 ->
     에쿼티/드로다운 -> 신호 -> 목표수량 -> 계획 -> 리스크 게이트 -> 집행 -> 원장 영속."""
     now_ts = now if now is not None else pd.Timestamp.now(tz="UTC")
@@ -1656,11 +1652,6 @@ def _marks_from_tickers(client: Any, symbols: Sequence[str]) -> dict[str, Decima
 
 # cache for microstructure reuse (populated by _marks_from_tickers)
 _marks_from_tickers._last_quotes = {}  # type: ignore[attr-defined]
-
-# wiring anchors for lean_check
-# fetch_book_quotes(market_client, wanted_symbols)
-# monthly_partition_path
-# load_partitions
 
 
 def _clock() -> float:

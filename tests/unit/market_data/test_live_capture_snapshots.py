@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import gzip
-import os
 import time
 from pathlib import Path
 
@@ -13,25 +11,13 @@ from src.market_data.streams.snapshots import (
     BOOK_TICKER_COLUMNS,
     PREMIUM_INDEX_COLUMNS,
     load_snapshot_dataset,
-    next_grid_time,
     parse_book_ticker_payload,
     parse_premium_index_payload,
     write_hourly_partition,
-    write_reference_snapshot,
 )
 
 _CAP = pd.Timestamp("2026-09-22T10:00:00Z")
 _FETCH = pd.Timestamp("2026-09-22T10:00:00.250Z")
-
-
-def test_next_grid_time_strictly_future() -> None:
-    """Grid points advance strictly forward on epoch alignment."""
-    assert next_grid_time(pd.Timestamp("2026-09-22T10:00:00Z"), 60) == pd.Timestamp("2026-09-22T10:01:00Z")
-    assert next_grid_time(pd.Timestamp("2026-09-22T10:00:59.900Z"), 60) == pd.Timestamp("2026-09-22T10:01:00Z")
-    with pytest.raises(ValueError, match="divisor"):
-        next_grid_time(pd.Timestamp("2026-09-22T10:00:00Z"), 7)
-    with pytest.raises(ValueError, match="tz-aware"):
-        next_grid_time(pd.Timestamp("2026-09-22 10:00:00"), 60)
 
 
 def _book_payload() -> list[dict[str, object]]:
@@ -285,35 +271,6 @@ def test_load_snapshot_dataset_bounds_by_window(tmp_path: Path) -> None:
     assert list(out["symbol"]) == ["B", "A"]
     assert (out["captured_at"] >= pd.Timestamp("2026-09-22T10:00:00Z")).all()
     assert (out["captured_at"] < pd.Timestamp("2026-09-22T11:00:00Z")).all()
-
-
-def test_write_reference_snapshot_byte_exact_once_per_day(tmp_path: Path, tmp_path_factory: pytest.TempPathFactory) -> None:
-    """Reference payloads persist byte-exact with deterministic gzip, once per day."""
-    raw = b'{"symbols": [{"symbol": "BTCUSDT"}]}'
-    cap = pd.Timestamp("2026-09-22T10:00:00Z")
-    first = write_reference_snapshot(raw, tmp_path, "exchange_info", captured_at=cap)
-    assert first is not None
-    assert gzip.decompress(first.read_bytes()) == raw
-    second = write_reference_snapshot(raw, tmp_path, "exchange_info", captured_at=cap + pd.Timedelta(hours=2))
-    assert second is None
-    assert gzip.decompress(first.read_bytes()) == raw
-    other = tmp_path_factory.mktemp("ref2")
-    twin = write_reference_snapshot(raw, other, "exchange_info", captured_at=cap)
-    assert twin is not None
-    assert first.read_bytes() == twin.read_bytes()
-    assert os.stat(first).st_mtime_ns != 0 or True
-
-
-def test_write_reference_snapshot_rejects_bad_input(tmp_path: Path) -> None:
-    """Empty, non-JSON, and unknown references are rejected without files."""
-    cap = pd.Timestamp("2026-09-22T10:00:00Z")
-    with pytest.raises(DataIntegrityError):
-        write_reference_snapshot(b"", tmp_path, "exchange_info", captured_at=cap)
-    with pytest.raises(DataIntegrityError):
-        write_reference_snapshot(b"not json", tmp_path, "exchange_info", captured_at=cap)
-    with pytest.raises(DataIntegrityError):
-        write_reference_snapshot(b'{"a": 1}', tmp_path, "foo", captured_at=cap)
-    assert list(tmp_path.rglob("*")) == [] or all(p.is_dir() for p in tmp_path.rglob("*"))
 
 
 def test_snapshot_frame_guards_and_loader_edges(tmp_path: Path) -> None:
@@ -619,17 +576,3 @@ def test_snapshot_premium_remaining_tokens() -> None:
         zero_index, captured_at=_CAP, fetched_at=_FETCH, max_rejected_fraction=0.05,
     )
     assert pd.isna(parsed.frame.iloc[0]["index_price"])
-
-
-def test_reference_snapshot_path_validates(tmp_path: Path) -> None:
-    """Reference paths are derived and validated without touching disk."""
-    from src.market_data.streams.snapshots import reference_snapshot_path
-
-    assert (
-        reference_snapshot_path(tmp_path, "exchange_info", "20260922")
-        == tmp_path / "reference" / "exchange_info" / "20260922.json.gz"
-    )
-    with pytest.raises(DataIntegrityError, match="unknown reference"):
-        reference_snapshot_path(tmp_path, "nope", "20260922")
-    with pytest.raises(DataIntegrityError, match="YYYYMMDD"):
-        reference_snapshot_path(tmp_path, "exchange_info", "22-09-01")

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import json
+import re
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -42,79 +43,78 @@ def _ready_payload(*, started_at: datetime = STARTED, ts: datetime = NOW, stoppe
 
 def test_unchanged_ready_slot_is_kept() -> None:
     """A current ready slot needs no deploy action."""
-    decision = decide_capture_action([_obs("blue"), _obs("green", running=False, fp=None, ready=False)], image_fingerprint="sha256:img", legacy_running=False)
+    decision = decide_capture_action([_obs("blue"), _obs("green", running=False, fp=None, ready=False)], image_fingerprint="sha256:img")
     assert (decision.action, decision.reason) == ("keep", "unchanged")
     assert decision.new_slot is None
     assert decision.old_slot is None
-    assert decision.retire_legacy is False
 
 
 def test_changed_fingerprint_hands_over_to_idle_slot() -> None:
     """A stale running slot hands over to the idle slot."""
-    decision = decide_capture_action([_obs("blue", fp="sha256:old"), _obs("green", running=False, fp=None, ready=False)], image_fingerprint="sha256:img", legacy_running=False)
+    decision = decide_capture_action([_obs("blue", fp="sha256:old"), _obs("green", running=False, fp=None, ready=False)], image_fingerprint="sha256:img")
     assert (decision.action, decision.new_slot, decision.old_slot, decision.reason) == ("handover", "green", "blue", "fingerprint_changed")
 
 
 def test_green_active_hands_over_back_to_blue() -> None:
     """Handover direction follows whichever slot is running."""
-    decision = decide_capture_action([_obs("blue", running=False, fp=None, ready=False), _obs("green", fp="sha256:old")], image_fingerprint="sha256:img", legacy_running=False)
+    decision = decide_capture_action([_obs("blue", running=False, fp=None, ready=False), _obs("green", fp="sha256:old")], image_fingerprint="sha256:img")
     assert (decision.action, decision.new_slot, decision.old_slot) == ("handover", "blue", "green")
 
 
 def test_unreadable_image_fingerprint_never_keeps() -> None:
     """Without a trusted image fingerprint the running slot cannot be proven current."""
-    decision = decide_capture_action([_obs("blue"), _obs("green", running=False, fp=None, ready=False)], image_fingerprint=None, legacy_running=False)
+    decision = decide_capture_action([_obs("blue"), _obs("green", running=False, fp=None, ready=False)], image_fingerprint=None)
     assert (decision.action, decision.reason) == ("handover", "image_fingerprint_unreadable")
 
 
 def test_unreadable_slot_fingerprint_hands_over() -> None:
     """An unreadable running fingerprint cannot be proven current."""
-    decision = decide_capture_action([_obs("blue", fp=None), _obs("green", running=False, fp=None, ready=False)], image_fingerprint="sha256:img", legacy_running=False)
+    decision = decide_capture_action([_obs("blue", fp=None), _obs("green", running=False, fp=None, ready=False)], image_fingerprint="sha256:img")
     assert decision.reason == "fingerprint_unreadable"
 
 
 def test_running_slot_not_ready_is_replaced() -> None:
     """A current but not-yet-ready slot hands over with reason not_ready."""
-    decision = decide_capture_action([_obs("blue", ready=False), _obs("green", running=False, fp=None, ready=False)], image_fingerprint="sha256:img", legacy_running=False)
+    decision = decide_capture_action([_obs("blue", ready=False), _obs("green", running=False, fp=None, ready=False)], image_fingerprint="sha256:img")
     assert (decision.action, decision.reason) == ("handover", "not_ready")
 
 
 def test_config_drift_hands_over() -> None:
     """Equal fingerprints with a config-hash mismatch still hands over."""
-    decision = decide_capture_action([_obs("blue", cfg=False), _obs("green", running=False, fp=None, ready=False)], image_fingerprint="sha256:img", legacy_running=False)
+    decision = decide_capture_action([_obs("blue", cfg=False), _obs("green", running=False, fp=None, ready=False)], image_fingerprint="sha256:img")
     assert decision.reason == "compose_config_changed"
 
 
 def test_both_running_reconciles_to_current_ready_slot() -> None:
     """A crashed handover leaves both slots running; reconcile keeps the current ready one."""
-    decision = decide_capture_action([_obs("blue", fp="sha256:old"), _obs("green")], image_fingerprint="sha256:img", legacy_running=False)
+    decision = decide_capture_action([_obs("blue", fp="sha256:old"), _obs("green")], image_fingerprint="sha256:img")
     assert (decision.action, decision.new_slot, decision.old_slot) == ("reconcile", "green", "blue")
 
 
 def test_both_current_ready_reconciles_to_blue() -> None:
     """Two current ready slots cannot be distinguished; reconcile keeps blue."""
-    decision = decide_capture_action([_obs("blue"), _obs("green")], image_fingerprint="sha256:img", legacy_running=False)
+    decision = decide_capture_action([_obs("blue"), _obs("green")], image_fingerprint="sha256:img")
     assert (decision.action, decision.new_slot, decision.old_slot, decision.reason) == ("reconcile", "blue", "green", "both_running")
 
 
 def test_both_running_without_current_keeps_ready_slot() -> None:
     """With no current slot, reconcile keeps the only READY one."""
-    decision = decide_capture_action([_obs("blue", fp="sha256:old"), _obs("green", fp="sha256:older")], image_fingerprint="sha256:img", legacy_running=False)
+    decision = decide_capture_action([_obs("blue", fp="sha256:old"), _obs("green", fp="sha256:older")], image_fingerprint="sha256:img")
     assert (decision.action, decision.new_slot, decision.old_slot) == ("reconcile", "blue", "green")
 
 
 def test_both_running_with_nothing_ready_keeps_blue() -> None:
     """With nothing READY, reconcile keeps blue deterministically."""
-    decision = decide_capture_action([_obs("blue", fp="sha256:old", ready=False), _obs("green", fp="sha256:older", ready=False)], image_fingerprint="sha256:img", legacy_running=False)
+    decision = decide_capture_action([_obs("blue", fp="sha256:old", ready=False), _obs("green", fp="sha256:older", ready=False)], image_fingerprint="sha256:img")
     assert (decision.action, decision.new_slot, decision.old_slot) == ("reconcile", "blue", "green")
 
 
 def test_decide_rejects_observations_without_both_slots() -> None:
     """Anything but exactly one observation per slot is a programming error."""
     with pytest.raises(ValueError, match="one observation per slot"):
-        decide_capture_action([_obs("blue"), _obs("blue")], image_fingerprint="sha256:img", legacy_running=False)
+        decide_capture_action([_obs("blue"), _obs("blue")], image_fingerprint="sha256:img")
     with pytest.raises(ValueError, match="one observation per slot"):
-        decide_capture_action([_obs("blue")], image_fingerprint="sha256:img", legacy_running=False)
+        decide_capture_action([_obs("blue")], image_fingerprint="sha256:img")
 
 
 def test_ready_accepts_docker_nanosecond_timestamps() -> None:
@@ -139,6 +139,7 @@ def test_cli_rejects_malformed_arguments() -> None:
     assert main(["decide", "--image-fp", "sha256:img", "--slot", "blue:bogus:fp:1:1", "--slot", "green:0:-:0:0"]) == 2
     assert main(["ready", "--heartbeat", "x", "--container-started-at", "not-a-time", "--stale-s", "30"]) == 2
     assert main(["decide", "--bogus-flag"]) == 2
+    assert main(["decide", "--legacy-running", "--slot", "blue:0:-:0:0", "--slot", "green:0:-:0:0"]) == 2
     assert main(["ready", "--heartbeat", "x"]) == 2
     assert main(["ready", "--heartbeat", "x", "--container-started-at", CONTAINER_START.isoformat(), "--now", "bogus", "--stale-s", "30"]) == 2
     assert main(["ready", "--heartbeat", "x", "--container-started-at", CONTAINER_START.isoformat(), "--stale-s", "bogus"]) == 2
@@ -159,16 +160,9 @@ def test_cli_decide_without_image_fingerprint_hands_over(capsys: pytest.CaptureF
     assert "reason=image_fingerprint_unreadable" in capsys.readouterr().out
 
 
-def test_first_deploy_migrates_legacy_recorder() -> None:
-    """No slot running with a legacy recorder starts blue and retires legacy."""
-    decision = decide_capture_action([_obs("blue", running=False, fp=None, ready=False), _obs("green", running=False, fp=None, ready=False)], image_fingerprint="sha256:img", legacy_running=True)
-    assert (decision.action, decision.new_slot, decision.reason) == ("start", "blue", "legacy_migration")
-    assert decision.retire_legacy is True
-
-
 def test_empty_host_starts_blue() -> None:
     """Nothing running starts the blue slot."""
-    decision = decide_capture_action([_obs("blue", running=False, fp=None, ready=False), _obs("green", running=False, fp=None, ready=False)], image_fingerprint="sha256:img", legacy_running=False)
+    decision = decide_capture_action([_obs("blue", running=False, fp=None, ready=False), _obs("green", running=False, fp=None, ready=False)], image_fingerprint="sha256:img")
     assert (decision.action, decision.new_slot, decision.reason) == ("start", "blue", "not_running")
 
 
@@ -249,7 +243,9 @@ def test_fully_ready_heartbeat_is_ready_and_cli_matches(tmp_path: Path) -> None:
 def test_cli_decide_prints_one_parseable_line(capsys: pytest.CaptureFixture[str]) -> None:
     """The decide CLI prints a single machine-readable line."""
     assert main(["decide", "--image-fp", "sha256:img", "--slot", "blue:1:sha256:old:1:1", "--slot", "green:0:-:0:0"]) == 0
-    assert capsys.readouterr().out.strip() == "action=handover new=green old=blue legacy=0 reason=fingerprint_changed"
+    output = capsys.readouterr().out.strip()
+    assert output == "action=handover new=green old=blue reason=fingerprint_changed"
+    assert re.fullmatch(r"action=\S+ new=\S+ old=\S+ reason=\S+", output)
 
 
 def test_helper_is_stdlib_only_and_312_safe() -> None:

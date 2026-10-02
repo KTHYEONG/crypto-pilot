@@ -3,17 +3,26 @@
 from __future__ import annotations
 
 import json
+from dataclasses import fields
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+import pandas as pd
 
 from src.common.errors import DataIntegrityError
 from src.live.account import AccountSnapshot, reconcile_or_halt
 from src.live.ledger import (
     LedgerState,
+    PositionSnapshot,
+    _evolve,
+    clear_derisk,
+    commit_journal_fills,
     default_ledger_path,
+    enter_derisk,
     load_ledger,
+    mark_fills_recorded,
     save_ledger,
 )
 from src.live.planner import OrderIntent
@@ -24,6 +33,30 @@ def _intent(symbol: str, side: str, qty: str) -> OrderIntent:
         symbol=symbol, side=side, quantity=Decimal(qty), reduce_only=False,
         target_qty=Decimal(qty), current_qty=Decimal(0), client_order_prefix="run1",
         leg_index=0, decision_price=Decimal("100"),
+    )
+
+
+def _fully_populated_state() -> LedgerState:
+    t0 = pd.Timestamp("2026-09-01T00:00:00Z")
+    t1 = pd.Timestamp("2026-09-02T00:00:00Z")
+    t2 = pd.Timestamp("2026-09-03T00:00:00Z")
+    return LedgerState(
+        positions={"BTCUSDT": Decimal("2.5"), "ETHUSDT": Decimal("-1.25")},
+        equity_high_water_mark=Decimal("5000"),
+        cash_usdt=Decimal("4321.25"),
+        funding_accrued_through=t2,
+        last_executed_decision_time=t1,
+        funding_watermarks={"BTCUSDT": t1, "ETHUSDT": t2},
+        position_history=(
+            PositionSnapshot(t0, {"BTCUSDT": Decimal("2")}),
+            PositionSnapshot(t1, {"BTCUSDT": Decimal("2.5"), "ETHUSDT": Decimal("-1.25")}),
+        ),
+        funding_accrual_started_at=t0,
+        funding_backfilled_through=t1,
+        journal_applied_fill_seq=8,
+        journal_recorded_fill_seq=7,
+        derisk_since=t0,
+        derisk_reasons=("existing",),
     )
 
 
@@ -934,3 +967,83 @@ def test_enter_derisk_rejects_naive_now(tmp_path) -> None:
 
     with pytest.raises(ValueError, match="tz-aware"):
         enter_derisk(tmp_path / "x.json", LedgerState(), reasons=("a",), now=pd.Timestamp("2026-09-14 00:00"))
+
+
+def test_ledger_transitions_preserve_all_untouched_fields_and_copy_mappings(tmp_path) -> None:
+    base = _fully_populated_state()
+    t3 = pd.Timestamp("2026-09-04T00:00:00Z")
+    fill = SimpleNamespace(
+        fill_seq=9,
+        kind="execution",
+        side="BUY",
+        symbol="BTCUSDT",
+        quantity=Decimal("0.5"),
+        price=Decimal("100"),
+        fee_bps=1.0,
+        filled_at=t3,
+    )
+    transitions = (
+        (
+            commit_journal_fills(
+                tmp_path / "commit.json",
+                base,
+                [fill],
+                equity=Decimal("6000"),
+                track_cash=True,
+                starting_capital=Decimal("1000"),
+                executed_decision_time=t3,
+            ),
+            {"positions", "equity_high_water_mark", "cash_usdt", "last_executed_decision_time", "position_history", "journal_applied_fill_seq"},
+        ),
+        (mark_fills_recorded(tmp_path / "mark.json", base, 8), {"journal_recorded_fill_seq"}),
+        (enter_derisk(tmp_path / "enter.json", base, reasons=("new",), now=t3), {"derisk_reasons"}),
+        (clear_derisk(tmp_path / "clear.json", base), {"derisk_since", "derisk_reasons"}),
+    )
+    for transitioned, changed_fields in transitions:
+        for item in fields(LedgerState):
+            if item.name not in changed_fields:
+                assert getattr(transitioned, item.name) == getattr(base, item.name), item.name
+        transitioned.positions["MUTATED"] = Decimal("1")
+        transitioned.funding_watermarks["MUTATED"] = t3
+        assert "MUTATED" not in base.positions
+        assert "MUTATED" not in base.funding_watermarks
+
+
+def test_save_load_roundtrip_covers_every_ledger_field(tmp_path) -> None:
+    path = tmp_path / "full-ledger.json"
+    expected = _fully_populated_state()
+    save_ledger(path, expected)
+    actual = load_ledger(path)
+    for item in fields(LedgerState):
+        assert getattr(actual, item.name) == getattr(expected, item.name), item.name
+
+
+def test_repeated_derisk_entry_returns_same_state_without_writing(tmp_path) -> None:
+    path = tmp_path / "derisk.json"
+    base = _fully_populated_state()
+    save_ledger(path, base)
+    before_bytes = path.read_bytes()
+    before_mtime = path.stat().st_mtime_ns
+
+    result = enter_derisk(path, base, reasons=("existing",), now=pd.Timestamp("2026-10-01T00:00:00Z"))
+
+    assert result is base
+    assert path.read_bytes() == before_bytes
+    assert path.stat().st_mtime_ns == before_mtime
+
+
+def test_derisk_entry_keeps_first_timestamp_and_unions_reasons(tmp_path) -> None:
+    base = _fully_populated_state()
+    result = enter_derisk(
+        tmp_path / "derisk-union.json",
+        base,
+        reasons=("new", "existing"),
+        now=pd.Timestamp("2026-10-01T00:00:00Z"),
+    )
+    assert result.derisk_since == base.derisk_since
+    assert result.derisk_reasons == ("existing", "new")
+
+
+def test_evolve_rejects_unknown_state_field() -> None:
+    with pytest.raises(TypeError):
+        _evolve(_fully_populated_state(), not_a_field=1)

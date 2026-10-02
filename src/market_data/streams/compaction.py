@@ -160,7 +160,7 @@ def _iter_day_records(hot_dir: Path, stream: str, torn: list[int]) -> Iterator[d
     day-scoped digests (REST by successful grid, WS by exact frame text), which are small next to the
     records themselves. ``torn`` accumulates torn-tail bytes of the source files.
     """
-    from src.capture.journal import iter_complete_records, last_complete_offset
+    from src.capture.journal import is_successful_rest_status, iter_complete_records, last_complete_offset
 
     by_hour: dict[int, list[Path]] = {}
     for path in sorted(hot_dir.glob("*.jsonl.gz")):
@@ -181,7 +181,11 @@ def _iter_day_records(hot_dir: Path, stream: str, torn: list[int]) -> Iterator[d
         for _recv, _slot, _name, record in ordered:
             if rest_stream:
                 grid = record.get("grid")
-                if record.get("kind") == "rest" and record.get("status") == 200 and isinstance(grid, str):
+                if (
+                    record.get("kind") == "rest"
+                    and is_successful_rest_status(record.get("status"))
+                    and isinstance(grid, str)
+                ):
                     if grid in seen_grids:
                         torn[1] += 1
                         continue

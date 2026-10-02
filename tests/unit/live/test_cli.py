@@ -34,7 +34,7 @@ def test_SCENARIO_LIVE_14_cli_registers_live_group() -> None:
         parser.parse_args(["live", "shadow-cycle"])
 
 
-def test_SCENARIO_LIVE_40_PREFLIGHT_CLI_EXITS_NONZERO_ON_FAILURE(monkeypatch) -> None:
+def test_SCENARIO_LIVE_40_PREFLIGHT_CLI_EXITS_NONZERO_ON_FAILURE(monkeypatch, tmp_path) -> None:
     """SCENARIO_LIVE_40_PREFLIGHT_CLI_EXITS_NONZERO_ON_FAILURE: ``live
     preflight`` shares the shadow-cycle --artifact default and surfaces a
     failing PreflightReport as a nonzero process exit."""
@@ -42,17 +42,31 @@ def test_SCENARIO_LIVE_40_PREFLIGHT_CLI_EXITS_NONZERO_ON_FAILURE(monkeypatch) ->
 
     parser = build_root_parser()
     args = parser.parse_args(["live", "preflight"])
-    assert "deployed_target_weights.parquet" in args.artifact
+    assert args.artifact is None
+
+    settings = LiveSettings(weights_path=str(tmp_path / "run" / "weights.parquet"))
+    monkeypatch.setattr("src.cli.commands.live._settings_with_mode", lambda _args: settings)
+    captured = []
 
     from src.live.preflight import PreflightCheck, PreflightReport
 
     failing_report = PreflightReport(
         checks=(PreflightCheck(name="artifact_readable", passed=False, detail="boom"),)
     )
-    monkeypatch.setattr(preflight_mod, "run_preflight", lambda *a, **k: failing_report)
+    def capture_run_preflight(_settings, artifact):
+        captured.append(artifact)
+        return failing_report
+
+    monkeypatch.setattr(preflight_mod, "run_preflight", capture_run_preflight)
     with pytest.raises(SystemExit) as excinfo:
         args.handler(args)
     assert excinfo.value.code == 1
+    assert captured[-1] == tmp_path / "run" / "weights.parquet"
+
+    explicit_args = parser.parse_args(["live", "preflight", "--artifact", "/x/w.parquet"])
+    with pytest.raises(SystemExit):
+        explicit_args.handler(explicit_args)
+    assert captured[-1] == __import__("pathlib").Path("/x/w.parquet")
 
     passing_report = PreflightReport(
         checks=(PreflightCheck(name="artifact_readable", passed=True, detail="rows=1"),)
@@ -95,20 +109,6 @@ COVERED_SCENARIOS: tuple[str, ...] = (
 )
 
 
-def test_deploy_check_exits_nonzero_on_missing_bundle(tmp_path) -> None:
-    """backtest_cloud_handoff: `live deploy-check` fails closed on a missing bundle."""
-    import argparse
-
-    from src.cli.commands.live import _run_deploy_check
-
-    ns = argparse.Namespace(
-        bundle=str(tmp_path / "nope.json.enc"), runtime=str(tmp_path / "rt.json")
-    )
-    with pytest.raises(SystemExit) as ei:
-        _run_deploy_check(ns)
-    assert ei.value.code != 0
-
-
 def test_run_shadow_cycle_gates_on_effective_decision_time(monkeypatch, tmp_path) -> None:  # noqa: SIM105,S110
     import contextlib
 
@@ -138,9 +138,11 @@ def test_live_cli_surface_after_v2() -> None:
     sub = parser.add_subparsers(dest="cmd")
     add_live_commands(sub.add_parser("live"))
 
-    for gone in ("signal-daemon", "signal-refresh", "deploy-check", "signal-step"):
+    for gone in ("signal-daemon", "signal-refresh", "deploy-check", "signal-step", "microstructure-summary"):
         with pytest.raises(SystemExit):
             parser.parse_args(["live", gone])
+    with pytest.raises(SystemExit):
+        parser.parse_args(["live", "shadow-cycle", "--decision-time", "2026-08-25T00:00:00Z", "--dry-run"])
     args = parser.parse_args(["live", "frozen-step", "--date", "2026-08-25T00:00:00Z"])
     assert args.handler.__name__ == "_run_frozen_step"
 

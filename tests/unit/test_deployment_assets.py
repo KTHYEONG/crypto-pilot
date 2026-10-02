@@ -440,24 +440,13 @@ case "$op" in
         if [ -f "$FAKE_STATE/green_running" ]; then cat "$FAKE_STATE/green_running";
         else printf '%s\\n' "${FAKE_GREEN_RUNNING:-false}"; fi
         exit 0 ;;
-      *State.Running*market-recorder*)
-        if [ -f "$FAKE_STATE/legacy_removed" ]; then printf 'false\\n'; else printf '%s\\n' "${FAKE_LEGACY_RUNNING:-false}"; fi
-        exit 0 ;;
-      market-recorder)
-        if [ "${FAKE_LEGACY_RUNNING:-false}" = "true" ] && [ ! -f "$FAKE_STATE/legacy_removed" ]; then exit 0; fi
-        exit 1 ;;
       *State.StartedAt*) printf '%s\\n' "$FAKE_STARTED_AT"; exit 0 ;;
       *config-hash*market-capture-blue*) printf '%s\\n' "$FAKE_LABEL_BLUE"; exit 0 ;;
       *config-hash*market-capture-green*) printf '%s\\n' "$FAKE_LABEL_GREEN"; exit 0 ;;
       *) exit 1 ;;
     esac
     ;;
-  stop|rm)
-    case "$*" in
-      *market-recorder*)
-        if [ "${FAKE_LEGACY_STUCK:-0}" != "1" ] && [ "$op" = "rm" ]; then touch "$FAKE_STATE/legacy_removed"; fi ;;
-    esac
-    exit 0 ;;
+  stop|rm) exit 0 ;;
   image) exit 0 ;;
   *) exit 0 ;;
 esac
@@ -525,7 +514,6 @@ def _base_recreate_env(started_at_iso: str = "2026-09-26T11:50:00+00:00") -> dic
     return {
         "FAKE_BLUE_RUNNING": "false",
         "FAKE_GREEN_RUNNING": "false",
-        "FAKE_LEGACY_RUNNING": "false",
         "FAKE_BLUE_FP": "sha256:abc",
         "FAKE_IMAGE_FP": "sha256:abc",
         "FAKE_CONFIG_HASH": "hash-1",
@@ -607,29 +595,6 @@ def test_compose_crashed_new_slot_fails_fast(tmp_path) -> None:
     assert "capture_handover=failed" in result.stdout
 
 
-def test_compose_first_deploy_retires_legacy_recorder_only_after_ready(tmp_path) -> None:
-    env = _base_recreate_env()
-    env["FAKE_LEGACY_RUNNING"] = "true"
-    _write_ready_heartbeat(tmp_path, "blue", _shift_iso(env["FAKE_STARTED_AT"], 10))
-    result, argv_log = _run_compose_recreate(tmp_path, env)
-    assert result.returncode == 0
-    assert "reason=legacy_migration" in result.stdout
-    joined = "\n".join(argv_log)
-    assert joined.index("capture-blue") < joined.index("market-recorder")
-
-
-def test_compose_failed_migration_keeps_legacy_and_skips_normalizer(tmp_path) -> None:
-    env = _base_recreate_env()
-    env["FAKE_LEGACY_RUNNING"] = "true"
-    env["CAPTURE_HANDOVER_TIMEOUT_S"] = "1"
-    result, argv_log = _run_compose_recreate(tmp_path, env)
-    assert result.returncode == 3
-    joined = "\n".join(argv_log)
-    assert "market-recorder" not in [line for line in joined.splitlines() if "docker stop" in line and "market-recorder" in line]
-    assert "normalizer_action=skipped reason=legacy_active" in result.stdout
-    assert any("mhs-live" in line for line in _up_lines(argv_log))
-
-
 def test_compose_both_running_host_reconciles(tmp_path) -> None:
     env = _base_recreate_env()
     env["FAKE_BLUE_RUNNING"] = "true"
@@ -644,6 +609,40 @@ def test_compose_both_running_host_reconciles(tmp_path) -> None:
     assert not any("capture-" in line for line in _up_lines(argv_log))
     stops = [line for line in argv_log if "stop" in line and "capture-" in line]
     assert len(stops) >= 1
+
+
+def test_compose_always_recreates_normalizer_before_daemon_for_each_capture_action(tmp_path) -> None:
+    scenarios = ("keep", "start", "handover", "reconcile")
+    for scenario in scenarios:
+        case_dir = tmp_path / scenario
+        case_dir.mkdir()
+        env = _base_recreate_env()
+        if scenario == "keep":
+            env["FAKE_BLUE_RUNNING"] = "true"
+            _write_ready_heartbeat(case_dir, "blue", _shift_iso(env["FAKE_STARTED_AT"], 10))
+        elif scenario == "start":
+            _write_ready_heartbeat(case_dir, "blue", _shift_iso(env["FAKE_STARTED_AT"], 10))
+        elif scenario == "handover":
+            env["FAKE_BLUE_RUNNING"] = "true"
+            env["FAKE_IMAGE_FP"] = "sha256:changed"
+            _write_ready_heartbeat(case_dir, "blue", _shift_iso(env["FAKE_STARTED_AT"], 10))
+            _write_ready_heartbeat(case_dir, "green", _shift_iso(env["FAKE_STARTED_AT"], 10))
+        else:
+            env["FAKE_BLUE_RUNNING"] = "true"
+            env["FAKE_GREEN_RUNNING"] = "true"
+            _write_ready_heartbeat(case_dir, "blue", _shift_iso(env["FAKE_STARTED_AT"], 10))
+            _write_ready_heartbeat(case_dir, "green", _shift_iso(env["FAKE_STARTED_AT"], 10))
+        result, argv_log = _run_compose_recreate(case_dir, env)
+        assert result.returncode == 0, (scenario, result.stdout, result.stderr)
+        ups = _up_lines(argv_log)
+        normalizer_idx = next(i for i, line in enumerate(ups) if "market-normalizer" in line and "--force-recreate" in line)
+        daemon_idx = next(i for i, line in enumerate(ups) if "mhs-live" in line and "--force-recreate" in line)
+        assert normalizer_idx < daemon_idx
+
+
+def test_compose_script_has_no_legacy_surface() -> None:
+    script = (ROOT / "deploy" / "compose_recreate.sh").read_text(encoding="utf-8")
+    assert not any(token in script for token in ("market-recorder", "legacy", "LEGACY_"))
 
 
 def test_compose_script_has_no_remove_orphans() -> None:
@@ -851,32 +850,6 @@ def test_compose_up_failure_of_new_slot_continues_and_fails_deploy(tmp_path) -> 
     assert any("market-normalizer" in line for line in ups)
     assert any("mhs-live" in line for line in ups)
     assert not any("capture-blue" in line and ("stop" in line or " rm" in line) for line in argv_log)
-
-
-def test_compose_keep_still_retires_lingering_legacy_recorder(tmp_path) -> None:
-    env = _base_recreate_env()
-    env["FAKE_BLUE_RUNNING"] = "true"
-    env["FAKE_LEGACY_RUNNING"] = "true"
-    _write_ready_heartbeat(tmp_path, "blue", _shift_iso(env["FAKE_STARTED_AT"], 10))
-    result, argv_log = _run_compose_recreate(tmp_path, env)
-    assert result.returncode == 0
-    assert "legacy_recorder=retired" in result.stdout
-    assert any("rm" in line and "market-recorder" in line for line in argv_log)
-    assert any("market-normalizer" in line for line in _up_lines(argv_log))
-
-
-def test_compose_stuck_legacy_recorder_blocks_normalizer_and_fails_deploy(tmp_path) -> None:
-    env = _base_recreate_env()
-    env["FAKE_BLUE_RUNNING"] = "true"
-    env["FAKE_LEGACY_RUNNING"] = "true"
-    env["FAKE_LEGACY_STUCK"] = "1"
-    _write_ready_heartbeat(tmp_path, "blue", _shift_iso(env["FAKE_STARTED_AT"], 10))
-    result, argv_log = _run_compose_recreate(tmp_path, env)
-    assert result.returncode == 3
-    assert "legacy_recorder=retire_failed" in result.stdout
-    assert "normalizer_action=skipped reason=legacy_active" in result.stdout
-    assert not any("market-normalizer" in line for line in _up_lines(argv_log))
-    assert any("mhs-live" in line for line in _up_lines(argv_log))
 
 
 def test_recreate_script_hashes_profile_gated_slot_services_with_their_profile() -> None:

@@ -28,7 +28,10 @@ def test_shadow_cycle_parses_utc_decision_time() -> None:
     # run-namespaced weights: unset --artifact resolves at handler time from
     # settings.weights_path, falling back to the rolling state file.
     assert args.artifact is None
-    assert args.dry_run is False
+    with pytest.raises(SystemExit):
+        _live_parser().parse_args(
+            ["shadow-cycle", "--decision-time", "2026-08-24T00:00:00Z", "--dry-run"]
+        )
 
 
 def test_decision_time_is_required() -> None:
@@ -113,7 +116,7 @@ def test_SCENARIO_REC_12_cli_tax_subcommands(monkeypatch) -> None:
     assert a.handler is _run_tax_summary
 
 
-def test_orderbook_capture_subcommand_invokes_capture_and_append(monkeypatch) -> None:
+def test_capture_subcommand_invokes_capture_and_append(monkeypatch) -> None:
     import argparse
 
     import src.cli.commands.live as live_mod
