@@ -12,7 +12,6 @@ from __future__ import annotations
 import itertools
 import json
 import sqlite3
-from dataclasses import fields
 from pathlib import Path
 from typing import Any
 
@@ -20,7 +19,6 @@ import pytest
 
 from src.backtests.migration import migrate_legacy_backtests
 from src.common.paths import BACKTESTS_DIR
-from src.mhs.contracts import MhsDiagnosticRequest
 from src.mhs.params import SEARCH_TRIALS_ATTEMPTED
 from src.mhs.run_history import (
     RESEARCH_NEUTRAL_FLAGS,
@@ -462,13 +460,15 @@ def test_trial_identity_key_distinguishes_data_policy_and_keeps_legacy_records()
 
 
 def test_trial_identity_key_is_sparse_and_stable_when_a_defaulted_field_is_added() -> None:
+    from src.mhs.run_history import TRIAL_IDENTITY_BASELINE
+
     snapshot = {"K": 1}
-    registered = [f for f in fields(MhsDiagnosticRequest) if f.name not in RESEARCH_NEUTRAL_FLAGS]
-    data_policy_default = next(f.default for f in registered if f.name == "data_policy")
-    record = {"flags": {"committee_capital": True, "data_policy": data_policy_default}, "params_snapshot": snapshot}
+    registered = [n for n in TRIAL_IDENTITY_BASELINE if n not in RESEARCH_NEUTRAL_FLAGS]
+    data_policy_baseline = TRIAL_IDENTITY_BASELINE["data_policy"]
+    record = {"flags": {"committee_capital": True, "data_policy": data_policy_baseline}, "params_snapshot": snapshot}
 
     # When the same configuration is written with explicit defaults
-    explicit = {f.name: f.default for f in registered}
+    explicit = {name: TRIAL_IDENTITY_BASELINE[name] for name in registered}
     explicit.update(record["flags"])
     assert trial_identity_key(record) == trial_identity_key({"flags": explicit, "params_snapshot": snapshot})
 
@@ -476,13 +476,15 @@ def test_trial_identity_key_is_sparse_and_stable_when_a_defaulted_field_is_added
 def test_dense_ledger_keys_collapse_on_import(tmp_path) -> None:
     """Schema drift must not split one configuration in two: a dense key written
     by an older contract collapses onto the sparse key with the earliest first-seen."""
+    from src.mhs.run_history import TRIAL_IDENTITY_BASELINE
+
     snapshot = {"K": 1}
-    registered = [f for f in fields(MhsDiagnosticRequest) if f.name not in RESEARCH_NEUTRAL_FLAGS]
-    data_policy_default = next(f.default for f in registered if f.name == "data_policy")
-    record = {"flags": {"committee_capital": True, "data_policy": data_policy_default}, "params_snapshot": snapshot}
+    registered = [n for n in TRIAL_IDENTITY_BASELINE if n not in RESEARCH_NEUTRAL_FLAGS]
+    data_policy_baseline = TRIAL_IDENTITY_BASELINE["data_policy"]
+    record = {"flags": {"committee_capital": True, "data_policy": data_policy_baseline}, "params_snapshot": snapshot}
 
     # A dense key from an older schema is missing the last registered field.
-    dense = {f.name: f.default for f in registered[:-1]}
+    dense = {name: TRIAL_IDENTITY_BASELINE[name] for name in registered[:-1]}
     dense.update(record["flags"])
     dense["params_snapshot"] = snapshot
     dense_key = json.dumps(
@@ -520,13 +522,11 @@ def test_dense_ledger_keys_collapse_on_import(tmp_path) -> None:
 
 
 def test_sparse_identity_key_passes_through_non_identity_keys() -> None:
-    import dataclasses
-    from types import SimpleNamespace
-    from src.mhs.run_history import _equals_field_default, _sparse_identity_key
+    from src.mhs.run_history import _equals_baseline, _sparse_identity_key
 
     assert _sparse_identity_key("not-json") == "not-json"
     assert _sparse_identity_key("[1, 2]") == "[1, 2]"
-    assert _equals_field_default(None, SimpleNamespace(default=dataclasses.MISSING)) is False
+    assert _equals_baseline("not_registered", None) is False
 
 
 def test_append_preserves_trial_identity_across_variants(tmp_path) -> None:
