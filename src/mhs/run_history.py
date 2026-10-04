@@ -15,7 +15,6 @@ by ``src.backtests.migration``.
 
 from __future__ import annotations
 
-import dataclasses
 import json
 import logging
 import math
@@ -24,7 +23,8 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, cast
+from types import MappingProxyType
+from typing import Any, Final, cast
 
 import pandas as pd
 
@@ -111,9 +111,16 @@ def _load_registry_state(registry: Path) -> HistoryRegistryState | None:
     evidence: a silently dropped row can hide a trial (understating the DSR
     denominator) or a consulted look (re-admitting contaminated forward data).
 
+    Stored identities are verified, never trusted: every row's stored
+    ``identity_key`` must equal the key recomputed from its record, and every
+    ``trials`` key must already be in sparse baseline form. A mismatch means
+    the identity definition drifted after the key was written; unioning such
+    keys would inflate or merge trials, so it fails closed (I-ID-STABLE).
+
     Raises:
         DataIntegrityError: the file is not a readable SQLite registry, a required
-            table/column is missing, or any ``record_json`` row is not a JSON object.
+            table/column is missing, any ``record_json`` row is not a JSON object,
+            or identity drift.
     """
     if not registry.is_file():
         return None
@@ -154,6 +161,18 @@ def _load_registry_state(registry: Path) -> HistoryRegistryState | None:
     ledger: dict[str, str] = {}
     for key, first_seen in ledger_rows:
         ledger.setdefault(str(key), str(first_seen))
+    for (source_id, ordinal, _payload, stored_key), record in zip(rows, records, strict=True):
+        if stored_key is None:
+            continue
+        if trial_identity_key(record) != str(stored_key):
+            raise DataIntegrityError(
+                f"trial identity drift: source_id={source_id} ordinal={ordinal}"
+            )
+    for key in ledger:
+        if _sparse_identity_key(key) != key:
+            raise DataIntegrityError(
+                f"trial ledger key not in baseline form: {key[:80]}"
+            )
     return HistoryRegistryState(tuple(records), tuple(stored_keys), ledger)
 
 
@@ -265,6 +284,67 @@ def append_run_history_record(record: Mapping[str, Any], history_dir: Path | str
 # --- trial-set definition (single source for N and V) ------------------------
 
 
+# Frozen canonical value per registered request field for trial identity. A field whose recorded value dumps equal to its baseline is omitted from the identity key, so request defaults can change without re-keying recorded trials (I-DEFAULT-DECOUPLED). Append-only: a new field is appended with the value it had when introduced; an existing entry is never edited or removed (I-ID-STABLE). Values are JSON-native; the retired unset-gross sentinel is represented by its canonical dump string.
+TRIAL_IDENTITY_BASELINE: Final[Mapping[str, object]] = MappingProxyType(
+    {
+        "start": None,
+        "end": None,
+        "partition": "dev",
+        "data_root": None,
+        "execution_timeframe": "3m",
+        "execution_universe_size": 30,
+        "max_rss_bytes": None,
+        "log_run": True,
+        "touch_diagnostic": False,
+        "ladder_diagnostic": False,
+        "peg_chase_diagnostic": False,
+        "liquidity_cost_model": "flat",
+        "passive_timeout_minutes": 30,
+        "discovery_gate": False,
+        "discovery_gate_adjusted_net_t": False,
+        "discovery_gate_regime_scaled_net_t": False,
+        "fold_safe_horizon_selection": False,
+        "crash_regime_tilt_alpha": None,
+        "slow_book_mode": "single_horizon",
+        "fast_book_mode": "single_horizon",
+        "rebalance_filter": "per_symbol_deadband",
+        "beta_neutralize": False,
+        "ensemble_signal": "raw",
+        "trend_efficiency_overlay": False,
+        "pnl_vol_target": True,
+        "pnl_vol_target_mode": "median_relative",
+        "trend_sleeve": False,
+        "trend_sleeve_gross": 0.0,
+        "multi_feature_book": False,
+        "committee_book": False,
+        "committee_kelly_sizing": False,
+        "committee_growth_diagnostic": False,
+        "committee_capital": False,
+        "committee_member_set": "risk_premia",
+        "committee_tranche_smoothing": False,
+        "committee_regime_adaptive_tranche": False,
+        "committee_tranche_count": 3,
+        "committee_target_gross": "<builtins.object>",
+        "committee_evidence_weighting": False,
+        "funding_carry_sleeve": False,
+        "funding_carry_weight": 0.0,
+        "execution_coverage_gate": False,
+        "exposure_scale_two_sided": False,
+        "exposure_drawdown_brake": False,
+        "name_drift_trim": False,
+        "ram_guard": True,
+        "growth_envelope": "conservative",
+        "committee_member_attribution": False,
+        "final_oos_2026h1": False,
+        "forward_registration_digest": None,
+        "data_policy": "zombie_mask_v1",
+        "input_manifest_path": None,
+        "forward_execution_quality_dir": None,
+        "forward_strategy_digest": None,
+    }
+)
+
+
 def _identity_dump(value: Any) -> str:
     return json.dumps(
         value,
@@ -274,59 +354,57 @@ def _identity_dump(value: Any) -> str:
     )
 
 
-def _equals_field_default(value: Any, field: Any) -> bool:
-    if field.default is dataclasses.MISSING:
+def _equals_baseline(name: str, value: Any) -> bool:
+    """True when ``value`` is the frozen identity baseline of field ``name``; never true for unregistered names."""
+    if name not in TRIAL_IDENTITY_BASELINE:
         return False
-    return _identity_dump(value) == _identity_dump(field.default)
+    return _identity_dump(value) == _identity_dump(TRIAL_IDENTITY_BASELINE[name])
 
 
 def _sparse_identity_key(key: str) -> str:
-    """Re-key one stored identity (dense or sparse) into the sparse form."""
+    """Re-key one stored identity (dense or sparse) into the sparse baseline form; non-object keys pass through."""
     try:
         parsed = json.loads(key)
     except json.JSONDecodeError:
         return key
     if not isinstance(parsed, dict):
         return key
-    from src.mhs.contracts import MhsDiagnosticRequest
-
-    for field in dataclasses.fields(MhsDiagnosticRequest):
-        if field.name in parsed and _equals_field_default(parsed[field.name], field):
-            del parsed[field.name]
+    for name in list(parsed.keys()):
+        if name in TRIAL_IDENTITY_BASELINE and _equals_baseline(name, parsed[name]):
+            del parsed[name]
     return _identity_dump(parsed)
 
 
 def trial_identity_key(record: Mapping[str, Any]) -> str | None:
     """Canonical identity key of one recorded configuration.
 
-    Normalizes the record's ``flags`` against the ``MhsDiagnosticRequest``
-    field defaults (missing key -> default, explicit ``None`` -> default),
-    drops the registered ``RESEARCH_NEUTRAL_FLAGS``, retains every other key
-    (fail-closed against new alpha fields), and serializes canonically. Two
-    records share a trial iff they denote the same strategy decision path,
-    regardless of schema drift or telemetry-only flag differences. Fields equal to their registered default are
-    omitted, so adding a defaulted request field never re-keys existing configurations.
+    Normalizes the record's ``flags`` against the frozen
+    ``TRIAL_IDENTITY_BASELINE`` (missing key or explicit ``None`` -> baseline;
+    a ``data_policy``-less record keeps the ``legacy`` policy it ran under),
+    drops ``RESEARCH_NEUTRAL_FLAGS``, omits values equal to their baseline,
+    retains every other key including unregistered ones (fail-closed against
+    new alpha fields), and serializes canonically with the ``params_snapshot``.
+    Two records share a trial iff they denote the same decision path.
+    Request dataclass defaults are deliberately not consulted: changing them
+    must never re-key recorded trials.
     """
     if not isinstance(record, Mapping):
         return None
-    from dataclasses import fields as dc_fields
-
-    from src.mhs.contracts import MhsDiagnosticRequest
-
     flags = record.get("flags")
     flags = flags if isinstance(flags, Mapping) else {}
     normalized: dict[str, Any] = {}
-    registered = {f.name for f in dc_fields(MhsDiagnosticRequest)}
-    for field in dc_fields(MhsDiagnosticRequest):
-        value = flags.get(field.name, field.default)
+    registered = set(TRIAL_IDENTITY_BASELINE)
+    for name in TRIAL_IDENTITY_BASELINE:
+        baseline = TRIAL_IDENTITY_BASELINE[name]
+        value = flags.get(name, baseline)
         if value is None:
-            value = field.default
-        if field.name == "data_policy" and "data_policy" not in flags:
+            value = baseline
+        if name == "data_policy" and "data_policy" not in flags:
             # Migration: a data_policy-less legacy record keeps its legacy
             # identity instead of adopting the new zombie default.
             value = "legacy"
-        if field.name not in RESEARCH_NEUTRAL_FLAGS and not _equals_field_default(value, field):
-            normalized[field.name] = value
+        if name not in RESEARCH_NEUTRAL_FLAGS and not _equals_baseline(name, value):
+            normalized[name] = value
     for key, value in flags.items():
         # Unknown keys are unregistered by construction: retain them fail-closed.
         if key not in registered and key not in RESEARCH_NEUTRAL_FLAGS:
