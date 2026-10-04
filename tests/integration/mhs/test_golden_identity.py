@@ -215,7 +215,7 @@ def test_run_mhs_diagnostic_entry_point_matches_golden(name, matrix_market, matr
     SCENARIO_MHS_STAGE_DECOMP_05_BOOKS_COMMITTEE
     SCENARIO_MHS_STAGE_DECOMP_06_ORCHESTRATOR
     """
-    from src.mhs.pipeline.config import MhsRunConfig
+    from src.mhs.pipeline.config import MhsRunConfig, MemberSet
     from src.mhs.pipeline.orchestrator import run_mhs_diagnostic
 
     root, end, start = matrix_market
@@ -225,6 +225,9 @@ def test_run_mhs_diagnostic_entry_point_matches_golden(name, matrix_market, matr
         committee_capital=False, committee_regime_adaptive_tranche=False,
         funding_carry_sleeve=False, committee_target_gross=None,
         pnl_vol_target_mode="median_relative",
+        committee_kelly_sizing=False, committee_evidence_weighting=False,
+        exposure_scale_two_sided=False, funding_carry_weight=0.0,
+        committee_member_set=MemberSet.RISK_PREMIA,
         # MhsRunConfig의 CLI 실효 기본값(60/growth_extreme)이 아니라 golden이 잡힌
         # MhsDiagnosticRequest의 동결 기본값(30/conservative)과 맞춰야 bit-exact parity가 성립한다.
         execution_universe_size=30,
