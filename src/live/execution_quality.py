@@ -13,15 +13,18 @@ import pandas as pd
 
 from src.common.paths import DATA_DIR
 from src.live.audit import AUDIT_LOG_RETENTION_DAYS
-from src.live.records import append_typed_frame
+from src.live.records import (
+    LIVE_RECORD_MAX_SHARDS,
+    LIVE_RECORD_SHARD_MAX_BYTES,
+    append_typed_frame,
+)
 from src.mhs.params import MEASURED_EXECUTION_COST_TIERS_BPS
-from src.mhs.run_history import RUN_HISTORY_MAX_SHARDS, RUN_HISTORY_SHARD_MAX_BYTES
 
 logger = logging.getLogger("ExecutionQuality")
 
 EXECUTION_QUALITY_MIN_EVIDENCE_DAYS: int = AUDIT_LOG_RETENTION_DAYS
-EXECUTION_QUALITY_SHARD_MAX_BYTES: int = RUN_HISTORY_SHARD_MAX_BYTES
-EXECUTION_QUALITY_MAX_SHARDS: int = RUN_HISTORY_MAX_SHARDS
+EXECUTION_QUALITY_SHARD_MAX_BYTES: int = LIVE_RECORD_SHARD_MAX_BYTES
+EXECUTION_QUALITY_MAX_SHARDS: int = LIVE_RECORD_MAX_SHARDS
 
 _EXECUTION_QUALITY_DTYPES: Mapping[str, str] = {
     "decision_time": "datetime64[ns, UTC]",

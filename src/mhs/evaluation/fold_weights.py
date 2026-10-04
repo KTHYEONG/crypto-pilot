@@ -1,6 +1,4 @@
-# mypy: ignore-errors
-# ruff: noqa: F401, F821, I001, E402, E701
-from __future__ import annotations  # mypy: ignore-errors
+from __future__ import annotations
 
 import dataclasses
 import os
@@ -10,17 +8,16 @@ import pandas as pd
 
 from src.mhs import research_go as _research_go
 from src.mhs import scaling as _scaling
+from src.mhs.books import inverse_realized_vol_tilt, portfolio_rebalance_trigger, renormalize_within_mask
 from src.mhs.contracts import MhsDiagnosticRequest
+from src.mhs.evidence import AnchoredPurgedFold
+from src.mhs.execution import bar_funding_panel
+from src.mhs.funding import funding_carry_execution_book
+from src.mhs.horizons import realized_vol
 from src.mhs.marks import (
     _pit_execution_mask,
     clear_mhs_market_data_caches,
 )
-from src.mhs.evidence import AnchoredPurgedFold
-from src.mhs.execution import bar_funding_panel
-from src.mhs.horizons import realized_vol
-from src.mhs.books import inverse_realized_vol_tilt, phase_tranche_book, portfolio_rebalance_trigger, renormalize_within_mask, scale_book_to_target_gross
-from src.mhs.funding import funding_carry_execution_book
-from src.mhs.features import build_feature_books
 from src.mhs.panel import PanelQuarantine, liquid_half_eligibility, load_base_panel, slice_base_panel
 from src.mhs.params import (
     CAUSAL_BETA_LOOKBACK_BARS,
@@ -30,9 +27,41 @@ from src.mhs.params import (
     REBALANCE_TRACKING_ERROR_THRESHOLD,
 )
 from src.mhs.regime import beta_neutralize_weights, causal_market_beta, crash_regime_tilt_weights
-from src.mhs.types import BOOK_BLEND_WEIGHTS, BOOK_SPECS, BookSpec, COMMITTEE_OOS_START, COMMITTEE_REGIME_ADAPTIVE_WINDOW, CRASH_REGIME_REFERENCE_SYMBOLS, FUNDING_CARRY_SLEEVE_LOOKBACK_HOURS
+from src.mhs.types import (
+    BOOK_BLEND_WEIGHTS,
+    BOOK_SPECS,
+    COMMITTEE_OOS_START,
+    COMMITTEE_REGIME_ADAPTIVE_WINDOW,
+    CRASH_REGIME_REFERENCE_SYMBOLS,
+    FUNDING_CARRY_SLEEVE_LOOKBACK_HOURS,
+)
 
 from . import books, committee, folds, integrity, specs
+
+
+def _resolve_effective_fold_window(
+    fold: AnchoredPurgedFold,
+    decision_start: pd.Timestamp | None,
+    decision_end: pd.Timestamp | None,
+) -> tuple[pd.Timestamp, pd.Timestamp]:
+    """Effective decision window for one fold, defaulting to its validation span.
+
+    Overrides exist for the train-only sizing reference; they must be tz-aware UTC,
+    non-empty and must not start before ``fold.train_start`` (no pre-discovery
+    borrowing). Raises ValueError with the existing messages otherwise.
+    """
+    ts = fold.train_start
+    effective_start = fold.validation_start if decision_start is None else decision_start
+    effective_end = fold.validation_end if decision_end is None else decision_end
+    if not isinstance(effective_start, pd.Timestamp) or effective_start.tzinfo is None:
+        raise ValueError("effective fold window bounds must be tz-aware UTC timestamps")
+    if not isinstance(effective_end, pd.Timestamp) or effective_end.tzinfo is None:
+        raise ValueError("effective fold window bounds must be tz-aware UTC timestamps")
+    if str(effective_start.tzinfo) != "UTC" or str(effective_end.tzinfo) != "UTC":
+        raise ValueError("effective fold window bounds must be UTC")
+    if effective_start < ts or effective_start >= effective_end:
+        raise ValueError("effective fold window is empty or precedes fold train_start")
+    return effective_start, effective_end
 
 
 def _build_fold_target_weights(
@@ -55,14 +84,7 @@ def _build_fold_target_weights(
 ) -> tuple[pd.DataFrame, pd.DatetimeIndex, list[str], pd.DatetimeIndex]:
     """Fold eligibility uses the same completed trade OHLCV and observed funding sources as top-level selection. Historical Mark availability cannot select fold members."""
     ts = fold.train_start
-    effective_start = fold.validation_start if decision_start is None else decision_start
-    effective_end = fold.validation_end if decision_end is None else decision_end
-    if not isinstance(effective_start, pd.Timestamp) or effective_start.tzinfo is None: raise ValueError("effective fold window bounds must be tz-aware UTC timestamps")
-    if not isinstance(effective_end, pd.Timestamp) or effective_end.tzinfo is None: raise ValueError("effective fold window bounds must be tz-aware UTC timestamps")
-    if str(effective_start.tzinfo) != "UTC" or str(effective_end.tzinfo) != "UTC": raise ValueError("effective fold window bounds must be UTC")
-    if effective_start < ts or effective_start >= effective_end: raise ValueError("effective fold window is empty or precedes fold train_start")
-    vs = effective_start
-    ve = effective_end
+    vs, ve = _resolve_effective_fold_window(fold, decision_start, decision_end)
     if apply_rebalance_deadband is False and request.rebalance_filter != "per_symbol_deadband":
         raise ValueError("apply_rebalance_deadband=False requires rebalance_filter='per_symbol_deadband'")
     panel_start = max(ts, vs - pd.Timedelta(hours=panel_warmup_hours))

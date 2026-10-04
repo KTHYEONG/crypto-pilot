@@ -60,6 +60,7 @@ select = [
     "ASYNC", # flake8-async
     "T20",  # flake8-print (Ensures no print statements are used, enforcing logger)
     "ARG",  # flake8-unused-arguments (Prevents unused variables/arguments cluttering context)
+    "PGH004",   # blanket noqa / ruff: noqa without codes
 ]
 ignore = [
     "S101",   # Allow assert (essential for pytest and invariant checking)
@@ -73,16 +74,11 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/*" = ["S101", "E402", "N803", "N806", "N813", "N814", "ARG", "I001", "RUF059", "F841", "N802"]
-"scripts/*" = ["T20"]
- "src/mhs/evaluation/*" = ["I001"]  # contract wiring mandates exact single-line import strings
- "src/mhs/evaluation.py" = ["I001"]  # contract wiring mandates exact single-line import strings
-"src/mhs/pipeline/orchestrator.py" = ["I001"]  # contract wiring mandates exact adjacent import lines
- "src/cli/commands/research/mhs.py" = ["I001"]  # contract wiring mandates an exact application-layer import line
- "src/cli/commands/research/*.py" = ["T20"]  # deterministic JSON diagnostic stdout
+"tests/*" = ["S101", "E402", "N803", "N806", "N813", "N814", "ARG", "I001", "RUF059", "F841", "N802", "PGH004"]
 "tools/maintenance/clean_logs.py" = ["T20"]  # ops CLI progress output
 
 [tool.ruff.lint.mccabe]
+# Enforced repo-wide by tests/contract/test_complexity_budget.py (frozen ratchet); C901 is deliberately not selected because verify lints only changed files and legacy functions are frozen, not exempted.
 max-complexity = 15
 
 [tool.mypy]
@@ -107,13 +103,6 @@ exclude = [
 [[tool.mypy.overrides]]
 module = "tests.*"
 ignore_errors = true
-
-# evaluation package intentionally re-exports many names imported from sibling mhs
-# modules; stage functions import them from evaluation's namespace for
-# byte-identical object references during the orchestrator decomposition.
-[[tool.mypy.overrides]]
-module = "src.mhs.evaluation"
-no_implicit_reexport = false
 
 
 

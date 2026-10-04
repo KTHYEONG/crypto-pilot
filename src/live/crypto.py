@@ -26,6 +26,9 @@ _TAG_LEN = 16
 _HEADER_LEN = len(MAGIC) + _NONCE_LEN
 _KEY_LEN = 32
 
+#: Exact byte overhead of one sealed envelope over its plaintext (MAGIC + nonce + GCM tag).
+SEALED_OVERHEAD_BYTES: int = _HEADER_LEN + _TAG_LEN
+
 #: 오라클 방지: 실패 원인을 구분하지 않는 단일 메시지.
 _GENERIC_SEAL_ERROR = "artifact seal envelope is invalid"
 

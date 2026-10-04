@@ -1,4 +1,3 @@
-# ruff: noqa
 """``live`` 커맨드 그룹: 섬도우 사이클 1회 실행 또는 24/7 무인 데몬 구동."""
 
 from __future__ import annotations
@@ -65,7 +64,6 @@ def _resolve_weights_path(explicit: str | None, settings: Any) -> Path:
 
 def _run_shadow_cycle(args: argparse.Namespace) -> None:
     from src.live.runner import run_shadow_cycle
-    from src.live.settings import LiveSettings
 
     settings = _settings_with_mode(args)
     report = run_shadow_cycle(
@@ -87,7 +85,6 @@ def _run_daemon(args: argparse.Namespace) -> None:
     from src.live.alerting import dispatch_alert, drain_alerts
     from src.live.lifecycle import ShutdownFlag, install_shutdown_handlers
     from src.live.recorder_watch import build_recorder_watchdog
-    from src.live.settings import LiveSettings
 
     _attach_process_log("daemon.log")
     settings = _settings_with_mode(args)
@@ -137,7 +134,6 @@ def _run_liveness_check(args: argparse.Namespace) -> None:
 
 def _run_frozen_step(args: argparse.Namespace) -> None:
     from src.live.scheduler import _default_frozen_step
-    from src.live.settings import LiveSettings
 
     _attach_process_log("frozen_step.log")
     settings = _settings_with_mode(args)
@@ -198,10 +194,9 @@ def _run_portfolio_state_summary(args: argparse.Namespace) -> None:  # noqa: ARG
 
 
 def _run_ledger_resync(args: argparse.Namespace) -> None:
+    import src.live.ledger_resync as _resync
     from src.common.errors import DataIntegrityError
     from src.live.errors import LiveTradingError
-
-    import src.live.ledger_resync as _resync
 
     settings = _settings_with_mode(args)
     try:
@@ -227,9 +222,8 @@ def _run_ledger_resync(args: argparse.Namespace) -> None:
 
 
 def _run_paper_funding_backfill(args: argparse.Namespace) -> None:
-    from src.common.errors import DataIntegrityError
-
     import src.live.funding_backfill as _backfill
+    from src.common.errors import DataIntegrityError
 
     settings = _settings_with_mode(args)
     try:
@@ -249,7 +243,6 @@ def _run_paper_funding_backfill(args: argparse.Namespace) -> None:
 
 def _run_preflight(args: argparse.Namespace) -> None:
     from src.live.preflight import run_preflight
-    from src.live.settings import LiveSettings
 
     settings = _settings_with_mode(args)
     report = run_preflight(settings, _resolve_weights_path(args.artifact, settings))

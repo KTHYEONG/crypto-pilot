@@ -335,6 +335,15 @@ EVENT_INFO: dict[str, dict[str, str]] = {
         "impact": "알림 아웃박스가 용량 상한에 도달했습니다. 오래된 완료 기록을 정리하고 알림 채널 상태를 확인하세요.",
         "action": "docker logs --tail 200 mhs-live-daemon",
     },
+    "order_recovery_unresolved": {
+        "title": "미해결 자체 주문으로 종목 동결",
+        "severity_badge": "⚠️ 주의",
+        "severity_label": "WARNING",
+        "header_color": "#d97706",
+        "bg_color": "#fffbeb",
+        "impact": "취소 확인이 되지 않은 자체 주문이 거래소에 남아 해당 종목의 모든 주문을 이번 사이클에서 보류했습니다. 주문이 종결되면 다음 사이클에 자동으로 해제되며, 같은 미해결 구간에는 다시 알리지 않습니다.",
+        "action": "docker exec mhs-live-daemon uv run python -m src.cli.main live status\ndocker logs --tail 200 mhs-live-daemon",
+    },
     "cycle_degraded": {
         "title": "디리스크 모드 축소 집행",
         "severity_badge": "🚨 긴급",

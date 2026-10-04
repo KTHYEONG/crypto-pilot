@@ -1,9 +1,10 @@
-"""Execution layer: passive fills, funding panel, and the simulated inventory ledger.
+"""Execution layer: passive fills, funding panel, and the streamed inventory ledger.
 
-The Research-GO PnL source is ``simulated_inventory_ledger`` fed by the
-OHLCV strict-proxy ``strategy_aware_execution_replay``; ``mhs_ledger_pnl`` is
-the pinned target-weight *pre-screen* proxy only and must never back Research
-GO, OOS, capital, or capacity claims.
+The Research-GO PnL source is the ``SimulatedInventoryLedgerResult`` streamed by
+``replay_execution_windows`` and the batch replays (the causal window accumulator).
+``simulated_inventory_ledger`` is an independent single-panel recomputation oracle used only by
+tests and diagnostics. ``mhs_ledger_pnl`` is the pinned target-weight *pre-screen* proxy only and
+must never back Research GO, OOS, capital, or capacity claims.
 """
 
 from __future__ import annotations

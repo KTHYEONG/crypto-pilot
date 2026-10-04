@@ -3,6 +3,15 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from src.common.errors import DataIntegrityError
+from src.mhs.data_policy import SOURCE_GAP_EXCLUDED_SYMBOLS as SOURCE_GAP_EXCLUDED_SYMBOLS
+from src.mhs.execution import StrategyExecutionReplayResult, laddered_fill_schedule
+from src.mhs.execution.integrity import (
+    _funding_gap_terminal_symbols as _funding_gap_terminal_symbols,
+)
+from src.mhs.execution.integrity import ledger_terminal_only as ledger_terminal_only
+from src.mhs.execution.integrity import replay_ledger_certified as replay_ledger_certified
+from src.mhs.params import PNL_VOL_TARGET_BURN_IN_DAYS
 from src.mhs.research_go import (
     GO_REASON_CAPITAL_BREACH,
     GO_REASON_EXECUTION_GAP,
@@ -10,21 +19,8 @@ from src.mhs.research_go import (
     GO_REASON_NONFINITE_EQUITY,
     GO_REASON_RESOURCE_BREACH,
 )
-from src.common.errors import DataIntegrityError
-from src.mhs.execution import StrategyExecutionReplayResult, laddered_fill_schedule
-from src.mhs.types import ExecutionSpec
-
-from src.mhs.data_policy import SOURCE_GAP_EXCLUDED_SYMBOLS as SOURCE_GAP_EXCLUDED_SYMBOLS
-from src.mhs.execution.integrity import (
-    _funding_gap_terminal_symbols as _funding_gap_terminal_symbols,
-)
-from src.mhs.execution.integrity import ledger_terminal_only as ledger_terminal_only
-from src.mhs.execution.integrity import replay_ledger_certified as replay_ledger_certified
 from src.mhs.resources import MhsResourceAdmissionError
-
-
-
-
+from src.mhs.types import ExecutionSpec
 
 
 def _assert_cache_required_ledger_valid(
@@ -200,3 +196,22 @@ def _assert_cache_required_marks(
                     f"for {name}"
                 )
 
+
+def _assert_train_reference_returns_valid(daily: pd.Series, train_end: pd.Timestamp, fold_index: int) -> None:
+    """Fail closed unless the fold's train-only sizing reference is causally usable.
+
+    The reference sizes the validation fold, so it must be finite, strictly
+    chronological, UTC, entirely before ``train_end`` (no validation leakage) and
+    at least ``PNL_VOL_TARGET_BURN_IN_DAYS`` rows long. Raises DataIntegrityError
+    naming the fold on the first violated condition.
+    """
+    if not bool(np.isfinite(daily.to_numpy(dtype="float64")).all()):
+        raise DataIntegrityError(f"fold {fold_index}: train reference returns must be finite")
+    if not daily.index.is_unique or not daily.index.is_monotonic_increasing:
+        raise DataIntegrityError(f"fold {fold_index}: train reference index must be unique and monotonic")
+    if not str(getattr(daily.index, "tz", None)) == "UTC":
+        raise DataIntegrityError(f"fold {fold_index}: train reference index must be UTC")
+    if not (daily.index < train_end).all():
+        raise DataIntegrityError(f"fold {fold_index}: train reference extends into validation")
+    if len(daily.dropna()) < PNL_VOL_TARGET_BURN_IN_DAYS:
+        raise DataIntegrityError(f"fold {fold_index}: train reference has {len(daily.dropna())} rows, require >= {PNL_VOL_TARGET_BURN_IN_DAYS}")

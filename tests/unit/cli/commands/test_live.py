@@ -242,3 +242,37 @@ def test_run_frozen_step_reports_and_fails_closed(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr("src.live.scheduler._default_frozen_step", _boom)
     with pytest.raises(SystemExit):
         live_mod._run_frozen_step(args)
+
+
+def test_run_ledger_resync_dry_run_logs_adjustment_count(monkeypatch, caplog) -> None:
+    """The ledger-resync handler plans a dry run and logs the adjustment count."""
+    import argparse
+    import logging
+    from types import SimpleNamespace
+
+    import src.cli.commands.live as live_mod
+    import src.live.ledger_resync as resync_mod
+
+    monkeypatch.setattr(resync_mod, "run_ledger_resync", lambda settings, *, apply, now: SimpleNamespace(adjustments=()))
+    with caplog.at_level(logging.INFO):
+        live_mod._run_ledger_resync(argparse.Namespace(apply=False, artifact=None, mode=None))
+    assert "adjustments=0" in caplog.text
+
+
+def test_run_paper_funding_backfill_dry_run_logs_cash_delta(monkeypatch, caplog) -> None:
+    """The funding-backfill handler plans a dry run and logs the cash delta."""
+    import argparse
+    import logging
+    from decimal import Decimal
+    from types import SimpleNamespace
+
+    import pandas as pd
+
+    import src.cli.commands.live as live_mod
+    import src.live.funding_backfill as backfill_mod
+
+    plan = SimpleNamespace(cash_delta=Decimal("0"), end=pd.Timestamp("2026-08-24", tz="UTC"))
+    monkeypatch.setattr(backfill_mod, "run_paper_funding_backfill", lambda settings, *, apply, now, accrual_start: plan)
+    with caplog.at_level(logging.INFO):
+        live_mod._run_paper_funding_backfill(argparse.Namespace(apply=False, artifact=None, mode=None, accrual_start=None))
+    assert "cash_delta=0" in caplog.text

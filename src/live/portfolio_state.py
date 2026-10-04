@@ -16,8 +16,8 @@ import pandas as pd
 
 from src.common.parquet_io import read_parquet_or_quarantine, write_parquet_atomic
 from src.common.paths import DATA_DIR
+from src.live.records import LIVE_RECORD_MAX_SHARDS, LIVE_RECORD_SHARD_MAX_BYTES
 from src.live.settings import ExecutionMode
-from src.mhs.run_history import RUN_HISTORY_MAX_SHARDS, RUN_HISTORY_SHARD_MAX_BYTES
 
 logger = logging.getLogger("PortfolioState")
 
@@ -89,7 +89,7 @@ def _unique_archive_path(history_dir: Path) -> Path:
 
 def _prune_archives(history_dir: Path) -> None:
     archives = sorted(history_dir.glob(f"{_PORTFOLIO_ARCHIVE_PREFIX}*{_PORTFOLIO_ARCHIVE_SUFFIX}"))
-    excess = len(archives) - RUN_HISTORY_MAX_SHARDS
+    excess = len(archives) - LIVE_RECORD_MAX_SHARDS
     for stale in archives[:excess]:
         with contextlib.suppress(OSError):
             stale.unlink()
@@ -129,7 +129,7 @@ def append_portfolio_state(record: PortfolioStateRecord, history_dir: Path) -> P
     """Append one cycle's portfolio state to ``active.parquet``, rotating it into a timestamped archive by size.
 
     Rotation (``active.parquet`` renamed to ``portfolio_state_<utc ms>.parquet`` once the next
-    append would exceed ``RUN_HISTORY_SHARD_MAX_BYTES``) is an atomic rename. The active shard is
+    append would exceed ``LIVE_RECORD_SHARD_MAX_BYTES``) is an atomic rename. The active shard is
     extended by atomic replacement; an undecodable active shard is quarantined and restarted from
     this record. Assumes a single writer process per ``history_dir``.
 
@@ -151,7 +151,7 @@ def append_portfolio_state(record: PortfolioStateRecord, history_dir: Path) -> P
     buf = io.BytesIO()
     df_new.to_parquet(buf, index=False, compression="snappy")
     new_bytes = buf.getvalue()
-    if active.exists() and active.stat().st_size + len(new_bytes) > RUN_HISTORY_SHARD_MAX_BYTES:
+    if active.exists() and active.stat().st_size + len(new_bytes) > LIVE_RECORD_SHARD_MAX_BYTES:
         archive = _unique_archive_path(history_dir)
         active.rename(archive)
         _prune_archives(history_dir)

@@ -1,6 +1,4 @@
-# mypy: ignore-errors
-# ruff: noqa: F401, F821, I001, E402
-from __future__ import annotations  # mypy: ignore-errors
+from __future__ import annotations
 
 import dataclasses
 import gc
@@ -8,7 +6,7 @@ import json
 import os
 import tempfile
 import zipfile
-from collections.abc import Callable, Iterable, Iterator, Mapping
+from collections.abc import Iterable, Iterator
 from dataclasses import replace as dataclass_replace
 from typing import Any, Literal
 
@@ -17,20 +15,42 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.ipc as pa_ipc
 
+from src.common.errors import DataIntegrityError
 from src.common.paths import BASE_DIR
 from src.mhs import research_go as _research_go
 from src.mhs import scaling as _scaling
 from src.mhs import statistics as _statistics
-from src.mhs.contracts import MhsBookFailure, MhsBookReport, MhsDiagnosticRequest
-from src.mhs.marks import _build_window_frames, _load_window_minute_frames
-from src.mhs.resources import MhsExecutionAllocation, assert_mhs_allocation_budget, plan_mhs_execution_bars, _assert_execution_rss_budget, _resolve_ram_budget, _StageRecorder
-from src.common.errors import DataIntegrityError
 from src.mhs.books import portfolio_rebalance_trigger
-from src.mhs.evidence import CostResponsePoint, PhaseDiagnosticResult, TailSensitivityResult, book_evidence, required_cost_tiers, resolved_anchored_folds
-from src.mhs.execution import ExecutionReplayWindow, StrategyExecutionReplayResult, align_funding_with_knowledge, bar_funding_panel, replay_execution_window_batch_isolated, replay_execution_windows, replay_execution_windows_coupled
+from src.mhs.contracts import MhsBookFailure, MhsBookReport, MhsDiagnosticRequest, MhsResourceMeasurement
+from src.mhs.evidence import (
+    CostResponsePoint,
+    PhaseDiagnosticResult,
+    TailSensitivityResult,
+    book_evidence,
+    required_cost_tiers,
+    resolved_anchored_folds,
+)
+from src.mhs.execution import (
+    ExecutionReplayWindow,
+    StrategyExecutionReplayResult,
+    replay_execution_window_batch_isolated,
+    replay_execution_windows,
+    replay_execution_windows_coupled,
+)
+from src.mhs.execution.window_stream import MhsExecutionWindow as MhsExecutionWindow
+from src.mhs.execution.window_stream import _estimate_mhs_execution_allocation as _estimate_mhs_execution_allocation
+from src.mhs.execution.window_stream import _iter_mhs_execution_windows as _iter_mhs_execution_windows
+from src.mhs.execution.window_stream import _materialize_execution_piece as _materialize_execution_piece
+from src.mhs.execution.window_stream import _minimum_mhs_execution_bars as _minimum_mhs_execution_bars
+from src.mhs.execution.window_stream import _resolve_ns_vectorized as _resolve_ns_vectorized
 from src.mhs.parallel import resolve_fork_shared
-from src.mhs.params import MEASURED_EXECUTION_COST_TIERS_BPS, REBALANCE_TRACKING_ERROR_THRESHOLD, REFERENCE_PASS_EQUITY_FLOOR
+from src.mhs.params import (
+    MEASURED_EXECUTION_COST_TIERS_BPS,
+    REBALANCE_TRACKING_ERROR_THRESHOLD,
+    REFERENCE_PASS_EQUITY_FLOOR,
+)
 from src.mhs.params import PERIODS_PER_YEAR_1H as _PERIODS_PER_YEAR_1H
+from src.mhs.resources import _assert_execution_rss_budget, _resolve_ram_budget, _StageRecorder
 from src.mhs.types import BookSpec, ExecutionSpec
 
 from . import books, integrity, specs
@@ -41,15 +61,6 @@ def _window_spill_root() -> str:
     root = os.environ.get("MHS_SPILL_DIR") or str(BASE_DIR / "tmp" / "mhs_spill")
     os.makedirs(root, exist_ok=True)
     return root
-
-
-from src.mhs.execution.window_stream import MhsExecutionWindow as MhsExecutionWindow  # noqa: E402
-from src.mhs.execution.window_stream import _estimate_mhs_execution_allocation as _estimate_mhs_execution_allocation  # noqa: E402
-from src.mhs.execution.window_stream import _iter_mhs_execution_windows as _iter_mhs_execution_windows  # noqa: E402
-from src.mhs.execution.window_stream import _materialize_execution_piece as _materialize_execution_piece  # noqa: E402
-from src.mhs.execution.window_stream import _minimum_mhs_execution_bars as _minimum_mhs_execution_bars  # noqa: E402
-from src.mhs.execution.window_stream import _resolve_ns_vectorized as _resolve_ns_vectorized  # noqa: E402
-
 
 
 def _rescaled_windows(
@@ -186,8 +197,11 @@ def _load_window_from_ipc(target_path: str) -> ExecutionReplayWindow:
                 for c in spec["columns"]
             }
             frames[name] = pd.DataFrame(data, index=idx, columns=spec["columns"])
-            frames[name] = frames[name].astype("float64")
-        known_frame = frames["funding_known"].astype(bool) if frames["funding_known"] is not None else None
+            built = frames[name]
+            if built is not None:
+                frames[name] = built.astype("float64")
+        funding_known = frames["funding_known"]
+        known_frame = funding_known.astype(bool) if funding_known is not None else None
         available = pd.DatetimeIndex(pd.to_datetime(np.asarray(meta.get("bar_available_ns"), dtype="int64"), unit="ns", utc=True)) if meta.get("bar_available_ns") is not None else None
         logical_partition = meta.get("logical_partition")
         from src.mhs.execution.contracts import FundingCoverageGap as _FundingCoverageGap

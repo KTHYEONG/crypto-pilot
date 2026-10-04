@@ -224,16 +224,22 @@ def test_recovery_malformed_venue_answer_fails_closed(tmp_path, answer) -> None:
     assert [s.client_order_id for s in journal.unresolved_submits(since=_NOW - _LOOKBACK)] == [order_id]
 
 
-def test_recovery_status_less_answer_left_for_sweep(tmp_path) -> None:
-    """A query answer without a status is undecidable and stays unresolved (no fill, no terminal)."""
+@pytest.mark.parametrize(
+    "answer",
+    [{"executedQty": "1.0"}, {"status": None, "executedQty": "1.0"}, {"status": "", "executedQty": "1.0"}],
+    ids=["missing_status", "none_status", "empty_status"],
+)
+def test_recovery_status_less_answer_fails_closed(tmp_path, answer) -> None:
+    """A query answer without a status fails closed (I-RECOVERY-STATUS): no fill, no terminal."""
     journal, _, order_id = _journal_with_submit(tmp_path)
     audit = AuditLog(tmp_path / "audit.jsonl")
-    client = _VenueClient({order_id: {"executedQty": "1.0"}})
+    client = _VenueClient({order_id: dict(answer)})
 
-    report = recover_unresolved_orders(client, journal, audit, now=_NOW, lookback=_LOOKBACK, taker_fee_bps=_TAKER_BPS)
+    with pytest.raises(DataIntegrityError):
+        recover_unresolved_orders(client, journal, audit, now=_NOW, lookback=_LOOKBACK, taker_fee_bps=_TAKER_BPS)
 
-    assert report.unresolved_ids == (order_id,)
-    assert report.recovered == ()
+    assert journal.fills_after(0) == ()
+    assert [s.client_order_id for s in journal.unresolved_submits(since=_NOW - _LOOKBACK)] == [order_id]
 
 
 def test_recovery_closed_order_without_new_execution_terminals_only(tmp_path) -> None:
@@ -263,3 +269,193 @@ def test_recovery_fill_without_venue_update_time_fails_closed(tmp_path, update_t
             client, journal, AuditLog(tmp_path / "a.jsonl"), now=_NOW, lookback=_LOOKBACK, taker_fee_bps=_TAKER_BPS
         )
     assert journal.observed_qty(order_id) == Decimal("0.4")
+
+
+# ---- Spec 02a: RecoveryReport.unresolved and settle_unresolved_orders ----
+
+def _settle_client(*, cancel_exc=None, answers=None):
+    """Cancel/query client counting venue calls; answers map order id to payload or exception."""
+
+    class _C:
+        def __init__(self):
+            self.cancels: list = []
+            self.queries: list = []
+
+        def cancel_order(self, symbol, oid):
+            self.cancels.append((symbol, oid))
+            if cancel_exc is not None:
+                raise cancel_exc
+            return {}
+
+        def query_order(self, symbol, oid):
+            self.queries.append((symbol, oid))
+            answer = (answers or {})[oid]
+            if isinstance(answer, Exception):
+                raise answer
+            return dict(answer)
+
+    return _C()
+
+
+def test_recovery_unresolved_carries_symbol_and_attempt(tmp_path) -> None:
+    """A PARTIALLY_FILLED answer returns unresolved with symbol and attempt attribution."""
+    from src.live.executor import UnresolvedOrder
+
+    journal, attempt, order_id = _journal_with_submit(tmp_path)
+    audit = AuditLog(tmp_path / "audit.jsonl")
+    client = _VenueClient({order_id: {"status": "PARTIALLY_FILLED", "side": "BUY", "executedQty": "0.4", "avgPrice": "99"}})
+
+    report = recover_unresolved_orders(client, journal, audit, now=_NOW, lookback=_LOOKBACK, taker_fee_bps=_TAKER_BPS)
+
+    assert report.unresolved == (UnresolvedOrder(order_id, "AAAUSDT", attempt.attempt_seq, 0),)
+    assert report.unresolved_ids == (order_id,)
+
+
+def test_settle_confirmed_cancel_books_delta_and_terminals(tmp_path) -> None:
+    """A confirmed CANCELED close books the executed delta as recovered and terminals the id."""
+    from src.live.executor import UnresolvedOrder
+    from src.live.recovery import settle_unresolved_orders
+
+    journal, attempt, order_id = _journal_with_submit(tmp_path)
+    audit = AuditLog(tmp_path / "audit.jsonl")
+    order = UnresolvedOrder(order_id, "AAAUSDT", attempt.attempt_seq, 0)
+    client = _settle_client(answers={order_id: {
+        "status": "CANCELED", "side": "BUY", "executedQty": "0.7", "avgPrice": "100", "updateTime": _UPDATE_MS}})
+
+    settlement = settle_unresolved_orders(client, journal, audit, (order,), taker_fee_bps=_TAKER_BPS)
+
+    assert len(settlement.recovered) == 1
+    fill = settlement.recovered[0]
+    assert (fill.quantity, fill.price) == (Decimal("0.3"), Decimal("100"))
+    assert fill.fee_bps == _TAKER_BPS
+    assert fill.filled_at == pd.Timestamp(_UPDATE_MS, unit="ms", tz="UTC")
+    assert fill.attempt_seq == attempt.attempt_seq
+    assert fill.cumulative_executed_qty == Decimal("0.7")
+    assert settlement.resolved_ids == (order_id,)
+    assert settlement.still_open == ()
+    assert journal.unresolved_submits(since=_NOW - _LOOKBACK) == ()
+
+
+def test_settle_2011_still_open_books_partial_delta_without_terminal(tmp_path) -> None:
+    """Cancel -2011 with a PARTIALLY_FILLED query books the delta but leaves the id non-terminal."""
+    from src.live.executor import UnresolvedOrder
+    from src.live.recovery import settle_unresolved_orders
+
+    journal, attempt, order_id = _journal_with_submit(tmp_path)
+    audit = AuditLog(tmp_path / "audit.jsonl")
+    order = UnresolvedOrder(order_id, "AAAUSDT", attempt.attempt_seq, 0)
+    client = _settle_client(
+        cancel_exc=_venue_error(-2011),
+        answers={order_id: {
+            "status": "PARTIALLY_FILLED", "side": "BUY", "executedQty": "0.6", "avgPrice": "100", "updateTime": _UPDATE_MS}})
+
+    settlement = settle_unresolved_orders(client, journal, audit, (order,), taker_fee_bps=_TAKER_BPS)
+
+    assert [f.quantity for f in settlement.recovered] == [Decimal("0.2")]
+    assert settlement.resolved_ids == ()
+    assert settlement.still_open == (order,)
+    assert [s.client_order_id for s in journal.unresolved_submits(since=_NOW - _LOOKBACK)] == [order_id]
+
+
+def test_settle_is_idempotent_on_unchanged_venue_state(tmp_path) -> None:
+    """Re-running settle on the same venue state books zero additional quantity."""
+    from src.live.executor import UnresolvedOrder
+    from src.live.recovery import settle_unresolved_orders
+
+    journal, attempt, order_id = _journal_with_submit(tmp_path)
+    audit = AuditLog(tmp_path / "audit.jsonl")
+    order = UnresolvedOrder(order_id, "AAAUSDT", attempt.attempt_seq, 0)
+    answer = {"status": "PARTIALLY_FILLED", "side": "BUY", "executedQty": "0.6", "avgPrice": "100", "updateTime": _UPDATE_MS}
+
+    first = settle_unresolved_orders(_settle_client(answers={order_id: answer}),
+                                     journal, audit, (order,), taker_fee_bps=_TAKER_BPS)
+    second = settle_unresolved_orders(_settle_client(answers={order_id: answer}),
+                                      journal, audit, (order,), taker_fee_bps=_TAKER_BPS)
+
+    assert len(first.recovered) == 1
+    assert second.recovered == ()
+    assert second.still_open == (order,)
+
+
+def test_settle_not_found_terminals_without_fill(tmp_path) -> None:
+    """A -2013 confirming query terminals NOT_FOUND with no fill."""
+    import json
+
+    from src.live.executor import ORDER_NOT_FOUND_STATUS, UnresolvedOrder
+    from src.live.recovery import settle_unresolved_orders
+
+    journal, attempt, order_id = _journal_with_submit(tmp_path)
+    audit = AuditLog(tmp_path / "audit.jsonl")
+    order = UnresolvedOrder(order_id, "AAAUSDT", attempt.attempt_seq, 0)
+    client = _settle_client(answers={order_id: _venue_error(-2013)})
+
+    settlement = settle_unresolved_orders(client, journal, audit, (order,), taker_fee_bps=_TAKER_BPS)
+
+    assert settlement.recovered == ()
+    assert settlement.resolved_ids == (order_id,)
+    assert settlement.still_open == ()
+    assert journal.unresolved_submits(since=_NOW - _LOOKBACK) == ()
+    assert journal.observed_qty(order_id) == Decimal("0.4")
+    terminals = [json.loads(line) for line in (tmp_path / "journal.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert [t for t in terminals if t.get("event") == "terminal"][-1]["status"] == ORDER_NOT_FOUND_STATUS
+
+
+def test_settle_status_less_confirmation_fails_closed(tmp_path) -> None:
+    """A confirming query without status raises DataIntegrityError and journals no terminal."""
+    from src.live.recovery import settle_unresolved_orders
+
+    journal, attempt, order_id = _journal_with_submit(tmp_path)
+    audit = AuditLog(tmp_path / "audit.jsonl")
+    from src.live.executor import UnresolvedOrder
+
+    client = _settle_client(answers={order_id: {"executedQty": "0"}})
+
+    with pytest.raises(DataIntegrityError):
+        settle_unresolved_orders(client, journal, audit,
+                                 (UnresolvedOrder(order_id, "AAAUSDT", attempt.attempt_seq, 0),),
+                                 taker_fee_bps=_TAKER_BPS)
+
+    assert [s.client_order_id for s in journal.unresolved_submits(since=_NOW - _LOOKBACK)] == [order_id]
+
+
+def test_settle_suppressed_client_makes_no_calls(tmp_path) -> None:
+    """A mutation-suppressed client returns an empty settlement with zero venue calls."""
+    from src.live.executor import UnresolvedOrder
+    from src.live.recovery import settle_unresolved_orders
+    from src.live.settings import ExecutionMode
+
+    journal, attempt, order_id = _journal_with_submit(tmp_path)
+    audit = AuditLog(tmp_path / "audit.jsonl")
+
+    class _SuppressedClient:
+        mode = ExecutionMode.PAPER
+
+        def cancel_order(self, symbol, oid):  # pragma: no cover - must never be called
+            raise AssertionError("suppressed client must not be asked to cancel")
+
+        def query_order(self, symbol, oid):  # pragma: no cover - must never be called
+            raise AssertionError("suppressed client must not be queried")
+
+    settlement = settle_unresolved_orders(_SuppressedClient(), journal, audit,
+                                          (UnresolvedOrder(order_id, "AAAUSDT", attempt.attempt_seq, 0),),
+                                          taker_fee_bps=_TAKER_BPS)
+
+    assert settlement.recovered == ()
+    assert settlement.resolved_ids == ()
+    assert settlement.still_open == ()
+
+
+def test_settle_empty_input_makes_no_calls(tmp_path) -> None:
+    """Settling no orders performs zero venue calls."""
+    from src.live.recovery import settle_unresolved_orders
+
+    journal, _, _ = _journal_with_submit(tmp_path)
+    client = _settle_client(answers={})
+
+    settlement = settle_unresolved_orders(client, journal, AuditLog(tmp_path / "a.jsonl"), (), taker_fee_bps=_TAKER_BPS)
+
+    assert settlement.recovered == ()
+    assert settlement.resolved_ids == ()
+    assert settlement.still_open == ()
+    assert client.cancels == []
+    assert client.queries == []

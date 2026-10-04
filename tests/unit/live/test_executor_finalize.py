@@ -520,6 +520,7 @@ def test_unknown_submission_found_late_adopted(tmp_path) -> None:
         def __init__(self):
             self.posted: list = []
             self.post_times: list = []
+            self.cancels: list = []
 
         def book_tickers(self):
             return {"AAAUSDT": {"symbol": "AAAUSDT", "bidPrice": "100.00", "askPrice": "100.20"}}
@@ -531,10 +532,13 @@ def test_unknown_submission_found_late_adopted(tmp_path) -> None:
                 raise OrderStatusUnknown("x", path="/fapi/v1/order", http_status=0, code=None)
             return {"orderId": len(self.posted)}
 
-        def cancel_order(self, *a, **k):
+        def cancel_order(self, symbol, oid):
+            self.cancels.append(oid)
             return {}
 
         def query_order(self, s, oid):
+            if oid in self.cancels:
+                return {"status": "CANCELED", "executedQty": "0", "avgPrice": "0"}
             if clock_state[0] < 10.0:
                 raise VenueError("m", code=-2013, http_status=400, path="/fapi/v1/order", payload_digest="0" * 12)
             return {"status": "NEW", "executedQty": "0", "avgPrice": "0"}
@@ -626,10 +630,16 @@ def test_finalize_horizon_branches(tmp_path) -> None:
     class _Found:
         unknown_outcome_horizon_s = 35.0
 
+        def __init__(self):
+            self.cancels: list = []
+
         def query_order(self, s, oid):
+            if oid in self.cancels:
+                return {"status": "CANCELED", "executedQty": "0"}
             return {"status": "NEW", "executedQty": "0"}
 
-        def cancel_order(self, *a, **k):
+        def cancel_order(self, symbol, oid):
+            self.cancels.append(oid)
             return {}
 
     rt = _rt("a", 0.0)
@@ -644,14 +654,18 @@ def test_finalize_horizon_branches(tmp_path) -> None:
 
         def __init__(self):
             self.n = 0
+            self.cancels: list = []
 
         def query_order(self, s, oid):
             self.n += 1
+            if oid in self.cancels:
+                return {"status": "CANCELED", "executedQty": "0"}
             if self.n == 1:
                 raise VenueError("m", code=-2013, http_status=400, path="/fapi/v1/order", payload_digest="0" * 12)
             return {"status": "NEW", "executedQty": "0"}
 
-        def cancel_order(self, *a, **k):
+        def cancel_order(self, symbol, oid):
+            self.cancels.append(oid)
             return {}
 
     rt2 = _rt("b", 0.0)

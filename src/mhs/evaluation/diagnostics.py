@@ -11,9 +11,8 @@ import pandas as pd
 import pyarrow.parquet as pq
 
 from src.mhs import statistics as _statistics
-from src.mhs.contracts import MhsDiagnosticRequest
-from src.mhs.resources import _assert_stage_rss_budget, _StageRecorder
 from src.mhs.books import rank_weight_book  # noqa: F401 - re-exported for monkeypatch seams
+from src.mhs.contracts import MhsDiagnosticRequest
 from src.mhs.discovery import yearly_net_t_diagnostic
 from src.mhs.evidence import (
     PhaseDiagnosticResult,
@@ -40,6 +39,7 @@ from src.mhs.params import (
 from src.mhs.params import (
     PERIODS_PER_YEAR_1H as _PERIODS_PER_YEAR_1H,
 )
+from src.mhs.resources import _assert_stage_rss_budget, _StageRecorder
 from src.mhs.stability import regime_split_stability
 from src.mhs.trend_sleeve import market_basket_log_price, time_series_trend_position, trend_sleeve_weights
 from src.mhs.types import TREND_SLEEVE_HORIZONS_HOURS, BookSpec

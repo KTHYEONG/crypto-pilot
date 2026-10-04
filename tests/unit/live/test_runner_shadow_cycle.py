@@ -20,7 +20,7 @@ from src.live.account import (
 from src.live.errors import ReconciliationBreach, RiskGateBreach, VenueError
 from src.live.executor import ExecutionOutcome
 from src.live.ledger import LedgerState, load_ledger, save_ledger
-from src.live.runner import check_risk_gates, run_shadow_cycle
+from src.live.runner import TickerMarks, check_risk_gates, run_shadow_cycle
 from src.live.settings import LiveSettings
 
 from tests.unit.live._runner_stubs import DECISION_TIME, NOW, StubMarketClient, StubOrderClient
@@ -446,8 +446,8 @@ def test_SCENARIO_LIVE_49_MARK_FETCH_FALLBACK_TOLERATES_UNKNOWN_SYMBOL() -> None
             return {"bidPrice": "100.00", "askPrice": "101.00"}
 
     marks = _marks_from_tickers(PartialFailClient(), ["AAAUSDT", "DEADUSDT", "BUSDT"])
-    assert set(marks) == {"AAAUSDT", "BUSDT"}
-    assert marks["AAAUSDT"] == Decimal("100.50")
+    assert set(marks.marks) == {"AAAUSDT", "BUSDT"}
+    assert marks.marks["AAAUSDT"] == Decimal("100.50")
 
 
 
@@ -1638,7 +1638,7 @@ def test_runner_stale_anchor_row_fails(artifact, live_env, tmp_path) -> None:
 def test_runner_current_ticker_remains_execution_check(artifact, live_env, tmp_path, monkeypatch) -> None:
     """A valid decision close with no current ticker stays NOT_TRADABLE."""
     settings = LiveSettings(notional_equity_usdt=2000.0, ledger_path=str(tmp_path / "ledger_notradable.json"), order_journal_path=str(tmp_path / "journal_25.jsonl"), fills_dir=str(tmp_path / "fills_25"), tax_ledger_dir=str(tmp_path / "tax_25"), execution_quality_dir=str(tmp_path / "eq_25"), portfolio_state_dir=str(tmp_path / "port_25"), microstructure_dir=str(tmp_path / "micro_25"))
-    monkeypatch.setattr(runner_mod, "_marks_from_tickers", lambda client, symbols: {})
+    monkeypatch.setattr(runner_mod, "_marks_from_tickers", lambda client, symbols: TickerMarks(marks={}, quotes={}))
     report = run_shadow_cycle(settings, DECISION_TIME, artifact, now=NOW)
     assert report.status == "COMPLETE"
     assert report.intent_count == 0

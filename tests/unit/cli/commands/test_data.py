@@ -756,3 +756,22 @@ def test_prune_live_data_tolerates_listing_unlink_failure(tmp_path, monkeypatch)
     data_mod._prune_live_data(argparse.Namespace())
 
     assert victim.exists()
+
+
+def test_venue_rules_cli_prints_written_snapshot_path(tmp_path, monkeypatch, capsys) -> None:
+    """`data collect venue-rules` prints exactly the written snapshot path to stdout."""
+    import src.cli.commands.data as data_mod
+    import src.market_data.binance.venue_rules as venue_mod
+    from types import SimpleNamespace
+
+    import pandas as pd
+
+    snapshot = SimpleNamespace(symbols=[], captured_at=pd.Timestamp("2026-10-04", tz="UTC"))
+    monkeypatch.setattr("src.common.paths.VENUE_RULES_DIR", tmp_path)
+    monkeypatch.setattr(venue_mod, "venue_rule_snapshot_exists", lambda *a, **k: False)
+    monkeypatch.setattr(venue_mod, "fetch_venue_rules", lambda **k: snapshot)
+    monkeypatch.setattr(venue_mod, "write_venue_rule_snapshot", lambda snapshot, directory: tmp_path / "v.json.gz")
+
+    data_mod._venue_rules(argparse.Namespace())
+
+    assert "v.json.gz" in capsys.readouterr().out
