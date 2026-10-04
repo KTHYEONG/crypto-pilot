@@ -9,25 +9,108 @@ carry the exact historical ``ValueError`` message strings so the 56
 from __future__ import annotations
 
 import re
-from typing import TYPE_CHECKING, Any
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Final
 
 if TYPE_CHECKING:
     from src.mhs.contracts import MhsDiagnosticRequest
+    from src.mhs.pipeline.config import MhsRunConfig
 
-from src.mhs.params import COMMITTEE_TRANCHE_COUNT, COMMITTEE_TRANCHE_COUNT_MAX
+from src.mhs.params import (
+    COMMITTEE_MEMBER_SET_INERT,
+    COMMITTEE_TRANCHE_COUNT,
+    COMMITTEE_TRANCHE_COUNT_MAX,
+)
+
+
+@dataclass(frozen=True, slots=True)
+class InertDependentRule:
+    """A value-carrying request field that only affects the decision path while ``is_active`` holds.
+
+    ``canonical`` is the only value the field may hold while inactive, so two
+    requests with the same decision path share one trial key and one procedure
+    digest. ``flag`` and ``requirement`` render the CLI rejection of an explicit
+    inert flag; ``message`` is the exact dataclass-level ``ValueError`` text.
+    """
+
+    field: str
+    flag: str
+    requirement: str
+    is_active: Callable[[Any], bool]
+    canonical: object
+    message: str
+
+
+INERT_DEPENDENT_RULES: Final[tuple[InertDependentRule, ...]] = (
+    InertDependentRule(
+        field="committee_member_set",
+        flag="--committee-member-set",
+        requirement="committee_capital=True",
+        is_active=lambda request: bool(request.committee_capital),
+        canonical=COMMITTEE_MEMBER_SET_INERT,
+        message="committee_member_set requires committee_capital=True",
+    ),
+    InertDependentRule(
+        field="committee_tranche_count",
+        flag="--committee-tranche-count",
+        requirement="committee_tranche_smoothing or committee_regime_adaptive_tranche",
+        is_active=lambda request: bool(
+            request.committee_tranche_smoothing or request.committee_regime_adaptive_tranche
+        ),
+        canonical=COMMITTEE_TRANCHE_COUNT,
+        message=(
+            "committee_tranche_count other than the default requires "
+            "committee_tranche_smoothing or committee_regime_adaptive_tranche"
+        ),
+    ),
+    InertDependentRule(
+        field="committee_target_gross",
+        flag="--committee-target-gross",
+        requirement="committee_capital=True",
+        is_active=lambda request: bool(request.committee_capital),
+        canonical=None,
+        message="committee_target_gross requires committee_capital=True",
+    ),
+    InertDependentRule(
+        field="funding_carry_weight",
+        flag="--funding-carry-weight",
+        requirement="funding_carry_sleeve=True",
+        is_active=lambda request: bool(request.funding_carry_sleeve),
+        canonical=0.0,
+        message="funding_carry_weight > 0.0 requires funding_carry_sleeve=True",
+    ),
+    InertDependentRule(
+        field="trend_sleeve_gross",
+        flag="--trend-sleeve-gross",
+        requirement="trend_sleeve=True",
+        is_active=lambda request: bool(request.trend_sleeve),
+        canonical=0.0,
+        message="trend_sleeve_gross requires trend_sleeve=True",
+    ),
+)
+
+
+def inert_dependent_overrides(request: Any) -> dict[str, object]:
+    """Canonical values for every inert dependent field of ``request``.
+
+    Returns ``{rule.field: rule.canonical}`` for each rule whose ``is_active``
+    is false; an empty mapping when every dependency is active. Pure.
+    """
+    return {rule.field: rule.canonical for rule in INERT_DEPENDENT_RULES if not rule.is_active(request)}
 
 
 def _choice_error(field: str, value: Any, choices: tuple[str, ...]) -> str:
     return f"unknown {field} '{value}'"
 
 
-def _validate_field_choices(request: MhsDiagnosticRequest, field: str, choices: tuple[str, ...]) -> None:
+def _validate_field_choices(request: MhsDiagnosticRequest | MhsRunConfig, field: str, choices: tuple[str, ...]) -> None:
     value = getattr(request, field)
     if value not in choices:
         raise ValueError(_choice_error(field, value, choices))
 
 
-def _validate_field_bounds(request: MhsDiagnosticRequest, field: str, bounds: tuple[float, float]) -> None:
+def _validate_field_bounds(request: MhsDiagnosticRequest | MhsRunConfig, field: str, bounds: tuple[float, float]) -> None:
     value = getattr(request, field)
     if value is None:
         return
@@ -36,7 +119,7 @@ def _validate_field_bounds(request: MhsDiagnosticRequest, field: str, bounds: tu
         raise ValueError(f"{field} must be in [{lo}, {hi}]")
 
 
-def _validate_committee_tranche_count(request: MhsDiagnosticRequest) -> None:
+def _validate_committee_tranche_count(request: MhsDiagnosticRequest | MhsRunConfig) -> None:
     """Fail-closed bounds for the committee tranche count.
 
     Raises:
@@ -63,7 +146,7 @@ def _validate_committee_tranche_count(request: MhsDiagnosticRequest) -> None:
         )
 
 
-def validate_request(request: MhsDiagnosticRequest, committee_target_gross_unset: object) -> None:
+def validate_request(request: MhsDiagnosticRequest | MhsRunConfig, committee_target_gross_unset: object) -> None:
     """Validate the single-source MHS diagnostic request and its timing, capital and execution controls without authorizing a mark-price valuation branch.
 
     Args:
@@ -85,6 +168,7 @@ def validate_request(request: MhsDiagnosticRequest, committee_target_gross_unset
     from src.mhs.panel import DATA_POLICIES
 
     _validate_field_choices(request, "data_policy", tuple(sorted(DATA_POLICIES)))
+    _validate_field_choices(request, "liquidity_cost_model", ("flat", "corwin_schultz"))
     _timeframe_minutes = 3
     if request.passive_timeout_minutes < 1 or request.passive_timeout_minutes % _timeframe_minutes:
         raise ValueError(
@@ -207,6 +291,8 @@ def validate_request(request: MhsDiagnosticRequest, committee_target_gross_unset
     _validate_field_choices(
         request, "committee_member_set", ("risk_premia", "flow_momentum"),
     )
+    if not request.committee_capital and request.committee_member_set != COMMITTEE_MEMBER_SET_INERT:
+        raise ValueError("committee_member_set requires committee_capital=True")
     if not isinstance(request.funding_carry_sleeve, bool):
         raise ValueError("funding_carry_sleeve must be a bool")
     if request.funding_carry_sleeve and not request.committee_capital:
@@ -223,7 +309,7 @@ def validate_request(request: MhsDiagnosticRequest, committee_target_gross_unset
         raise ValueError("funding_carry_weight > 0.0 requires funding_carry_sleeve=True")
 
 
-def _validate_forward_registration(request: MhsDiagnosticRequest) -> None:
+def _validate_forward_registration(request: MhsDiagnosticRequest | MhsRunConfig) -> None:
     """Fail-closed preconditions for a registered forward evaluation."""
     digest = request.forward_registration_digest
     if digest is None:

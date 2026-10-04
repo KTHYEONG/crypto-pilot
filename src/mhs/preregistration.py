@@ -75,10 +75,11 @@ def procedure_payload(request: Any) -> dict[str, Any]:
 
     Run-window and telemetry fields are excluded; the resolved committee gross
     and the sealed params snapshot are included so a changed decision constant
-    changes the digest.
+    changes the digest. Inert dependent fields are recorded at their canonical value so one decision path has one digest.
     """
     from src.mhs.live_strategy import capture_params_snapshot
     from src.mhs.research_go import _resolved_committee_target_gross
+    from src.mhs.validation import inert_dependent_overrides
 
     payload = {
         f.name: getattr(request, f.name)
@@ -87,6 +88,7 @@ def procedure_payload(request: Any) -> dict[str, Any]:
     }
     payload["committee_target_gross"] = _resolved_committee_target_gross(request)
     payload["params_snapshot"] = capture_params_snapshot()
+    payload.update(inert_dependent_overrides(request))
     raw = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"), default=str)
     return json.loads(raw)  # type: ignore[no-any-return]
 
