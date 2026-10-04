@@ -107,7 +107,7 @@ class MhsDiagnosticRequest:
         metadata=cli_param(flag="--ladder-diagnostic", help="Additionally replay under OHLCV_LADDERED_PROXY."),
     )
     peg_chase_diagnostic: bool = field(default=False, metadata=cli_param(flag="--peg-chase-diagnostic", help="Additionally replay under OHLCV_PEG_CHASE_PROXY."))
-    liquidity_cost_model: str = field(default="flat", metadata=cli_param(flag="--liquidity-cost-model", help="Taker crossing cost model: flat or corwin_schultz."))
+    liquidity_cost_model: Literal["flat", "corwin_schultz"] = field(default="flat", metadata=cli_param(flag="--liquidity-cost-model", help="Taker crossing cost model: flat or corwin_schultz.", choices=("flat", "corwin_schultz")))
     passive_timeout_minutes: int = field(
         default=30,
         metadata=cli_param(

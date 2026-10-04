@@ -241,7 +241,7 @@ def test_mhs_diagnostic_trend_sleeve_flags_threaded_to_request(monkeypatch) -> N
 
     defaults = {action.dest: action.default for action in parser._actions}
     assert defaults["trend_sleeve"] is False
-    assert defaults["trend_sleeve_gross"] == 0.0
+    assert defaults["trend_sleeve_gross"] is None
 
     args = parser.parse_args(["--trend-sleeve", "--trend-sleeve-gross", "0.3"])
     assert args.trend_sleeve is True
@@ -253,7 +253,7 @@ def test_mhs_diagnostic_trend_sleeve_flags_threaded_to_request(monkeypatch) -> N
     captured.clear()
     args = parser.parse_args([])
     assert args.trend_sleeve is False
-    assert args.trend_sleeve_gross == 0.0
+    assert args.trend_sleeve_gross is None
     _run_mhs_horizon_diagnostic(args)
     assert captured["trend_sleeve"] is False
     assert captured["trend_sleeve_gross"] == 0.0
@@ -786,7 +786,7 @@ def test_cli_flags_threaded(monkeypatch) -> None:
     defaults = {action.dest: action.default for action in parser._actions}
     assert defaults["pnl_vol_target_mode"] == "growth_budget"
     assert defaults["no_funding_carry_sleeve"] is False
-    assert defaults["funding_carry_weight"] == FUNDING_CARRY_SLEEVE_WEIGHT
+    assert defaults["funding_carry_weight"] is None
 
     # Default (2026-08-22 main logic): growth_budget, carry sleeve ON
     # (committee_capital default ON)
@@ -794,7 +794,7 @@ def test_cli_flags_threaded(monkeypatch) -> None:
     args = parser.parse_args([])
     assert args.pnl_vol_target_mode == "growth_budget"
     assert args.no_funding_carry_sleeve is False
-    assert args.funding_carry_weight == FUNDING_CARRY_SLEEVE_WEIGHT
+    assert args.funding_carry_weight is None
     _run_mhs_horizon_diagnostic(args)
     assert captured["pnl_vol_target_mode"] == "growth_budget"
     assert captured["funding_carry_sleeve"] is True

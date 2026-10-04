@@ -107,6 +107,9 @@ COMMITTEE_MEMBER_SETS: dict[str, tuple[str, ...]] = {
 
 COMMITTEE_DEFAULT_MEMBER_SET: str = "flow_momentum"
 
+# Canonical value of committee_member_set while committee capital is off; equal to the frozen trial-identity baseline so a capital-off run never carries an inert member set into its trial key or procedure digest.
+COMMITTEE_MEMBER_SET_INERT: str = "risk_premia"
+
 COMMITTEE_MEMBERS: tuple[str, ...] = COMMITTEE_MEMBER_SETS[
     COMMITTEE_DEFAULT_MEMBER_SET
 ]

@@ -330,3 +330,112 @@ def test_config_forward_registration_default_none():
     from src.mhs.pipeline.config import MhsRunConfig
 
     assert MhsRunConfig().forward_registration_digest is None
+
+
+def test_from_namespace_is_pure_and_idempotent() -> None:
+    import copy
+
+    from src.cli.main import build_root_parser
+    from src.mhs.pipeline.config import MhsRunConfig
+
+    base = ["research", "run", "portfolio", "mhs-horizon-diagnostic"]
+    args = build_root_parser().parse_args([*base, "--pnl-vol-target-mode", "median_relative"])
+    before = copy.deepcopy(vars(args))
+    first = MhsRunConfig.from_namespace(args)
+    second = MhsRunConfig.from_namespace(args)
+    assert vars(args) == before
+    assert first == second
+    assert first.exposure_scale_two_sided is False
+
+
+def test_from_namespace_no_arg_parity_preserved() -> None:
+    import dataclasses
+
+    from src.cli.main import build_root_parser
+    from src.mhs.pipeline.config import MhsRunConfig
+
+    base = ["research", "run", "portfolio", "mhs-horizon-diagnostic"]
+    args = build_root_parser().parse_args(base)
+    assert dataclasses.asdict(MhsRunConfig.from_namespace(args)) == dataclasses.asdict(MhsRunConfig())
+
+
+def test_from_namespace_rejects_explicit_inert_flags() -> None:
+    import re
+
+    import pytest
+
+    from src.cli.main import build_root_parser
+    from src.mhs.pipeline.config import MhsRunConfig
+
+    base = ["research", "run", "portfolio", "mhs-horizon-diagnostic"]
+    cases = [
+        (["--no-committee-capital", "--committee-member-set", "risk_premia"], "--committee-member-set is inert unless committee_capital=True"),
+        (["--no-committee-capital", "--funding-carry-weight", "0.25"], "--funding-carry-weight is inert unless funding_carry_sleeve=True"),
+        (["--no-funding-carry-sleeve", "--funding-carry-weight", "0.3"], "--funding-carry-weight is inert unless funding_carry_sleeve=True"),
+        (["--no-committee-capital", "--committee-target-gross", "1.2"], "--committee-target-gross is inert unless committee_capital=True"),
+        (["--no-committee-regime-adaptive-tranche", "--committee-tranche-count", "5"], "--committee-tranche-count is inert unless committee_tranche_smoothing or committee_regime_adaptive_tranche"),
+        (["--trend-sleeve-gross", "0.0"], "--trend-sleeve-gross is inert unless trend_sleeve=True"),
+    ]
+    for extra, message in cases:
+        args = build_root_parser().parse_args([*base, *extra])
+        with pytest.raises(ValueError, match=re.escape(message)):
+            MhsRunConfig.from_namespace(args)
+
+
+def test_mutually_exclusive_gross_flags() -> None:
+    import pytest
+
+    from src.cli.main import build_root_parser
+
+    base = ["research", "run", "portfolio", "mhs-horizon-diagnostic"]
+    with pytest.raises(SystemExit):
+        build_root_parser().parse_args([*base, "--committee-target-gross", "1.2", "--no-committee-target-gross"])
+
+
+def test_capital_opt_out_yields_canonical_dependents() -> None:
+    from src.cli.main import build_root_parser
+    from src.mhs.params import COMMITTEE_TRANCHE_COUNT
+    from src.mhs.pipeline.config import MhsRunConfig
+
+    base = ["research", "run", "portfolio", "mhs-horizon-diagnostic"]
+    config = MhsRunConfig.from_namespace(build_root_parser().parse_args([*base, "--no-committee-capital"]))
+    assert config.committee_member_set == "risk_premia"
+    assert config.committee_tranche_count == COMMITTEE_TRANCHE_COUNT
+    assert config.committee_target_gross is None
+    assert config.funding_carry_weight == 0.0
+    assert config.trend_sleeve_gross == 0.0
+    assert config.committee_kelly_sizing is False
+    assert config.committee_evidence_weighting is False
+    assert config.committee_regime_adaptive_tranche is False
+    assert config.funding_carry_sleeve is False
+
+
+def test_active_explicit_values_pass_through() -> None:
+    from src.cli.main import build_root_parser
+    from src.mhs.pipeline.config import MhsRunConfig
+
+    base = ["research", "run", "portfolio", "mhs-horizon-diagnostic"]
+    cfg = MhsRunConfig.from_namespace(
+        build_root_parser().parse_args([*base, "--committee-tranche-smoothing", "--committee-tranche-count", "7"])
+    )
+    assert cfg.committee_tranche_count == 7
+    cfg = MhsRunConfig.from_namespace(
+        build_root_parser().parse_args([*base, "--trend-sleeve", "--trend-sleeve-gross", "0.3"])
+    )
+    assert cfg.trend_sleeve_gross == 0.3
+    cfg = MhsRunConfig.from_namespace(
+        build_root_parser().parse_args([*base, "--funding-carry-weight", "0.25"])
+    )
+    assert cfg.funding_carry_weight == 0.25
+    cfg = MhsRunConfig.from_namespace(
+        build_root_parser().parse_args([*base, "--committee-member-set", "risk_premia"])
+    )
+    assert cfg.committee_member_set == "risk_premia"
+    cfg = MhsRunConfig.from_namespace(
+        build_root_parser().parse_args([*base, "--committee-target-gross", "1.2"])
+    )
+    assert cfg.committee_target_gross == 1.2
+    cfg = MhsRunConfig.from_namespace(
+        build_root_parser().parse_args([*base, "--no-committee-target-gross", "--no-funding-carry-sleeve"])
+    )
+    assert cfg.committee_target_gross is None

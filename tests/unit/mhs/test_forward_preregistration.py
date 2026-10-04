@@ -553,3 +553,51 @@ def test_integrity_skips_reliability_eligibility_only_under_forward_protocol(mon
     assert dg.integrity_reasons_from_report(unsealed, SimpleNamespace(forward_registration_digest="d" * 32)) == (
         dg.GATE_INPUT_UNSEALED,
     )
+
+
+def test_one_decision_path_one_digest() -> None:
+    from src.mhs.contracts import MhsDiagnosticRequest
+    from src.mhs.preregistration import procedure_identity_digest, procedure_payload
+
+    assert procedure_identity_digest(MhsDiagnosticRequest()) == procedure_identity_digest(
+        MhsDiagnosticRequest(committee_target_gross=None)
+    )
+    assert procedure_payload(MhsDiagnosticRequest())["committee_target_gross"] is None
+
+
+def test_active_payload_unchanged() -> None:
+    import dataclasses
+
+    from src.mhs.contracts import MhsDiagnosticRequest
+    from src.mhs.params import COMMITTEE_TARGET_GROSS
+    from src.mhs.pipeline.config import MhsRunConfig
+    from src.mhs.preregistration import procedure_payload
+    from src.mhs.validation import inert_dependent_overrides
+
+    request = MhsDiagnosticRequest(**dataclasses.asdict(MhsRunConfig()))
+    assert inert_dependent_overrides(request) == {"trend_sleeve_gross": 0.0}
+    assert procedure_payload(request)["committee_target_gross"] == COMMITTEE_TARGET_GROSS
+
+
+def test_cli_opt_out_and_research_request_share_identity() -> None:
+    import dataclasses
+
+    from src.cli.main import build_root_parser
+    from src.mhs.contracts import MhsDiagnosticRequest
+    from src.mhs.pipeline.config import MhsRunConfig
+    from src.mhs.preregistration import procedure_identity_digest
+    from src.mhs.run_history import trial_identity_key
+
+    base = ["research", "run", "portfolio", "mhs-horizon-diagnostic"]
+    cfg = MhsRunConfig.from_namespace(
+        build_root_parser().parse_args(
+            [*base, "--no-committee-capital", "--execution-universe-size", "30",
+             "--pnl-vol-target-mode", "median_relative", "--growth-envelope", "conservative"]
+        )
+    )
+    req = MhsDiagnosticRequest()
+    snapshot = {"K": 1}
+    assert trial_identity_key({"flags": dataclasses.asdict(cfg), "params_snapshot": snapshot}) == trial_identity_key(
+        {"flags": dataclasses.asdict(req), "params_snapshot": snapshot}
+    )
+    assert procedure_identity_digest(cfg) == procedure_identity_digest(req)

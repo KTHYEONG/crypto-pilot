@@ -19,12 +19,9 @@ from src.mhs.params import (
     CLI_GROWTH_ENVELOPE_DEFAULT as _CLI_GROWTH_ENVELOPE_DEFAULT,
 )
 from src.mhs.params import (
-    COMMITTEE_DEFAULT_MEMBER_SET,
-    COMMITTEE_TRANCHE_COUNT,
     GROWTH_RISK_ENVELOPES,
     LEVERAGE_FRONTIER_SCAN_MULTIPLES,
 )
-from src.mhs.types import FUNDING_CARRY_SLEEVE_WEIGHT
 
 # The application module imports numpy/pandas transitively; it is imported
 # lazily inside the handler so that merely registering the parser never pulls
@@ -221,7 +218,7 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
     mhs.add_argument(
         "--trend-sleeve-gross",
         type=float,
-        default=0.0,
+        default=None,
         help=(
             "Gross budget allocated to the directional trend sleeve, in "
             "[0.0, 1.0]; a risk-budget policy value, never a fitted parameter. "
@@ -283,7 +280,8 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
             "or capital allocation"
         ),
     )
-    mhs.add_argument(
+    gross_group = mhs.add_mutually_exclusive_group()
+    gross_group.add_argument(
         "--committee-target-gross",
         type=float,
         default=None,
@@ -304,7 +302,7 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
             "a risk-budget policy value, never a fitted parameter"
         ),
     )
-    mhs.add_argument(
+    gross_group.add_argument(
         "--no-committee-target-gross",
         action="store_true",
         default=False,
@@ -357,7 +355,7 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
             "own signals per ADR_20260823_MHS_CONSTANT_RISK_DEPLOYMENT."
         ),
     )
-    mhs.add_argument("--committee-tranche-count", type=int, default=COMMITTEE_TRANCHE_COUNT, help="Committee tranche mean length in 24h decision rows (1..7). Non-default values require --committee-tranche-smoothing or the default regime-adaptive tranche.")
+    mhs.add_argument("--committee-tranche-count", type=int, default=None, help="Committee tranche mean length in 24h decision rows (1..7). Non-default values require --committee-tranche-smoothing or the default regime-adaptive tranche.")
     mhs.add_argument(
         "--no-committee-regime-adaptive-tranche",
         action="store_true",
@@ -538,7 +536,7 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
     mhs.add_argument(
         "--committee-member-set",
         choices=["risk_premia", "flow_momentum"],
-        default=COMMITTEE_DEFAULT_MEMBER_SET,
+        default=None,
         help=(
             "Registered committee axis set: flow_momentum (default, "
             "the certified k=5 book) or risk_premia (measured non-default -- "
@@ -561,7 +559,7 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
     mhs.add_argument(
         "--funding-carry-weight",
         type=float,
-        default=FUNDING_CARRY_SLEEVE_WEIGHT,
+        default=None,
         help=(
             "Gross-budget share of the funding-carry sleeve in [0.0, 1.0); "
             "a registered risk-budget policy value on a measured 0.25-0.35 "
