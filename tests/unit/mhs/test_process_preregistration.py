@@ -17,6 +17,7 @@ from src.mhs.backtest.journal import (
     reserve_research_attempt,
 )
 from src.mhs.preregistration import register_process_procedure
+from src.mhs.run_history import append_run_history_record
 
 from tests.unit.mhs.test_research_journal import (
     E1,
@@ -51,21 +52,35 @@ def test_registration_advances_boundary_without_unsealing_history(tmp_path: Path
     assert load_process_evaluation_plan(journal) == registered
     journal2 = tmp_path / "j2.db"
     initialize_research_journal(journal2, now=INIT_NOW, legacy_consulted_through=LEGACY_OLD, legacy_history_complete=False)
-    (tmp_path / "hist2").mkdir(parents=True, exist_ok=True)
-    (tmp_path / "hist2" / "active.jsonl").write_text(
-        '{"resolved_end": "2026-08-20T00:00:00+00:00", "end": "2026-08-20T00:00:00+00:00"}\n', encoding="utf-8"
+    hist2 = tmp_path / "hist2"
+    append_run_history_record(
+        {"resolved_end": "2026-08-20T00:00:00+00:00", "end": "2026-08-20T00:00:00+00:00"}, hist2
     )
     late = register_process_procedure(
         _plan(family_id="fam-late"), now=pd.Timestamp("2026-08-21", tz="UTC"), journal_path=journal2,
-        legacy_history_dir=tmp_path / "hist2", legacy_registry_path=tmp_path / "reg2.jsonl",
+        legacy_history_dir=hist2, legacy_registry_path=tmp_path / "reg2.jsonl",
     )
     assert late.registration_digest is not None
     historical = register_process_procedure(
         _plan(role="historical", judging_start=None, family_id="fam-hist"),
         now=pd.Timestamp("2026-08-21", tz="UTC"), journal_path=journal2,
-        legacy_history_dir=tmp_path / "hist2", legacy_registry_path=tmp_path / "reg2.jsonl",
+        legacy_history_dir=hist2, legacy_registry_path=tmp_path / "reg2.jsonl",
     )
     assert historical.registration_digest is not None
+
+
+def test_history_look_blocks_process_registration(tmp_path: Path) -> None:
+    """A look recorded in the run-history registry is part of the consulted floor."""
+    journal = _journal(tmp_path / "j.db")
+    hist = tmp_path / "hist"
+    append_run_history_record(
+        {"resolved_end": "2026-08-20T00:00:00+00:00", "end": "2026-08-20T00:00:00+00:00"}, hist
+    )
+    with pytest.raises(DataIntegrityError, match="precedes consulted data horizon"):
+        register_process_procedure(
+            _plan(family_id="fam-early"), now=pd.Timestamp("2026-08-19", tz="UTC"), journal_path=journal,
+            legacy_history_dir=hist, legacy_registry_path=tmp_path / "reg.jsonl",
+        )
 
 
 def test_frozen_runtime_mismatch_blocks_registration(tmp_path: Path) -> None:

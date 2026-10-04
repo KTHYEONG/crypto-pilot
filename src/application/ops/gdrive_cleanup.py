@@ -20,6 +20,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
+from src.live.crypto import SEALED_OVERHEAD_BYTES
+
 DRIVE_REMOTE: str = "gdrive:quant-lake"
 LIVE_DATA: str = "live/crypto-pilot/data"
 RESEARCH_FUTURES: str = "research/crypto-pilot-full/futures"
@@ -30,6 +32,9 @@ LEGACY_FUTURES_SUBDIRS: tuple[str, ...] = ("ohlcv/1h", "markPriceKlines/1h", "fu
 LIVE_STATE_KEEP: frozenset[str] = frozenset({"live_daemon_heartbeat.json", "live_daemon_last_run.json", "non_crypto_symbols.json"})
 VISION_BUCKET_LISTING_URL: str = "https://s3-ap-northeast-1.amazonaws.com/data.binance.vision"
 REPORT_DIR: Path = Path("logs/ops")
+
+#: Suffixes of append-only text ledgers: a later copy may legitimately be larger, never smaller.
+APPEND_ONLY_SUFFIXES: tuple[str, ...] = (".jsonl",)
 
 CleanupRule = Literal["futures_legacy", "legacy_state", "plaintext_run_artifact", "manual_debug_backup", "oci_server_snapshot"]
 
@@ -66,6 +71,26 @@ _BOUND_SUBPROCESS_RUN = subprocess.run
 
 
 @dataclass(frozen=True, slots=True)
+class OciProjectRoot:
+    """Where one OCI snapshot project lives on the Drive and which listed root may vouch for it.
+
+    The snapshot mirrors the project data root (``_backup/oci-server/<project>/<rel>`` <-> ``<live_root>/<rel>``,
+    where ``<rel>`` carries no ``data/`` segment). Only counterparts under ``listed_root`` are ever
+    observed, so any other mapped path has no verifiable evidence.
+    """
+
+    live_root: str
+    listed_root: str
+    evidence_label: str
+
+
+OCI_PROJECT_ROOTS: dict[str, OciProjectRoot] = {
+    "crypto-pilot": OciProjectRoot(live_root=LIVE_DATA, listed_root=LIVE_DATA, evidence_label="live"),
+    "krx-alpha": OciProjectRoot(live_root=KRX_DATA, listed_root=KRX_DATA, evidence_label="live-krx"),
+}
+
+
+@dataclass(frozen=True, slots=True)
 class RemoteObject:
     path: str  # relative to DRIVE_REMOTE, posix
     size: int
@@ -76,6 +101,7 @@ class CleanupCandidate:
     rule: CleanupRule
     obj: RemoteObject
     evidence: str  # human-readable proof, e.g. "research:<path> size=<n>" or "vision:<symbol>"
+    evidence_path: str | None = None  # Drive object vouching for deletion; None for non-object proofs (vision, regenerable)
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,14 +180,106 @@ def _scope_rule_of(path: str) -> CleanupRule | None:
     return None
 
 
+def _evidence_size_admissible(subject: RemoteObject, evidence_size: int, *, sealed_evidence: bool = False) -> bool:
+    """Whether a counterpart of ``evidence_size`` bytes proves ``subject`` is redundant.
+
+    Why: a same-path counterpart only proves redundancy when its bytes can contain the subject.
+    Append-only text ledgers (``APPEND_ONLY_SUFFIXES``) grow monotonically, so a later copy may be
+    larger; every other format is rewritten wholesale, so only an identical size is admissible.
+    A sealed counterpart wraps byte-identical plaintext, so it must be exactly
+    ``SEALED_OVERHEAD_BYTES`` larger. A zero-byte object never proves anything (truncated or
+    reset copies are exactly what this tool must not trust).
+    """
+    if evidence_size <= 0:
+        return False
+    if sealed_evidence:
+        return evidence_size == subject.size + SEALED_OVERHEAD_BYTES
+    if subject.path.endswith(APPEND_ONLY_SUFFIXES):
+        return evidence_size >= subject.size
+    return evidence_size == subject.size
+
+
+def _sizes_by_path(objects: Sequence[RemoteObject]) -> dict[str, list[int]]:
+    """Group listed sizes by exact path; Drive allows same-name duplicates."""
+    sizes: dict[str, list[int]] = {}
+    for obj in objects:
+        sizes.setdefault(obj.path, []).append(obj.size)
+    return sizes
+
+
+def _classify_oci_snapshot(
+    obj: RemoteObject, listed_sizes: Mapping[str, Mapping[str, list[int]]]
+) -> CleanupCandidate | str:
+    """Return the candidate for one snapshot object, or the reason it must be kept."""
+    project, sep, rel = obj.path[len(OCI_SNAPSHOT) + 1:].partition("/")
+    root = OCI_PROJECT_ROOTS.get(project)
+    if root is None or not sep:
+        return "counterpart_root_not_listed"
+    if any(segment in ("", ".", "..") for segment in rel.split("/")):
+        return "unnormalized_path"
+    counterpart = f"{root.live_root}/{rel}"
+    sizes_by_path = listed_sizes.get(root.listed_root)
+    if sizes_by_path is None or not counterpart.startswith(root.listed_root + "/"):
+        return "counterpart_root_not_listed"
+    sizes = sizes_by_path.get(counterpart)
+    if sizes is None:
+        return "no_live_counterpart"
+    if any(size <= 0 for size in sizes):
+        return "zero_byte_evidence"
+    if not all(_evidence_size_admissible(obj, size) for size in sizes):
+        return "evidence_size_mismatch"
+    return CleanupCandidate(
+        "oci_server_snapshot",
+        obj,
+        f"{root.evidence_label}:{counterpart} size={min(sizes)} snapshot_size={obj.size}",
+        counterpart,
+    )
+
+
+def _classify_manual_backup(
+    obj: RemoteObject,
+    backup_dir: str,
+    stamp: str,
+    runs_entries: Sequence[tuple[str, str, str, int]],
+    other_candidate_paths: frozenset[str],
+) -> CleanupCandidate | str:
+    """Return the candidate for one manual debug backup file, or the reason it must be kept."""
+    basename = obj.path.rsplit("/", 1)[-1]
+    name_matched = False
+    admissible: list[tuple[bool, str, int]] = []
+    for other_dir, other_base, other_path, other_size in runs_entries:
+        if other_dir == backup_dir or not other_dir.endswith("_" + stamp):
+            continue
+        if other_base == basename:
+            ok = _evidence_size_admissible(obj, other_size)
+        elif other_base == basename + ".enc":
+            ok = _evidence_size_admissible(obj, other_size, sealed_evidence=True)
+        else:
+            continue
+        name_matched = True
+        if ok:
+            admissible.append((other_path in other_candidate_paths, other_path, other_size))
+    if not admissible:
+        return "run_counterpart_size_mismatch" if name_matched else "no_run_counterpart"
+    _is_other_candidate, path, size = min(admissible)
+    return CleanupCandidate("manual_debug_backup", obj, f"run-counterpart:{path} size={size}", path)
+
+
 def build_cleanup_plan(
     listings: Mapping[str, Sequence[RemoteObject]],
     vision_has_symbol: Callable[[str, str], bool],
 ) -> CleanupPlan:
     """Classify remote objects into evidence-backed deletion candidates and kept objects.
 
-    Pure function: all remote state arrives via ``listings`` (keyed by the listed root:
-    LIVE_DATA, RESEARCH_FUTURES, OCI_SNAPSHOT) and ``vision_has_symbol(dataset, symbol)``.
+    Pure function: all remote state arrives via ``listings`` (keyed by listed root: LIVE_DATA,
+    RESEARCH_FUTURES, OCI_SNAPSHOT required; KRX_DATA optional) and
+    ``vision_has_symbol(dataset, symbol)``.
+
+    Evidence discipline (why: ``--apply`` is irreversible once Drive trash is emptied):
+    an object is deletable only when a counterpart at the exact corresponding path exists in a
+    listed root, passes the size gate, and is not itself deleted by the same plan. OCI snapshots map
+    ``_backup/oci-server/<project>/<rel>`` to ``OCI_PROJECT_ROOTS[project].live_root/<rel>``; a mapped
+    path outside a listed root is kept because nothing observed can vouch for it.
 
     Args:
         listings: Recursive file listings per root; paths are relative to DRIVE_REMOTE.
@@ -169,8 +287,9 @@ def build_cleanup_plan(
             "fundingRate") for ``symbol``.
 
     Returns:
-        Plan whose candidates each carry the evidence that justified deletion; every other object
-        under a rule's scope appears in ``kept`` with a reason.
+        Plan whose candidates each carry the evidence that justified deletion and never reference
+        another candidate's path as evidence; every other object under a rule's scope appears in
+        ``kept`` with a reason.
 
     Raises:
         ValueError: a required root is missing from ``listings``.
@@ -181,16 +300,8 @@ def build_cleanup_plan(
     live = list(listings[LIVE_DATA])
     research = list(listings[RESEARCH_FUTURES])
     oci = list(listings[OCI_SNAPSHOT])
-    krx = list(listings.get(KRX_DATA, ()))
 
-    research_size: dict[str, int] = {}
-    research_prefix = RESEARCH_FUTURES + "/"
-    for obj in research:
-        if not obj.path.startswith(research_prefix):
-            continue
-        rel = obj.path[len(research_prefix):]
-        if obj.size > research_size.get(rel, -1):
-            research_size[rel] = obj.size
+    research_sizes = _sizes_by_path(research)
 
     archive_size: dict[str, int] = {}
     for obj in live:
@@ -207,18 +318,11 @@ def build_cleanup_plan(
         if obj.size > live_size.get(obj.path, -1):
             live_size[obj.path] = obj.size
 
-    live_by_base: dict[str, list[tuple[str, int]]] = {}
-    live_prefix = LIVE_DATA + "/"
-    for obj in live:
-        if not obj.path.startswith(live_prefix):
-            continue
-        live_by_base.setdefault(obj.path.rsplit("/", 1)[-1], []).append((obj.path, obj.size))
-    krx_by_base: dict[str, list[tuple[str, int]]] = {}
-    krx_prefix = KRX_DATA + "/"
-    for obj in krx:
-        if not obj.path.startswith(krx_prefix):
-            continue
-        krx_by_base.setdefault(obj.path.rsplit("/", 1)[-1], []).append((obj.path, obj.size))
+    listed_sizes: dict[str, dict[str, list[int]]] = {
+        root.listed_root: _sizes_by_path(listings[root.listed_root])
+        for root in OCI_PROJECT_ROOTS.values()
+        if root.listed_root in listings
+    }
 
     runs_entries: list[tuple[str, str, str, int]] = []
     for obj in live:
@@ -234,28 +338,29 @@ def build_cleanup_plan(
 
     candidates: list[CleanupCandidate] = []
     kept: list[tuple[RemoteObject, str]] = []
+    manual_backups: list[tuple[RemoteObject, str, str]] = []
 
     for obj in live:
         sub = _futures_subdir(obj.path)
         if sub is not None:
             rest = obj.path[len(_FUTURES_PREFIX):]
             basename = rest.rsplit("/", 1)[-1]
-            research_hit = research_size.get(rest)
-            if research_hit is not None and research_hit > 0:
+            symbol = basename[: -len(".parquet")] if basename.endswith(".parquet") else ""
+            research_path = f"{RESEARCH_FUTURES}/{rest}"
+            research_hit = research_sizes.get(research_path)
+            research_min = min(research_hit) if research_hit is not None else None
+            # The research tree is the full-history store of the same dataset: a legitimate copy is
+            # equal or larger, and a strictly smaller one cannot contain the live rows.
+            if research_min is not None and research_min > 0 and research_min >= obj.size:
                 candidates.append(
-                    CleanupCandidate("futures_legacy", obj, f"research:{RESEARCH_FUTURES}/{rest} size={research_hit}")
+                    CleanupCandidate("futures_legacy", obj, f"research:{research_path} size={research_min}", research_path)
                 )
             elif basename.endswith(".coverage.json"):
                 candidates.append(CleanupCandidate("futures_legacy", obj, "regenerable:coverage-metadata"))
-            elif basename.endswith(".parquet"):
-                symbol = basename[: -len(".parquet")]
-                dataset = _FUTURES_DATASETS[sub]
-                if symbol and vision_has_symbol(dataset, symbol):
-                    candidates.append(CleanupCandidate("futures_legacy", obj, f"vision:{symbol}"))
-                else:
-                    kept.append((obj, "no_equivalent_copy"))
+            elif symbol and vision_has_symbol(_FUTURES_DATASETS[sub], symbol):
+                candidates.append(CleanupCandidate("futures_legacy", obj, f"vision:{symbol}"))
             else:
-                kept.append((obj, "no_equivalent_copy"))
+                kept.append((obj, "research_size_mismatch" if research_min is not None else "no_equivalent_copy"))
             continue
         if _is_legacy_state(obj.path):
             rel = obj.path[len(_STATE_PREFIX):]
@@ -267,7 +372,7 @@ def build_cleanup_plan(
             basename = obj.path.rsplit("/", 1)[-1]
             orderbook = "/live_orderbook/" in obj.path or basename.startswith("live_orderbook")
             if (orderbook and asize == obj.size) or (not orderbook and asize >= obj.size):
-                candidates.append(CleanupCandidate("legacy_state", obj, f"archive:{counterpart} size={asize}"))
+                candidates.append(CleanupCandidate("legacy_state", obj, f"archive:{counterpart} size={asize}", counterpart))
             else:
                 kept.append((obj, "archive_size_mismatch"))
             continue
@@ -277,7 +382,9 @@ def build_cleanup_plan(
             sibling = f"{LIVE_DATA}/state/runs/{run}/{name}.enc"
             if sibling in live_paths:
                 candidates.append(
-                    CleanupCandidate("plaintext_run_artifact", obj, f"sealed-sibling:{sibling} size={live_size[sibling]}")
+                    CleanupCandidate(
+                        "plaintext_run_artifact", obj, f"sealed-sibling:{sibling} size={live_size[sibling]}", sibling
+                    )
                 )
             else:
                 kept.append((obj, "no_sealed_sibling"))
@@ -287,59 +394,40 @@ def build_cleanup_plan(
             dirname = rest.split("/", 1)[0]
             stamp = _manual_backup_date(dirname)
             if stamp is not None and "/" in rest:
-                basename = rest.rsplit("/", 1)[-1]
-                match: tuple[str, int] | None = None
-                for other_dir, other_base, other_path, other_size in runs_entries:
-                    if other_dir == dirname or not other_dir.endswith("_" + stamp):
-                        continue
-                    if other_base in (basename, basename + ".enc") and (match is None or other_path < match[0]):
-                        match = (other_path, other_size)
-                if match is not None:
-                    candidates.append(
-                        CleanupCandidate("manual_debug_backup", obj, f"run-counterpart:{match[0]} size={match[1]}")
-                    )
-                else:
-                    kept.append((obj, "no_run_counterpart"))
-            continue
+                manual_backups.append((obj, dirname, stamp))
 
     oci_prefix = OCI_SNAPSHOT + "/"
     for obj in oci:
         if not obj.path.startswith(oci_prefix):
             continue
-        rest = obj.path[len(oci_prefix):]
-        basename = obj.path.rsplit("/", 1)[-1]
-        if rest.startswith("crypto-pilot/"):
-            hits = sorted(live_by_base.get(basename, ()))
-            if hits:
-                live_path, live_n = hits[0]
-                candidates.append(
-                    CleanupCandidate(
-                        "oci_server_snapshot",
-                        obj,
-                        f"live:{live_path} size={live_n} snapshot_size={obj.size}",
-                    )
-                )
-            else:
-                kept.append((obj, "no_live_counterpart"))
-        elif rest.startswith("krx-alpha/"):
-            hits = sorted(krx_by_base.get(basename, ()))
-            if hits:
-                live_path, live_n = hits[0]
-                candidates.append(
-                    CleanupCandidate(
-                        "oci_server_snapshot",
-                        obj,
-                        f"live-krx:{live_path} size={live_n} snapshot_size={obj.size}",
-                    )
-                )
-            else:
-                kept.append((obj, "no_live_counterpart"))
+        outcome = _classify_oci_snapshot(obj, listed_sizes)
+        if isinstance(outcome, CleanupCandidate):
+            candidates.append(outcome)
         else:
-            kept.append((obj, "no_live_counterpart"))
+            kept.append((obj, outcome))
 
-    candidates.sort(key=lambda c: (c.obj.path, c.rule, c.evidence))
+    # Manual backups run last so they can prefer a counterpart that no other rule deletes.
+    other_candidate_paths = frozenset(c.obj.path for c in candidates)
+    for obj, dirname, stamp in manual_backups:
+        outcome = _classify_manual_backup(obj, dirname, stamp, runs_entries, other_candidate_paths)
+        if isinstance(outcome, CleanupCandidate):
+            candidates.append(outcome)
+        else:
+            kept.append((obj, outcome))
+
+    # Single pass against the provisional set (not a fixed point) keeps the result order-independent;
+    # over-retention in evidence chains is the accepted price.
+    provisional_paths = frozenset(c.obj.path for c in candidates)
+    closed: list[CleanupCandidate] = []
+    for candidate in candidates:
+        if candidate.evidence_path is not None and candidate.evidence_path in provisional_paths:
+            kept.append((candidate.obj, "evidence_is_candidate"))
+        else:
+            closed.append(candidate)
+
+    closed.sort(key=lambda c: (c.obj.path, c.rule, c.evidence))
     kept.sort(key=lambda item: (item[0].path, item[1]))
-    return CleanupPlan(candidates=tuple(candidates), kept=tuple(kept))
+    return CleanupPlan(candidates=tuple(closed), kept=tuple(kept))
 
 
 def list_remote(rclone: str, root: str, *, runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run) -> list[RemoteObject]:
@@ -518,7 +606,7 @@ def _write_report(
     if plan is not None:
         payload["rules"] = dict(_rule_summary(plan))
         payload["candidates"] = [
-            {"rule": c.rule, "path": c.obj.path, "size": c.obj.size, "evidence": c.evidence}
+            {"rule": c.rule, "path": c.obj.path, "size": c.obj.size, "evidence": c.evidence, "evidence_path": c.evidence_path}
             for c in plan.candidates
         ]
         payload["kept"] = [{"path": obj.path, "size": obj.size, "reason": reason} for obj, reason in plan.kept]

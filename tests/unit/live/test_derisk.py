@@ -86,3 +86,47 @@ def test_derisk_filter_kept_intents_are_reduce_only() -> None:
         before = abs(current[intent.symbol])
         after = abs(current[intent.symbol] + (intent.quantity if intent.side == "BUY" else -intent.quantity))
         assert after <= before
+
+
+def test_freeze_blocks_every_intent_on_frozen_symbol_including_reduce_only() -> None:
+    """Freeze blocks every intent on a frozen symbol including reduce-only exits."""
+    from src.live.derisk import UNRESOLVED_ORDER_BLOCK_REASON, freeze_unresolved_symbols
+
+    intents = [
+        _intent("AAAUSDT", "BUY", "1", reduce_only=False),
+        _intent("AAAUSDT", "SELL", "1", reduce_only=True),
+        _intent("BUSDT", "BUY", "1", reduce_only=False),
+    ]
+    plan = freeze_unresolved_symbols(intents, {"AAAUSDT"})
+    assert tuple(i.symbol for i in plan.kept) == ("BUSDT",)
+    assert len(plan.blocked) == 2
+    assert all(reason == UNRESOLVED_ORDER_BLOCK_REASON for _, reason in plan.blocked)
+
+
+def test_freeze_with_no_frozen_symbols_is_identity() -> None:
+    """Empty frozen set keeps every intent in order."""
+    from src.live.derisk import freeze_unresolved_symbols
+
+    intents = [
+        _intent("AAAUSDT", "BUY", "1", reduce_only=False),
+        _intent("BUSDT", "BUY", "1", reduce_only=False),
+        _intent("CUSDT", "SELL", "1", reduce_only=True),
+    ]
+    plan = freeze_unresolved_symbols(intents, set())
+    assert plan.kept == tuple(intents)
+    assert plan.blocked == ()
+
+
+def test_freeze_partitions_input_exactly() -> None:
+    """kept + blocked partition the input with no drops or duplicates."""
+    from src.live.derisk import freeze_unresolved_symbols
+
+    intents = [
+        _intent("AAAUSDT", "BUY", "1", reduce_only=False),
+        _intent("BUSDT", "BUY", "1", reduce_only=False),
+        _intent("CUSDT", "SELL", "1", reduce_only=True),
+        _intent("AAAUSDT", "SELL", "1", reduce_only=True),
+    ]
+    plan = freeze_unresolved_symbols(intents, {"AAAUSDT", "CUSDT"})
+    assert len(plan.kept) + len(plan.blocked) == len(intents)
+    assert sorted([i.symbol for i in plan.kept] + [i.symbol for i, _ in plan.blocked]) == sorted(i.symbol for i in intents)

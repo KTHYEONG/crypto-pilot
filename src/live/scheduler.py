@@ -1,4 +1,3 @@
-# ruff: noqa
 """24/7 무인 섬도우 데몬 스케줄러 (ADR_LIVE_DAEMON_DOCKER_DEPLOY).
 
 I-DAEMON-IDEMPOTENT: 상태 파일에 기록된 마지막 처리 시각 이상은 재실행하지 않는다.
@@ -19,30 +18,27 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pandas as pd
 
-from typing import TYPE_CHECKING
-
-from src.common.paths import DATA_DIR, FUTURES_DATA_DIR, VENUE_RULES_DIR
-from src.common.errors import DataIntegrityError
 from src.common.daemon_stages import BUSY_STAGES
+from src.common.errors import DataIntegrityError
+from src.common.paths import DATA_DIR, FUTURES_DATA_DIR, VENUE_RULES_DIR
 from src.live.errors import CausalityViolation
 
 if TYPE_CHECKING:
     from src.live.data_refresh import RefreshReport
     from src.live.frozen_signal import FrozenStepReport
-from src.live.audit import AUDIT_LOG_ROOT, prune_old_audit_logs
-from src.live.errors import StaleSignalError
-from src.live.lifecycle import ShutdownFlag, install_shutdown_handlers  # noqa: F401
-from src.live.runner import run_shadow_cycle
-from src.live.settings import LiveSettings
-from src.mhs.frozen_research_candidate import FROZEN_MHS_TOP20_V2
-
 from src.live.alert_outbox import default_dedupe_key
 from src.live.alerting import dispatch_alert, drain_alerts
+from src.live.audit import AUDIT_LOG_ROOT, prune_old_audit_logs
 from src.live.deadman import DeadmanPinger
+from src.live.derisk import UNRESOLVED_ORDERS_REASON
+from src.live.lifecycle import ShutdownFlag, install_shutdown_handlers  # noqa: F401
+from src.live.runner import CycleReport, run_shadow_cycle
+from src.live.settings import LiveSettings
+from src.mhs.frozen_research_candidate import FROZEN_MHS_TOP20_V2
 
 logger = logging.getLogger("LiveScheduler")
 
@@ -224,7 +220,6 @@ def _default_data_refresh(
 ) -> RefreshReport:
     import urllib.request
 
-    from src.market_data.binance.venue_rules import EXCHANGE_INFO_URL
     from src.live.data_refresh import (
         EXCHANGE_INFO_TIMEOUT_S,
         build_refresh_universe,
@@ -236,18 +231,16 @@ def _default_data_refresh(
         parse_venue_listing,
         write_venue_listing_snapshot,
     )
+    from src.market_data.binance.venue_rules import EXCHANGE_INFO_URL
     from src.mhs.params import LIVE_FROZEN_WARMUP_DAYS
 
     with urllib.request.urlopen(EXCHANGE_INFO_URL, timeout=EXCHANGE_INFO_TIMEOUT_S) as resp:  # noqa: S310
         payload = json.loads(resp.read())
-    crypto, non_crypto = listed_crypto_perpetuals(payload)
-    NON_CRYPTO_SYMBOLS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = NON_CRYPTO_SYMBOLS_PATH.with_suffix(NON_CRYPTO_SYMBOLS_PATH.suffix + ".tmp")
-    tmp_path.write_text(
+    _crypto, non_crypto = listed_crypto_perpetuals(payload)
+    _atomic_write_text(
+        NON_CRYPTO_SYMBOLS_PATH,
         json.dumps({"captured_at": _utc_now().isoformat(), "symbols": sorted(non_crypto)}, sort_keys=True),
-        encoding="utf-8",
     )
-    os.replace(tmp_path, NON_CRYPTO_SYMBOLS_PATH)
     listing_root = DATA_DIR / "state" / "venue_listing"
     previous = latest_venue_listing_or_none(listing_root)
     listing = parse_venue_listing(
@@ -258,14 +251,9 @@ def _default_data_refresh(
     )
     write_venue_listing_snapshot(listing, listing_root, slot_day=decision_time)
     required = _required_symbols(settings, weights_path)
-    universe = build_refresh_universe(
-        listing, required_symbols=required, non_crypto=non_crypto, now=_utc_now(),
-    )
+    universe = build_refresh_universe(listing, required_symbols=required, non_crypto=non_crypto, now=_utc_now())
     if universe.unlisted_required:
-        logger.error(
-            "[DATA] stage=refresh_universe unlisted_required=%s",
-            ",".join(universe.unlisted_required),
-        )
+        logger.error("[DATA] stage=refresh_universe unlisted_required=%s", ",".join(universe.unlisted_required))
     fetch_set = sorted({*universe.trading, *universe.tracked_pending, *universe.tracked_settled})
     return refresh_live_market_data(
         FUTURES_DATA_DIR,
@@ -546,9 +534,9 @@ def _sizing_note(frozen_report: Any) -> str:
     if frozen_report is None:
         return ""
     try:
-        exposure = float(getattr(frozen_report, "exposure"))
-        equity = float(getattr(frozen_report, "equity_usdt"))
-        unit_obs = int(getattr(frozen_report, "unit_observations"))
+        exposure = float(frozen_report.exposure)
+        equity = float(frozen_report.equity_usdt)
+        unit_obs = int(frozen_report.unit_observations)
     except (TypeError, ValueError, AttributeError):
         return ""
     return f" exposure={exposure:.4f} equity_usdt={equity:.2f} unit_observations={unit_obs}"
@@ -643,6 +631,23 @@ def default_step_fns(settings: LiveSettings, weights_path: Path) -> dict[str, Ca
         "venue": functools.partial(_default_venue_capture, settings),
         "prefetch": functools.partial(_default_funding_prefetch, settings, weights_path),
     }
+
+
+def _run_cycle_at(
+    settings: LiveSettings,
+    decision_time: pd.Timestamp,
+    weights_path: Path,
+    now_fn: Callable[[], pd.Timestamp],
+    shutdown: ShutdownFlag | None,
+) -> CycleReport:
+    """Run one shadow cycle, reading the clock only when the pulsed stage starts.
+
+    Bound via ``functools.partial`` so the loop's decision time is captured per iteration; ``shutdown``
+    is forwarded only when present so cycle doubles without that parameter keep working.
+    """
+    if shutdown is None:
+        return run_shadow_cycle(settings, decision_time, weights_path, now=now_fn())
+    return run_shadow_cycle(settings, decision_time, weights_path, now=now_fn(), shutdown=shutdown)
 
 
 def run_daemon(
@@ -792,7 +797,7 @@ def run_daemon(
                     _run_with_pulse(
                         "idle",
                         _default_expected_by(settings, "idle", now_fn(), wait_until),
-                        lambda: prefetch_fn(target),
+                        functools.partial(prefetch_fn, target),
                     )
                 except Exception:  # noqa: BLE001
                     logger.exception("[SYS] funding prefetch failed decision_time=%s", target)
@@ -805,7 +810,7 @@ def run_daemon(
 
         venue_outcome: Any = None
         try:
-            venue_outcome = _run_with_pulse("idle", _default_expected_by(settings, "idle", now_fn(), wait_until), lambda: venue_fn(target))
+            venue_outcome = _run_with_pulse("idle", _default_expected_by(settings, "idle", now_fn(), wait_until), functools.partial(venue_fn, target))
         except Exception:  # noqa: BLE001
             logger.exception("[SYS] venue capture failed decision_time=%s", target)
         if venue_outcome == "failed":
@@ -819,7 +824,7 @@ def run_daemon(
         report = None
         err = None
         try:
-            report = _run_with_pulse("refresh", refresh_expected, lambda: refresh_step(target))  # RefreshReport | None; run_daemon staleness gate calls market_data_staleness_hours(FUTURES_DATA_DIR, now=now_fn())
+            report = _run_with_pulse("refresh", refresh_expected, functools.partial(refresh_step, target))  # RefreshReport | None; run_daemon staleness gate calls market_data_staleness_hours(FUTURES_DATA_DIR, now=now_fn())
         except Exception as exc:  # noqa: BLE001
             logger.exception("[SYS] data refresh failed")
             err = exc
@@ -854,7 +859,7 @@ def run_daemon(
                 try:
                     _wait(DAEMON_POLL_INTERVAL_SECONDS)
                 except Exception:
-                    pass
+                    logger.exception("[SYS] awaiting-data backoff wait failed decision_time=%s", target)
                 continue
         if shutdown is not None and shutdown.requested:
             break
@@ -869,7 +874,7 @@ def run_daemon(
         _beat("RUNNING", "signal", expected_by=signal_expected)
         stage_started = time.monotonic()
         try:
-            frozen_report = _run_with_pulse("signal", signal_expected, lambda: signal_step_fn(target))
+            frozen_report = _run_with_pulse("signal", signal_expected, functools.partial(signal_step_fn, target))
         except (DataIntegrityError, CausalityViolation) as exc:
             logger.exception("[SYS] frozen step halted decision_time=%s", target)
             signal_status = "HALT"
@@ -918,7 +923,7 @@ def run_daemon(
         _beat("RUNNING", "execute", expected_by=execute_expected)
         stage_started = time.monotonic()
         try:
-            report = _run_with_pulse("execute", execute_expected, lambda: run_shadow_cycle(settings, target, weights_path, now=now_fn()) if shutdown is None else run_shadow_cycle(settings, target, weights_path, now=now_fn(), shutdown=shutdown))
+            report = _run_with_pulse("execute", execute_expected, functools.partial(_run_cycle_at, settings, target, weights_path, now_fn, shutdown))
             logger.info("[EVAL] daemon cycle decision_time=%s status=%s reason=%s", target, report.status, report.reason)
             status = report.status
             failure_cause = f"cycle status={status} reason={report.reason}"
@@ -935,7 +940,9 @@ def run_daemon(
             break
         if status == "DEGRADED":
             degraded_detail = f"reasons={getattr(report, 'reason', None)} intents={getattr(report, 'intent_count', 0)}"
-            _daemon_alert(settings, event="cycle_degraded", detail=degraded_detail, decision_time=target, now=now_fn(), dedupe_key=default_dedupe_key("cycle_degraded", target))
+            freeze_only = set(filter(None, str(getattr(report, "reason", "") or "").split(","))) == {UNRESOLVED_ORDERS_REASON}
+            if not freeze_only:
+                _daemon_alert(settings, event="cycle_degraded", detail=degraded_detail, decision_time=target, now=now_fn(), dedupe_key=default_dedupe_key("cycle_degraded", target))
             try:
                 tick = now_fn()
                 write_heartbeat(heartbeat_path, decision_time=target, status="DEGRADED", attempts=attempts, consecutive_halts=consecutive_halts, now=tick, stage="idle", detail=degraded_detail, expected_by=_default_expected_by(settings, "idle", tick, tick + pd.Timedelta(seconds=DAEMON_POLL_INTERVAL_SECONDS)))

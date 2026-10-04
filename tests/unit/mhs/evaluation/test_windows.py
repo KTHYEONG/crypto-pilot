@@ -232,19 +232,89 @@ def test_window_ipc_numpy_restore_preserves_exact_bits(tmp_path) -> None:
         )
 
 
-def test_window_ipc_loader_has_no_python_value_list_conversion() -> None:
-    import ast
-    import inspect
+def test_window_ipc_loader_has_no_python_value_list_conversion(tmp_path, monkeypatch) -> None:
+    import types
 
-    from src.mhs.evaluation.windows import _load_window_from_ipc
+    import numpy as np
+    import pandas as pd
 
-    source = inspect.getsource(_load_window_from_ipc)
-    tree = ast.parse(source)
-    attrs = [node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)]
+    import src.mhs.evaluation.windows as windows
+    from src.mhs.evaluation.windows import _load_window_from_ipc, _spill_window_to_ipc
+    from src.mhs.execution.contracts import ExecutionReplayWindow
 
-    assert "to_pylist" not in attrs
-    assert "to_numpy" in attrs
-    assert "zero_copy_only=False" in source
+    minute_grid = pd.date_range("2026-01-01", periods=4, freq="3min", tz="UTC")
+    decision_grid = pd.date_range("2026-01-01", periods=2, freq="6h", tz="UTC")
+    market_values = np.array(
+        [
+            [0x3FF0000000000000, 0x8000000000000000],
+            [0x7FF8000000000001, 0x7FF0000000000000],
+            [0xFFF0000000000000, 0x400C000000000000],
+            [0x401D000000000000, 0xC022000000000000],
+        ],
+        dtype=np.uint64,
+    ).view(np.float64)
+    weights = np.array([[0.25, -0.25], [0.0, 0.5]], dtype=np.float64)
+    expected = ExecutionReplayWindow(
+        window_start=minute_grid[0], window_end=minute_grid[-1], columns=("BTC", "ETH", "SOL"),
+        symbols=("BTC", "ETH"), minute_grid=minute_grid,
+        highs=pd.DataFrame(market_values, index=minute_grid, columns=["BTC", "ETH"]),
+        lows=pd.DataFrame(market_values - 1.0, index=minute_grid, columns=["BTC", "ETH"]),
+        closes=pd.DataFrame(market_values, index=minute_grid, columns=["BTC", "ETH"]),
+        marks=pd.DataFrame(market_values, index=minute_grid, columns=["BTC", "ETH"]),
+        bar_funding=pd.DataFrame(np.zeros((4, 2), dtype=np.float64), index=minute_grid, columns=["BTC", "ETH"]),
+        target_weights=pd.DataFrame(weights, index=decision_grid, columns=["BTC", "ETH"]),
+        signal_available_at=decision_grid + pd.Timedelta(hours=1),
+    )
+    path = str(tmp_path / "window_00000.arrow")
+    _spill_window_to_ipc(expected, path)
+
+    real_ipc = windows.pa_ipc
+    zero_copy_flags: list[bool] = []
+
+    class _ColumnProxy:
+        def __init__(self, column):
+            self._column = column
+
+        def to_numpy(self, zero_copy_only=True):
+            zero_copy_flags.append(bool(zero_copy_only))
+            return self._column.to_numpy(zero_copy_only=zero_copy_only)
+
+        def to_pylist(self, *args, **kwargs):
+            raise AssertionError("to_pylist must not be called")
+
+    class _TableProxy:
+        def __init__(self, table):
+            self._table = table
+
+        def column(self, name):
+            return _ColumnProxy(self._table.column(name))
+
+    class _ReaderProxy:
+        def __init__(self, reader):
+            self._reader = reader
+
+        def read_all(self):
+            return _TableProxy(self._reader.read_all())
+
+    def _recording_open_stream(buf):
+        return _ReaderProxy(real_ipc.open_stream(buf))
+
+    monkeypatch.setattr(windows, "pa_ipc", types.SimpleNamespace(open_stream=_recording_open_stream))
+    actual = _load_window_from_ipc(path)
+
+    assert zero_copy_flags, "every restored column must go through to_numpy"
+    assert all(flag is False for flag in zero_copy_flags)
+    assert actual.window_start == expected.window_start
+    assert actual.signal_available_at.equals(expected.signal_available_at)
+    for name in ("highs", "lows", "closes", "marks", "bar_funding", "target_weights"):
+        actual_frame = getattr(actual, name)
+        expected_frame = getattr(expected, name)
+        assert actual_frame is not None
+        assert expected_frame is not None
+        np.testing.assert_array_equal(
+            actual_frame.to_numpy(dtype=np.float64).view(np.uint64),
+            expected_frame.to_numpy(dtype=np.float64).view(np.uint64),
+        )
 
 
 def test_iter_spilled_windows_keeps_filename_order_and_exact_values(tmp_path) -> None:
@@ -801,11 +871,8 @@ def test_batch_live_roster_holds_unfilled_exit(tmp_path) -> None:
     assert "AUSDT" in live_required_symbols(cell[0])
 
 
-def test_batch_without_live_cell_drops_stale_roster_member(tmp_path) -> None:
-    """Without live requirements the legacy roster drops the held symbol."""
-    import pytest
-
-    from src.common.errors import DataIntegrityError
+def test_batch_without_live_cell_carries_held_symbol(tmp_path) -> None:
+    """Without live requirements the sticky carry keeps the held symbol rostered."""
     from src.mhs.evaluation.windows import _iter_mhs_execution_windows
     from src.mhs.execution import replay_execution_window_batch_isolated
     from src.mhs.types import ExecutionSpec
@@ -819,11 +886,11 @@ def test_batch_without_live_cell_drops_stale_roster_member(tmp_path) -> None:
         )
     )
     assert len(windows) >= 3
-    assert "AUSDT" not in windows[-1].symbols
-    with pytest.raises(DataIntegrityError, match=r".+"):
-        replay_execution_window_batch_isolated(
-            iter(windows), 1000.0, [("OHLCV_IMMEDIATE_TAKER", spec)]
-        )
+    assert all("AUSDT" in w.symbols for w in windows)
+    outcome = replay_execution_window_batch_isolated(
+        iter(windows), 1000.0, [("OHLCV_IMMEDIATE_TAKER", spec)]
+    )
+    assert outcome.results[0] is not None
 
 
 def test_single_and_coupled_live_cells_populated(tmp_path) -> None:
@@ -1480,7 +1547,9 @@ def test_materialize_covers_empty_and_missing_branches(tmp_path, monkeypatch) ->
     assert win.marks is None
     w2 = pd.DataFrame(0.0, index=pd.DatetimeIndex([grid[0]]), columns=list(cols))
     s2 = pd.DatetimeIndex([grid[0] + pd.Timedelta(hours=1)])
-    monkeypatch.setattr(_w, "_load_window_minute_frames", lambda *a, **k: {})
+    import src.mhs.execution.window_stream as _ws
+
+    monkeypatch.setattr(_ws, "_load_window_minute_frames", lambda *a, **k: {})
     win2 = _w._materialize_execution_piece(
         piece_grid=grid, piece_weights=w2, piece_signals=s2, roster=["AUSDT"],
         columns=cols, root=str(tmp_path), timeframe="3m", funding_by_symbol={},
@@ -1601,7 +1670,7 @@ def test_adaptive_split_unknown_roster_fails_closed(tmp_path, monkeypatch) -> No
 
 
 def test_adaptive_piece_and_tail_unknown_branches(tmp_path, monkeypatch) -> None:
-    """Late unknown symbols hit piece and tail roster guards."""
+    """Single piece reuses the planning snapshot; late unknowns hit split-piece guards."""
     import itertools
 
     import pandas as pd
@@ -1619,14 +1688,16 @@ def test_adaptive_piece_and_tail_unknown_branches(tmp_path, monkeypatch) -> None
         i = next(calls)
         return seq[min(i, 1)]
 
-    with pytest.raises(DataIntegrityError, match=r"not in canonical"):
-        list(
-            _iter_mhs_execution_windows(
-                targets, decisions + pd.Timedelta(hours=1), str(tmp_path / "ohlcv"),
-                "3m", start, end, funding, spec,
-                budget_bytes=10**12, reserve_bytes=100, required_symbols=_flip,
-            )
+    windows = list(
+        _iter_mhs_execution_windows(
+            targets, decisions + pd.Timedelta(hours=1), str(tmp_path / "ohlcv"),
+            "3m", start, end, funding, spec,
+            budget_bytes=10**12, reserve_bytes=100, required_symbols=_flip,
         )
+    )
+    assert len(windows) == 1
+    assert next(calls) == 1
+    assert list(windows[0].symbols) == ["AUSDT"]
     start3, end3, decisions3, funding3, targets3, spec3 = _adaptive_fixture(tmp_path, days=3)
     calls2 = itertools.count()
 

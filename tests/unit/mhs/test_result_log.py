@@ -1,4 +1,4 @@
-"""Run-history ledger contract: append / rotate / prune / latest snapshot."""
+"""Run-history registry append contract."""
 
 from __future__ import annotations
 
@@ -6,12 +6,7 @@ import json
 import sqlite3
 from pathlib import Path
 
-from src.mhs.run_history import (
-    RUN_HISTORY_MAX_SHARDS,
-    RUN_HISTORY_SHARD_MAX_BYTES,
-    append_run_history_record,
-    mhs_run_history_dir,
-)
+from src.mhs.run_history import append_run_history_record
 
 
 def _history_records(registry: Path) -> list[dict[str, object]]:
@@ -22,19 +17,18 @@ def _history_records(registry: Path) -> list[dict[str, object]]:
     return [json.loads(str(row[0])) for row in rows]
 
 
-def test_append_creates_history_dir_active_line_and_latest(tmp_path) -> None:
+def test_append_creates_history_dir_and_registry(tmp_path) -> None:
     record = {"run_id": "abc", "status": "COMPLETE", "perf": {"run_elapsed_seconds": 1.5}}
     history_dir = tmp_path / "history"
-    active = append_run_history_record(record, history_dir)
+    registry = append_run_history_record(record, history_dir)
 
-    assert active.name == "registry.sqlite3"
-    assert active == history_dir / "registry.sqlite3"
+    assert registry.name == "registry.sqlite3"
+    assert registry == history_dir / "registry.sqlite3"
     assert history_dir.is_dir()
-    assert _history_records(active) == [record]
+    assert _history_records(registry) == [record]
 
 
-def test_append_keeps_all_records_in_registry(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr("src.mhs.run_history.RUN_HISTORY_SHARD_MAX_BYTES", 1)
+def test_append_keeps_all_records_in_registry(tmp_path) -> None:
     history_dir = tmp_path / "history"
 
     append_run_history_record({"run_id": "first"}, history_dir)
@@ -46,9 +40,7 @@ def test_append_keeps_all_records_in_registry(tmp_path, monkeypatch) -> None:
     ]
 
 
-def test_append_does_not_mutate_legacy_archives(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr("src.mhs.run_history.RUN_HISTORY_SHARD_MAX_BYTES", 1)
-    monkeypatch.setattr("src.mhs.run_history.RUN_HISTORY_MAX_SHARDS", 3)
+def test_append_does_not_mutate_legacy_archives(tmp_path) -> None:
     history_dir = tmp_path / "history"
     history_dir.mkdir(parents=True)
     (history_dir / "mhs_run_history_100.jsonl").write_text('{"run_id": "oldest"}\n', encoding="utf-8")
@@ -78,15 +70,6 @@ def test_latest_snapshot_tracks_most_recent_record(tmp_path) -> None:
     append_run_history_record({"run_id": "second"}, history_dir)
     records = _history_records(history_dir / "registry.sqlite3")
     assert records[-1]["run_id"] == "second"
-
-
-def test_mhs_run_history_dir_derives_from_target_parent() -> None:
-    assert mhs_run_history_dir(Path("results/report.json")) == Path("results/mhs_run_history")
-
-
-def test_shard_constants_are_fixed_bounds() -> None:
-    assert RUN_HISTORY_SHARD_MAX_BYTES == 262144
-    assert RUN_HISTORY_MAX_SHARDS == 12
 
 
 class TestFillMarkParityRunHistoryRecord:

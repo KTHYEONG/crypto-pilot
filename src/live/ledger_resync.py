@@ -26,11 +26,11 @@ from src.live.account import (
 from src.live.audit import AuditLog, default_audit_log_path
 from src.live.daemon_idle import assert_daemon_idle
 from src.live.errors import LiveTradingError
-from src.live.executor import _LEGACY_CLIENT_ORDER_ID, cancel_orphan_orders
 from src.live.ledger import clear_derisk, default_ledger_path, load_ledger
+from src.live.order_cancel import _LEGACY_CLIENT_ORDER_ID, cancel_orphan_orders
 from src.live.order_journal import OrderJournal, default_order_journal_path
 from src.live.planner import CLIENT_ORDER_NAMESPACE
-from src.live.recovery import recover_unresolved_orders
+from src.live.recovery import recover_unresolved_orders, settle_unresolved_orders
 from src.live.scheduler import _resolve_heartbeat_path
 from src.live.settings import LiveSettings
 
@@ -79,7 +79,7 @@ def run_ledger_resync(
 
     Args: settings: live settings (must be a LIVE mode). apply: False computes and logs the plan only. now: tz-aware UTC wall clock.
     Returns: ResyncPlan.
-    Raises: LiveTradingError: mode is PAPER/SHADOW, the daemon heartbeat shows a busy stage younger than the busy-stale threshold, foreign open orders exist (the operator must resolve them first), or post-commit verification still breaches.
+    Raises: LiveTradingError: mode is PAPER/SHADOW, the daemon heartbeat shows a busy stage younger than the busy-stale threshold, foreign open orders exist (the operator must resolve them first), own open orders remain unresolved after confirmed cancel attempts, or post-commit verification still breaches.
     """
     now_ts = pd.Timestamp(now)
     if now_ts.tzinfo is None:
@@ -139,7 +139,7 @@ def run_ledger_resync(
                 f"foreign open orders present on {','.join(sweep.foreign_symbols)}; "
                 "operator must resolve them first"
             )
-        recover_unresolved_orders(
+        recovery = recover_unresolved_orders(
             order_client,
             journal,
             audit,
@@ -147,6 +147,18 @@ def run_ledger_resync(
             lookback=pd.Timedelta(hours=settings.journal_recovery_lookback_hours),
             taker_fee_bps=float(settings.taker_fee_bps),
         )
+        settlement = settle_unresolved_orders(order_client, journal, audit, recovery.unresolved, taker_fee_bps=float(settings.taker_fee_bps))
+        pending = (*sweep.unconfirmed, *settlement.still_open)
+        if pending:
+            pending_symbols = sorted({o.symbol for o in pending})
+            audit.record(
+                "order_recovery_unresolved",
+                client_order_ids=[o.client_order_id for o in pending],
+                symbols=pending_symbols,
+            )
+            raise LiveTradingError(
+                f"own open orders unresolved on {','.join(pending_symbols)}; retry resync later"
+            )
         # 스냅샷은 고아 주문 정리·복구 이후에 떠야 그 사이 체결까지 반영된 거래소 상태와 비교된다.
         snapshot = fetch_account_snapshot(order_client, now=now_ts)
         ledger_state = load_ledger(ledger_path)
@@ -193,7 +205,7 @@ def run_ledger_resync(
                 os.fsync(dir_fd)
             finally:
                 os.close(dir_fd)
-        marks = _marks_from_tickers(market_client, sorted({b.symbol for b in breaches}))
+        marks = _marks_from_tickers(market_client, sorted({b.symbol for b in breaches})).marks
         unpriced = sorted(b.symbol for b in breaches if not (marks.get(b.symbol) or Decimal(0)) > 0)
         if unpriced:
             # 재동기화 체결의 가격은 라벨이지만 임의 값을 원장 증거로 남기지 않는다.

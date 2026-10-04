@@ -523,3 +523,12 @@ def test_deliver_record_failure_isolated_per_channel(tmp_path, monkeypatch) -> N
     monkeypatch.setattr(a, "post_alert", _boom)
     assert a._deliver_record(settings, record, "webhook", pd.Timestamp("2026-08-24 01:10Z")) is False
     assert a._deliver_record(settings, record, "bogus", pd.Timestamp("2026-08-24 01:10Z")) is False
+
+
+def test_event_info_order_recovery_unresolved_is_warning() -> None:
+    """order_recovery_unresolved is a registered WARNING event."""
+    from src.live.alerting import EVENT_INFO, event_severity
+
+    assert "order_recovery_unresolved" in EVENT_INFO
+    assert EVENT_INFO["order_recovery_unresolved"]["severity_label"] == "WARNING"
+    assert event_severity("order_recovery_unresolved") == "WARNING"

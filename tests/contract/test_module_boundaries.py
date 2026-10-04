@@ -3,11 +3,30 @@
 from __future__ import annotations
 
 import ast
+from collections.abc import Mapping
 from pathlib import Path
 
 STAGES_DIR = Path("src/mhs/pipeline/stages")
 SCHEMA = Path("src/mhs/report/schema.py")
 ARTIFACTS = Path("src/mhs/report/artifacts.py")
+
+
+def _assert_frozen_entries_live(
+    frozen: Mapping[str, int], measured: Mapping[str, int], default_budget: int, label: str
+) -> None:
+    """Fail when a frozen budget exemption no longer exempts anything.
+
+    Each frozen key must still be present in ``measured`` and its measured size
+    must still exceed ``default_budget``; otherwise the exemption is dead weight
+    that would silently re-admit growth up to a stale ceiling. ``label`` names
+    the budget in the assertion message.
+    """
+    stale = sorted(
+        key
+        for key in frozen
+        if key not in measured or measured[key] <= default_budget
+    )
+    assert stale == [], f"stale frozen entries in {label} (shrink or delete): {stale}"
 
 
 def test_schema_imports_jsonable_from_artifacts_not_evaluation() -> None:
@@ -74,17 +93,21 @@ def test_file_size_budget() -> None:
     exceeds 60 KB, so an AI changing one behavior never has to read a
     hundreds-of-KB test module for unrelated context."""
     budget_bytes = 60 * 1024
+    # frozen at measured size; growth fails, shrink requires deleting/lowering the entry.
     frozen_oversized = {
-        # Pre-existing live suites; keep their exact sizes frozen while new
-        # tests remain subject to the 60 KiB default budget.
-        "tests/unit/live/test_scheduler.py": 170000,
-        "tests/unit/live/test_runner_shadow_cycle.py": 100000,
-        "tests/unit/live/test_runner_ledger.py": 65000,
-        "tests/unit/live/test_executor.py": 200000,
-        "tests/unit/live/test_data_refresh.py": 75000,
-        "tests/unit/mhs/test_process_backtest.py": 145000,
-        "tests/unit/cli/commands/test_backtest.py": 85000,
-        "tests/unit/mhs/evaluation/test_windows.py": 75000,
+        "tests/unit/live/test_scheduler.py": 168409,
+        "tests/unit/live/test_runner_shadow_cycle.py": 99074,
+        "tests/unit/live/test_runner_ledger.py": 63891,
+        "tests/unit/live/test_executor.py": 193626,
+        "tests/unit/live/test_data_refresh.py": 71709,
+        "tests/unit/mhs/test_process_backtest.py": 140056,
+        "tests/unit/cli/commands/test_backtest.py": 81671,
+        "tests/unit/mhs/evaluation/test_windows.py": 76592,
+    }
+    measured = {
+        str(path): path.stat().st_size
+        for path in Path("tests").rglob("*.py")
+        if "__pycache__" not in path.parts
     }
     offenders = [
         str(path)
@@ -93,6 +116,7 @@ def test_file_size_budget() -> None:
         and path.stat().st_size > frozen_oversized.get(str(path), budget_bytes)
     ]
     assert offenders == [], f"files over the {budget_bytes}-byte test budget: {offenders}"
+    _assert_frozen_entries_live(frozen_oversized, measured, budget_bytes, "test file size budget")
 
 
 def test_baseline_regression_gates_are_green() -> None:
@@ -207,18 +231,19 @@ def test_evaluation_modules_respect_size_budget() -> None:
     from pathlib import Path
 
     budget = 700
-    allowlist = {
-        # Pre-existing execution-window orchestrator; P1 adds causal funding,
-        # volume, availability, and IPC payload fields without changing its
-        # established window ownership boundary.
-        "src/mhs/evaluation/windows.py": 855,
+    # frozen at measured size; growth fails, shrink requires deleting/lowering the entry.
+    allowlist: dict[str, int] = {
+        "src/mhs/evaluation/windows.py": 713,
     }
-    offenders = {
+    measured = {
         str(path): len(path.read_text(encoding="utf-8").splitlines())
         for path in Path("src/mhs/evaluation").rglob("*.py")
-        if len(path.read_text(encoding="utf-8").splitlines()) > allowlist.get(str(path), budget)
+    }
+    offenders = {
+        key: lines for key, lines in measured.items() if lines > allowlist.get(key, budget)
     }
     assert offenders == {}, f"modules over {budget} lines: {offenders}"
+    _assert_frozen_entries_live(allowlist, measured, budget, "evaluation module size budget")
 
 
 def test_execution_public_surface_preserved() -> None:
@@ -243,13 +268,51 @@ def test_execution_public_surface_preserved() -> None:
     assert missing == [], f"execution facade dropped names: {missing}"
 
 
+def test_inventory_oracle_stays_out_of_production() -> None:
+    """The single-panel ledger oracle must never be imported by ``src/``.
+
+    It exists to certify the streamed accumulator ledger. A production import
+    would let the thing being checked become the source it is checked against,
+    so only the facade re-export (kept for test imports) is allowed.
+    """
+    import ast
+    from pathlib import Path
+
+    facade = Path("src/mhs/execution/__init__.py")
+    oracle = "simulated_inventory_ledger"
+    offenders: list[tuple[str, int]] = []
+    for path in Path("src").rglob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.Import, ast.ImportFrom)):
+                continue
+            if isinstance(node, ast.Import):
+                modules = [alias.name for alias in node.names]
+                imported = [alias.asname or alias.name.split(".")[0] for alias in node.names]
+            else:
+                modules = [node.module or ""]
+                imported = [alias.name for alias in node.names]
+                if node.level:
+                    base = "src.mhs.execution" if path.parent.name == "execution" else ""
+                    modules = [f"{base}{'.' * node.level}{modules[0]}"]
+            reaches_ledger = any(
+                module == "src.mhs.execution.ledger"
+                or (path.parent == facade.parent and module == "ledger")
+                for module in modules
+            )
+            if path != facade and (reaches_ledger or oracle in imported):
+                offenders.append((str(path), node.lineno))
+
+    assert offenders == [], (
+        f"production modules import the inventory oracle {oracle!r}: {sorted(offenders)}"
+    )
+
+
 def test_no_method_exceeds_length_budget() -> None:
     """A 700-line method is unreadable; consume() must stay decomposed.
 
     Scoped to accumulator.py, the sole module this phase authorizes
-    decomposing methods in. Every other execution/ module is a verbatim
-    move (target_layout) and may keep whatever length its original
-    function had -- e.g. strategy_aware_execution_replay at 576 lines.
+    decomposing methods in.
     """
     import ast
     from pathlib import Path
@@ -271,24 +334,25 @@ def test_no_method_exceeds_length_budget() -> None:
 def test_execution_module_size_budget_with_allowlist() -> None:
     """One documented exemption: the cohesive stateful accumulator class.
 
-    Raised 1200 -> 1450 for the P1 causal-execution overhaul
-    (CausalPortfolioState mirror, PIT/funding/viability guards, causal
-    timestamps): the state machine stays in one class by design.
+    The state machine stays in one class by design.
     """
     from pathlib import Path
 
     default_budget = 700
-    allowlist = {"src/mhs/execution/accumulator.py": 2000}
+    # frozen at measured size; growth fails, shrink requires deleting/lowering the entry.
+    allowlist = {"src/mhs/execution/accumulator.py": 1969}
 
-    offenders: dict[str, int] = {}
-    for path in Path("src/mhs/execution").rglob("*.py"):
-        lines = len(path.read_text(encoding="utf-8").splitlines())
-        budget = allowlist.get(str(path), default_budget)
-        if lines > budget:
-            offenders[str(path)] = lines
+    measured = {
+        str(path): len(path.read_text(encoding="utf-8").splitlines())
+        for path in Path("src/mhs/execution").rglob("*.py")
+    }
+    offenders: dict[str, int] = {
+        key: lines for key, lines in measured.items() if lines > allowlist.get(key, default_budget)
+    }
 
     assert offenders == {}, f"modules over budget: {offenders}"
     assert not Path("src/mhs/execution.py").exists(), "monolith must be gone"
+    _assert_frozen_entries_live(allowlist, measured, default_budget, "execution module size budget")
 
 
 def test_source_module_size_budget() -> None:
@@ -296,45 +360,46 @@ def test_source_module_size_budget() -> None:
     from pathlib import Path
 
     default_budget = 700
+    # frozen at measured size; growth fails, shrink requires deleting/lowering the entry.
     allowlist = {
-        "src/mhs/execution/accumulator.py": 2000,
-        "src/live/runner.py": 1800,
-        "src/live/scheduler.py": 1000,
-        "src/live/executor.py": 2000,
-        "src/live/tax_ledger.py": 1250,
-        "src/live/rest.py": 850,
-        "src/mhs/resources.py": 950,
-        "src/mhs/evidence.py": 1300,
-        "src/mhs/deploy_gate.py": 750,
-        "src/mhs/scaling.py": 900,
-        "src/application/mhs_supervisor.py": 1100,
-        "src/cli/commands/backtest.py": 1200,
-        "src/market_data/services/futures_collection.py": 1350,
-        "src/market_data/services/mhs_execution.py": 800,
-        "src/market_data/streams/liquidations.py": 950,
-        "src/quant/technical_experts/cross_sectional.py": 1300,
-        "src/quant/evaluation/reliability.py": 850,
-        "src/mhs/reporting/inventory.py": 750,
-        "src/mhs/backtest/paths.py": 900,
-        "src/mhs/backtest/journal.py": 1150,
-        "src/mhs/backtest/inventory.py": 900,
-        "src/mhs/report/persist.py": 800,
-        "src/cli/commands/research/mhs.py": 750,
-        "src/mhs/evaluation/windows.py": 900,
+        "src/mhs/execution/accumulator.py": 1969,
+        "src/live/runner.py": 1656,
+        "src/live/scheduler.py": 999,
+        "src/live/executor.py": 1848,
+        "src/live/tax_ledger.py": 1209,
+        "src/live/rest.py": 815,
+        "src/mhs/resources.py": 923,
+        "src/mhs/evidence.py": 1267,
+        "src/mhs/deploy_gate.py": 723,
+        "src/mhs/scaling.py": 892,
+        "src/application/mhs_supervisor.py": 1050,
+        "src/cli/commands/backtest.py": 1133,
+        "src/market_data/services/futures_collection.py": 1291,
+        "src/market_data/services/mhs_execution.py": 761,
+        "src/quant/technical_experts/cross_sectional.py": 1267,
+        "src/quant/evaluation/reliability.py": 816,
+        "src/mhs/reporting/inventory.py": 741,
+        "src/mhs/backtest/paths.py": 850,
+        "src/mhs/backtest/journal.py": 1091,
+        "src/mhs/backtest/inventory.py": 877,
+        "src/mhs/evaluation/windows.py": 713,
         # Checkpoint advancement, retention and the loop stay co-located for review;
         # _run_retention_pass persists the checkpoint and is not split out.
-        "src/market_data/streams/normalizer.py": 1150,
+        "src/market_data/streams/normalizer.py": 1112,
     }
-    offenders: dict[str, int] = {}
-    for path in Path("src").rglob("*.py"):
-        lines = len(path.read_text(encoding="utf-8").splitlines())
-        if lines > allowlist.get(str(path), default_budget):
-            offenders[str(path)] = lines
+    measured = {
+        str(path): len(path.read_text(encoding="utf-8").splitlines())
+        for path in Path("src").rglob("*.py")
+    }
+    offenders: dict[str, int] = {
+        key: lines for key, lines in measured.items() if lines > allowlist.get(key, default_budget)
+    }
 
     assert offenders == {}, (
         f"modules over budget: {offenders}. Split it, or add a documented "
         f"allowlist entry with a stated reason."
     )
+    _assert_frozen_entries_live(allowlist, measured, default_budget, "source module size budget")
 
 
 def test_no_import_cycles_between_packages() -> None:
@@ -388,30 +453,26 @@ def test_no_function_exceeds_length_budget() -> None:
     from pathlib import Path
 
     budget = 250
-    # P5 amendment (ADR_20260902): pre-existing functions outside P3 scope
-    # (I-P3-METHOD-BUDGET-SCOPE), frozen at measured spans. New code over
-    # budget and any growth beyond a frozen span both fail.
+    # frozen at measured size; growth fails, shrink requires deleting/lowering the entry.
     frozen = {
-        "src/live/runner.py::run_shadow_cycle": 610,
-        "src/live/scheduler.py::run_daemon": 370,
-        "src/live/executor.py::_poll_or_post": 300,
-        "src/live/frozen_signal.py::run_frozen_signal_step": 320,
-        "src/mhs/account_ledger.py::replay_account": 320,
-        "src/application/mhs_supervisor.py::run_mhs_process_backtest": 310,
-        "src/cli/commands/backtest.py::run_frozen_account_command": 290,
-        "src/market_data/streams/liquidations.py::run_liquidation_stream": 340,
-        "src/mhs/evaluation/windows.py::_book_outcome": 420,
-        "src/mhs/execution/accumulator.py::_consume_append_ledger": 260,
-        "src/mhs/execution/window_stream.py::_iter_mhs_execution_windows": 390,
-        "src/mhs/backtest/paths.py::run_process_paths": 270,
-        "src/mhs/backtest/inventory.py::evaluate_process_inventory_backtest": 300,
+        "src/live/runner.py::run_shadow_cycle": 609,
+        "src/live/scheduler.py::run_daemon": 345,
+        "src/live/executor.py::_poll_or_post": 268,
+        "src/live/frozen_signal.py::run_frozen_signal_step": 312,
+        "src/mhs/account_ledger.py::replay_account": 308,
+        "src/application/mhs_supervisor.py::run_mhs_process_backtest": 303,
+        "src/cli/commands/backtest.py::run_frozen_account_command": 284,
+        "src/mhs/evaluation/windows.py::_book_outcome": 411,
+        "src/mhs/execution/accumulator.py::_consume_append_ledger": 252,
+        "src/mhs/execution/window_stream.py::_iter_mhs_execution_windows": 382,
+        "src/mhs/backtest/paths.py::run_process_paths": 263,
+        "src/mhs/backtest/inventory.py::evaluate_process_inventory_backtest": 289,
         "src/mhs/discovery.py::select_horizon_by_discovery_qualification": 270,
-        "src/cli/commands/research/mhs.py::add_mhs_commands": 571,
+        "src/cli/commands/research/mhs.py::add_mhs_commands": 559,
         "src/mhs/evaluation/committee.py::_committee_diagnostic": 282,
-        "src/mhs/execution/strategy_replay.py::strategy_aware_execution_replay": 576,
-        "src/mhs/pipeline/stages/committee.py::build_committee": 291,
-        "src/mhs/pipeline/stages/fold.py::run_folds": 252,
+        "src/mhs/pipeline/stages/committee.py::build_committee": 278,
     }
+    measured: dict[str, int] = {}
     offenders: dict[str, int] = {}
     for path in Path("src").rglob("*.py"):
         tree = ast.parse(path.read_text(encoding="utf-8"))
@@ -420,10 +481,12 @@ def test_no_function_exceeds_length_budget() -> None:
                 continue
             span = (node.end_lineno or node.lineno) - node.lineno
             key = f"{path}::{node.name}"
+            measured[key] = max(measured.get(key, 0), span)
             if span > frozen.get(key, budget):
                 offenders[key] = span
 
     assert offenders == {}, f"functions over {budget} lines: {offenders}"
+    _assert_frozen_entries_live(frozen, measured, budget, "function length budget")
 
 
 def test_docs_reference_no_ephemeral_spec_paths() -> None:
@@ -482,3 +545,24 @@ def test_deleted_trees_stay_deleted() -> None:
                     break
 
     assert offenders == [], f"modules still import a deleted tree: {offenders}"
+
+
+def test_frozen_entries_live_rejects_missing_key() -> None:
+    """Live-entry helper rejects a frozen key absent from the measurement."""
+    import pytest
+
+    with pytest.raises(AssertionError, match=r"a\.py::f"):
+        _assert_frozen_entries_live({"a.py::f": 300}, {}, 250, "function length budget")
+
+
+def test_frozen_entries_live_rejects_compliant_key() -> None:
+    """Live-entry helper rejects a frozen key that no longer exceeds the budget."""
+    import pytest
+
+    with pytest.raises(AssertionError, match=r"a\.py"):
+        _assert_frozen_entries_live({"a.py": 900}, {"a.py": 650}, 700, "source module size budget")
+
+
+def test_frozen_entries_live_accepts_oversized_key() -> None:
+    """Live-entry helper accepts a frozen key that still exceeds the budget."""
+    _assert_frozen_entries_live({"a.py": 900}, {"a.py": 850}, 700, "source module size budget")

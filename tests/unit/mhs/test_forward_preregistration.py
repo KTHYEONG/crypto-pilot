@@ -42,10 +42,11 @@ def _request(**overrides):
 
 
 def _write_history(history_dir: Path, ends: list[str]) -> None:
-    history_dir.mkdir(parents=True, exist_ok=True)
-    with (history_dir / "active.jsonl").open("w", encoding="utf-8") as fh:
-        for end in ends:
-            fh.write(json.dumps({"status": "COMPLETE", "resolved_end": end}) + "\n")
+    """Record consulted looks in the canonical run-history registry."""
+    from src.mhs.run_history import append_run_history_record
+
+    for end in ends:
+        append_run_history_record({"status": "COMPLETE", "resolved_end": end}, history_dir)
 
 
 # --- fold calendar ---------------------------------------------------------

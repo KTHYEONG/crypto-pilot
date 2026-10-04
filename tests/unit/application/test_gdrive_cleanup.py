@@ -25,7 +25,8 @@ from src.application.ops.gdrive_cleanup import (
     main,
     vision_symbol_probe,
 )
-from src.application.ops.gdrive_cleanup import _scope_rule_of
+from src.application.ops.gdrive_cleanup import _evidence_size_admissible, _scope_rule_of
+from src.live.crypto import SEALED_OVERHEAD_BYTES
 
 
 def _obj(path: str, size: int = 100) -> RemoteObject:
@@ -150,13 +151,21 @@ def test_build_plan_manual_debug_backup_requires_dated_run_counterpart() -> None
     assert (orphan, "no_run_counterpart") in plan.kept
 
 
-def test_build_plan_oci_snapshot_requires_live_basename_counterpart() -> None:
+S = f"{OCI_SNAPSHOT}/crypto-pilot"
+K = f"{OCI_SNAPSHOT}/krx-alpha"
+
+
+def _oci_candidates(plan: CleanupPlan) -> list[CleanupCandidate]:
+    return [c for c in plan.candidates if c.rule == "oci_server_snapshot"]
+
+
+def test_build_plan_oci_snapshot_requires_exact_relative_path_counterpart() -> None:
     live_copy = _obj(f"{LIVE_DATA}/live_capture/btc_top.json", 300)
-    snap = _obj(f"{OCI_SNAPSHOT}/crypto-pilot/data/live_capture/btc_top.json", 300)
-    stray = _obj(f"{OCI_SNAPSHOT}/crypto-pilot/data/live_capture/gone.json", 10)
+    snap = _obj(f"{S}/live_capture/btc_top.json", 300)
+    stray = _obj(f"{S}/live_capture/gone.json", 10)
     krx_copy = _obj(f"{KRX_DATA}/state/universe.json", 60)
-    krx_snap = _obj(f"{OCI_SNAPSHOT}/krx-alpha/data/state/universe.json", 60)
-    krx_orphan = _obj(f"{OCI_SNAPSHOT}/krx-alpha/data/state/missing.json", 10)
+    krx_snap = _obj(f"{K}/state/universe.json", 60)
+    krx_orphan = _obj(f"{K}/state/missing.json", 10)
     krx_stray = _obj("stray/k.json", 5)
     unknown = _obj(f"{OCI_SNAPSHOT}/unknown/tree/file.json", 10)
     off_prefix = _obj("elsewhere/file.json", 10)
@@ -166,12 +175,250 @@ def test_build_plan_oci_snapshot_requires_live_basename_counterpart() -> None:
     )
     by_path = {c.obj.path: c for c in plan.candidates}
     assert set(by_path) == {snap.path, krx_snap.path}
-    assert "size=300 snapshot_size=300" in by_path[snap.path].evidence
+    assert by_path[snap.path].evidence == f"live:{live_copy.path} size=300 snapshot_size=300"
+    assert by_path[snap.path].evidence_path == live_copy.path
     assert by_path[krx_snap.path].evidence.startswith("live-krx:")
+    assert by_path[krx_snap.path].evidence_path == krx_copy.path
     assert (stray, "no_live_counterpart") in plan.kept
     assert (krx_orphan, "no_live_counterpart") in plan.kept
-    assert (unknown, "no_live_counterpart") in plan.kept
+    assert (unknown, "counterpart_root_not_listed") in plan.kept
     assert off_prefix not in [obj for obj, _reason in plan.kept]
+
+
+def test_build_plan_oci_snapshot_same_basename_in_different_directory_is_kept() -> None:
+    live = _obj(f"{LIVE_DATA}/futures/ohlcv/1h/BTCUSDT.parquet", 1_000)
+    snap = _obj(f"{S}/futures/ohlcv/3m/BTCUSDT.parquet", 90_000_000)
+    plan = build_cleanup_plan(_listings((live,), (), (snap,)), _no_vision)
+    assert _oci_candidates(plan) == []
+    assert (snap, "no_live_counterpart") in plan.kept
+
+
+def test_build_plan_oci_hourly_capture_partitions_never_match_across_days_or_datasets() -> None:
+    live = tuple(_obj(f"{LIVE_DATA}/live_capture/top_of_book/20261002/{h:02d}.parquet", 10) for h in range(24))
+    snaps = tuple(
+        _obj(f"{S}/live_capture/{dataset}/202609{day:02d}/{h:02d}.parquet", 2_000_000)
+        for dataset in ("top_of_book", "premium_index")
+        for day in range(1, 31)
+        for h in range(24)
+    )
+    plan = build_cleanup_plan(_listings(live, (), snaps), _no_vision)
+    assert len(snaps) == 1440
+    assert _oci_candidates(plan) == []
+    kept_snaps = [obj for obj, _reason in plan.kept if obj.path.startswith(S + "/")]
+    assert len(kept_snaps) == 1440
+
+
+def test_build_plan_oci_generic_file_names_in_other_runs_are_kept() -> None:
+    live = (
+        _obj(f"{LIVE_DATA}/state/runs/r1/run_manifest.json", 5),
+        _obj(f"{LIVE_DATA}/state/runs/run_new/tax_ledger/tax_ledger_202609.jsonl", 10),
+    )
+    snaps = (
+        _obj(f"{S}/state/runs/r_old/run_manifest.json", 999),
+        _obj(f"{S}/state/runs/run_old_oci_only/tax_ledger/tax_ledger_202609.jsonl", 50_000),
+    )
+    plan = build_cleanup_plan(_listings(live, (), snaps), _no_vision)
+    assert plan.candidates == ()
+
+
+def test_build_plan_oci_immutable_file_requires_identical_size() -> None:
+    snap = _obj(f"{S}/state/live_position_ledger.json", 80_000)
+    truncated = _obj(f"{LIVE_DATA}/state/live_position_ledger.json", 2)
+    plan = build_cleanup_plan(_listings((truncated,), (), (snap,)), _no_vision)
+    assert _oci_candidates(plan) == []
+    assert (snap, "evidence_size_mismatch") in plan.kept
+    identical = _obj(f"{LIVE_DATA}/state/live_position_ledger.json", 80_000)
+    matched = build_cleanup_plan(_listings((identical,), (), (snap,)), _no_vision)
+    assert [c.obj for c in _oci_candidates(matched)] == [snap]
+
+
+def test_build_plan_oci_append_only_ledger_accepts_grown_live_copy() -> None:
+    snap = _obj(f"{S}/state/runs/r1/audit/2026-09-01.jsonl", 100)
+    grown = _obj(f"{LIVE_DATA}/state/runs/r1/audit/2026-09-01.jsonl", 150)
+    plan = build_cleanup_plan(_listings((grown,), (), (snap,)), _no_vision)
+    assert [c.obj for c in _oci_candidates(plan)] == [snap]
+    assert _oci_candidates(plan)[0].evidence_path == grown.path
+    shrunk = _obj(f"{LIVE_DATA}/state/runs/r1/audit/2026-09-01.jsonl", 99)
+    kept_plan = build_cleanup_plan(_listings((shrunk,), (), (snap,)), _no_vision)
+    assert _oci_candidates(kept_plan) == []
+    assert (snap, "evidence_size_mismatch") in kept_plan.kept
+
+
+def test_build_plan_oci_zero_byte_live_copy_is_never_evidence() -> None:
+    live = (
+        _obj(f"{LIVE_DATA}/futures/liquidations/stream.parquet", 0),
+        _obj(f"{LIVE_DATA}/state/runs/r1/audit/2026-09-02.jsonl", 0),
+    )
+    parquet_snap = _obj(f"{S}/futures/liquidations/stream.parquet", 5_000_000)
+    ledger_snap = _obj(f"{S}/state/runs/r1/audit/2026-09-02.jsonl", 0)
+    plan = build_cleanup_plan(_listings(live, (), (parquet_snap, ledger_snap)), _no_vision)
+    assert plan.candidates == ()
+    assert (parquet_snap, "zero_byte_evidence") in plan.kept
+    assert (ledger_snap, "zero_byte_evidence") in plan.kept
+
+
+def test_build_plan_oci_live_duplicate_failing_the_gate_keeps_the_snapshot() -> None:
+    live = (
+        _obj(f"{LIVE_DATA}/live_capture/btc_top.json", 300),
+        _obj(f"{LIVE_DATA}/live_capture/btc_top.json", 0),
+    )
+    snap = _obj(f"{S}/live_capture/btc_top.json", 300)
+    plan = build_cleanup_plan(_listings(live, (), (snap,)), _no_vision)
+    assert plan.candidates == ()
+    assert (snap, "zero_byte_evidence") in plan.kept
+
+
+def test_build_plan_oci_live_duplicate_with_other_size_is_size_mismatch() -> None:
+    live = (
+        _obj(f"{LIVE_DATA}/live_capture/btc_top.json", 300),
+        _obj(f"{LIVE_DATA}/live_capture/btc_top.json", 299),
+    )
+    snap = _obj(f"{S}/live_capture/btc_top.json", 300)
+    plan = build_cleanup_plan(_listings(live, (), (snap,)), _no_vision)
+    assert plan.candidates == ()
+    assert (snap, "evidence_size_mismatch") in plan.kept
+
+
+def test_build_plan_oci_non_data_subtree_counterpart_is_not_listed() -> None:
+    audit = _obj(f"{LIVE_DATA}/state/runs/r1/audit/2026-09-01.jsonl", 5)
+    snap = _obj(f"{OCI_SNAPSHOT}/crypto-pilot/logs/live/orders/2026-09-01.jsonl", 5)
+    plan = build_cleanup_plan(_listings((audit,), (), (snap,)), _no_vision)
+    assert plan.candidates == ()
+    assert (snap, "no_live_counterpart") in plan.kept
+
+
+def test_build_plan_oci_krx_snapshot_without_krx_listing_is_kept() -> None:
+    snap = _obj(f"{K}/state/universe.json", 60)
+    listings = _listings((), (), (snap,))
+    del listings[KRX_DATA]
+    plan = build_cleanup_plan(listings, _no_vision)
+    assert plan.candidates == ()
+    assert plan.kept == ((snap, "counterpart_root_not_listed"),)
+
+
+def test_build_plan_oci_snapshot_without_project_segment_is_kept() -> None:
+    loose = _obj(f"{OCI_SNAPSHOT}/crypto-pilot", 10)
+    plan = build_cleanup_plan(_listings((_obj(f"{LIVE_DATA}/x.json", 10),), (), (loose,)), _no_vision)
+    assert plan.candidates == ()
+    assert plan.kept == ((loose, "counterpart_root_not_listed"),)
+
+
+def test_build_plan_oci_krx_different_directory_is_kept() -> None:
+    krx_live = _obj(f"{KRX_DATA}/state/2024.parquet", 1)
+    snap = _obj(f"{K}/prices/2024.parquet", 9_999)
+    plan = build_cleanup_plan(_listings((), (), (snap,), (krx_live,)), _no_vision)
+    assert plan.candidates == ()
+    assert (snap, "no_live_counterpart") in plan.kept
+
+
+def test_build_plan_oci_unnormalized_snapshot_path_is_kept() -> None:
+    target = _obj(f"{LIVE_DATA}/state/x.json", 10)
+    snap = _obj(f"{S}/live_capture/../state/x.json", 10)
+    plan = build_cleanup_plan(_listings((target,), (), (snap,)), _no_vision)
+    assert _oci_candidates(plan) == []
+    assert (snap, "unnormalized_path") in plan.kept
+
+
+def _chained_evidence_listings(reverse: bool = False) -> dict[str, list[RemoteObject]]:
+    listings = _listings(
+        (
+            _obj(f"{LIVE_DATA}/state/runs/r1/fills.parquet", 100),
+            _obj(f"{LIVE_DATA}/state/runs/r1/fills.parquet.enc", 100 + SEALED_OVERHEAD_BYTES),
+        ),
+        (),
+        (_obj(f"{S}/state/runs/r1/fills.parquet", 100),),
+    )
+    if reverse:
+        return {root: list(reversed(objs)) for root, objs in reversed(listings.items())}
+    return listings
+
+
+def test_build_plan_evidence_deleted_by_another_rule_demotes_dependent_candidate() -> None:
+    plan = build_cleanup_plan(_chained_evidence_listings(), _no_vision)
+    plain = _obj(f"{LIVE_DATA}/state/runs/r1/fills.parquet", 100)
+    snap = _obj(f"{S}/state/runs/r1/fills.parquet", 100)
+    assert _candidates_by_rule(plan, "plaintext_run_artifact") == [plain]
+    assert _oci_candidates(plan) == []
+    assert (snap, "evidence_is_candidate") in plan.kept
+    assert not {c.evidence_path for c in plan.candidates} & {c.obj.path for c in plan.candidates}
+    assert cleanup_module._rule_summary(plan)["oci_server_snapshot"]["kept"] == 1
+
+
+def test_build_plan_evidence_closure_is_order_independent() -> None:
+    forward = build_cleanup_plan(_chained_evidence_listings(), _no_vision)
+    backward = build_cleanup_plan(_chained_evidence_listings(reverse=True), _no_vision)
+    assert forward == backward
+
+
+def test_build_plan_futures_research_copy_smaller_than_live_is_rejected() -> None:
+    live = _obj(f"{LIVE_DATA}/futures/ohlcv/1h/BTCUSDT.parquet", 50_000_000)
+    research = _obj(f"{RESEARCH_FUTURES}/ohlcv/1h/BTCUSDT.parquet", 1)
+    plan = build_cleanup_plan(_listings((live,), (research,)), _no_vision)
+    assert plan.candidates == ()
+    assert plan.kept == ((live, "research_size_mismatch"),)
+    vision_plan = build_cleanup_plan(_listings((live,), (research,)), lambda dataset, symbol: True)
+    assert len(vision_plan.candidates) == 1
+    assert vision_plan.candidates[0].evidence == "vision:BTCUSDT"
+    assert vision_plan.candidates[0].evidence_path is None
+
+
+def test_build_plan_futures_research_copy_equal_or_larger_justifies_deletion() -> None:
+    live = _obj(f"{LIVE_DATA}/futures/ohlcv/1h/BTCUSDT.parquet", 500)
+    research_path = f"{RESEARCH_FUTURES}/ohlcv/1h/BTCUSDT.parquet"
+    for research_size in (500, 600):
+        plan = build_cleanup_plan(_listings((live,), (_obj(research_path, research_size),)), _no_vision)
+        assert len(plan.candidates) == 1
+        assert plan.candidates[0].evidence == f"research:{research_path} size={research_size}"
+        assert plan.candidates[0].evidence_path == research_path
+
+
+def test_build_plan_manual_debug_backup_rejects_much_smaller_counterpart() -> None:
+    backup = _obj(f"{LIVE_DATA}/state/runs/_manual_debug_backup_20260915/order_journal.jsonl", 900_000)
+    tiny = _obj(f"{LIVE_DATA}/state/runs/someRun_20260915/order_journal.jsonl", 10)
+    plan = build_cleanup_plan(_listings((backup, tiny)), _no_vision)
+    assert plan.candidates == ()
+    assert (backup, "run_counterpart_size_mismatch") in plan.kept
+    grown = _obj(tiny.path, 900_500)
+    matched = build_cleanup_plan(_listings((backup, grown)), _no_vision)
+    assert _candidates_by_rule(matched, "manual_debug_backup") == [backup]
+    assert matched.candidates[0].evidence == f"run-counterpart:{grown.path} size=900500"
+    assert matched.candidates[0].evidence_path == grown.path
+
+
+def test_build_plan_manual_debug_backup_accepts_sealed_counterpart_with_exact_envelope_overhead() -> None:
+    backup = _obj(f"{LIVE_DATA}/state/runs/_manual_debug_backup_20260921/target_weights.parquet", 200)
+    sealed_path = f"{LIVE_DATA}/state/runs/frozen_20260921/target_weights.parquet.enc"
+    plan = build_cleanup_plan(_listings((backup, _obj(sealed_path, 200 + SEALED_OVERHEAD_BYTES))), _no_vision)
+    assert _candidates_by_rule(plan, "manual_debug_backup") == [backup]
+    assert plan.candidates[0].evidence_path == sealed_path
+    off_by_one = build_cleanup_plan(_listings((backup, _obj(sealed_path, 200 + SEALED_OVERHEAD_BYTES + 1))), _no_vision)
+    assert off_by_one.candidates == ()
+    assert (backup, "run_counterpart_size_mismatch") in off_by_one.kept
+
+
+def test_build_plan_manual_debug_backup_prefers_counterpart_that_survives_the_plan() -> None:
+    backup = _obj(f"{LIVE_DATA}/state/runs/_manual_debug_backup_20260921/target_weights.parquet", 200)
+    plain = _obj(f"{LIVE_DATA}/state/runs/r_20260921/target_weights.parquet", 200)
+    sealed = _obj(f"{LIVE_DATA}/state/runs/r_20260921/target_weights.parquet.enc", 200 + SEALED_OVERHEAD_BYTES)
+    plan = build_cleanup_plan(_listings((backup, plain, sealed)), _no_vision)
+    assert _candidates_by_rule(plan, "plaintext_run_artifact") == [plain]
+    manual = [c for c in plan.candidates if c.rule == "manual_debug_backup"]
+    assert [c.obj for c in manual] == [backup]
+    assert manual[0].evidence_path == sealed.path
+
+
+def test_evidence_size_admissible_gate_boundaries() -> None:
+    parquet = _obj(f"{LIVE_DATA}/a.parquet", 100)
+    ledger = _obj(f"{LIVE_DATA}/a.jsonl", 100)
+    assert _evidence_size_admissible(parquet, 100)
+    assert not _evidence_size_admissible(parquet, 101)
+    assert not _evidence_size_admissible(parquet, 99)
+    assert _evidence_size_admissible(ledger, 101)
+    assert not _evidence_size_admissible(ledger, 99)
+    assert not _evidence_size_admissible(_obj(f"{LIVE_DATA}/z.parquet", 0), 0)
+    assert not _evidence_size_admissible(_obj(f"{LIVE_DATA}/z.jsonl", 0), 0)
+    assert _evidence_size_admissible(parquet, 100 + SEALED_OVERHEAD_BYTES, sealed_evidence=True)
+    assert not _evidence_size_admissible(parquet, 100, sealed_evidence=True)
 
 
 def test_build_plan_out_of_scope_roots_are_immune() -> None:
@@ -397,6 +644,9 @@ def test_main_dry_run_is_non_mutating_and_writes_report(
     assert payload["mode"] == "dry-run"
     assert payload["rules"]["futures_legacy"]["candidates"] == 1
     assert payload["rules"]["plaintext_run_artifact"]["kept"] == 2
+    assert all("evidence_path" in c for c in payload["candidates"])
+    futures = [c for c in payload["candidates"] if c["rule"] == "futures_legacy"]
+    assert [c["evidence_path"] for c in futures] == [research.path]
     immune = {f"{LIVE_DATA}/state/runs/", f"{LIVE_DATA}/state/runs/r1/sub/f.parquet"}
     assert not immune & {c["path"] for c in payload["candidates"]}
     assert not immune & {k["path"] for k in payload["kept"]}

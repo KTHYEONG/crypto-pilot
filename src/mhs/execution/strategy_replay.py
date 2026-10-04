@@ -1,11 +1,10 @@
 """OHLCV strategy-aware execution replay (delegates to the causal window engine).
 
-``strategy_aware_execution_replay`` is a thin single-panel adapter: it keeps
-the historical input validation, builds one ``ExecutionReplayWindow``, and
-delegates to ``replay_execution_windows`` so exactly one accounting
-implementation exists (migration oracle retirement). Independent verification
-of the economics lives in ``simulate_inventory_ledger`` recomputation plus
-the hand-calculated regression tests, not in a second replay formula.
+``strategy_aware_execution_replay`` is a thin single-panel adapter: it keeps the historical input
+validation, builds one ``ExecutionReplayWindow``, and delegates to ``replay_execution_windows`` so
+exactly one accounting implementation exists. Independent verification of the economics is the
+``simulated_inventory_ledger`` recomputation oracle, property-tested against the streamed ledger,
+plus the hand-calculated regression tests; it is never a second replay formula.
 """
 
 from __future__ import annotations

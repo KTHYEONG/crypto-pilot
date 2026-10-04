@@ -13,7 +13,6 @@ ceil(window_deadline_s / poll_interval_s) + 1 로 유도된다.
 from __future__ import annotations
 
 import math
-import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from decimal import ROUND_DOWN, ROUND_UP, Decimal
@@ -33,8 +32,19 @@ from src.live.errors import (
 )
 from src.live.filters import _ZERO, SymbolFilters, quantize_to_multiple
 from src.live.microstructure import parse_book_quote
+from src.live.order_cancel import _LEGACY_CLIENT_ORDER_ID as _LEGACY_CLIENT_ORDER_ID
+from src.live.order_cancel import _OPEN_ORDER_STATUSES as _OPEN_ORDER_STATUSES
+from src.live.order_cancel import _ORDER_GONE_CODES as _ORDER_GONE_CODES
+from src.live.order_cancel import ORDER_DOES_NOT_EXIST_CODE as ORDER_DOES_NOT_EXIST_CODE
+from src.live.order_cancel import ORDER_NOT_FOUND_STATUS as ORDER_NOT_FOUND_STATUS
+from src.live.order_cancel import CancelConfirmation as CancelConfirmation
+from src.live.order_cancel import CancelNotConfirmed as CancelNotConfirmed
+from src.live.order_cancel import OrphanSweep as OrphanSweep
+from src.live.order_cancel import UnresolvedOrder as UnresolvedOrder
+from src.live.order_cancel import cancel_and_confirm as cancel_and_confirm
+from src.live.order_cancel import cancel_orphan_orders as cancel_orphan_orders
 from src.live.order_journal import OrderJournal
-from src.live.planner import CLIENT_ORDER_NAMESPACE, OrderIntent, build_client_order_id
+from src.live.planner import OrderIntent, build_client_order_id
 from src.live.rest import (
     _HTTP_TIMEOUT_SECONDS,
     OrderStatusUnknown,
@@ -58,14 +68,6 @@ EXECUTION_BAR_SECONDS: float = 180.0
 #: 미확인 제출이 실제로 미체결로 확정되기까지 필요한 연속 -2013 조회 횟수.
 UNKNOWN_SUBMISSION_MISS_LIMIT: int = 2
 
-#: 취소/조회에서 benign(사라진 주문)으로 취급하는 베뉴 코드.
-_ORDER_GONE_CODES: frozenset[int] = frozenset({-2011, -2013})
-
-#: 취소 상태 미확인 시 해소 조회에서 '아직 열림'으로 판정하는 상태 집합.
-_OPEN_ORDER_STATUSES: frozenset[str] = frozenset({"NEW", "PARTIALLY_FILLED"})
-
-#: 네임스페이스 이전('%Y%m%d-' 접두) 레거시 client order id.
-_LEGACY_CLIENT_ORDER_ID = re.compile(r"^\d{8}-")
 
 #: Closed outcome set for one intent.
 OUTCOME_STATUSES: frozenset[str] = frozenset(
@@ -283,28 +285,6 @@ class ExecutionOutcome:
     maker_qty: Decimal = _ZERO
     taker_qty: Decimal = _ZERO
     reject_code: int | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class OrphanSweep:
-    fills: tuple[JournalFill, ...]
-    foreign_symbols: tuple[str, ...]
-
-    def __iter__(self):  # type: ignore[no-untyped-def]
-        return iter(self.fills)
-
-    def __len__(self) -> int:
-        return len(self.fills)
-
-    def __getitem__(self, index):  # type: ignore[no-untyped-def]
-        return self.fills[index]
-
-    def __eq__(self, other: object) -> bool:
-        if isinstance(other, (list, tuple)):
-            return list(self.fills) == list(other)
-        if isinstance(other, OrphanSweep):
-            return self.fills == other.fills and self.foreign_symbols == other.foreign_symbols
-        return NotImplemented
 
 
 def _slice_quantities(total: Decimal, slice_count: int, step_size: Decimal) -> list[Decimal]:
@@ -628,23 +608,6 @@ def _journal_terminal(rt: _IntentRuntime, order_id: str | None, status: str) -> 
     rt.journal.record_terminal(order_id, status)
 
 
-def _cancel_tolerating_benign(client: Any, symbol: str, client_order_id: str) -> None:
-    """취소 거절(-2011/-2013: 이미 체결/취소/소멸)은 benign이므로 무시한다.
-
-    취소 상태 미확인이면 절대 재전송하지 않고 조회로 해소한다: 아직 열려
-    있으면 미확인을 재전파하고, 닫혔으면 benign(호출부가 정산으로 진행)이다.
-    """
-    try:
-        client.cancel_order(symbol, client_order_id)
-    except VenueError as exc:
-        if exc.code not in _ORDER_GONE_CODES:
-            raise
-    except OrderStatusUnknown:
-        payload = client.query_order(symbol, client_order_id)
-        if str(payload.get("status", "")) in _OPEN_ORDER_STATUSES:
-            raise
-
-
 def _cancel_and_settle(
     client: Any,
     rt: _IntentRuntime,
@@ -674,9 +637,18 @@ def _cancel_and_settle(
     if rt.paper_active:
         _release_active(rt, "CANCELED")
         return
-    _cancel_tolerating_benign(client, rt.intent.symbol, rt.active_id)
-    status = _sync_venue_order(client, rt, now=now, audit=audit, touch=touch)
-    _release_active(rt, status or "CANCELED")
+    confirmation = cancel_and_confirm(client, rt.intent.symbol, rt.active_id)
+    if confirmation.payload is not None:
+        _sync_venue_order(client, rt, now=now, audit=audit, touch=touch, payload=confirmation.payload)
+    if not confirmation.closed or confirmation.payload is None:
+        audit.record(
+            "order_cancel_unconfirmed",
+            symbol=rt.intent.symbol,
+            client_order_id=rt.active_id,
+            status=confirmation.status,
+        )
+        raise CancelNotConfirmed(rt.intent.symbol, str(rt.active_id), confirmation.status)
+    _release_active(rt, confirmation.status)
 
 
 def _emit_fill_event(
@@ -770,11 +742,13 @@ def _sync_venue_order(
     now: float,
     audit: AuditLog,
     touch: tuple[Decimal, Decimal] | None,
+    payload: Mapping[str, Any] | None = None,
 ) -> str:
-    """Query and apply new execution quantity for the current LIVE order."""
+    """Apply new execution quantity for the current LIVE order from ``payload`` (queried when None)."""
     assert rt.active_id is not None
     assert not rt.paper_active
-    payload = client.query_order(rt.intent.symbol, rt.active_id)
+    if payload is None:
+        payload = client.query_order(rt.intent.symbol, rt.active_id)
     status = str(payload.get("status", "") or "")
     executed = Decimal(str(payload.get("executedQty", "0")))
     if executed > rt.active_post_qty:
@@ -925,119 +899,6 @@ class _IntentRuntime:
             taker_qty=taker_qty,
             reject_code=self.reject_code if status == "REJECTED" else None,
         )
-
-
-def cancel_orphan_orders(
-    client: Any,
-    client_order_prefix: str,
-    audit: AuditLog,
-    *,
-    journal: OrderJournal,
-    now: pd.Timestamp,
-    taker_fee_bps: float,
-) -> OrphanSweep:
-    """Cancel namespace orphan orders before reconciliation and report foreign orders.
-
-    Foreign (non-namespace) open orders are never cancelled; their symbols are returned in `foreign_symbols` and audited as `foreign_open_order`, and the caller decides the policy (de-risk-only with those symbols excluded, or HALT when de-risk mode is disabled).
-
-    Returns the journaled `orphan_settlement` fills (one per order whose venue executedQty
-    exceeds the journal observed qty). The ledger learns about them only through
-    `commit_journal_fills`. Settlements are booked at ``taker_fee_bps`` because the order query
-    does not reveal maker/taker and a conservative fee never understates cost.
-
-    Raises:
-        DataIntegrityError: a settled order's venue response lacks a parseable executedQty, a
-            BUY/SELL side, or a positive avgPrice. Nothing is invented for missing venue fields.
-    """
-    open_orders = client.open_orders()
-    ours: list[Mapping[str, Any]] = []
-    foreign_symbols: list[str] = []
-    for entry in open_orders:
-        order_id = str(entry.get("clientOrderId", ""))
-        if order_id.startswith(CLIENT_ORDER_NAMESPACE) or _LEGACY_CLIENT_ORDER_ID.match(order_id):
-            ours.append(entry)
-        else:
-            symbol = str(entry.get("symbol", ""))
-            if symbol and symbol not in foreign_symbols:
-                foreign_symbols.append(symbol)
-            audit.record(
-                "foreign_open_order",
-                symbol=entry.get("symbol"),
-                client_order_id=order_id,
-            )
-    settlements: list[JournalFill] = []
-    for entry in ours:
-        order_id = str(entry.get("clientOrderId", ""))
-        symbol = str(entry["symbol"])
-        _cancel_tolerating_benign(client, symbol, order_id)
-        audit.record(
-            "orphan_cancelled",
-            symbol=entry.get("symbol"),
-            client_order_id=order_id,
-            current_run=order_id.startswith(f"{CLIENT_ORDER_NAMESPACE}{client_order_prefix}"),
-        )
-        try:
-            queried = client.query_order(symbol, order_id)
-        except VenueError as exc:
-            if exc.code in _ORDER_GONE_CODES:
-                continue
-            raise
-        executed_raw = queried.get("executedQty")
-        try:
-            executed_qty = Decimal(str(executed_raw))
-        except ArithmeticError as exc:
-            raise DataIntegrityError(
-                f"orphan order {order_id} has unparseable executedQty {executed_raw!r}"
-            ) from exc
-        if not executed_qty.is_finite():
-            raise DataIntegrityError(f"orphan order {order_id} has unparseable executedQty {executed_raw!r}")
-        observed = journal.observed_qty(order_id)
-        delta = executed_qty - observed
-        status = str(queried.get("status", "") or "")
-        if delta <= _ZERO:
-            if status and status not in _OPEN_ORDER_STATUSES:
-                journal.record_terminal(order_id, status)
-            continue
-        side = queried.get("side") or entry.get("side")
-        if side not in ("BUY", "SELL"):
-            raise DataIntegrityError(f"orphan order {order_id} settled {delta} without a venue side")
-        avg_raw = queried.get("avgPrice", entry.get("avgPrice"))
-        try:
-            avg_price = Decimal(str(avg_raw)) if avg_raw is not None else None
-        except ArithmeticError as exc:
-            raise DataIntegrityError(f"orphan order {order_id} has unparseable avgPrice {avg_raw!r}") from exc
-        # Never invent a price: a settled quantity without a positive venue price fails closed.
-        if avg_price is None or not avg_price.is_finite() or avg_price <= _ZERO:
-            raise DataIntegrityError(
-                f"orphan order {order_id} settled {delta} with no positive venue avgPrice"
-            )
-        fill = journal.record_fill(
-            kind="orphan_settlement",
-            attempt_seq=None,
-            symbol=symbol,
-            side=str(side),
-            quantity=delta,
-            price=avg_price,
-            fee_bps=float(taker_fee_bps),
-            liquidity="taker",
-            reason="orphan_settlement",
-            filled_at=now,
-            client_order_id=order_id,
-            leg_index=0,
-            cumulative_executed_qty=executed_qty,
-            simulated=False,
-        )
-        settlements.append(fill)
-        audit.record(
-            "orphan_settled",
-            symbol=symbol,
-            client_order_id=order_id,
-            executed_qty=str(delta),
-            previously_observed=str(observed),
-        )
-        if status and status not in _OPEN_ORDER_STATUSES:
-            journal.record_terminal(order_id, status)
-    return OrphanSweep(fills=tuple(settlements), foreign_symbols=tuple(sorted(foreign_symbols)))
 
 
 def _order_budget_exceeded(client: Any, policy: PassiveExecutionPolicy, rate_limits: RateLimits | None) -> bool:
@@ -1933,15 +1794,24 @@ def _finalize(
                 _adopt_unresolved(rt, now)
         if rt.active_id is not None:
             if not rt.paper_active:
-                _cancel_tolerating_benign(client, rt.intent.symbol, rt.active_id)
+                confirmation = cancel_and_confirm(client, rt.intent.symbol, rt.active_id)
+                if confirmation.payload is not None:
+                    _sync_venue_order(client, rt, now=now, audit=audit, touch=None, payload=confirmation.payload)
+                if not confirmation.closed or confirmation.payload is None:
+                    audit.record(
+                        "order_cancel_unconfirmed",
+                        symbol=rt.intent.symbol,
+                        client_order_id=rt.active_id,
+                        status=confirmation.status,
+                    )
+                    raise CancelNotConfirmed(rt.intent.symbol, str(rt.active_id), confirmation.status)
                 audit.record(
                     "order_cancelled",
                     symbol=rt.intent.symbol,
                     client_order_id=rt.active_id,
                     reason="window_end",
                 )
-                status = _sync_venue_order(client, rt, now=now, audit=audit, touch=None)
-                _release_active(rt, status or "CANCELED")
+                _release_active(rt, confirmation.status)
             else:
                 _release_active(rt, "CANCELED")
         if rt.intent.quantity - rt.filled_total > _ZERO:

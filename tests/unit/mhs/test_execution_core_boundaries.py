@@ -1,4 +1,4 @@
-"""Execution core boundary guards: new owners preserve legacy behavior."""
+"""Execution core owners: re-export identity and owner behaviour guards."""
 
 from __future__ import annotations
 
@@ -6,8 +6,38 @@ import ast
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from src.mhs.types import ExecutionSpec
+
+_REEXPORTS: tuple[tuple[str, str, str], ...] = (
+    ("src.mhs.evaluation.windows", "src.mhs.execution.window_stream", "_iter_mhs_execution_windows"),
+    ("src.mhs.evaluation.windows", "src.mhs.execution.window_stream", "_resolve_ns_vectorized"),
+    ("src.mhs.evaluation.windows", "src.mhs.execution.window_stream", "_estimate_mhs_execution_allocation"),
+    ("src.mhs.evaluation.windows", "src.mhs.execution.window_stream", "_minimum_mhs_execution_bars"),
+    ("src.mhs.evaluation.windows", "src.mhs.execution.window_stream", "_materialize_execution_piece"),
+    ("src.mhs.evaluation.windows", "src.mhs.execution.window_stream", "MhsExecutionWindow"),
+    ("src.mhs.evaluation.integrity", "src.mhs.execution.integrity", "replay_ledger_certified"),
+    ("src.mhs.evaluation.integrity", "src.mhs.execution.integrity", "ledger_terminal_only"),
+    ("src.mhs.evaluation.integrity", "src.mhs.execution.integrity", "_funding_gap_terminal_symbols"),
+    ("src.mhs.evaluation.integrity", "src.mhs.data_policy", "SOURCE_GAP_EXCLUDED_SYMBOLS"),
+    ("src.mhs.evaluation.specs", "src.mhs.execution.specs", "_stress_cost_execution_spec"),
+)
+
+
+@pytest.mark.parametrize(("facade_module", "owner_module", "name"), _REEXPORTS)
+def test_evaluation_facade_reexports_execution_owner_object(facade_module: str, owner_module: str, name: str) -> None:
+    """The evaluation namespaces re-export the execution owners, not copies.
+
+    Callers and monkeypatch seams use ``src.mhs.evaluation.*``; identity
+    guarantees there is a single implementation, so behaviour is tested once on
+    the owner and parity between "legacy" and "new" can never drift.
+    """
+    import importlib
+
+    facade = importlib.import_module(facade_module)
+    owner = importlib.import_module(owner_module)
+    assert getattr(facade, name) is getattr(owner, name)
 
 
 def _write_3m_ohlcv(root: Path, symbol: str, labels: pd.DatetimeIndex) -> None:
@@ -40,131 +70,36 @@ def _fixture(tmp_path: Path, *, days: int = 2):
     return start, end, decisions, funding, targets, ExecutionSpec()
 
 
-def _windows_equal(left, right) -> None:
-    assert len(left) == len(right)
-    for wl, wr in zip(left, right, strict=True):
-        assert wl.window_start == wr.window_start
-        assert wl.window_end == wr.window_end
-        assert wl.columns == wr.columns
-        assert wl.symbols == wr.symbols
-        assert wl.minute_grid.equals(wr.minute_grid)
-        assert wl.logical_partition == wr.logical_partition
-        pd.testing.assert_frame_equal(wl.target_weights, wr.target_weights)
-        assert wl.signal_available_at.equals(wr.signal_available_at)
-
-
-def test_iter_mirrors_legacy_window_fields(tmp_path) -> None:
-    """Window identity: every emitted field matches the legacy owner."""
-    import src.mhs.evaluation.windows as legacy
+def test_iter_live_required_symbols_present_in_every_window(tmp_path) -> None:
+    """Live requirements: every window carries the required symbols."""
     from src.mhs.execution.window_stream import _iter_mhs_execution_windows
 
     start, end, decisions, funding, targets, spec = _fixture(tmp_path)
     signals = decisions + pd.Timedelta(hours=1)
     root = str(tmp_path / "ohlcv")
-    left = list(_iter_mhs_execution_windows(targets, signals, root, "3m", start, end, funding, spec))
-    right = list(legacy._iter_mhs_execution_windows(targets, signals, root, "3m", start, end, funding, spec))
-    _windows_equal(left, right)
-
-
-def test_iter_preserves_timeout_overlap_resolution(tmp_path) -> None:
-    """Timeout overlap: partition overlap and resolve nanoseconds match legacy."""
-    import numpy as np
-
-    import src.mhs.evaluation.windows as legacy
-    from src.mhs.execution.window_stream import _iter_mhs_execution_windows, _resolve_ns_vectorized
-
-    start, end, decisions, funding, targets, spec = _fixture(tmp_path)
-    signals = decisions + pd.Timedelta(hours=1)
-    root = str(tmp_path / "ohlcv")
-    left = list(_iter_mhs_execution_windows(targets, signals, root, "3m", start, end, funding, spec))
-    right = list(legacy._iter_mhs_execution_windows(targets, signals, root, "3m", start, end, funding, spec))
-    assert [w.logical_partition for w in left] == [w.logical_partition for w in right]
-    spos = np.array([0, 10, 10**12], dtype="int64")
-    grid = np.arange(0, 100, dtype="int64")
-    assert (_resolve_ns_vectorized(spos, grid, 100, 5) == legacy._resolve_ns_vectorized(spos, grid, 100, 5)).all()
-
-
-def test_iter_applies_live_requirements_at_same_step(tmp_path) -> None:
-    """Live requirements: required-symbol roster timing matches legacy."""
-    import src.mhs.evaluation.windows as legacy
-    from src.mhs.execution.window_stream import _iter_mhs_execution_windows
-
-    start, end, decisions, funding, targets, spec = _fixture(tmp_path)
-    signals = decisions + pd.Timedelta(hours=1)
-    root = str(tmp_path / "ohlcv")
-    left = list(
+    windows = list(
         _iter_mhs_execution_windows(
             targets, signals, root, "3m", start, end, funding, spec,
             required_symbols=lambda: frozenset({"AUSDT"}),
         )
     )
-    right = list(
-        legacy._iter_mhs_execution_windows(
-            targets, signals, root, "3m", start, end, funding, spec,
-            required_symbols=lambda: frozenset({"AUSDT"}),
-        )
-    )
-    assert [w.symbols for w in left] == [w.symbols for w in right]
-    assert all("AUSDT" in w.symbols for w in left)
-
-
-def test_iter_keeps_allocation_shape_and_guards(tmp_path) -> None:
-    """Bound staging budget: allocation shapes and guard calls match legacy."""
-    import src.mhs.evaluation.windows as legacy
-    from src.mhs.execution.window_stream import _estimate_mhs_execution_allocation, _minimum_mhs_execution_bars
-
-    assert _estimate_mhs_execution_allocation(n_symbols=2, n_columns=2, bound_count=2) == legacy._estimate_mhs_execution_allocation(
-        n_symbols=2, n_columns=2, bound_count=2
-    )
-    assert _minimum_mhs_execution_bars(180_000_000_000, 180_000_000_000) == legacy._minimum_mhs_execution_bars(
-        180_000_000_000, 180_000_000_000
-    )
+    assert all("AUSDT" in w.symbols for w in windows)
 
 
 def test_iter_keeps_half_open_fence(tmp_path) -> None:
-    """Half open range: fence bars stay unpublished in both owners."""
-    import src.mhs.evaluation.windows as legacy
+    """Half open range: fence bars stay unpublished in the owner."""
     from src.mhs.execution.window_stream import _iter_mhs_execution_windows
 
     start, end, decisions, funding, targets, spec = _fixture(tmp_path)
     signals = decisions + pd.Timedelta(hours=1)
     root = str(tmp_path / "ohlcv")
-    for owner in (_iter_mhs_execution_windows, legacy._iter_mhs_execution_windows):
-        windows = list(owner(targets, signals, root, "3m", start, end, funding, spec))
-        assert all(end not in w.minute_grid for w in windows)
-        assert all((w.bar_available_at <= end).all() for w in windows)
+    windows = list(_iter_mhs_execution_windows(targets, signals, root, "3m", start, end, funding, spec))
+    assert all(end not in w.minute_grid for w in windows)
+    assert all((w.bar_available_at <= end).all() for w in windows)
 
 
-def test_iter_keeps_funding_knowledge_behavior(tmp_path) -> None:
-    """Funding behavior parity: known rates and gaps match legacy."""
-    import src.mhs.evaluation.windows as legacy
-    from src.mhs.execution.window_stream import _iter_mhs_execution_windows
-
-    start, end, decisions, funding, targets, spec = _fixture(tmp_path)
-    funding = {"AUSDT": funding["AUSDT"]}
-    signals = decisions + pd.Timedelta(hours=1)
-    root = str(tmp_path / "ohlcv")
-    left = list(
-        _iter_mhs_execution_windows(
-            targets, signals, root, "3m", start, end, funding, spec,
-            funding_failures={"BUSDT": "missing"},
-        )
-    )
-    right = list(
-        legacy._iter_mhs_execution_windows(
-            targets, signals, root, "3m", start, end, funding, spec,
-            funding_failures={"BUSDT": "missing"},
-        )
-    )
-    assert len(left) == len(right)
-    for wl, wr in zip(left, right, strict=True):
-        pd.testing.assert_frame_equal(wl.bar_funding, wr.bar_funding)
-        pd.testing.assert_frame_equal(wl.funding_known, wr.funding_known)
-
-
-def test_certification_matches_legacy_verdicts() -> None:
-    """Certification parity: verdicts match the legacy owner on every class."""
-    import src.mhs.evaluation.integrity as legacy
+def test_certification_verdicts() -> None:
+    """Certification verdicts on every replay class."""
     from src.mhs.execution.contracts import ExecutionDataGap
     from src.mhs.execution.integrity import ledger_terminal_only, replay_ledger_certified
 
@@ -185,17 +120,15 @@ def test_certification_matches_legacy_verdicts() -> None:
     fills = pd.DataFrame({"symbol": [], "timestamp": []})
     gap = ExecutionDataGap(code="UNKNOWN_TERMINATION", symbol="AUSDT", timestamp=stamp)
     assert replay_ledger_certified(_Replay(True, [], fills)) is True
-    assert replay_ledger_certified(_Replay(True, [], fills)) == legacy.replay_ledger_certified(_Replay(True, [], fills))
-    assert ledger_terminal_only([gap], fills) == legacy.ledger_terminal_only([gap], fills)
-    assert replay_ledger_certified(_Replay(False, [gap], fills)) == legacy.replay_ledger_certified(_Replay(False, [gap], fills))
+    assert ledger_terminal_only([gap], fills) is True
+    assert replay_ledger_certified(_Replay(False, [gap], fills)) is False
     assert replay_ledger_certified(object()) is False
     assert replay_ledger_certified(None) is False
     assert replay_ledger_certified(_Replay(False, [], fills)) is False
 
 
-def test_later_fill_classification_matches_legacy() -> None:
-    """Later fill classification: recovery versus delist settlement matches legacy."""
-    import src.mhs.evaluation.integrity as legacy
+def test_later_fill_classification() -> None:
+    """Later fill classification: recovery versus delist settlement."""
     from src.mhs.execution.contracts import ExecutionDataGap
     from src.mhs.execution.integrity import _funding_gap_terminal_symbols
 
@@ -203,18 +136,16 @@ def test_later_fill_classification_matches_legacy() -> None:
     later = pd.Timestamp("2022-01-02", tz="UTC")
     gaps = [ExecutionDataGap(code="MISSING_HELD_FUNDING", symbol="AUSDT", timestamp=stamp)]
     fills = pd.DataFrame({"symbol": ["AUSDT"], "timestamp": [later], "reason": ["fill"]})
-    assert _funding_gap_terminal_symbols(gaps, fills) == legacy._funding_gap_terminal_symbols(gaps, fills) == frozenset()
+    assert _funding_gap_terminal_symbols(gaps, fills) == frozenset()
     settlement = pd.DataFrame({"symbol": ["AUSDT"], "timestamp": [later], "reason": ["delist_settlement"]})
     assert _funding_gap_terminal_symbols(gaps, settlement) == frozenset({"AUSDT"})
     assert _funding_gap_terminal_symbols([], fills) == frozenset()
 
 
-def test_exception_roster_matches_legacy() -> None:
-    """Exception roster preservation: the single registry derives the legacy view."""
-    import src.mhs.evaluation.integrity as legacy
+def test_exception_roster_values() -> None:
+    """Exception roster preservation: the single registry holds the frozen set."""
     from src.mhs.data_policy import SOURCE_GAP_EXCLUDED_SYMBOLS
 
-    assert legacy.SOURCE_GAP_EXCLUDED_SYMBOLS is SOURCE_GAP_EXCLUDED_SYMBOLS
     assert set(SOURCE_GAP_EXCLUDED_SYMBOLS) == frozenset(
         {
             "AERGOUSDT", "CTKUSDT", "CVCUSDT", "MAVIAUSDT", "LITUSDT", "PUMPUSDT",
@@ -222,23 +153,6 @@ def test_exception_roster_matches_legacy() -> None:
             "BTCSTUSDT", "BDXNUSDT", "LUNAUSDT", "MANAUSDT", "NEARUSDT",
         }
     )
-
-
-def test_stress_costs_match_legacy_fields() -> None:
-    """Stress costs parity: multiplied and preserved fields match legacy."""
-    import src.mhs.evaluation.specs as legacy
-    from src.mhs.execution.specs import _stress_cost_execution_spec
-
-    base = ExecutionSpec()
-    left = _stress_cost_execution_spec(base)
-    right = legacy._stress_cost_execution_spec(base)
-    assert left.maker_fee_bps == right.maker_fee_bps
-    assert left.taker_fee_bps == right.taker_fee_bps
-    assert left.taker_slippage_bps == right.taker_slippage_bps
-    assert left.passive_timeout_minutes == right.passive_timeout_minutes
-    assert left.name_drift_trim_max_weight == right.name_drift_trim_max_weight
-    defaulted = _stress_cost_execution_spec()
-    assert defaulted.passive_timeout_minutes == ExecutionSpec().passive_timeout_minutes
 
 
 def test_moved_defaults_match_legacy_values() -> None:
@@ -316,7 +230,6 @@ def test_ops_migrate_wiring_stays_available(tmp_path) -> None:
 
 def test_no_recovery_is_not_proof() -> None:
     """No recovery is not proof: held gaps without later fills never certify."""
-    import src.mhs.evaluation.integrity as legacy
     from src.mhs.execution.contracts import ExecutionDataGap
     from src.mhs.execution.integrity import ledger_terminal_only, replay_ledger_certified
 
@@ -341,9 +254,6 @@ def test_no_recovery_is_not_proof() -> None:
     ]
     assert ledger_terminal_only(gaps, fills) is True
     assert replay_ledger_certified(_Replay(False, ("MISSING_DATA",), gaps, fills)) is False
-    assert replay_ledger_certified(_Replay(False, ("MISSING_DATA",), gaps, fills)) == legacy.replay_ledger_certified(
-        _Replay(False, ("MISSING_DATA",), gaps, fills)
-    )
 
 
 def test_forged_validity_cannot_rescue_gaps() -> None:
@@ -377,9 +287,8 @@ def test_forged_validity_cannot_rescue_gaps() -> None:
     assert replay_ledger_certified(_Replay(True, (), [], (unresolved,))) is False
 
 
-def test_canonical_alias_parity() -> None:
-    """Canonical alias parity: core and legacy certification agree on every class."""
-    import src.mhs.evaluation.integrity as legacy
+def test_certification_terminal_evidence_classes() -> None:
+    """Canonical terminal evidence classes certify exactly the priced, settled and gap cases."""
     from src.mhs.execution.contracts import ExecutionDataGap, TerminalPositionEvidence
     from src.mhs.execution.integrity import replay_ledger_certified
 
@@ -410,8 +319,6 @@ def test_canonical_alias_parity() -> None:
         (),
     )
     settled = _Replay(True, (), [], ())
-    for replay in (priced, unresolved, settled):
-        assert replay_ledger_certified(replay) == legacy.replay_ledger_certified(replay)
     assert replay_ledger_certified(priced) is True
     assert replay_ledger_certified(unresolved) is False
     assert replay_ledger_certified(settled) is True

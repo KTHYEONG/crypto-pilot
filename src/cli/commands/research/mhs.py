@@ -1,4 +1,3 @@
-# ruff: noqa
 """MHS Phase 1 CLI: ``research run portfolio mhs-horizon-diagnostic``.
 
 Dev-only: the command registers no ``--unseal-holdout`` flag -- final OOS needs
@@ -11,17 +10,21 @@ import argparse
 import logging
 import time
 
-from src.mhs.types import FUNDING_CARRY_SLEEVE_WEIGHT
 from src.mhs.data_policy import MHS_DATA_POLICY_DEFAULT
 from src.mhs.panel import DATA_POLICIES
 from src.mhs.params import (
     CLI_EXECUTION_UNIVERSE_SIZE_DEFAULT as _CLI_EXECUTION_UNIVERSE_SIZE_DEFAULT,
+)
+from src.mhs.params import (
     CLI_GROWTH_ENVELOPE_DEFAULT as _CLI_GROWTH_ENVELOPE_DEFAULT,
+)
+from src.mhs.params import (
     COMMITTEE_DEFAULT_MEMBER_SET,
     COMMITTEE_TRANCHE_COUNT,
     GROWTH_RISK_ENVELOPES,
     LEVERAGE_FRONTIER_SCAN_MULTIPLES,
 )
+from src.mhs.types import FUNDING_CARRY_SLEEVE_WEIGHT
 
 # The application module imports numpy/pandas transitively; it is imported
 # lazily inside the handler so that merely registering the parser never pulls
@@ -55,9 +58,9 @@ def _run_mhs_horizon_diagnostic(args: argparse.Namespace) -> None:
 
     from src.common.paths import DATA_DIR
     from src.mhs.contracts import MhsDiagnosticRequest, MhsOutputTier
-    from src.mhs.report.persist import persist_mhs_horizon_diagnostic_report
     from src.mhs.pipeline.config import MhsRunConfig
     from src.mhs.pipeline.orchestrator import run_mhs_diagnostic
+    from src.mhs.report.persist import persist_mhs_horizon_diagnostic_report
 
     # FIX D1: MhsRunConfig is the sole owner of the derived-default logic
     # (committee_capital/regime-adaptive tranche/target-gross/funding-carry-sleeve
@@ -66,6 +69,7 @@ def _run_mhs_horizon_diagnostic(args: argparse.Namespace) -> None:
     request = MhsDiagnosticRequest(**dataclasses.asdict(config))
     if getattr(args, "register_procedure", False):
         import pandas as pd
+
         from src.mhs.preregistration import register_procedure
         registration = register_procedure(request, now=pd.Timestamp.now(tz="UTC"))
         _logger.info("[EVAL] procedure_registered digest=%s effective_start=%s", registration.procedure_digest, registration.effective_start.isoformat())
@@ -632,7 +636,7 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
         ),
     )
     mhs.add_argument("--forward-registration", dest="forward_registration_digest", default=None, help="Evaluate a pre-registered MHS procedure (digest) through a completed calendar quarter end; requires --end at that quarter end.")
-    mhs.add_argument("--register-procedure", action="store_true", default=False, help="Freeze this flag set as a pre-registered procedure in the git-tracked registry and exit without running.")
+    mhs.add_argument("--register-procedure", action="store_true", default=False, help="Freeze this flag set as a pre-registered procedure in the procedure registry (data/backtests/procedure_registry.jsonl) and exit without running.")
     mhs.add_argument(
         "--committee-member-attribution",
         action="store_true",

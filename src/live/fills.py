@@ -38,6 +38,16 @@ _FILL_COLUMNS = [
 
 @dataclass(frozen=True, slots=True)
 class FillEvent:
+    """One venue fill as a row of the live per-fill ledger (backtest ``fills.parquet`` parity).
+
+    ``pre_trade_equity`` is the decision-time sizing equity: the account equity the decision used
+    to size its orders, shared by every leg of that decision attempt. The research accumulator
+    records the same definition (an evidenced settlement records the equity immediately before
+    the settlement). Fills attributed to a synthetic attempt with no sizing decision (cycle
+    fallback, ledger resync) carry ``0`` as an explicit "no sizing equity" sentinel, never an
+    estimate.
+    """
+
     decision_time: pd.Timestamp
     timestamp: pd.Timestamp
     symbol: str

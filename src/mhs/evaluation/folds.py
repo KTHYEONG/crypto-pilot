@@ -1,30 +1,16 @@
-# mypy: ignore-errors
-# ruff: noqa: F401, F821, I001, E402, E701
-from __future__ import annotations  # mypy: ignore-errors
+from __future__ import annotations
 
 import logging
+from collections.abc import Iterator
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import numpy as np
 import pandas as pd
 
+from src.common.errors import DataIntegrityError
 from src.mhs import scaling as _scaling
 from src.mhs import statistics as _statistics
 from src.mhs.contracts import MhsDiagnosticRequest, MhsFoldReport
-from src.mhs.research_go import (
-    GO_REASON_EXECUTION_GAP,
-    GO_REASON_INCOMPLETE_FOLD,
-    GO_REASON_INVALID_PRIMARY,
-    GO_REASON_NONFINITE_EQUITY,
-)
-from src.mhs.resources import (
-    _assert_execution_rss_budget,
-    _assert_stage_rss_budget,
-    _resolve_ram_budget,
-    _StageRecorder,
-    _worker_plan_observer,
-)
-from src.common.errors import DataIntegrityError
 from src.mhs.discovery import (
     DiscoveryQualificationResult,
     fold_train_only_discovery_qualification,
@@ -35,6 +21,7 @@ from src.mhs.execution import (
     replay_execution_window_batch,
     replay_execution_windows,
 )
+from src.mhs.execution.window_stream import MhsExecutionWindow
 from src.mhs.parallel import (
     FORK_CONTEXT,
     assert_fork_admission,
@@ -47,10 +34,21 @@ from src.mhs.params import (
     FOLD_PANEL_WARMUP_HOURS,
     FUNDING_CARRY_LOOKBACK_CANDIDATES_HOURS,
     MEASURED_EXECUTION_COST_TIERS_BPS,
-    PNL_VOL_TARGET_BURN_IN_DAYS,
 )
 from src.mhs.params import (
     PERIODS_PER_YEAR_1H as _PERIODS_PER_YEAR_1H,
+)
+from src.mhs.research_go import (
+    GO_REASON_EXECUTION_GAP,
+    GO_REASON_INCOMPLETE_FOLD,
+    GO_REASON_INVALID_PRIMARY,
+    GO_REASON_NONFINITE_EQUITY,
+)
+from src.mhs.resources import (
+    _assert_execution_rss_budget,
+    _resolve_ram_budget,
+    _StageRecorder,
+    _worker_plan_observer,
 )
 from src.mhs.trend_sleeve import market_basket_log_price, time_series_trend_position, trend_sleeve_weights
 from src.mhs.types import BOOK_SPECS, TREND_SLEEVE_HORIZONS_HOURS, WORKER_PEAK_RSS_BYTES, BookSpec
@@ -377,28 +375,27 @@ def _fold_train_reference_returns(
 ) -> pd.Series:
     reference_start = fold.train_start + pd.Timedelta(hours=FOLD_PANEL_WARMUP_HOURS)
     reference_end = fold.train_end
-    if not reference_start < reference_end: raise DataIntegrityError(f"fold {fold_index}: train reference window is empty; do not borrow pre-DISCOVERY data")
+    if not reference_start < reference_end:
+        raise DataIntegrityError(f"fold {fold_index}: train reference window is empty; do not borrow pre-DISCOVERY data")
     target_weights, signal_available_at, minute_roster, _grid_1h = fold_weights._build_fold_target_weights(
         root, fold, request, funding_by_symbol, slow_horizon_override, committee_member_weights,
         decision_start=reference_start, decision_end=reference_end,
     )
     target_replay = target_weights[minute_roster]
-    def _ref_windows():
+
+    def _ref_windows(target_frame: pd.DataFrame, signals: pd.DatetimeIndex) -> Iterator[MhsExecutionWindow]:
         base_spec = specs._resolved_base_execution_spec(request)
         execution_grid = pd.date_range(reference_start, reference_end, freq="3min", tz="UTC")
-        truncated, truncated_signals, _censored = integrity._truncate_replayable_decisions(target_replay, signal_available_at, execution_grid, base_spec)
+        truncated, truncated_signals, _censored = integrity._truncate_replayable_decisions(target_frame, signals, execution_grid, base_spec)
         yield from windows._iter_mhs_execution_windows(truncated, truncated_signals, root, request.execution_timeframe, reference_start, reference_end, funding_by_symbol, base_spec)
-    _ref_iter = _ref_windows()
+
+    _ref_iter = _ref_windows(target_replay, signal_available_at)
     base_spec = specs._resolved_base_execution_spec(request)
     ref_replay = replay_execution_windows(_ref_iter, initial_equity, "OHLCV_IMMEDIATE_TAKER", base_spec, retain_event_snapshots=False)
     daily = ref_replay.ledger.equity.resample("1D").last().dropna().pct_change().dropna().astype("float64")
     daily = pd.Series(daily.to_numpy(dtype="float64"), index=daily.index, dtype="float64")
     daily = daily.loc[daily.index < fold.train_end]
-    if not bool(np.isfinite(daily.to_numpy(dtype="float64")).all()): raise DataIntegrityError(f"fold {fold_index}: train reference returns must be finite")
-    if not daily.index.is_unique or not daily.index.is_monotonic_increasing: raise DataIntegrityError(f"fold {fold_index}: train reference index must be unique and monotonic")
-    if not str(getattr(daily.index, "tz", None)) == "UTC": raise DataIntegrityError(f"fold {fold_index}: train reference index must be UTC")
-    if not (daily.index < fold.train_end).all(): raise DataIntegrityError(f"fold {fold_index}: train reference extends into validation")
-    if len(daily.dropna()) < PNL_VOL_TARGET_BURN_IN_DAYS: raise DataIntegrityError(f"fold {fold_index}: train reference has {len(daily.dropna())} rows, require >= {PNL_VOL_TARGET_BURN_IN_DAYS}")
+    integrity._assert_train_reference_returns_valid(daily, fold.train_end, fold_index)
     del target_weights, target_replay
     return daily
 
@@ -421,11 +418,14 @@ def _run_anchored_fold(
         vs = fold.validation_start
         ve = fold.validation_end
         train_reference = _fold_train_reference_returns(root, fold, request, funding_by_symbol, initial_equity, fold_index, slow_horizon_override, committee_member_weights)
-        if telemetry is not None: telemetry.record(f"anchored_fold_{fold_index}_sizing_reference", grid_bars=len(train_reference), window_start=str(train_reference.index[0]), window_end=str(train_reference.index[-1]))
+        if telemetry is not None:
+            telemetry.record(f"anchored_fold_{fold_index}_sizing_reference", grid_bars=len(train_reference), window_start=str(train_reference.index[0]), window_end=str(train_reference.index[-1]))
         from src.mhs.research_go import _resolved_growth_envelope as _resolve_envelope
         _envelope = _resolve_envelope(request)
-        if str(request.pnl_vol_target_mode) in ("growth_budget", "constant_risk"): _local_target_vol: float | None = _scaling._growth_budget_target_vol_by_boundary(train_reference, _envelope, {f"fold_{fold_index}": fold.train_end})[f"fold_{fold_index}"]
-        else: _local_target_vol = None
+        if str(request.pnl_vol_target_mode) in ("growth_budget", "constant_risk"):
+            _local_target_vol: float | None = _scaling._growth_budget_target_vol_by_boundary(train_reference, _envelope, {f"fold_{fold_index}": fold.train_end})[f"fold_{fold_index}"]
+        else:
+            _local_target_vol = None
         target_weights, signal_available_at, minute_roster, _grid_1h = fold_weights._build_fold_target_weights(
             root, fold, request, funding_by_symbol, slow_horizon_override, committee_member_weights,
         )

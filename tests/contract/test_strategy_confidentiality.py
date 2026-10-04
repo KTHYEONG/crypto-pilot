@@ -20,22 +20,7 @@ _RETIRED_PATHS = (    Path("docs/results/mhs_backtest"),
 )
 # Legacy run-history compatibility readers owned by earlier result-tree specs;
 # they never select a documentation destination for new output.
-_KNOWN_READONLY_COMPAT = frozenset(
-    {
-        (
-            "src/mhs/run_history.py",
-            '_DEFAULT_HISTORY_DIR = Path("docs") / "results" / "mhs_run_history"',
-        ),
-        (
-            "src/mhs/run_history.py",
-            'if str(history_dir).endswith("docs/results/mhs_run_history"):',
-        ),
-        (
-            "src/mhs/run_history.py",
-            'if text.endswith("docs/results/mhs_run_history"):',
-        ),
-    }
-)
+_KNOWN_READONLY_COMPAT: frozenset[tuple[str, str]] = frozenset()
 
 
 def _tracked_files() -> list[str]:

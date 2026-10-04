@@ -209,13 +209,14 @@ def _ledger_window(grid, symbols, decisions, weights, marks=None, funding=None, 
     )
 
 
-def _replay_with_acc(window_or_windows, spec=None, execution_bound="OHLCV_IMMEDIATE_TAKER"):
+def _replay_with_acc(window_or_windows, spec=None, execution_bound="OHLCV_IMMEDIATE_TAKER", retain_event_snapshots=False):
     from src.mhs.execution import ExecutionSpec, replay_execution_windows
 
     windows = window_or_windows if isinstance(window_or_windows, tuple) else (window_or_windows,)
     live: list = []
     result = replay_execution_windows(
         windows, 1000.0, execution_bound, spec or ExecutionSpec(), live_accumulators=live,
+        retain_event_snapshots=retain_event_snapshots,
     )
     return result, live[0][0]
 
@@ -375,4 +376,400 @@ def test_peg_chase_fill_lists_stay_aligned() -> None:
     assert len(acc.fill_qty) >= 1
     assert len(acc.fill_post_units) == len(acc.fill_qty)
     assert float(acc.fill_post_units[-1]) == float(acc.units_arr[0])
+
+
+# ---------------------------------------------------------------------------
+# Spec 05 — single atomic fill booking + decision-time pre_trade_equity
+# ---------------------------------------------------------------------------
+
+_TWELVE_FILL_LISTS = (
+    "fill_bar_ns", "fill_gcol", "fill_ts", "fill_symbol", "fill_qty",
+    "fill_post_units", "fill_price", "fill_fee_bps", "fill_reason",
+    "fill_pre_trade_equity", "fill_times", "submit_times",
+)
+
+_BOUNDS_4 = (
+    "OHLCV_STRICT_PROXY", "OHLCV_IMMEDIATE_TAKER",
+    "OHLCV_LADDERED_PROXY", "OHLCV_PEG_CHASE_PROXY",
+)
+
+
+def _probe_like_workload(*, days=12, n_symbols=6, seed=7, funding=1e-5):
+    """Hermetic mirror of scratch/probe_mhs_exec/topic_a_b.py::workload (same shape and params)."""
+    import numpy as np
+    import pandas as pd
+
+    grid = pd.date_range("2021-01-01", periods=days * 24 * 12, freq="5min", tz="UTC")
+    symbols = [f"SYM{i:03d}USDT" for i in range(n_symbols)]
+    rng = np.random.default_rng(seed)
+    closes = pd.DataFrame(
+        {s: 100.0 * np.exp(np.cumsum(rng.normal(0.0, 0.002, len(grid)))) for s in symbols},
+        index=grid,
+    )
+    decision_grid = pd.date_range("2021-01-01", periods=days * 4, freq="6h", tz="UTC")
+    weights = pd.DataFrame(0.0, index=decision_grid, columns=symbols)
+    rng_w = np.random.default_rng(seed + 1)
+    for ts in decision_grid:
+        active = rng_w.choice(symbols, size=4, replace=False)
+        weights.loc[ts, active] = rng_w.uniform(0.05, 0.25, 4) * rng_w.choice([-1, 1], 4)
+    return {
+        "grid": grid,
+        "highs": closes * 1.001,
+        "lows": closes * 0.999,
+        "closes": closes,
+        "marks": closes * (1 + rng.normal(0, 3e-4, closes.shape)),
+        "funding": pd.DataFrame(funding, index=grid, columns=symbols),
+        "weights": weights,
+        "signals": decision_grid + pd.Timedelta(hours=1),
+    }
+
+
+def _replay_probe_workload(bound, *, spec=None, n_windows=3, settlement_event=None):
+    import dataclasses
+
+    from src.mhs.execution import ExecutionSpec, replay_execution_windows
+    from tests.unit.mhs.test_execution import _partition_windows
+
+    wl = _probe_like_workload()
+    spec = spec or ExecutionSpec()
+    wins = _partition_windows(
+        wl["grid"], wl["weights"], wl["signals"], wl["highs"], wl["lows"],
+        wl["closes"], wl["marks"], wl["funding"], spec, n_windows=n_windows,
+    )
+    if settlement_event is not None:
+        idx = next(
+            i for i, w in enumerate(wins)
+            if w.minute_grid[0] <= settlement_event.available_at <= w.minute_grid[-1]
+        )
+        wins[idx] = dataclasses.replace(wins[idx], settlement_events=(settlement_event,))
+    live: list = []
+    result = replay_execution_windows(wins, 1000.0, bound, spec, live_accumulators=live)
+    return result, live[0][0], wl
+
+
+def _mid_replay_book_setup():
+    """Replay one decision; return (acc, valid _book_fill kwargs, pre-call state snapshot)."""
+    import pandas as pd
+
+    grid = pd.date_range("2025-01-01 00:00", periods=10, freq="3min", tz="UTC")
+    window = _ledger_window(grid, ["BTCUSDT"], [grid[0]], {"BTCUSDT": [0.1]})
+    _result, acc = _replay_with_acc(window)
+    assert len(acc.fill_qty) > 0
+    frame = acc._consume_validate_window(window)
+    kwargs = {
+        "frame": frame, "gcol": int(frame.gpos[0]), "symbol": "BTCUSDT", "bar_pos": 1, "submit_pos": 1,
+        "quantity": 0.5, "fill_price": 100.0, "fee_bps": 8.0, "reason": "passive_fill",
+        "valuation_mark": 100.0, "pre_trade_equity": 1000.0,
+        "target_weight": 0.1, "decision_price": 100.0,
+    }
+    snapshot = (
+        float(acc.cash), acc.units_arr.copy(), acc.last_prices_arr.copy(),
+        {name: list(getattr(acc, name)) for name in (*_TWELVE_FILL_LISTS, "_mirror_pending")},
+    )
+    return acc, kwargs, snapshot
+
+
+def _assert_book_state_unchanged(acc, snapshot) -> None:
+    import numpy as np
+
+    cash, units, lasts, lists = snapshot
+    assert float(acc.cash) == cash
+    np.testing.assert_array_equal(acc.units_arr, units)
+    np.testing.assert_array_equal(acc.last_prices_arr, lasts)
+    for name, before in lists.items():
+        assert list(getattr(acc, name)) == before
+
+
+def test_pre_trade_equity_equals_decision_sizing_equity() -> None:
+    import math
+
+    for bound in _BOUNDS_4:
+        _result, acc, _wl = _replay_probe_workload(bound)
+        assert len(acc.fill_qty) > 0
+        groups: dict = {}
+        for submit, equity in zip(acc.submit_times, acc.fill_pre_trade_equity, strict=True):
+            groups.setdefault(submit, []).append(equity)
+        assert len(groups) >= 2
+        for equities in groups.values():
+            assert all(math.isfinite(e) and e > 0 for e in equities)
+            assert all(e == equities[0] for e in equities)
+
+
+def test_pre_trade_equity_independent_of_own_fill() -> None:
+    import dataclasses
+
+    import pandas as pd
+    import pytest
+
+    grid = pd.date_range("2025-01-01 00:00", periods=10, freq="3min", tz="UTC")
+    window = _ledger_window(grid, ["BTCUSDT"], [grid[0]], {"BTCUSDT": [0.1]})
+    bumped_closes = window.closes.copy()
+    bumped_closes.iloc[1, 0] *= 1.05
+    _base, base_acc = _replay_with_acc(window)
+    _bump, bump_acc = _replay_with_acc(dataclasses.replace(window, closes=bumped_closes))
+    assert bump_acc.fill_price[0] == pytest.approx(base_acc.fill_price[0] * 1.05)
+    assert bump_acc.fill_price[0] != base_acc.fill_price[0]
+    assert bump_acc.fill_pre_trade_equity[0] == base_acc.fill_pre_trade_equity[0] == 1000.0
+
+
+def test_same_bar_multi_fill_does_not_compound() -> None:
+    import pandas as pd
+    import pytest
+
+    grid = pd.date_range("2025-01-01 00:00", periods=10, freq="3min", tz="UTC")
+    decisions = [grid[2], grid[2] + pd.Timedelta(minutes=1)]
+    window = _ledger_window(
+        grid, ["BTCUSDT"], decisions,
+        {"BTCUSDT": [0.1, 0.2]},
+    )
+    _result, acc = _replay_with_acc(window)
+    assert len(acc.fill_qty) == 2
+    assert acc.fill_bar_ns[0] == acc.fill_bar_ns[1]
+    assert acc.fill_pre_trade_equity[0] == 1000.0
+    first_fee = acc.fill_fee_bps[0] / 1e4 * abs(acc.fill_qty[0]) * acc.fill_price[0]
+    assert acc.fill_pre_trade_equity[1] == pytest.approx(1000.0 - first_fee)
+
+
+def test_settlement_records_pre_mutation_equity() -> None:
+    import pandas as pd
+    import pytest
+
+    from src.mhs.execution.contracts import InstrumentSettlementEvent
+
+    grid = pd.date_range("2025-01-01 00:00", periods=10, freq="3min", tz="UTC")
+    event = InstrumentSettlementEvent(
+        event_id="settle-pre", symbol="BTCUSDT", effective_at=grid[5], available_at=grid[5],
+        settlement_price=90.0, fee_bps=5.0, source_digest="spec05",
+    )
+    window = _ledger_window(
+        grid, ["BTCUSDT"], [grid[0]], {"BTCUSDT": [0.1]}, settlement_events=(event,),
+    )
+    _result, acc = _replay_with_acc(window)
+    idx = list(acc.fill_reason).index("delist_settlement")
+    assert idx == len(acc.fill_qty) - 1
+    q0, p0, fb0 = acc.fill_qty[0], acc.fill_price[0], acc.fill_fee_bps[0]
+    cash_after_first = 1000.0 - q0 * p0 - fb0 / 1e4 * abs(q0) * p0
+    expected_pre = cash_after_first + q0 * 100.0
+    assert acc.fill_pre_trade_equity[idx] == pytest.approx(expected_pre)
+    post_cash = cash_after_first - acc.fill_qty[idx] * 90.0 - 5.0 / 1e4 * abs(acc.fill_qty[idx]) * 90.0
+    assert abs(expected_pre - post_cash) > 1.0
+    assert abs(float(acc.fill_pre_trade_equity[idx]) - post_cash) > 1.0
+
+
+def test_unknown_reason_fails_closed_without_mutation() -> None:
+    import pytest
+
+    from src.common.errors import DataIntegrityError
+
+    acc, kwargs, snapshot = _mid_replay_book_setup()
+    kwargs["reason"] = "weird_reason"
+    with pytest.raises(DataIntegrityError, match="weird_reason"):
+        acc._book_fill(**kwargs)
+    _assert_book_state_unchanged(acc, snapshot)
+
+
+def test_non_positive_pre_trade_equity_fails_closed() -> None:
+    import pytest
+
+    from src.common.errors import DataIntegrityError
+    from src.mhs.evaluation.integrity import _classify_execution_failure
+
+    for bad_equity in (0.0, float("nan")):
+        acc, kwargs, snapshot = _mid_replay_book_setup()
+        kwargs["pre_trade_equity"] = bad_equity
+        with pytest.raises(
+            DataIntegrityError, match="pre-trade equity must be positive and finite"
+        ) as exc_info:
+            acc._book_fill(**kwargs)
+        _assert_book_state_unchanged(acc, snapshot)
+        assert _classify_execution_failure(exc_info.value) == "CAPITAL_INVARIANT_BREACH"
+
+
+def test_non_finite_fill_sizing_fails_closed_without_mutation() -> None:
+    import pytest
+
+    from src.common.errors import DataIntegrityError
+    from src.mhs.evaluation.integrity import _classify_execution_failure
+
+    for bad_qty, bad_price in ((float("inf"), 100.0), (0.5, float("nan"))):
+        acc, kwargs, snapshot = _mid_replay_book_setup()
+        kwargs["quantity"] = bad_qty
+        kwargs["fill_price"] = bad_price
+        with pytest.raises(DataIntegrityError, match="capital accounting invariant") as exc_info:
+            acc._book_fill(**kwargs)
+        _assert_book_state_unchanged(acc, snapshot)
+        assert _classify_execution_failure(exc_info.value) == "CAPITAL_INVARIANT_BREACH"
+
+
+def test_parallel_fill_lists_stay_equal_length_across_bounds() -> None:
+    import dataclasses
+
+    import pandas as pd
+
+    from src.mhs.execution import ExecutionSpec
+    from src.mhs.execution.accumulator import _BOOKED_FILL_REASONS
+    from src.mhs.execution.contracts import InstrumentSettlementEvent
+
+    def _assert_aligned(acc, result, *, expect_settlement: bool) -> None:
+        lengths = {len(getattr(acc, name)) for name in _TWELVE_FILL_LISTS}
+        assert lengths == {len(result.simulated_fills)}
+        assert set(acc.fill_reason) <= _BOOKED_FILL_REASONS | {"drift_trim"}
+        if expect_settlement:
+            assert "delist_settlement" in set(acc.fill_reason)
+
+    for bound in _BOUNDS_4:
+        # Workload scale: settlement only. (Trim + settlement at this scale trips a
+        # pre-existing causal-mirror divergence, identical on the pre-change tree,
+        # so the combined path is covered on the small fixture below instead.)
+        wl = _probe_like_workload()
+        decision_ts = wl["weights"].index[-1]
+        sym = str(wl["weights"].loc[decision_ts].abs().idxmax())
+        at = decision_ts + pd.Timedelta(hours=2)
+        event = InstrumentSettlementEvent(
+            event_id=f"settle-{bound}", symbol=sym,
+            effective_at=at, available_at=at,
+            settlement_price=90.0, fee_bps=5.0, source_digest="spec05",
+        )
+        result, acc, _ = _replay_probe_workload(bound, settlement_event=event)
+        _assert_aligned(acc, result, expect_settlement=True)
+
+        # Combined path on a small fixture: drift trim fires at the 04:00 check and
+        # BTC settles at 05:00 while its decision position is still open.
+        grid = pd.date_range("2025-01-01 00:00", "2025-01-01 10:00", freq="3min", tz="UTC")
+        drift_window = _drift_window(grid, alt_short=False, decisions=[grid[0]])
+        trim_event = InstrumentSettlementEvent(
+            event_id=f"trim-settle-{bound}", symbol="BTCUSDT",
+            effective_at=grid[100], available_at=grid[100],
+            settlement_price=90.0, fee_bps=5.0, source_digest="spec05",
+        )
+        spec = dataclasses.replace(ExecutionSpec(), name_drift_trim_max_weight=0.2)
+        combined, live_acc = _replay_with_acc(
+            dataclasses.replace(drift_window, settlement_events=(trim_event,)),
+            spec=spec, execution_bound=bound,
+        )
+        _assert_aligned(live_acc, combined, expect_settlement=True)
+        assert "drift_trim" in set(live_acc.fill_reason)
+
+
+def test_cash_two_step_versus_mirror_one_step_preserved() -> None:
+    import pandas as pd
+
+    grid = pd.date_range("2025-01-01 00:00", periods=10, freq="3min", tz="UTC")
+    window = _ledger_window(
+        grid, ["BTCUSDT", "ALTUSDT"], [grid[0], grid[4]],
+        {"BTCUSDT": [0.1, 0.0], "ALTUSDT": [0.05, 0.05]},
+    )
+    result, acc = _replay_with_acc(window)
+    assert result.ledger.primary_valid is True
+    assert float(acc.cash) != float(acc.ledger_cash)
+    assert abs(float(acc.cash) - float(acc.ledger_cash)) <= 1e-12 * max(1.0, abs(float(acc.ledger_cash)))
+
+
+def test_booked_snapshots_retained_when_opted_in() -> None:
+    import numpy as np
+    import pandas as pd
+
+    grid = pd.date_range("2025-01-01 00:00", periods=10, freq="3min", tz="UTC")
+    window = _ledger_window(
+        grid, ["BTCUSDT"], [grid[0]], {"BTCUSDT": [0.1]},
+    )
+    _result, acc = _replay_with_acc(window, retain_event_snapshots=True)
+    assert len(acc.fill_qty) >= 1
+    assert len(acc.units_after_events) == len(acc.fill_qty) == len(acc.notional_after_events)
+    for (stamp, units), notional in zip(acc.units_after_events, [n for _, n in acc.notional_after_events], strict=True):
+        assert stamp in set(acc.fill_ts)
+        assert units.shape == notional.shape == acc.units_arr.shape
+        assert np.isfinite(np.asarray(units, dtype="float64")).all()
+
+
+# ---------------------------------------------------------------------------
+# Spec 05b — _WindowFrame replaces positional window-array plumbing
+# ---------------------------------------------------------------------------
+
+
+def test_window_frame_holds_references_not_copies() -> None:
+    import dataclasses
+
+    import pandas as pd
+    import pytest
+
+    from src.mhs.execution import ExecutionSpec
+    from src.mhs.execution.accumulator import _BoundExecutionReplayAccumulator, _WindowFrame
+
+    grid = pd.date_range("2025-01-01 00:00", periods=10, freq="3min", tz="UTC")
+    window = _ledger_window(grid, ["BTCUSDT"], [grid[0]], {"BTCUSDT": [0.1]})
+    acc = _BoundExecutionReplayAccumulator(window, 1000.0, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec(), False)
+    frame = acc._consume_validate_window(window)
+    assert isinstance(frame, _WindowFrame)
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        frame.bar_ns = -1  # type: ignore[misc]
+    assert frame.n_grid == len(window.minute_grid)
+    assert frame.n_local == len(window.symbols)
+    assert frame.grid is window.minute_grid
+    assert frame.tw_index is window.target_weights.index
+    assert frame.sig_index is window.signal_available_at
+
+
+def test_window_frame_refactor_preserves_replay_output() -> None:
+    import dataclasses
+
+    import numpy as np
+    import pandas as pd
+
+    from src.mhs.execution import ExecutionSpec, replay_execution_windows
+    from src.mhs.execution.contracts import InstrumentSettlementEvent
+    from tests.unit.mhs.test_execution import _partition_windows
+
+    # 2-day scale: trim + settlement at the 12-day scale trips a pre-existing
+    # causal-mirror divergence identical on the pre-change tree (see the
+    # combined-path note in test_parallel_fill_lists_stay_equal_length_across_bounds).
+    spec = dataclasses.replace(ExecutionSpec(), name_drift_trim_max_weight=0.2)
+    for bound in _BOUNDS_4:
+        wl = _probe_like_workload(days=2)
+        decision_ts = wl["weights"].index[-1]
+        sym = str(wl["weights"].loc[decision_ts].abs().idxmax())
+        at = decision_ts + pd.Timedelta(hours=2)
+        event = InstrumentSettlementEvent(
+            event_id=f"frame-settle-{bound}", symbol=sym,
+            effective_at=at, available_at=at,
+            settlement_price=90.0, fee_bps=5.0, source_digest="spec05b",
+        )
+        ledgers = []
+        counts = []
+        for n_windows in (1, 3):
+            wins = _partition_windows(
+                wl["grid"], wl["weights"], wl["signals"], wl["highs"], wl["lows"],
+                wl["closes"], wl["marks"], wl["funding"], spec, n_windows=n_windows,
+            )
+            idx = next(
+                i for i, w in enumerate(wins)
+                if w.minute_grid[0] <= event.available_at <= w.minute_grid[-1]
+            )
+            wins[idx] = dataclasses.replace(wins[idx], settlement_events=(event,))
+            live: list = []
+            result = replay_execution_windows(wins, 1000.0, bound, spec, live_accumulators=live)
+            ledgers.append(result.ledger.equity.to_numpy(dtype="float64"))
+            acc = live[0][0]
+            lengths = {len(getattr(acc, name)) for name in _TWELVE_FILL_LISTS}
+            assert lengths == {len(result.simulated_fills)}
+            counts.append(len(result.simulated_fills))
+        np.testing.assert_allclose(ledgers[0], ledgers[1], rtol=1e-12, atol=1e-12)
+        assert counts[0] == counts[1] > 0
+
+
+def test_idle_holdings_never_settle() -> None:
+    import dataclasses
+
+    import pandas as pd
+
+    grid = pd.date_range("2025-01-01 00:00", periods=40, freq="3min", tz="UTC")
+    window = _ledger_window(grid, ["BTCUSDT"], [grid[0]], {"BTCUSDT": [0.1]})
+    quote_volumes = window.quote_volumes.copy()
+    quote_volumes.iloc[2:, 0] = 0.0
+    window = dataclasses.replace(window, quote_volumes=quote_volumes)
+    result, acc = _replay_with_acc(window)
+    assert len(acc.fill_qty) == 1
+    assert float(acc.units_arr[0]) == float(acc.fill_qty[0]) != 0.0
+    assert "delist_settlement" not in set(acc.fill_reason)
+    assert "DELIST_SETTLEMENT" not in result.termination_counts
 

@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from typing import Any
 
 import numpy as np
 
-from src.mhs.contracts import MhsFoldReport
-from src.mhs.research_go import GO_REASON_FOLD_GROWTH_CONCENTRATION, GO_REASON_PATH_DIVERGENCE
 from src.mhs.calibration import sharpe_lower_confidence_bound
+from src.mhs.contracts import MhsFoldReport
 from src.mhs.params import EVIDENCE_GATE_ALPHA, FOLD_BLEND_PARITY_TOLERANCE, FOLD_REALIZED_RISK_PARITY_TOLERANCE
+from src.mhs.research_go import GO_REASON_FOLD_GROWTH_CONCENTRATION, GO_REASON_PATH_DIVERGENCE
 
 
 def _pooled_fold_evidence(
@@ -160,8 +161,21 @@ def _fold_realized_risk_parity(
     return payload, ()
 
 
+def _trace_number(trace: Mapping[str, float | str], key: str) -> float | None:
+    """Numeric book-structure metric, or None when absent or non-numeric.
+
+    Book-structure traces mix float metrics with ISO timestamp provenance strings;
+    parity ratios must only ever consume the numeric metrics, and a non-numeric
+    value is treated exactly like a missing one (unmeasured), never coerced.
+    """
+    value = trace.get(key)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
 def _fold_blend_parity(
-    blend_traces: dict[int, dict[str, float]],
+    blend_traces: Mapping[int, Mapping[str, float | str]],
     folds: tuple[MhsFoldReport, ...],
     tolerance: float = FOLD_BLEND_PARITY_TOLERANCE,
 ) -> tuple[dict[str, Any], tuple[str, ...]]:
@@ -195,11 +209,20 @@ def _fold_blend_parity(
                 "blend": blend_trace,
             }
             continue
-        f_holdings = fold_trace.get("holdings_mean", 0.0)
-        b_holdings = blend_trace.get("holdings_mean", 0.0)
-        f_gross = fold_trace.get("gross_mean", 0.0)
-        b_gross = blend_trace.get("gross_mean", 0.0)
-        if f_holdings <= 0.0 or b_holdings <= 0.0 or f_gross <= 0.0 or b_gross <= 0.0:
+        f_holdings = _trace_number(fold_trace, "holdings_mean")
+        b_holdings = _trace_number(blend_trace, "holdings_mean")
+        f_gross = _trace_number(fold_trace, "gross_mean")
+        b_gross = _trace_number(blend_trace, "gross_mean")
+        if (
+            f_holdings is None
+            or b_holdings is None
+            or f_gross is None
+            or b_gross is None
+            or f_holdings <= 0.0
+            or b_holdings <= 0.0
+            or f_gross <= 0.0
+            or b_gross <= 0.0
+        ):
             payload["unmeasured"].append(fold.fold_index)
             payload["folds"][fold.fold_index] = {
                 "holdings_log_ratio": None,
@@ -214,10 +237,10 @@ def _fold_blend_parity(
         # Deployed (post-exposure-scale) gross is what actually ships; a trace
         # without exposure_scale_mean stays unmeasured for this ratio -- never
         # silently treated as scale 1.0.
-        f_scale = fold_trace.get("exposure_scale_mean")
-        b_scale = blend_trace.get("exposure_scale_mean")
+        f_scale = _trace_number(fold_trace, "exposure_scale_mean")
+        b_scale = _trace_number(blend_trace, "exposure_scale_mean")
         deployed_gross_log_ratio: float | None
-        if not isinstance(f_scale, float) or f_scale <= 0.0 or not isinstance(b_scale, float) or b_scale <= 0.0:
+        if f_scale is None or f_scale <= 0.0 or b_scale is None or b_scale <= 0.0:
             deployed_gross_log_ratio = None
             payload["unmeasured"].append(fold.fold_index)
         else:

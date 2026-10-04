@@ -1,4 +1,3 @@
-# ruff: noqa
 """Persist an MHS horizon diagnostic report to disk.
 
 Extracted verbatim from ``src.mhs.evaluation`` (the legacy
@@ -11,10 +10,8 @@ record. Artifact-table checksum/reference helpers live in ``artifacts``.
 from __future__ import annotations
 
 import dataclasses
-import io
 import json
 import logging
-import math
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
@@ -23,16 +20,15 @@ from uuid import uuid4
 import numpy as np
 import pandas as pd
 
+from src.common.errors import DataIntegrityError
 from src.mhs.contracts import (
     MhsBookReport,
     MhsDiagnosticRequest,
     MhsFoldReport,
     MhsOutputTier,
 )
-from src.mhs.deployment_policy import live_parity_blockers
 from src.mhs.deploy_gate import deploy_gate_from_report
-from src.mhs.resources import _peak_rss_bytes
-from src.common.errors import DataIntegrityError
+from src.mhs.deployment_policy import live_parity_blockers
 from src.mhs.execution import StrategyExecutionReplayResult
 from src.mhs.params import ARTIFACT_CATEGORIES
 from src.mhs.report.artifacts import (
@@ -43,6 +39,7 @@ from src.mhs.report.artifacts import (
     _verify_ledger_artifact,
 )
 from src.mhs.report.schema import MhsHorizonDiagnosticReport
+from src.mhs.resources import _peak_rss_bytes
 from src.mhs.run_history import append_run_history_record, canonical_history_registry
 
 logger = logging.getLogger("MhsHorizonDiagnostic")

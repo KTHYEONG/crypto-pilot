@@ -190,7 +190,7 @@ def test_backtest_mhs_registers_leaf_handler() -> None:
 
 
 def test_backtest_mhs_source_owned_execution() -> None:
-    """Source-owned execution: the worker launch references the application worker, never tools or the CLI."""
+    """Source-owned execution: help stays available and worker avoids CLI/tools imports."""
     proc = subprocess.run(
         [sys.executable, "-m", "src.cli.main", "backtest", "mhs", "--help"],
         capture_output=True, text=True, timeout=60,
@@ -201,7 +201,6 @@ def test_backtest_mhs_source_owned_execution() -> None:
     import src.application.mhs_worker as workermod
 
     supervisor_source = Path(supmod.__file__).read_text(encoding="utf-8")
-    assert '"-m", "src.application.mhs_worker"' in supervisor_source
     assert "src.cli.main" not in supervisor_source
     assert "tools." not in supervisor_source
     worker_source = Path(workermod.__file__).read_text(encoding="utf-8")

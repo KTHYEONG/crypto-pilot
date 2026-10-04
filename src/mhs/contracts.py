@@ -468,7 +468,7 @@ class MhsFoldReport:
     funding_carry_sign: int | None = None
     funding_carry_source: str = "frozen_default"
     funding_carry_vs_slow_momentum_daily_corr: float | None = None
-    book_structure: dict[str, float] | None = None
+    book_structure: dict[str, float | str] | None = None
     regime_characterization: dict[str, float] | None = None
     # strict 원장 일간 수익률 std(ddof=1)*sqrt(365); 2행 미만이면 None.
     realized_annualized_vol: float | None = None

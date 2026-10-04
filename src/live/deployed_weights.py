@@ -1,4 +1,3 @@
-# ruff: noqa
 """Thin weights reader: rolling state file."""
 
 from __future__ import annotations
@@ -10,21 +9,21 @@ from pathlib import Path
 import pandas as pd
 from pydantic import SecretStr
 
-from src.common.paths import DATA_DIR
 from src.common.errors import DataIntegrityError
-from src.live.errors import StaleSignalError, ArtifactSealError
+from src.common.paths import DATA_DIR
+from src.live.errors import ArtifactSealError, StaleSignalError
 
 EXPOSURE_SCALE_COLUMN: str = "exposure_scale"
 
 
 def _sibling_with_token(weights_path: Path, replacement: str) -> Path:
     p = Path(weights_path)
-    token = "deployed_target_weights"
+    stem_marker = "deployed_target_weights"
     name = p.name
     sealed = name.endswith(".enc")
     inner = name[:-4] if sealed else name
-    if token in inner:
-        sibling = inner.replace(token, replacement)
+    if stem_marker in inner:
+        sibling = inner.replace(stem_marker, replacement)
     elif Path(inner).stem == "target_weights":
         sibling = replacement.removeprefix("deployed_") + Path(inner).suffix
     else:

@@ -216,18 +216,16 @@ def test_execution_quality_min_evidence_references_audit_retention() -> None:
     assert EXECUTION_QUALITY_MIN_EVIDENCE_DAYS == AUDIT_LOG_RETENTION_DAYS
 
 
-def test_execution_quality_shard_constants_reference_run_history() -> None:
-    from src.mhs.run_history import RUN_HISTORY_SHARD_MAX_BYTES, RUN_HISTORY_MAX_SHARDS
+def test_execution_quality_shard_bounds_reference_live_records() -> None:
     import src.live.execution_quality as eq_mod
+    from src.live.records import LIVE_RECORD_MAX_SHARDS, LIVE_RECORD_SHARD_MAX_BYTES
 
-    # Check source literally references the run_history constants (not literal copy)
-    import pathlib
-
-    src_text = pathlib.Path(eq_mod.__file__).read_text(encoding="utf-8")
-    assert "RUN_HISTORY_SHARD_MAX_BYTES" in src_text
-    assert "RUN_HISTORY_MAX_SHARDS" in src_text
-    assert eq_mod.EXECUTION_QUALITY_SHARD_MAX_BYTES == RUN_HISTORY_SHARD_MAX_BYTES
-    assert eq_mod.EXECUTION_QUALITY_MAX_SHARDS == RUN_HISTORY_MAX_SHARDS
+    source = Path(eq_mod.__file__).read_text(encoding="utf-8")
+    assert "LIVE_RECORD_SHARD_MAX_BYTES" in source
+    assert "LIVE_RECORD_MAX_SHARDS" in source
+    assert "src.mhs.run_history" not in source
+    assert eq_mod.EXECUTION_QUALITY_SHARD_MAX_BYTES == LIVE_RECORD_SHARD_MAX_BYTES == 262144
+    assert eq_mod.EXECUTION_QUALITY_MAX_SHARDS == LIVE_RECORD_MAX_SHARDS == 12
 
 def test_SCENARIO_EXECUTOR_REVERSAL_LEGS_HAVE_DISTINCT_LEG_INDEX() -> None:
     """반전(reversal) 분해로 같은 심볼에 두 intent(청산=0, 신규=1)가 생겨도

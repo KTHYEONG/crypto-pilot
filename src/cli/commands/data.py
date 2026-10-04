@@ -1,4 +1,3 @@
-# ruff: noqa
 from __future__ import annotations
 
 import argparse
@@ -64,7 +63,7 @@ def _venue_rules(args: argparse.Namespace) -> None:
         return
     snapshot = fetch_venue_rules()
     path = write_venue_rule_snapshot(snapshot, VENUE_RULES_DIR)
-    print(path)
+    print(path)  # noqa: T201 - written snapshot path on stdout is the CLI contract (pinned by test_collect_venue_rules_registers_and_collects)
     _logger.info(
         "[DATA] venue-rules symbols=%d captured_at=%s",
         len(snapshot.symbols), snapshot.captured_at.isoformat(),
