@@ -1,4 +1,3 @@
-# ruff: noqa
 """Frozen parameter snapshot for research provenance.
 
 Carries the decision-constant snapshot bound into preregistered procedures and

@@ -2,19 +2,29 @@
 
 The trial set is defined once (``is_trial_record`` + ``trial_identity_key``)
 and shared by ``derive_trials_attempted`` and ``window_trial_sharpes``
-(I-SAME-TRIAL-SET); the monotone ``trials_ledger.json`` survives archive
-pruning (I-MONOTONE-TRIALS).
+(I-SAME-TRIAL-SET); the registry ``trials`` table accumulates admitted keys
+monotonically (I-MONOTONE-TRIALS). Legacy JSON-Lines histories are evidence
+only after import by ``src.backtests.migration``.
 """
 
 from __future__ import annotations
 
 import itertools
+import json
+import sqlite3
+from dataclasses import fields
+from pathlib import Path
 from typing import Any
 
 import pytest
 
+from src.backtests.migration import migrate_legacy_backtests
+from src.common.paths import BACKTESTS_DIR
+from src.mhs.contracts import MhsDiagnosticRequest
 from src.mhs.params import SEARCH_TRIALS_ATTEMPTED
 from src.mhs.run_history import (
+    RESEARCH_NEUTRAL_FLAGS,
+    _resolve_history_registry,
     append_run_history_record,
     derive_trials_attempted,
     is_trial_record,
@@ -88,8 +98,8 @@ def test_empty_or_missing_directory_falls_back(tmp_path) -> None:
 
 
 def test_distinct_configurations_counted_across_all_shards(tmp_path) -> None:
-    """Archives, the active shard, and the ledger are one logical ledger:
-    distinct trial configurations accumulate across every JSONL shard."""
+    """Appends are cumulative: distinct trial configurations accumulate on the
+    registered floor regardless of how many registry rows already exist."""
     history_dir = tmp_path / "history"
     append_run_history_record(
         _trial_record("a", {"execution_universe_size": 30}), history_dir
@@ -125,14 +135,26 @@ def test_non_trial_records_contribute_no_configuration(tmp_path) -> None:
     assert counted_with_default == SEARCH_TRIALS_ATTEMPTED + 1
 
 
-def test_malformed_history_falls_back_with_explicit_provenance(tmp_path) -> None:
+def test_legacy_jsonl_is_not_evidence(tmp_path) -> None:
+    """Legacy JSON-Lines history is inert: only the registry counts trials."""
     history_dir = tmp_path / "history"
-    history_dir.mkdir(parents=True)
-    (history_dir / "active.jsonl").write_text("{not-json}\n", encoding="utf-8")
+    history_dir.mkdir()
+    shard = history_dir / "active.jsonl"
+    payload = "".join(
+        json.dumps(_trial_record(f"r{index}", {"u": index}), sort_keys=True) + "\n"
+        for index in range(2)
+    )
+    shard.write_text(payload, encoding="utf-8")
+
     assert derive_trials_attempted(history_dir) == (
         SEARCH_TRIALS_ATTEMPTED,
         "constant_fallback",
     )
+    assert window_trial_sharpes(_DEFAULT_WINDOW, history_dir) == ()
+    disclosure = trial_pool_disclosure(_DEFAULT_WINDOW, history_dir)
+    assert disclosure["n_history_records"] == 0
+    assert disclosure["source"] == "constant_fallback"
+    assert shard.read_text(encoding="utf-8") == payload
 
 
 def test_default_directory_resolution_uses_repository_layout() -> None:
@@ -383,6 +405,31 @@ def test_disclosure_reports_all_ten_keys_and_accounting(tmp_path) -> None:
     assert missing["n_history_records"] == 0
     assert missing["source"] == "constant_fallback"
 
+
+# I-SAME-TRIAL-SET: one admission predicate feeds both DSR denominators.
+def test_denominator_and_window_pool_share_one_admission_set(tmp_path) -> None:
+    gap_code = "RELEVANT_EXECUTION_DATA_GAP"
+    admitted = [
+        _trial_record("clean1", {"u": 1}, sharpe=1.0),
+        _trial_record("clean2", {"u": 2}, sharpe=2.0),
+    ]
+    excluded = [
+        _trial_record("gap", {"u": 3}, sharpe=9.0, reason_codes=(gap_code,)),
+        _trial_record("failed", {"u": 4}, sharpe=8.0, status="FAILED"),
+        _trial_record("nan", {"u": 5}, sharpe=float("nan")),
+    ]
+    history_dir = tmp_path / "history"
+    for record in (*admitted, *excluded):
+        append_run_history_record(record, history_dir)
+
+    disclosure = trial_pool_disclosure(_DEFAULT_WINDOW, history_dir)
+    counted, source = derive_trials_attempted(history_dir)
+    admitted_keys = {trial_identity_key(record) for record in admitted}
+    assert counted - SEARCH_TRIALS_ATTEMPTED == disclosure["ledger_size"] == len(admitted_keys)
+    assert source == "constant_plus_ledger"
+    assert disclosure["n_trial_records"] == len(admitted_keys)
+    assert window_trial_sharpes(_DEFAULT_WINDOW, history_dir) == (1.0, 2.0)
+
 def test_mhs_kelly_z0_run_history_policy_is_distinct_trial(tmp_path) -> None:
     from src.mhs.params import SEARCH_TRIALS_ATTEMPTED
     from src.mhs.run_history import append_run_history_record, derive_trials_attempted, trial_identity_key
@@ -414,12 +461,7 @@ def test_trial_identity_key_distinguishes_data_policy_and_keeps_legacy_records()
     assert masked != legacy
 
 
-def test_trial_identity_key_is_sparse_and_stable_when_a_defaulted_field_is_added(tmp_path) -> None:
-    import json
-    from dataclasses import fields
-    from src.mhs.contracts import MhsDiagnosticRequest
-    from src.mhs.run_history import RESEARCH_NEUTRAL_FLAGS, _load_trials_ledger, trial_identity_key
-
+def test_trial_identity_key_is_sparse_and_stable_when_a_defaulted_field_is_added() -> None:
     snapshot = {"K": 1}
     registered = [f for f in fields(MhsDiagnosticRequest) if f.name not in RESEARCH_NEUTRAL_FLAGS]
     data_policy_default = next(f.default for f in registered if f.name == "data_policy")
@@ -430,20 +472,51 @@ def test_trial_identity_key_is_sparse_and_stable_when_a_defaulted_field_is_added
     explicit.update(record["flags"])
     assert trial_identity_key(record) == trial_identity_key({"flags": explicit, "params_snapshot": snapshot})
 
-    # Given a dense ledger key from an older schema missing the last registered field
+
+def test_dense_ledger_keys_collapse_on_import(tmp_path) -> None:
+    """Schema drift must not split one configuration in two: a dense key written
+    by an older contract collapses onto the sparse key with the earliest first-seen."""
+    snapshot = {"K": 1}
+    registered = [f for f in fields(MhsDiagnosticRequest) if f.name not in RESEARCH_NEUTRAL_FLAGS]
+    data_policy_default = next(f.default for f in registered if f.name == "data_policy")
+    record = {"flags": {"committee_capital": True, "data_policy": data_policy_default}, "params_snapshot": snapshot}
+
+    # A dense key from an older schema is missing the last registered field.
     dense = {f.name: f.default for f in registered[:-1]}
     dense.update(record["flags"])
     dense["params_snapshot"] = snapshot
-    dense_key = json.dumps(dense, ensure_ascii=False, sort_keys=True,
-                           default=lambda o: f"<{type(o).__module__}.{type(o).__qualname__}>")
-    (tmp_path / "trials_ledger.json").write_text(
-        json.dumps({dense_key: "2026-09-02T00:00:00+00:00", trial_identity_key(record): "2026-09-10T00:00:00+00:00"}),
+    dense_key = json.dumps(
+        dense,
+        ensure_ascii=False,
+        sort_keys=True,
+        default=lambda o: f"<{type(o).__module__}.{type(o).__qualname__}>",
+    )
+    legacy = tmp_path / "legacy"
+    legacy.mkdir()
+    (legacy / "trials_ledger.json").write_text(
+        json.dumps({
+            dense_key: "2026-09-02T00:00:00+00:00",
+            trial_identity_key(record): "2026-09-10T00:00:00+00:00",
+        }),
         encoding="utf-8",
     )
 
-    # Then both collapse onto one sparse identity keeping the earliest first-seen
-    loaded = _load_trials_ledger(tmp_path)
-    assert loaded == {trial_identity_key(record): "2026-09-02T00:00:00+00:00"}
+    home = tmp_path / "registry-home"
+    home.mkdir()
+    registry = home / "registry.sqlite3"
+    migrate_legacy_backtests(
+        registry_path=registry,
+        history_directories=(legacy,),
+        run_directories=(),
+        dry_run=False,
+    )
+
+    assert derive_trials_attempted(home) == (SEARCH_TRIALS_ATTEMPTED + 1, "constant_plus_ledger")
+    with sqlite3.connect(registry) as conn:
+        first_seen = conn.execute(
+            "SELECT first_seen FROM trials WHERE namespace = 'mhs_legacy_horizon'"
+        ).fetchall()
+    assert first_seen == [("2026-09-02T00:00:00+00:00",)]
 
 
 def test_sparse_identity_key_passes_through_non_identity_keys() -> None:
@@ -472,7 +545,7 @@ def test_append_preserves_trial_identity_across_variants(tmp_path) -> None:
 
 
 def test_append_denominator_matches_legacy_union(tmp_path) -> None:
-    """Denominator parity: registry union equals legacy shard plus ledger union."""
+    """Denominator: the record union and the monotone ledger count one trial set."""
     history_dir = tmp_path / "history"
     records = [_trial_record(f"r{i}", {"u": i}) for i in range(3)]
     for record in records:
@@ -483,7 +556,7 @@ def test_append_denominator_matches_legacy_union(tmp_path) -> None:
 
 
 def test_append_window_outcomes_match_legacy_dedup(tmp_path) -> None:
-    """Window outcome parity: sorted dedup tuples of distinct (key, sharpe)."""
+    """Window outcomes: sorted dedup tuples of distinct (identity key, Sharpe)."""
     history_dir = tmp_path / "history"
     window = ("2021-01-01 00:00:00+00:00", "2025-12-31 23:59:59+00:00")
     append_run_history_record(_trial_record("r1", {"a": 1}, sharpe=2.0), history_dir)
@@ -494,7 +567,7 @@ def test_append_window_outcomes_match_legacy_dedup(tmp_path) -> None:
 
 
 def test_append_disclosure_matches_legacy_buckets(tmp_path) -> None:
-    """Disclosure parity: counts, span and source equal legacy accounting."""
+    """Disclosure: buckets, ledger size and source label over one registry scan."""
     history_dir = tmp_path / "history"
     gap_code = "RELEVANT_EXECUTION_DATA_GAP"
     for record in [
@@ -530,42 +603,125 @@ def test_append_isolates_explicit_histories(tmp_path) -> None:
     assert (first / "registry.sqlite3").read_bytes() != (second / "registry.sqlite3").read_bytes() or True
 
 
-def test_registry_fallback_on_invalid_and_empty_state(tmp_path) -> None:
-    import sqlite3
-
+def _corrupt_registry(history_dir) -> Path:
     from src.backtests.registry import initialize_registry
+
+    history_dir.mkdir(parents=True, exist_ok=True)
+    registry = history_dir / "registry.sqlite3"
+    initialize_registry(registry)
+    return registry
+
+
+def test_corrupt_registry_file_fails_closed(tmp_path) -> None:
+    """Corrupt evidence must never be mistaken for absent evidence: the DSR
+    denominator N and the trial-Sharpe pool V both enter the Deflated Sharpe."""
+    from src.common.errors import DataIntegrityError
 
     history_dir = tmp_path / "history"
     history_dir.mkdir()
     (history_dir / "registry.sqlite3").write_text("not-a-db", encoding="utf-8")
-    counted, source = derive_trials_attempted(history_dir)
-    assert counted == SEARCH_TRIALS_ATTEMPTED
-    assert source == "constant_fallback"
-    fresh = tmp_path / "fresh"
-    fresh.mkdir()
-    initialize_registry(fresh / "registry.sqlite3")
-    counted_fresh, _ = derive_trials_attempted(fresh)
-    assert counted_fresh == SEARCH_TRIALS_ATTEMPTED
+    with pytest.raises(DataIntegrityError):
+        derive_trials_attempted(history_dir)
+    with pytest.raises(DataIntegrityError):
+        window_trial_sharpes(_DEFAULT_WINDOW, history_dir)
+
+
+def test_malformed_history_row_fails_closed_naming_the_row(tmp_path) -> None:
+    """A dropped row could hide a consulted look or a trial, so the whole read fails."""
+    import sqlite3
+
+    from src.common.errors import DataIntegrityError
+
     bad = tmp_path / "bad"
-    bad.mkdir()
-    initialize_registry(bad / "registry.sqlite3")
-    conn = sqlite3.connect(str(bad / "registry.sqlite3"))
+    registry = _corrupt_registry(bad)
+    conn = sqlite3.connect(str(registry))
     try:
         conn.execute(
             "INSERT INTO history_records (source_id, ordinal, namespace, record_json, admitted, identity_key)"
             " VALUES (?, ?, ?, ?, ?, ?)",
-            ("live", 0, "mhs_legacy_horizon", "{bad-json", 0, None),
+            ("imported-src", 3, "mhs_legacy_horizon", "{bad-json", 0, None),
         )
         conn.execute(
             "INSERT INTO history_records (source_id, ordinal, namespace, record_json, admitted, identity_key)"
             " VALUES (?, ?, ?, ?, ?, ?)",
-            ("live", 1, "mhs_legacy_horizon", '{"status": "COMPLETE"}', 0, None),
+            ("imported-src", 4, "mhs_legacy_horizon", '{"status": "COMPLETE"}', 0, None),
+        )
+        conn.execute(
+            "INSERT INTO trials (namespace, identity_key, first_seen, provenance_json)"
+            " VALUES (?, ?, ?, ?)",
+            ("mhs_legacy_horizon", '{"u": 1}', "2026-01-01T00:00:00+00:00", "{}"),
         )
         conn.commit()
     finally:
         conn.close()
-    counted_bad, _ = derive_trials_attempted(bad)
-    assert counted_bad == SEARCH_TRIALS_ATTEMPTED
+    with pytest.raises(DataIntegrityError) as malformed:
+        derive_trials_attempted(bad)
+    assert "imported-src" in str(malformed.value)
+    assert "imported-src/3" in str(malformed.value)
+
+
+def test_non_object_history_row_fails_closed(tmp_path) -> None:
+    import sqlite3
+
+    from src.common.errors import DataIntegrityError
+
+    bad = tmp_path / "bad"
+    registry = _corrupt_registry(bad)
+    conn = sqlite3.connect(str(registry))
+    try:
+        conn.execute(
+            "INSERT INTO history_records (source_id, ordinal, namespace, record_json, admitted, identity_key)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            ("live", 0, "mhs_legacy_horizon", "[1, 2]", 0, None),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    with pytest.raises(DataIntegrityError):
+        derive_trials_attempted(bad)
+
+
+def test_empty_initialized_registry_is_absence_not_corruption(tmp_path) -> None:
+    from src.backtests.registry import initialize_registry
+
+    fresh = tmp_path / "fresh"
+    fresh.mkdir()
+    initialize_registry(fresh / "registry.sqlite3")
+    assert derive_trials_attempted(fresh) == (SEARCH_TRIALS_ATTEMPTED, "constant_fallback")
+
+
+def test_disclosure_degrades_observationally_on_corrupt_registry(tmp_path, caplog) -> None:
+    """Disclosure is observational only: it warns and never raises into the run."""
+    from src.mhs.run_history import _EMPTY_DISCLOSURE
+
+    history_dir = tmp_path / "history"
+    history_dir.mkdir()
+    (history_dir / "registry.sqlite3").write_text("not-a-db", encoding="utf-8")
+    with caplog.at_level("WARNING", logger="MhsRunHistory"):
+        disclosure = trial_pool_disclosure(_DEFAULT_WINDOW, history_dir)
+    assert disclosure == {**_EMPTY_DISCLOSURE}
+    assert disclosure["source"] == "constant_fallback"
+    assert any("[DATA] trial_pool_disclosure registry_unreadable" in r.message for r in caplog.records)
+
+
+def test_disclosure_reports_pool_window_span_of_the_matched_pool(tmp_path) -> None:
+    """The matched pool's end-date heterogeneity is disclosed in days."""
+    history_dir = tmp_path / "history"
+    append_run_history_record(
+        _trial_record("early", {"u": 1}, sharpe=2.0, resolved_end="2025-12-01T00:00:00+00:00"),
+        history_dir,
+    )
+    append_run_history_record(
+        _trial_record("late", {"u": 2}, sharpe=2.5, resolved_end=_DEFAULT_WINDOW[1]),
+        history_dir,
+    )
+    disclosure = trial_pool_disclosure(_DEFAULT_WINDOW, history_dir)
+    assert disclosure["n_trial_records"] == 2
+    assert disclosure["distinct_trial_keys"] == 2
+    assert disclosure["pool_window_span_days"] == pytest.approx(31.0, abs=1e-3)
+
+
+def test_stamped_records_keep_their_trial_provenance(tmp_path) -> None:
     stamped = dict(_trial_record("stamped", {"u": 1}))
     stamped["run_at"] = "2026-03-01T00:00:00+00:00"
     append_run_history_record(stamped, tmp_path / "stamped")
@@ -573,14 +729,9 @@ def test_registry_fallback_on_invalid_and_empty_state(tmp_path) -> None:
     assert stamped_count == SEARCH_TRIALS_ATTEMPTED + 1
 
 
-def test_canonical_history_dir_maps_to_backtests_registry(tmp_path) -> None:
-    from pathlib import Path
-
-    from src.common.paths import BACKTESTS_DIR
-    from src.mhs.run_history import _resolve_history_registry
-
-    assert _resolve_history_registry(Path("docs/results/mhs_run_history")) == BACKTESTS_DIR / "registry.sqlite3"
+def test_explicit_location_maps_to_its_own_registry_file() -> None:
     assert _resolve_history_registry(None) == BACKTESTS_DIR / "registry.sqlite3"
+    assert _resolve_history_registry(Path("x")) == Path("x") / "registry.sqlite3"
 
 
 def test_disclosure_without_ledger_keeps_history_source(tmp_path) -> None:
@@ -597,18 +748,13 @@ def test_disclosure_without_ledger_keeps_history_source(tmp_path) -> None:
 
 
 def test_append_writes_registry_only(tmp_path) -> None:
-    """Single writer backend: registry grows without new active/latest JSON."""
-    history_dir = tmp_path / "history"
-    target = tmp_path / "report.json"
-    from src.mhs.run_history import mhs_run_history_dir
-
-    resolved = mhs_run_history_dir(target)
+    """Single writer backend: the registry grows without any sibling JSON artifact."""
+    resolved = tmp_path / "mhs_run_history"
     record = _trial_record("r1", {"u": 1})
     registry = append_run_history_record(record, resolved)
     assert registry.is_file()
     assert registry == resolved / "registry.sqlite3"
-    assert list(resolved.glob("*.jsonl")) == []
-    assert not (resolved / "latest.json").exists()
+    assert sorted(p.name for p in resolved.iterdir()) == ["registry.sqlite3"]
     counted, _ = derive_trials_attempted(resolved)
     assert counted == SEARCH_TRIALS_ATTEMPTED + 1
     assert window_trial_sharpes(_DEFAULT_WINDOW, resolved) == (2.0,)
@@ -632,10 +778,8 @@ def test_default_history_never_reads_docs(tmp_path, monkeypatch) -> None:
 
 
 def test_imported_registry_preserves_denominator(tmp_path) -> None:
-    """Same legacy records yield the same count and source before and after migration."""
+    """Legacy records become registry evidence carrying both records and their trials."""
     import json as _json
-
-    from src.backtests.migration import migrate_legacy_backtests
 
     source = tmp_path / "legacy"
     source.mkdir()
@@ -654,14 +798,12 @@ def test_imported_registry_preserves_denominator(tmp_path) -> None:
 
     ledger_seed = {k: "2026-01-01T00:00:00+00:00" for r in records if (k := _key(r)) is not None}
     (source / "trials_ledger.json").write_text(_json.dumps(ledger_seed), encoding="utf-8")
-    before_count, before_source = derive_trials_attempted(source)
     registry_home = tmp_path / "registry-home"
     registry_home.mkdir()
     registry = registry_home / "registry.sqlite3"
     migrate_legacy_backtests(registry_path=registry, history_directories=(source,), run_directories=(), dry_run=False)
-    after_count, after_source = derive_trials_attempted(registry_home)
-    assert (after_count, after_source) == (before_count, before_source)
-    assert after_count == SEARCH_TRIALS_ATTEMPTED + 2
+    assert derive_trials_attempted(registry_home) == (SEARCH_TRIALS_ATTEMPTED + 2, "constant_plus_ledger")
+    assert window_trial_sharpes(_DEFAULT_WINDOW, registry_home) == (1.5, 2.5)
 
 
 def test_explicit_fixture_directory_remains_isolated(tmp_path, monkeypatch) -> None:
@@ -672,10 +814,7 @@ def test_explicit_fixture_directory_remains_isolated(tmp_path, monkeypatch) -> N
     canonical_home.mkdir()
     monkeypatch.setattr(rh, "canonical_history_registry", lambda: canonical_home / "registry.sqlite3")
     assert rh.canonical_history_registry().parent == canonical_home
-    assert rh._is_canonical_history_request(None) is True
-    assert rh._is_canonical_history_request("docs/results/mhs_run_history") is True
     first = tmp_path / "first"
-    assert rh._is_canonical_history_request(first) is False
     append_run_history_record(_trial_record("r1", {"u": 1}), first)
     assert (first / "registry.sqlite3").is_file()
     assert not (canonical_home / "registry.sqlite3").exists()
@@ -685,11 +824,9 @@ def test_explicit_fixture_directory_remains_isolated(tmp_path, monkeypatch) -> N
 
 
 def test_canonical_registry_points_to_backtests_dir() -> None:
-    from src.common.paths import BACKTESTS_DIR
-    from src.mhs.run_history import _is_canonical_history_request, canonical_history_registry
+    from src.mhs.run_history import canonical_history_registry
 
     assert canonical_history_registry() == BACKTESTS_DIR / "registry.sqlite3"
-    assert _is_canonical_history_request(BACKTESTS_DIR) is True
 
 
 def test_persisted_research_observation_uses_registry(tmp_path, monkeypatch) -> None:
@@ -726,3 +863,27 @@ def test_registry_failure_stays_observational(tmp_path, monkeypatch, caplog) -> 
         result = persist_mod.persist_mhs_report(object(), target)  # type: ignore[arg-type]
     assert result == target
     assert any("run-history" in r.message for r in caplog.records)
+
+
+def test_retired_jsonl_symbols_are_gone() -> None:
+    """The registry is the only history backend: no rotation or shard symbols remain."""
+    import src.mhs.run_history as rh
+
+    retired = (
+        "RUN_HISTORY_SHARD_MAX_BYTES",
+        "RUN_HISTORY_MAX_SHARDS",
+        "_DEFAULT_HISTORY_DIR",
+        "_ACTIVE_FILE_NAME",
+        "_LATEST_FILE_NAME",
+        "mhs_run_history_dir",
+        "_archive_path",
+        "_unique_archive_path",
+        "_serialize_record",
+        "_prune_archives",
+        "_upsert_trials_ledger",
+        "_load_trials_ledger",
+        "_iter_history_records",
+        "_is_canonical_history_request",
+    )
+    assert [name for name in retired if hasattr(rh, name)] == []
+    assert "jsonl" not in Path(rh.__file__).read_text(encoding="utf-8")

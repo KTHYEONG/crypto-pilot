@@ -74,7 +74,7 @@ def test_SCENARIO_LIVE_46_PORTFOLIO_STATE_APPENDS_TYPED_PARQUET_AND_ROTATES(tmp_
 
     import src.live.portfolio_state as ps_mod
 
-    monkeypatch.setattr(ps_mod, "RUN_HISTORY_SHARD_MAX_BYTES", 1)
+    monkeypatch.setattr(ps_mod, "LIVE_RECORD_SHARD_MAX_BYTES", 1)
     append_portfolio_state(_record(decision_time=DECISION_TIME + pd.Timedelta(days=1)), history_dir)
     archives = list(history_dir.glob("portfolio_state_*.parquet"))
     assert len(archives) == 1
@@ -110,6 +110,26 @@ def test_corrupt_active_shard_is_quarantined_and_restarted(tmp_path: Path) -> No
     quarantined = list((history_dir / "_quarantine").glob("active.parquet.*.corrupt"))
     assert len(quarantined) == 1
     assert quarantined[0].read_bytes() == raw[: len(raw) // 2]
+
+
+def test_live_chain_does_not_import_research_history() -> None:
+    """The live daemon import chain must not pull the research run-history module in."""
+    import subprocess
+    import sys
+
+    out = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys, src.live.portfolio_state, src.live.execution_quality;"
+            " print('src.mhs.run_history' in sys.modules)",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+        cwd=str(Path(__file__).resolve().parents[3]),
+    )
+    assert out.stdout.strip() == "False"
 
 
 #: 본 모듈이 검증하는 시나리오 ID(lean_check 추적용).

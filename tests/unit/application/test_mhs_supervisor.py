@@ -915,6 +915,9 @@ def test_supervised_launch_shares_source_identity(tmp_path, monkeypatch) -> None
     assert run.status == "failed"
     assert "--procedure-code-digest" in seen["command"]
     assert seen["command"][seen["command"].index("--procedure-code-digest") + 1] == digest
+    assert seen["command"][1:3] == ["-m", "src.application.mhs_worker"]
+    assert not any(str(part).startswith("src.cli") for part in seen["command"])
+    assert not any(str(part).startswith("tools") for part in seen["command"])
     conn = _sqlite3.connect(str(db))
     try:
         row = conn.execute("SELECT request_json FROM runs WHERE run_id = ?", (run_id,)).fetchone()
@@ -988,3 +991,23 @@ def test_fingerprint_changes_with_source_identity(tmp_path) -> None:
     )
     assert sup.find_reused_run(registry, first)[0] == "c" * 32
     assert sup.find_reused_run(registry, second) is None
+
+
+def test_supervised_run_reports_wall_time_and_tree_pss(tmp_path, monkeypatch) -> None:
+    """Supervised runs report wall time and sampled tree PSS."""
+    start, end = _stamps()
+    result = _result(tmp_path, "pss")
+
+    def _on_start(proc):
+        staging = result.parent / ".staging_domain.json"
+        staging.parent.mkdir(parents=True, exist_ok=True)
+        staging.write_text(json.dumps(_completed_domain()))
+
+    _install_fake(monkeypatch, 0, 0.3, _on_start)
+    run = sup.run_mhs_process_backtest(
+        start=start, end=end, data_root=None, result_output=result, poll_seconds=0.05
+    )
+    assert run.status == "completed"
+    assert run.wall_seconds >= 0.0
+    assert run.sampled_tree_pss_peak_bytes == 100
+    assert "PSS" in run.memory_scope

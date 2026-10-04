@@ -1,6 +1,4 @@
-# mypy: ignore-errors
-# ruff: noqa: F401, F821, I001, E402
-from __future__ import annotations  # mypy: ignore-errors
+from __future__ import annotations
 
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from typing import Any
@@ -8,16 +6,12 @@ from typing import Any
 import pandas as pd
 
 import src.mhs.evaluation.participation as participation_mod
-from src.mhs import statistics as _statistics
-from src.mhs.contracts import MhsBookReport, MhsDiagnosticRequest
-from src.mhs.resources import (
-    _resolve_ram_budget,
-    _StageRecorder,
-    _worker_plan_observer,
-)
 from src.common.errors import DataIntegrityError
+from src.mhs import statistics as _statistics
+from src.mhs.contracts import MhsBookReport, MhsDiagnosticRequest, MhsFoldReport
 from src.mhs.evidence import (
     DeploymentReadinessResult,
+    PhaseDiagnosticResult,
     compute_deployment_readiness,
     resolved_anchored_folds,
 )
@@ -28,6 +22,11 @@ from src.mhs.parallel import (
     plan_worker_count,
 )
 from src.mhs.params import PERIODS_PER_YEAR_1H as _PERIODS_PER_YEAR_1H
+from src.mhs.resources import (
+    _resolve_ram_budget,
+    _StageRecorder,
+    _worker_plan_observer,
+)
 from src.mhs.types import BOOK_BLEND_WEIGHTS, WORKER_PEAK_RSS_BYTES, BookSpec
 
 from . import books, folds, windows

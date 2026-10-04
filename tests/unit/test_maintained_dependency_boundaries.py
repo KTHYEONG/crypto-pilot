@@ -65,9 +65,9 @@ def test_maintenance_tool_identity_preserved(tmp_path: Path) -> None:
 
 def test_active_golden_preserved() -> None:
     """Active golden capture matrix stays usable after cleanup."""
-    path = ROOT / "tests/fixtures/golden/capture_matrix.py"
-    assert path.exists()
-    assert "def capture_golden_matrix" in _read_text(path)
+    from tests.fixtures.golden.capture_matrix import capture_golden_matrix
+
+    assert callable(capture_golden_matrix)
 
 
 def test_no_source_tools_dependency() -> None:
@@ -103,10 +103,12 @@ def test_used_dependencies_preserved() -> None:
 
 def test_no_eager_facade_on_package_import() -> None:
     """Importing the evaluation package performs no orchestration."""
-    init_text = _read_text(ROOT / "src/mhs/evaluation/__init__.py").strip()
-    assert "package initialization performs no orchestration or report loading" in init_text
-    code_lines = [line for line in init_text.splitlines() if line.strip() and not line.strip().startswith('"""') and not line.strip().startswith("Research")]
-    assert code_lines == []
+    import ast
+
+    tree = ast.parse(_read_text(ROOT / "src/mhs/evaluation/__init__.py"))
+    assert len(tree.body) == 1
+    assert isinstance(tree.body[0], ast.Expr)
+    assert isinstance(tree.body[0].value, ast.Constant)
     proc = subprocess.run(
         [sys.executable, "-c", "import src.mhs.evaluation, sys; print(sorted(m for m in sys.modules if m.startswith('src.mhs.report') or m.startswith('src.mhs.pipeline')))"],
         cwd=str(ROOT),
@@ -183,13 +185,13 @@ def test_full_three_minute_equivalence_scope() -> None:
     """Canonical run keeps 3m grid with supervisor wall and memory scope."""
     import dataclasses
 
+    import src.application.mhs_supervisor as sup_mod
     from src.mhs.pipeline.config import MhsRunConfig
 
     fields = {f.name: f.default for f in dataclasses.fields(MhsRunConfig)}
     assert fields.get("execution_timeframe") == "3m"
-    supervisor = _read_text(ROOT / "src/application/mhs_supervisor.py")
-    assert "wall_seconds" in supervisor
-    assert "PSS" in supervisor
+    supervised_fields = {f.name for f in dataclasses.fields(sup_mod.MhsSupervisedRun)}
+    assert {"wall_seconds", "sampled_tree_pss_peak_bytes", "memory_scope"} <= supervised_fields
 
 
 def test_direct_owner_blend_grid_selection() -> None:

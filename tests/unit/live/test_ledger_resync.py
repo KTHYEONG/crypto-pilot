@@ -252,7 +252,7 @@ def test_ledger_resync_apply_fails_when_verification_breaches(resync_env, tmp_pa
 
 def test_ledger_resync_dry_run_reports_only_foreign_order_symbols(tmp_path, monkeypatch) -> None:
     """Dry run lists symbols with non-namespaced orders and ignores our own order ids."""
-    from src.live.executor import CLIENT_ORDER_NAMESPACE
+    from src.live.planner import CLIENT_ORDER_NAMESPACE
 
     class _MixedClient(_ResyncOrderClient):
         def open_orders(self):
@@ -283,7 +283,9 @@ def test_ledger_resync_apply_without_valid_mark_writes_nothing(resync_env, tmp_p
     ledger_path = Path(settings.ledger_path)
     save_ledger(ledger_path, LedgerState(positions={}, equity_high_water_mark=Decimal(0)))
     before = ledger_path.read_bytes()
-    monkeypatch.setattr(runner_mod, "_marks_from_tickers", lambda client, symbols: {})
+    from src.live.runner import TickerMarks
+
+    monkeypatch.setattr(runner_mod, "_marks_from_tickers", lambda client, symbols: TickerMarks(marks={}, quotes={}))
 
     with pytest.raises(LiveTradingError, match="no valid mark"):
         resync_mod.run_ledger_resync(settings, apply=True, now=NOW)
@@ -294,3 +296,53 @@ def test_ledger_resync_apply_without_valid_mark_writes_nothing(resync_env, tmp_p
     journal_path = Path(settings.order_journal_path)
     if journal_path.exists():
         assert not [f for f in OrderJournal(journal_path).fills_after(-1) if f.kind == "operator_resync"]
+
+
+def test_ledger_resync_refuses_while_own_orders_unresolved(tmp_path, monkeypatch) -> None:
+    """Apply refuses while own orders stay open after confirmed cancels."""
+    import json
+
+    import pytest
+
+    from src.live.errors import LiveTradingError, VenueError
+    from src.live.order_journal import OrderJournal
+    from src.live.planner import build_client_order_id
+    from decimal import Decimal
+
+    class _UnresolvedClient(_ResyncOrderClient):
+        def __init__(self, order_id: str) -> None:
+            self._order_id = order_id
+
+        def open_orders(self):
+            return []
+
+        def cancel_order(self, symbol, orig_client_order_id):
+            raise VenueError("unknown order", code=-2011, http_status=400, path="/fapi/v1/order", payload_digest="0" * 12)
+
+        def query_order(self, symbol, orig_client_order_id):
+            return {"status": "NEW", "side": "BUY", "executedQty": "0", "avgPrice": "0", "updateTime": 1}
+
+    monkeypatch.setattr(runner_mod, "_market_client", lambda settings, decision_time: StubMarketClient())
+    order_id = build_client_order_id("20260823", "AAAUSDT", 0, 0, 0)
+    monkeypatch.setattr(runner_mod, "_order_client", lambda settings, decision_time: _UnresolvedClient(order_id))
+    audit_path = tmp_path / "ledger_resync_unresolved.jsonl"
+    monkeypatch.setattr(resync_mod, "default_audit_log_path", lambda name, for_date=None: audit_path)
+    settings = _resync_settings(tmp_path, "unresolved")
+    ledger_path = Path(settings.ledger_path)
+    save_ledger(ledger_path, LedgerState(positions={}, equity_high_water_mark=Decimal(0)))
+    before = ledger_path.read_bytes()
+    journal = OrderJournal(Path(settings.order_journal_path))
+    attempt = journal.begin_attempt(
+        decision_time=NOW - pd.Timedelta(days=1), run_id="20260823", mode="live_testnet",
+        pre_trade_equity=Decimal("2000"), sizing_anchor="ledger_resync",
+        decision_marks={}, started_at=NOW - pd.Timedelta(days=1),
+    )
+    journal.record_submit(order_id, "AAAUSDT", journal.next_submit_seq(), attempt_seq=attempt.attempt_seq,
+                          side="BUY", quantity=Decimal("0.4"), reduce_only=False, leg_index=0)
+
+    with pytest.raises(LiveTradingError, match="unresolved"):
+        resync_mod.run_ledger_resync(settings, apply=True, now=NOW)
+
+    assert ledger_path.read_bytes() == before
+    assert not [f for f in OrderJournal(Path(settings.order_journal_path)).fills_after(-1) if f.kind == "operator_resync"]
+    assert any(json.loads(line).get("event") == "order_recovery_unresolved" for line in audit_path.read_text(encoding="utf-8").splitlines() if line.strip())

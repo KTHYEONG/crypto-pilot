@@ -76,6 +76,8 @@ class StubClient:
             if self._executed_sequence
             else self._executed_sequence_default
         )
+        if orig_client_order_id in self.cancels:
+            return {"status": "CANCELED", "executedQty": executed}
         return {"status": "NEW", "executedQty": executed}
 
     _executed_sequence_default = "0"
@@ -487,12 +489,15 @@ class CancelFillStubClient(StubClient):
         self.cancelled_ids: set[str] = set()
 
     def cancel_order(self, symbol: str, orig_client_order_id: str) -> dict[str, Any]:
+        self.cancels.append(orig_client_order_id)
         self.cancelled_ids.add(orig_client_order_id)
         return {}
 
     def query_order(self, symbol: str, orig_client_order_id: str) -> dict[str, Any]:
         self.queries += 1
         executed = "0.5" if orig_client_order_id in self.cancelled_ids else "0"
+        if orig_client_order_id in self.cancelled_ids:
+            return {"status": "CANCELED", "executedQty": executed}
         return {"status": "NEW", "executedQty": executed}
 
 
@@ -952,6 +957,7 @@ def test_SCENARIO_PARITY_01_slice_progress_no_stall(tmp_path):
     class SliceClient:
         def __init__(self):
             self.orders=[]
+            self.cancelled=set()
             self._tick=0
         def book_tickers(self):
             return {"AAAUSDT": {"bidPrice": "100.00", "askPrice": "100.20"}}
@@ -961,13 +967,16 @@ def test_SCENARIO_PARITY_01_slice_progress_no_stall(tmp_path):
             self.orders.append(params)
             return {"orderId": len(self.orders)}
         def cancel_order(self, *a, **k):
+            self.cancelled.add(a[1] if len(a) > 1 else k.get("orig_client_order_id"))
             return {}
         def query_order(self, symbol, oid):
             # find order quantity
             for o in self.orders:
                 if o["newClientOrderId"]==oid:
-                    return {"executedQty": str(o["quantity"]), "avgPrice": o["price"]}
-            return {"executedQty": "0", "avgPrice": "0"}
+                    status = "CANCELED" if oid in self.cancelled else "NEW"
+                    return {"status": status, "executedQty": str(o["quantity"]), "avgPrice": o["price"]}
+            status = "CANCELED" if oid in self.cancelled else "NEW"
+            return {"status": status, "executedQty": "0", "avgPrice": "0"}
         def open_orders(self):
             return []
     client = SliceClient()
@@ -1797,20 +1806,20 @@ def test_cancel_orphan_orders_cancel_status_unknown_resolved_by_lookup(tmp_path)
             return {"status": status, "side": "BUY", "avgPrice": "100",
                     "executedQty": self._executed.get(orig_client_order_id, "0")}
 
-    import pytest
-
     order = "mh20260914-ABCDEFGHIJ-0-0-3"
     closed = _Client([{"symbol": "AAAUSDT", "clientOrderId": order}], {order: "1"}, cancel_unknown_status="CANCELED")
 
-    settlements = cancel_orphan_orders(closed, "20260914", audit, journal=journal, now=pd.Timestamp("2026-09-14T00:00:00Z"), taker_fee_bps=4.5)
+    sweep = cancel_orphan_orders(closed, "20260914", audit, journal=journal, now=pd.Timestamp("2026-09-14T00:00:00Z"), taker_fee_bps=4.5)
 
     assert closed.cancels == [order]
-    assert [s.quantity for s in settlements] == [Decimal("1")]
+    assert [s.quantity for s in sweep] == [Decimal("1")]
+    assert sweep.unconfirmed == ()
 
     still_open = _Client([{"symbol": "AAAUSDT", "clientOrderId": order}], {order: "0"}, cancel_unknown_status="NEW")
-    with pytest.raises(OrderStatusUnknown):
-        cancel_orphan_orders(still_open, "20260914", audit, journal=journal, now=pd.Timestamp("2026-09-14T00:00:00Z"), taker_fee_bps=4.5)
+    reopened = cancel_orphan_orders(still_open, "20260914", audit, journal=journal, now=pd.Timestamp("2026-09-14T00:00:00Z"), taker_fee_bps=4.5)
     assert still_open.cancels == [order]
+    assert [u.client_order_id for u in reopened.unconfirmed] == [order]
+    assert reopened.unconfirmed[0].symbol == "AAAUSDT"
 
 def test_cancel_orphan_orders_tolerates_order_gone_on_lookup(tmp_path) -> None:
     import pandas as pd
@@ -2389,6 +2398,7 @@ def test_live_partial_fills_emit_deltas(tmp_path) -> None:
         def __init__(self):
             self.tick = -1
             self.orders: list[dict] = []
+            self.cancels: list[str] = []
             self._executed = ["3", "5", "6"]
 
         def book_tickers(self):
@@ -2405,10 +2415,13 @@ def test_live_partial_fills_emit_deltas(tmp_path) -> None:
             return {"orderId": len(self.orders)}
 
         def cancel_order(self, symbol, orig_client_order_id):
+            self.cancels.append(orig_client_order_id)
             return {}
 
         def query_order(self, symbol, orig_client_order_id):
             executed = self._executed.pop(0) if self._executed else "0"
+            if orig_client_order_id in self.cancels:
+                return {"status": "CANCELED", "executedQty": executed}
             return {"status": "NEW", "executedQty": executed}
 
     policy = PassiveExecutionPolicy(
@@ -2668,6 +2681,8 @@ def test_consecutive_book_failures_abort_fail_closed(tmp_path) -> None:
             return {}
 
         def query_order(self, symbol, oid):
+            if oid in self.cancels:
+                return {"status": "CANCELED", "executedQty": "0"}
             return {"status": "NEW", "executedQty": "0"}
 
     client = _Client()
@@ -2698,6 +2713,7 @@ def test_order_query_transient_isolates_intent(tmp_path) -> None:
     class _Client:
         def __init__(self):
             self.orders: list = []
+            self.cancels: list = []
             self.post_times: list = []
             self.calls = 0
 
@@ -2709,7 +2725,8 @@ def test_order_query_transient_isolates_intent(tmp_path) -> None:
             self.post_times.append((params["symbol"], clock_state[0]))
             return {"orderId": len(self.orders)}
 
-        def cancel_order(self, *a, **k):
+        def cancel_order(self, symbol, oid):
+            self.cancels.append(oid)
             return {}
 
         def query_order(self, symbol, oid):
@@ -2717,6 +2734,10 @@ def test_order_query_transient_isolates_intent(tmp_path) -> None:
                 self.calls += 1
                 if self.calls == 1:
                     raise TransientReadError("blip", path="/fapi/v1/order", http_status=503, code=None, attempts=4)
+            if oid in self.cancels:
+                if symbol == "AAAUSDT":
+                    return {"status": "CANCELED", "executedQty": "0"}
+                return {"status": "CANCELED", "executedQty": "1", "avgPrice": "100.00"}
             if symbol == "AAAUSDT":
                 return {"status": "NEW", "executedQty": "0"}
             return {"status": "FILLED", "executedQty": "1", "avgPrice": "100.00"}
@@ -2747,6 +2768,7 @@ def test_repro_b_single_503_no_abort(tmp_path, monkeypatch) -> None:
     clock_state = [0.0]
     calls: list[tuple[str, str, float]] = []
     served_503: list[tuple[str, str]] = []
+    deleted: list[tuple[str, str]] = []
 
     def _responder(method, url):
         from urllib.parse import urlparse
@@ -2754,11 +2776,16 @@ def test_repro_b_single_503_no_abort(tmp_path, monkeypatch) -> None:
         calls.append((method, path, clock_state[0]))
         if path == "/fapi/v1/ticker/bookTicker":
             return HttpResponse(status_code=200, headers={}, body=b'[{"symbol":"AAAUSDT","bidPrice":"100.00","askPrice":"100.20"},{"symbol":"BBBUSDT","bidPrice":"100.00","askPrice":"100.20"}]')
+        if method == "DELETE" and path == "/fapi/v1/order":
+            deleted.append((method, path))
+            return HttpResponse(status_code=200, headers={}, body=b'{"status":"CANCELED","executedQty":"0"}')
         if method == "GET" and path == "/fapi/v1/order" and not served_503:
             # 모든 재시도를 소진시키도록 한 틱 동안 5xx 를 유지한다.
             if sum(1 for m, p, t in calls if m == "GET" and p == "/fapi/v1/order" and t == clock_state[0]) >= 4:
                 served_503.append((method, path))
             return HttpResponse(status_code=503, headers={}, body=b"")
+        if deleted:
+            return HttpResponse(status_code=200, headers={}, body=b'{"status":"CANCELED","executedQty":"0"}')
         return HttpResponse(status_code=200, headers={}, body=b'{"status":"NEW","executedQty":"0"}')
 
     class _Transport:
@@ -3010,6 +3037,7 @@ def test_sub_minimum_residual_after_partial_fill(tmp_path) -> None:
     class _Client:
         def __init__(self):
             self.orders: list = []
+            self.cancels: list = []
 
         def book_tickers(self):
             return {s: {"symbol": s, "bidPrice": "100.00", "askPrice": "100.20"} for s in ("AAAUSDT", "BBBUSDT")}
@@ -3018,12 +3046,14 @@ def test_sub_minimum_residual_after_partial_fill(tmp_path) -> None:
             self.orders.append(params)
             return {"orderId": len(self.orders)}
 
-        def cancel_order(self, *a, **k):
+        def cancel_order(self, symbol, oid):
+            self.cancels.append(oid)
             return {}
 
         def query_order(self, symbol, oid):
             if symbol == "AAAUSDT":
-                return {"status": "NEW", "executedQty": "0.96", "avgPrice": "100.00"}
+                status = "CANCELED" if oid in self.cancels else "NEW"
+                return {"status": status, "executedQty": "0.96", "avgPrice": "100.00"}
             return {"status": "FILLED", "executedQty": "1", "avgPrice": "100.00"}
 
     client = _Client()
@@ -3043,6 +3073,7 @@ def test_sub_minimum_reduce_only_residual_is_posted(tmp_path) -> None:
     class _Client:
         def __init__(self):
             self.orders: list = []
+            self.cancels: list = []
 
         def book_tickers(self):
             return {"AAAUSDT": {"symbol": "AAAUSDT", "bidPrice": "100.00", "askPrice": "100.20"}}
@@ -3051,10 +3082,13 @@ def test_sub_minimum_reduce_only_residual_is_posted(tmp_path) -> None:
             self.orders.append(params)
             return {"orderId": len(self.orders)}
 
-        def cancel_order(self, *a, **k):
+        def cancel_order(self, symbol, oid):
+            self.cancels.append(oid)
             return {}
 
         def query_order(self, s, oid):
+            if oid in self.cancels:
+                return {"status": "CANCELED", "executedQty": "0"}
             return {"status": "NEW", "executedQty": "0"}
 
     client = _Client()
@@ -3094,6 +3128,7 @@ def test_undersized_head_slice_posts_whole_remainder(tmp_path) -> None:
     class _Client:
         def __init__(self):
             self.orders: list = []
+            self.cancels: list = []
 
         def book_tickers(self):
             return {"AAAUSDT": {"symbol": "AAAUSDT", "bidPrice": "100.00", "askPrice": "100.20"}}
@@ -3102,10 +3137,13 @@ def test_undersized_head_slice_posts_whole_remainder(tmp_path) -> None:
             self.orders.append(params)
             return {"orderId": len(self.orders)}
 
-        def cancel_order(self, *a, **k):
+        def cancel_order(self, symbol, oid):
+            self.cancels.append(oid)
             return {}
 
         def query_order(self, s, oid):
+            if oid in self.cancels:
+                return {"status": "CANCELED", "executedQty": "0"}
             return {"status": "NEW", "executedQty": "0"}
 
     client = _Client()
@@ -3295,6 +3333,7 @@ def test_reductions_posted_before_increases(tmp_path) -> None:
     class _Client:
         def __init__(self):
             self.posted: list = []
+            self.cancels: list = []
 
         def book_tickers(self):
             return {s: {"symbol": s, "bidPrice": "100.00", "askPrice": "100.20"} for s in ("AAAUSDT", "BBBUSDT")}
@@ -3303,10 +3342,13 @@ def test_reductions_posted_before_increases(tmp_path) -> None:
             self.posted.append(params)
             return {"orderId": len(self.posted)}
 
-        def cancel_order(self, *a, **k):
+        def cancel_order(self, symbol, oid):
+            self.cancels.append(oid)
             return {}
 
         def query_order(self, s, oid):
+            if oid in self.cancels:
+                return {"status": "CANCELED", "executedQty": "0"}
             return {"status": "NEW", "executedQty": "0"}
 
     client = _Client()
@@ -3773,6 +3815,8 @@ def test_every_fill_is_journaled_before_visible(tmp_path) -> None:
         # A constant venue answer would re-fill on every repost; only the first order may fill.
         first_id.setdefault("id", oid)
         executed = "0.4" if oid == first_id["id"] else "0"
+        if oid in live_client.cancels:
+            return {"status": "CANCELED", "executedQty": executed, "avgPrice": "100.00"}
         return {"status": "NEW", "executedQty": executed, "avgPrice": "100.00"}
 
     live_client.query_order = _once_partial
@@ -4360,3 +4404,291 @@ def test_strict_passive_repeg_policy_rejects_deadline_interval() -> None:
         strict_passive_repeg_execution_policy(schedule, 3.0, 5, 0.0)
     with pytest.raises(ValueError, match="passive_timeout_minutes"):
         strict_passive_repeg_execution_policy(schedule, 3.0, 0)
+
+
+# ---- Spec 02a: strict cancel confirmation and unresolved-order settlement ----
+
+def _confirm_client(*, cancel_exc=None, query_answer=None, query_exc=None):
+    """Venue order client counting one cancel and one query per call."""
+
+    class _C:
+        def __init__(self):
+            self.cancels: list = []
+            self.queries: list = []
+
+        def cancel_order(self, symbol, oid):
+            self.cancels.append(oid)
+            if cancel_exc is not None:
+                raise cancel_exc
+            return {}
+
+        def query_order(self, symbol, oid):
+            self.queries.append(oid)
+            if query_exc is not None:
+                raise query_exc
+            return dict(query_answer)
+
+    return _C()
+
+
+def _venue_error(code):
+    from src.live.errors import VenueError
+
+    return VenueError("venue", code=code, http_status=400, path="/fapi/v1/order", payload_digest="0" * 12)
+
+
+def test_cancel_and_confirm_benign_2011_with_open_query_is_not_closed() -> None:
+    """Cancel -2011 with a NEW confirming query stays open with exactly one cancel and one query."""
+    from src.live.executor import cancel_and_confirm
+
+    client = _confirm_client(cancel_exc=_venue_error(-2011), query_answer={"status": "NEW", "executedQty": "0"})
+
+    confirmation = cancel_and_confirm(client, "AAAUSDT", "oid-1")
+
+    assert confirmation.closed is False
+    assert confirmation.status == "NEW"
+    assert confirmation.payload is not None
+    assert confirmation.payload["status"] == "NEW"
+    assert client.cancels == ["oid-1"]
+    assert client.queries == ["oid-1"]
+
+
+def test_cancel_and_confirm_benign_2011_with_filled_query_is_closed() -> None:
+    """Cancel -2011 with a FILLED confirming query is a confirmed close."""
+    from src.live.executor import cancel_and_confirm
+
+    client = _confirm_client(
+        cancel_exc=_venue_error(-2011),
+        query_answer={"status": "FILLED", "executedQty": "1", "avgPrice": "100"},
+    )
+
+    confirmation = cancel_and_confirm(client, "AAAUSDT", "oid-1")
+
+    assert confirmation.closed is True
+    assert confirmation.payload is not None
+    assert confirmation.payload["status"] == "FILLED"
+
+
+def test_cancel_and_confirm_successful_cancel_still_queries() -> None:
+    """A successful cancel response never proves the final state: exactly one query follows."""
+    from src.live.executor import cancel_and_confirm
+
+    client = _confirm_client(query_answer={"status": "CANCELED", "executedQty": "0"})
+
+    confirmation = cancel_and_confirm(client, "AAAUSDT", "oid-1")
+
+    assert confirmation.closed is True
+    assert client.cancels == ["oid-1"]
+    assert client.queries == ["oid-1"]
+
+
+def test_cancel_and_confirm_query_2013_is_not_found() -> None:
+    """A -2013 confirming query means the order is gone: closed, NOT_FOUND, no payload."""
+    from src.live.executor import ORDER_NOT_FOUND_STATUS, cancel_and_confirm
+
+    client = _confirm_client(cancel_exc=_venue_error(-2011), query_exc=_venue_error(-2013))
+
+    confirmation = cancel_and_confirm(client, "AAAUSDT", "oid-1")
+
+    assert confirmation.closed is True
+    assert confirmation.status == ORDER_NOT_FOUND_STATUS
+    assert confirmation.payload is None
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [{"executedQty": "0"}, {"status": "", "executedQty": "0"}],
+    ids=["missing_status", "empty_status"],
+)
+def test_cancel_and_confirm_status_less_query_fails_closed(answer) -> None:
+    """A confirming query without a non-empty status fails closed instead of defaulting to CANCELED."""
+    from src.common.errors import DataIntegrityError
+    from src.live.executor import cancel_and_confirm
+
+    with pytest.raises(DataIntegrityError):
+        cancel_and_confirm(_confirm_client(query_answer=dict(answer)), "AAAUSDT", "oid-1")
+
+
+def test_cancel_and_confirm_non_benign_cancel_propagates_without_query() -> None:
+    """A non-benign cancel rejection propagates before any query."""
+    from src.live.errors import VenueError
+    from src.live.executor import cancel_and_confirm
+
+    client = _confirm_client(cancel_exc=_venue_error(-1021), query_answer={"status": "CANCELED"})
+
+    with pytest.raises(VenueError):
+        cancel_and_confirm(client, "AAAUSDT", "oid-1")
+    assert client.queries == []
+
+
+def test_cancel_and_confirm_non_benign_query_propagates() -> None:
+    """A non-benign query rejection after the cancel propagates instead of resolving."""
+    from src.live.errors import VenueError
+    from src.live.executor import cancel_and_confirm
+
+    client = _confirm_client(query_exc=_venue_error(-1021))
+
+    with pytest.raises(VenueError):
+        cancel_and_confirm(client, "AAAUSDT", "oid-1")
+    assert client.cancels == ["oid-1"]
+    assert client.queries == ["oid-1"]
+
+
+def test_cancel_and_confirm_never_resends_cancel_on_unknown() -> None:
+    """A transport-unknown cancel is resolved by reading: one cancel, still open."""
+    from src.live.executor import cancel_and_confirm
+    from src.live.rest import OrderStatusUnknown
+
+    unknown = OrderStatusUnknown("timeout", path="/fapi/v1/order", http_status=0, code=None)
+    client = _confirm_client(cancel_exc=unknown, query_answer={"status": "NEW", "executedQty": "0"})
+
+    confirmation = cancel_and_confirm(client, "AAAUSDT", "oid-1")
+
+    assert client.cancels == ["oid-1"]
+    assert confirmation.closed is False
+
+
+def test_orphan_sweep_audits_cancelled_only_when_confirmed(tmp_path) -> None:
+    """An own order still NEW after a confirmed cancel is unconfirmed, never orphan_cancelled or terminal."""
+    import json
+
+    import pandas as pd
+
+    from src.live.audit import AuditLog
+    from src.live.executor import UnresolvedOrder, cancel_orphan_orders
+    from src.live.order_journal import OrderJournal
+
+    audit_path = tmp_path / "orphan_audit.jsonl"
+    audit = AuditLog(audit_path)
+    journal = OrderJournal(tmp_path / "journal.jsonl")
+    order_id = "mh20260914-ABCDEFGHIJ-0-0-9"
+    client = _confirm_client(
+        cancel_exc=_venue_error(-2011),
+        query_answer={"status": "NEW", "side": "BUY", "executedQty": "0", "avgPrice": "100"},
+    )
+    client.open_orders = lambda: [{"symbol": "AAAUSDT", "clientOrderId": order_id}]
+
+    sweep = cancel_orphan_orders(client, "20260914", audit, journal=journal,
+                                 now=pd.Timestamp("2026-09-14T00:00:00Z"), taker_fee_bps=4.5)
+
+    assert sweep.unconfirmed == (UnresolvedOrder(order_id, "AAAUSDT"),)
+    assert sweep.fills == ()
+    events = [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()]
+    assert not [e for e in events if e["event"] == "orphan_cancelled"]
+    unconfirmed = [e for e in events if e["event"] == "orphan_cancel_unconfirmed"]
+    assert len(unconfirmed) == 1
+    assert unconfirmed[0]["status"] == "NEW"
+    journal_path = tmp_path / "journal.jsonl"
+    terminals = (
+        [json.loads(line) for line in journal_path.read_text(encoding="utf-8").splitlines()]
+        if journal_path.exists() else []
+    )
+    assert [t for t in terminals if t.get("event") == "terminal"] == []
+
+
+def test_orphan_sweep_books_partial_delta_of_unconfirmed_order_without_terminal(tmp_path) -> None:
+    """A still-open PARTIALLY_FILLED orphan books its executed delta but stays non-terminal."""
+    import pandas as pd
+
+    from src.live.audit import AuditLog
+    from src.live.executor import cancel_orphan_orders
+    from src.live.order_journal import OrderJournal
+
+    audit = AuditLog(tmp_path / "orphan_audit.jsonl")
+    journal = OrderJournal(tmp_path / "journal.jsonl")
+    order_id = "mh20260914-ABCDEFGHIJ-0-0-9"
+    client = _confirm_client(
+        query_answer={"status": "PARTIALLY_FILLED", "side": "BUY", "executedQty": "0.3", "avgPrice": "100"},
+    )
+    client.open_orders = lambda: [{"symbol": "AAAUSDT", "clientOrderId": order_id}]
+
+    sweep = cancel_orphan_orders(client, "20260914", audit, journal=journal,
+                                 now=pd.Timestamp("2026-09-14T00:00:00Z"), taker_fee_bps=4.5)
+
+    assert len(sweep.fills) == 1
+    assert sweep.fills[0].quantity == Decimal("0.3")
+    assert sweep.fills[0].cumulative_executed_qty == Decimal("0.3")
+    assert [u.client_order_id for u in sweep.unconfirmed] == [order_id]
+    assert journal.observed_qty(order_id) == Decimal("0.3")
+
+
+def test_orphan_sweep_confirmed_close_keeps_settlement_semantics(tmp_path) -> None:
+    """A confirmed CANCELED close audits orphan_cancelled with status, settles, terminals, one query."""
+    import json
+
+    import pandas as pd
+
+    from src.live.audit import AuditLog
+    from src.live.executor import cancel_orphan_orders
+    from src.live.order_journal import OrderJournal
+
+    audit_path = tmp_path / "orphan_audit.jsonl"
+    audit = AuditLog(audit_path)
+    journal = OrderJournal(tmp_path / "journal.jsonl")
+    order_id = "mh20260914-ABCDEFGHIJ-0-0-9"
+    client = _confirm_client(
+        query_answer={"status": "CANCELED", "side": "BUY", "executedQty": "1", "avgPrice": "100"},
+    )
+    client.open_orders = lambda: [{"symbol": "AAAUSDT", "clientOrderId": order_id}]
+
+    sweep = cancel_orphan_orders(client, "20260914", audit, journal=journal,
+                                 now=pd.Timestamp("2026-09-14T00:00:00Z"), taker_fee_bps=4.5)
+
+    assert sweep.unconfirmed == ()
+    assert [s.quantity for s in sweep.fills] == [Decimal("1")]
+    assert client.queries == [order_id]
+    events = [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()]
+    cancelled = [e for e in events if e["event"] == "orphan_cancelled"]
+    assert len(cancelled) == 1
+    assert cancelled[0]["status"] == "CANCELED"
+
+
+def test_in_execution_cancel_with_open_confirmation_raises_and_keeps_order_non_terminal(tmp_path) -> None:
+    """A passive-timeout cancel confirmed NEW raises CancelNotConfirmed without journaling an open terminal."""
+    import json
+
+    import pandas as pd
+
+    from src.live.audit import AuditLog
+    from src.live.errors import LiveTradingError
+    from src.live.executor import CancelNotConfirmed, execute_intents
+    from src.live.order_journal import OrderJournal
+
+    assert issubclass(CancelNotConfirmed, LiveTradingError)
+
+    class _UnconfirmedClient:
+        def __init__(self):
+            self.orders: list = []
+
+        def book_tickers(self):
+            return {"AAAUSDT": {"bidPrice": "100.00", "askPrice": "100.20"}}
+
+        def book_ticker(self, symbol):
+            return {"bidPrice": "100.00", "askPrice": "100.20"}
+
+        def new_order(self, params):
+            self.orders.append(params)
+            return {"orderId": len(self.orders)}
+
+        def cancel_order(self, symbol, oid):
+            raise _venue_error(-2011)
+
+        def query_order(self, symbol, oid):
+            return {"status": "NEW", "executedQty": "0"}
+
+    audit_path = tmp_path / "audit.jsonl"
+    journal = OrderJournal(tmp_path / "journal.jsonl")
+    attempt = _test_attempt(journal)
+    client = _UnconfirmedClient()
+
+    with pytest.raises(CancelNotConfirmed):
+        execute_intents(client, [_shutdown_intent("AAAUSDT")], {"AAAUSDT": _shutdown_filters("AAAUSDT")},
+                        _shutdown_policy(passive_deadline_s=5.0), AuditLog(audit_path),
+                        SteppingClock(1.0), lambda s: None, journal=journal, attempt=attempt)
+
+    posted_id = client.orders[0]["newClientOrderId"]
+    events = [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()]
+    assert any(e["event"] == "order_cancel_unconfirmed" and e["status"] == "NEW" for e in events)
+    assert [s.client_order_id for s in journal.unresolved_submits(since=pd.Timestamp("2026-01-01", tz="UTC"))] == [posted_id]
+    terminals = [json.loads(line) for line in (tmp_path / "journal.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert [t for t in terminals if t.get("event") == "terminal" and t.get("status") in ("NEW", "PARTIALLY_FILLED")] == []

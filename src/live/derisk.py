@@ -11,6 +11,12 @@ from src.live.planner import OrderIntent
 
 DeriskReason = Literal["reconciliation_breach", "foreign_open_orders", "free_margin_floor"]
 
+#: Cycle-scoped DEGRADED reason when own orders stay open after confirmed cancel attempts; never persisted to the ledger.
+UNRESOLVED_ORDERS_REASON: str = "unresolved_own_orders"
+
+#: Block reason for an intent on a symbol that still has an unresolved own order.
+UNRESOLVED_ORDER_BLOCK_REASON: str = "unresolved_order_symbol"
+
 
 @dataclass(frozen=True, slots=True)
 class DeriskPlan:
@@ -51,6 +57,33 @@ def derisk_filter(
             continue
         if intent.quantity > abs(current):
             blocked.append((intent, "exceeds_position"))
+            continue
+        kept.append(intent)
+    return DeriskPlan(kept=tuple(kept), blocked=tuple(blocked))
+
+
+def freeze_unresolved_symbols(
+    intents: Sequence[OrderIntent],
+    frozen_symbols: Collection[str],
+) -> DeriskPlan:
+    """Withhold every intent on a symbol that still has an own order resting at the venue.
+
+    Why: a resting own order of uncertain residual can be same-side and larger than the position (a
+    flip open leg), so even a reduce-only exit can enlarge the final |position| when both fill. The
+    venue never dedupes our unique client order ids against it. Blocking the whole symbol for one
+    cycle is the only action that provably adds no exposure; other symbols are unaffected, and the
+    next cycle re-derives the freeze from venue truth.
+
+    Returns:
+        DeriskPlan preserving input order of kept intents; each blocked intent carries
+        ``UNRESOLVED_ORDER_BLOCK_REASON``.
+    """
+    frozen = set(frozen_symbols)
+    kept: list[OrderIntent] = []
+    blocked: list[tuple[OrderIntent, str]] = []
+    for intent in intents:
+        if intent.symbol in frozen:
+            blocked.append((intent, UNRESOLVED_ORDER_BLOCK_REASON))
             continue
         kept.append(intent)
     return DeriskPlan(kept=tuple(kept), blocked=tuple(blocked))

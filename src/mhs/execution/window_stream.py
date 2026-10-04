@@ -68,6 +68,92 @@ def _minimum_mhs_execution_bars(timeout_ns_delta: int, step_ns: int) -> int:
     return max(2, int(timeout_bars) + 1)
 
 
+def _first_active_ordinals(target_weights: pd.DataFrame) -> np.ndarray:
+    """Return, per column, the ordinal of the first decision with a finite nonzero target.
+
+    A position can only open from a finite nonzero target, so this table bounds every inventory
+    any execution bound can carry from a target path alone, without consulting a consumer.
+    Columns never targeted get ``len(target_weights)``.
+
+    Args:
+        target_weights: Decision-indexed targets in canonical column order.
+
+    Returns:
+        ``int64`` array of length ``len(target_weights.columns)``.
+    """
+    n_rows = len(target_weights)
+    n_cols = len(target_weights.columns)
+    first = np.full(n_cols, n_rows, dtype=np.int64)
+    if n_rows == 0 or n_cols == 0:
+        return first
+    active = (target_weights.notna() & target_weights.ne(0.0)).to_numpy()
+    has_any = active.any(axis=0)
+    first[has_any] = np.argmax(active[:, has_any], axis=0)
+    return first
+
+
+def _roster_requirement(
+    required_symbols: Callable[[], frozenset[str]] | None,
+    columns: tuple[str, ...],
+    first_active: np.ndarray,
+    stop_ordinal: int,
+) -> frozenset[str]:
+    """Resolve the symbols a piece must load regardless of its own intents.
+
+    With a live callback the requirement is the consumer's actual carried inventory and
+    unresolved orders, validated against the canonical columns here and nowhere else. Without one,
+    the requirement is every column whose first finite nonzero target precedes ``stop_ordinal``:
+    held, blocked-exit and NaN-hold inventory can only exist on such columns, and the result is a
+    pure function of the target path, so a generated stream stays valid for every bound and pass
+    that replays it.
+
+    Args:
+        required_symbols: Live requirement callback, or None for the target-only carry.
+        columns: Canonical column order.
+        first_active: Output of ``_first_active_ordinals`` for the same targets.
+        stop_ordinal: Exclusive global decision ordinal already scheduled at this piece.
+
+    Returns:
+        Requirement set (subset of ``columns``).
+
+    Raises:
+        DataIntegrityError: The callback names a symbol outside ``columns``
+            ("required symbols [...] are not in canonical columns; missing held symbols must
+            never disappear").
+    """
+    if required_symbols is not None:
+        live = set(required_symbols())
+        unknown = live - set(columns)
+        if unknown:
+            raise DataIntegrityError(
+                f"required symbols {sorted(unknown)} are not in canonical columns; "
+                "missing held symbols must never disappear"
+            )
+        return frozenset(live)
+    return frozenset(
+        col for col, ordinal in zip(columns, first_active, strict=True) if int(ordinal) < stop_ordinal
+    )
+
+
+def _piece_roster(
+    columns: tuple[str, ...],
+    *,
+    piece_active: frozenset[str],
+    previous_active: frozenset[str],
+    requirement: frozenset[str],
+) -> list[str]:
+    """Union the piece's own intents, the previous piece's intents, and the requirement.
+
+    One rule for every branch and both modes. It is a superset of each branch's former roster, so
+    the refactor can add but never drop a symbol any branch loaded before.
+
+    Returns:
+        Roster in canonical ``columns`` order.
+    """
+    roster_set = set(piece_active) | set(previous_active) | set(requirement)
+    return [s for s in columns if s in roster_set]
+
+
 def _materialize_execution_piece(
     *,
     piece_grid: pd.DatetimeIndex,
@@ -180,7 +266,7 @@ def _iter_mhs_execution_windows(
     execution_bound_count: int = 2,
     initial_swap_bytes: int | None = None,
 ) -> Iterator[MhsExecutionWindow]:
-    """Stream chronologically completed three-minute trade bars and funding knowledge for an exact target path. The OHLCV mode leaves `ExecutionReplayWindow.marks` absent so the shared accounting engine values positions from 3m closes; bar completion remains the earliest publication time."""
+    """Stream chronologically completed three-minute trade bars and funding knowledge for an exact target path. The OHLCV mode leaves `ExecutionReplayWindow.marks` absent so the shared accounting engine values positions from 3m closes; bar completion remains the earliest publication time. Rosters always cover carried inventory — live requirements when supplied, otherwise every column targeted so far."""
     if len(target_weights) != len(signal_available_at):
         raise DataIntegrityError("signal_available_at must align with target_weights")
     if start >= end:
@@ -223,6 +309,7 @@ def _iter_mhs_execution_windows(
         return
 
     decision_times = pd.DatetimeIndex(target_weights.index)
+    first_active = _first_active_ordinals(target_weights)
     max_window = pd.Timedelta(days=31)
     bounds: list[tuple[int, int]] = []
     i0 = 0
@@ -267,19 +354,12 @@ def _iter_mhs_execution_windows(
         if not budgeted:
             non_zero = w_weights.notna() & w_weights.ne(0.0)
             active = set(w_weights.columns[non_zero.any(axis=0)])
-            if required_symbols is not None:
-                live_required = set(required_symbols())
-                unknown = live_required - set(columns)
-                if unknown:
-                    raise DataIntegrityError(
-                        f"required symbols {sorted(unknown)} are not in canonical columns; "
-                        "missing held symbols must never disappear"
-                    )
-                roster_set = active | live_required
-            else:
-                roster_set = active | prev_active
+            requirement = _roster_requirement(required_symbols, columns, first_active, i1)
+            roster = _piece_roster(
+                columns, piece_active=frozenset(active), previous_active=frozenset(prev_active),
+                requirement=requirement,
+            )
             prev_active = active
-            roster = [s for s in columns if s in roster_set]
             legacy_alloc = _estimate_mhs_execution_allocation(
                 n_symbols=len(roster), n_columns=len(columns), bound_count=bound_count
             )
@@ -309,17 +389,11 @@ def _iter_mhs_execution_windows(
         full_ns = np.asarray(full_grid, dtype="datetime64[ns]").astype("int64")
         n_full = len(full_grid)
         active_full = set(w_weights.columns[(w_weights.notna() & w_weights.ne(0.0)).any(axis=0)])
-        if required_symbols is not None:
-            live_now = set(required_symbols())
-            unknown = live_now - set(columns)
-            if unknown:
-                raise DataIntegrityError(
-                    f"required symbols {sorted(unknown)} are not in canonical columns; "
-                    "missing held symbols must never disappear"
-                )
-        else:
-            live_now = set(prev_active)
-        roster_full = [s for s in columns if s in (active_full | live_now)]
+        planning_requirement = _roster_requirement(required_symbols, columns, first_active, i1)
+        roster_full = _piece_roster(
+            columns, piece_active=frozenset(active_full),
+            previous_active=frozenset(prev_active), requirement=planning_requirement,
+        )
         allocation = _estimate_mhs_execution_allocation(
             n_symbols=len(roster_full), n_columns=len(columns), bound_count=bound_count
         )
@@ -356,18 +430,14 @@ def _iter_mhs_execution_windows(
             non_zero = w_weights.notna() & w_weights.ne(0.0)
             active = set(w_weights.columns[non_zero.any(axis=0)])
             if required_symbols is not None:
-                live_required = set(required_symbols())
-                unknown = live_required - set(columns)
-                if unknown:
-                    raise DataIntegrityError(
-                        f"required symbols {sorted(unknown)} are not in canonical columns; "
-                        "missing held symbols must never disappear"
-                    )
-                roster_set = active | live_required
+                requirement = planning_requirement
             else:
-                roster_set = active | prev_active
+                requirement = _roster_requirement(None, columns, first_active, i1)
+            roster = _piece_roster(
+                columns, piece_active=frozenset(active),
+                previous_active=frozenset(prev_active), requirement=requirement,
+            )
             prev_active = active
-            roster = [s for s in columns if s in roster_set]
             piece_allocation = _estimate_mhs_execution_allocation(
                 n_symbols=len(roster), n_columns=len(columns), bound_count=bound_count
             )
@@ -410,18 +480,11 @@ def _iter_mhs_execution_windows(
                         f"physical piece at logical partition [{i0}, {i1}) leaves order {i0 + d} unresolved "
                         "merely to satisfy a narrower IO budget"
                     )
-                if required_symbols is not None:
-                    live_required = set(required_symbols())
-                    unknown = live_required - set(columns)
-                    if unknown:
-                        raise DataIntegrityError(
-                            f"required symbols {sorted(unknown)} are not in canonical columns; "
-                            "missing held symbols must never disappear"
-                        )
-                    roster_set = live_required | prev_active
-                else:
-                    roster_set = set(prev_active)
-                roster = [s for s in columns if s in roster_set]
+                requirement = _roster_requirement(required_symbols, columns, first_active, i0 + d)
+                roster = _piece_roster(
+                    columns, piece_active=frozenset(),
+                    previous_active=frozenset(prev_active), requirement=requirement,
+                )
                 piece_grid = full_grid[g0 : g1 + 1]
                 empty_weights = target_weights.iloc[0:0].reindex(columns=roster)
                 empty_signals = signal_available_at[0:0]
@@ -456,19 +519,12 @@ def _iter_mhs_execution_windows(
             piece_weights = target_weights.iloc[i0 + d : i0 + d1]
             piece_signals = signal_available_at[i0 + d : i0 + d1]
             piece_active = set(piece_weights.columns[(piece_weights.notna() & piece_weights.ne(0.0)).any(axis=0)])
-            if required_symbols is not None:
-                live_required = set(required_symbols())
-                unknown = live_required - set(columns)
-                if unknown:
-                    raise DataIntegrityError(
-                        f"required symbols {sorted(unknown)} are not in canonical columns; "
-                        "missing held symbols must never disappear"
-                    )
-                roster_set = piece_active | live_required
-            else:
-                roster_set = piece_active | prev_active
+            requirement = _roster_requirement(required_symbols, columns, first_active, i0 + d1)
+            roster = _piece_roster(
+                columns, piece_active=frozenset(piece_active),
+                previous_active=frozenset(prev_active), requirement=requirement,
+            )
             prev_active = set(piece_active)
-            roster = [s for s in columns if s in roster_set]
             piece_allocation = _estimate_mhs_execution_allocation(
                 n_symbols=len(roster), n_columns=len(columns), bound_count=bound_count
             )
@@ -504,18 +560,11 @@ def _iter_mhs_execution_windows(
             while tail_start < n_full - 1:
                 tail_end = min(tail_start + planned - 1, n_full - 1)
                 tail_grid = full_grid[tail_start : tail_end + 1]
-                if required_symbols is not None:
-                    live_required = set(required_symbols())
-                    unknown = live_required - set(columns)
-                    if unknown:
-                        raise DataIntegrityError(
-                            f"required symbols {sorted(unknown)} are not in canonical columns; "
-                            "missing held symbols must never disappear"
-                        )
-                    roster_set = set(live_required) | prev_active
-                else:
-                    roster_set = set(prev_active)
-                roster = [s for s in columns if s in roster_set]
+                requirement = _roster_requirement(required_symbols, columns, first_active, i1)
+                roster = _piece_roster(
+                    columns, piece_active=frozenset(),
+                    previous_active=frozenset(prev_active), requirement=requirement,
+                )
                 empty_weights = target_weights.iloc[0:0].reindex(columns=roster)
                 empty_signals = signal_available_at[0:0]
                 piece_allocation = _estimate_mhs_execution_allocation(
@@ -551,8 +600,11 @@ def _iter_mhs_execution_windows(
 __all__ = [
     "MhsExecutionWindow",
     "_estimate_mhs_execution_allocation",
+    "_first_active_ordinals",
     "_iter_mhs_execution_windows",
     "_materialize_execution_piece",
     "_minimum_mhs_execution_bars",
+    "_piece_roster",
     "_resolve_ns_vectorized",
+    "_roster_requirement",
 ]

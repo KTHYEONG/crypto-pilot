@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 
-import inspect
 from pathlib import Path
 import numpy as np
 import pandas as pd
@@ -80,20 +79,32 @@ class TestQualityCalibrationWiring:
         assert report.xs_rank_ic == statistics._xs_rank_ic(signal_48h, opens, forward_bars=48)
         assert report.date_clustered_regression == statistics._date_clustered_ols(opens, signal_48h, forward_bars=48)
 
-    def test_run_mhs_horizon_diagnostic_log_close_released_before_book_replay(self) -> None:
-        """The log_close release (now in build_committee) still runs, and the
-        pipeline runner still sequences build_committee strictly before
-        run_replays -- the memory-release ordering this test protects survived
-        the stage decomposition, just moved to different source files."""
-        from src.mhs.pipeline import runner
-        from src.mhs.pipeline.stages import committee as committee_stage
+    def test_run_mhs_horizon_diagnostic_log_close_released_before_book_replay(
+        self, synthetic_market, monkeypatch
+    ) -> None:
+        """The committee stage releases log_close before the book replays run,
+        while the shared 48h signal is already populated."""
+        import src.mhs.pipeline.stages.replay as replay_stage
 
-        committee_src = inspect.getsource(committee_stage.build_committee)
-        assert "del ctx.log_close" in committee_src
-        assert "signal_48h" in committee_src
+        root, end = synthetic_market
+        real_run_replays = replay_stage.run_replays
+        seen: dict[str, object] = {}
 
-        runner_src = inspect.getsource(runner.run_stages)
-        assert runner_src.index("build_committee(") < runner_src.index("run_replays(")
+        def _spy(ctx, telemetry):
+            seen["log_close_released"] = "log_close" not in vars(ctx)
+            seen["signal_empty"] = bool(ctx.signal_48h.empty)
+            return real_run_replays(ctx, telemetry)
+
+        monkeypatch.setattr(replay_stage, "run_replays", _spy)
+        report = run_mhs_horizon_diagnostic(
+            MhsDiagnosticRequest(
+                start=str(START), end=str(end), data_root=str(root),
+                execution_timeframe="3m", log_run=False,
+            ),
+        )
+        assert report is not None
+        assert seen["log_close_released"] is True
+        assert seen["signal_empty"] is False
 
 class TestMhsHorizonDiagnostic:
     """MHS-10-DIAGNOSTIC-HOLDOUT-SEALED: dev-only diagnostic on a synthetic panel."""

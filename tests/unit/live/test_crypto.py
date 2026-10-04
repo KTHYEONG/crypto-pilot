@@ -10,7 +10,7 @@ import pandas as pd
 import pytest
 from pydantic import SecretStr
 
-from src.live.crypto import MAGIC, derive_key, open_bytes, read_sealed_parquet, seal_bytes
+from src.live.crypto import MAGIC, SEALED_OVERHEAD_BYTES, derive_key, open_bytes, read_sealed_parquet, seal_bytes
 from src.live.errors import ArtifactSealError
 
 KEY = bytes(range(32))
@@ -75,6 +75,11 @@ def test_read_sealed_parquet_roundtrip(tmp_path: Path) -> None:
 
     restored = read_sealed_parquet(path, KEY)
     pd.testing.assert_frame_equal(restored, frame)
+
+
+def test_sealed_overhead_constant_matches_envelope_length() -> None:
+    for plaintext in (b"", b"x", bytes(1000)):
+        assert len(seal_bytes(plaintext, KEY)) - len(plaintext) == SEALED_OVERHEAD_BYTES
 
 
 #: 본 모듈이 검증하는 시나리오 ID(lean_check 추적용).

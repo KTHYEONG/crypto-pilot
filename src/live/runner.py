@@ -1,4 +1,3 @@
-# ruff: noqa
 """일일 섬도우 사이클 오케스트레이션.
 
 어떤 게이트든 위반하면 주문을 하나도 생성하지 않고 HALT를 반환한다(부분 집행 금지).
@@ -15,7 +14,7 @@ import json
 import logging
 import os
 import time
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
@@ -24,9 +23,9 @@ from typing import Any
 import pandas as pd
 
 from src.common.errors import DataIntegrityError
+from src.common.paths import FUTURES_DATA_DIR, LIVE_CAPTURE_DIR
 from src.live.account import (
     RECONCILE_QTY_TOLERANCE_FRACTION,
-    AccountSnapshot,
     assert_suppressed_venue_flat,
     assert_venue_configuration,
     effective_positions,
@@ -42,28 +41,35 @@ from src.live.account import (
     settled_delisting_symbols,
     synthetic_flat_snapshot,
 )
-from src.live.derisk import derisk_filter
-from src.common.paths import FUTURES_DATA_DIR, LIVE_CAPTURE_DIR
-from src.live.audit import AuditLog, default_audit_log_path
-from src.live.alerting import dispatch_alert
 from src.live.alert_outbox import default_dedupe_key
+from src.live.alerting import dispatch_alert
+from src.live.audit import AuditLog, default_audit_log_path
+from src.live.delisting_settlement import DelistingSettlement as DelistingSettlement
+from src.live.delisting_settlement import book_delisting_settlements as book_delisting_settlements
+from src.live.delisting_settlement import delisting_settlement_tax_records as delisting_settlement_tax_records
+from src.live.depth_capture import DepthCaptureSummary, ExecutionDepthRecorder
+from src.live.derisk import UNRESOLVED_ORDERS_REASON, derisk_filter, freeze_unresolved_symbols
 from src.live.errors import CausalityViolation, LiveTradingError, ReconciliationBreach, RiskGateBreach, StaleSignalError
 from src.live.execution_quality import (
     append_execution_quality,
     build_execution_quality_records,
     default_execution_quality_dir,
 )
-from src.live.depth_capture import DepthCaptureSummary, ExecutionDepthRecorder
 from src.live.executor import (
     ExecutionInterrupted,
     ExecutionOutcome,
     ForeignOpenOrderError,
-    PassiveExecutionPolicy,
+    UnresolvedOrder,
     cancel_orphan_orders,
     execute_intents,
 )
 from src.live.fills import FillEvent, append_fills, default_fills_dir
-from src.live.filters import held_symbols_absent_from_exchange, is_delisted, parse_delivery_schedule, parse_exchange_filters
+from src.live.filters import (
+    held_symbols_absent_from_exchange,
+    is_delisted,
+    parse_delivery_schedule,
+    parse_exchange_filters,
+)
 from src.live.ledger import (
     FundingAccrual,
     LedgerState,
@@ -78,13 +84,13 @@ from src.live.ledger import (
 )
 from src.live.lifecycle import ShutdownFlag
 from src.live.microstructure import (
+    BookQuote,
     append_microstructure,
     build_microstructure_records,
     default_microstructure_dir,
     fetch_book_quotes,
 )
 from src.live.order_journal import JournalAttempt, JournalFill, OrderJournal, default_order_journal_path
-from src.live.recovery import recover_unresolved_orders
 from src.live.planner import OrderIntent, partition_risk_controlled, plan_orders
 from src.live.portfolio_state import (
     PortfolioStateRecord,
@@ -92,9 +98,15 @@ from src.live.portfolio_state import (
     default_portfolio_state_dir,
     resolve_effective_equity,
 )
+from src.live.recovery import recover_unresolved_orders, settle_unresolved_orders
 from src.live.rest import BinanceFuturesRestClient, parse_rate_limits
 from src.live.settings import ExecutionMode, LiveSettings
-from src.live.signal import assert_signal_available, assert_signal_fresh, latest_decision_ohlcv_close, latest_target_weights
+from src.live.signal import (
+    assert_signal_available,
+    assert_signal_fresh,
+    latest_decision_ohlcv_close,
+    latest_target_weights,
+)
 from src.live.sizing import target_quantities
 from src.live.tax_ledger import (
     TaxLedgerCorruptError,
@@ -464,173 +476,6 @@ def _delisted_held_symbols(
         if is_delisted(info, now):
             delisted[symbol] = info.delivery_time
     return delisted
-
-
-@dataclass(frozen=True, slots=True)
-class DelistingSettlement:
-    """One booked settlement of a delivered perpetual position."""
-
-    symbol: str
-    quantity: Decimal  # signed ledger quantity that was settled
-    price: Decimal | None  # settlement price (PAPER); None in LIVE where the venue books cash
-    fee: Decimal  # PAPER settlement fee in USDT; 0 in LIVE
-    delivery_time: pd.Timestamp
-    evidence_source: str  # "flat_1h_klines" (PAPER) | "venue_flat_position" (LIVE)
-
-
-def book_delisting_settlements(
-    state: LedgerState,
-    *,
-    mode: ExecutionMode,
-    exchange_info: Mapping[str, Any],
-    venue_positions: Mapping[str, Decimal],
-    evidence: Mapping[str, SettlementEvidence],
-    fee_bps: Decimal,
-    now: pd.Timestamp,
-) -> tuple[LedgerState, tuple[DelistingSettlement, ...]]:
-    """Zero ledger positions the venue has settled at delivery, and book the PAPER settlement cash.
-
-    LIVE: a nonzero ledger quantity is settled when the venue position is flat, the listing
-    status is SETTLING/CLOSE, and delivery has passed (``settled_delisting_symbols``). The
-    ledger quantity is zeroed. Cash is venue-owned in LIVE, so none is booked here. PAPER: a
-    held quantity past delivery is settled only when ``evidence`` holds a venue-evidenced
-    settlement price. Cash moves by ``quantity x price`` minus the fee, like a closing fill at
-    the settlement price. Without evidence the position stays unresolved and the caller fails
-    closed. A settlement appends a position-history snapshot at ``now``, so funding accrual
-    stops at delivery. SHADOW books nothing. Pure: audit and alert emission belong to the
-    caller, which has the ``AuditLog`` and settings.
-
-    Raises:
-        DataIntegrityError: ``now`` is naive, ``fee_bps`` is negative, or PAPER cash_usdt is
-            None while a settlement must be booked.
-    """
-    now_ts = pd.Timestamp(now)
-    if now_ts.tzinfo is None:
-        raise DataIntegrityError("delisting settlement now must be tz-aware")
-    now_ts = now_ts.tz_convert("UTC")
-    fee_rate = Decimal(str(fee_bps))
-    if fee_rate < 0:
-        raise DataIntegrityError("delisting settlement fee_bps must be >= 0")
-    if mode == ExecutionMode.SHADOW:
-        return state, ()
-    schedule = parse_delivery_schedule(exchange_info)
-    if mode == ExecutionMode.PAPER:
-        candidates: list[tuple[str, Decimal, SettlementEvidence]] = []
-        for symbol in sorted(state.positions):
-            qty = state.positions[symbol]
-            if qty == 0:
-                continue
-            info = schedule.get(symbol)
-            if info is None or info.delivery_time is None:
-                continue
-            if not is_delisted(info, now_ts):
-                continue
-            proven = evidence.get(symbol)
-            if proven is None:
-                continue
-            candidates.append((symbol, qty, proven))
-        if not candidates:
-            return state, ()
-        if state.cash_usdt is None:
-            raise DataIntegrityError("paper delisting settlement requires cash_usdt")
-        positions = dict(state.positions)
-        cash = state.cash_usdt
-        booked: list[DelistingSettlement] = []
-        for symbol, qty, proven in candidates:
-            price = Decimal(proven.price)
-            fee = abs(qty * price) * fee_rate / Decimal(10_000)
-            cash = cash + qty * price - fee
-            positions[symbol] = Decimal(0)
-            delivery = pd.Timestamp(proven.delivery_time).tz_convert("UTC")
-            booked.append(
-                DelistingSettlement(
-                    symbol=symbol,
-                    quantity=qty,
-                    price=price,
-                    fee=fee,
-                    delivery_time=delivery,
-                    evidence_source="flat_1h_klines",
-                )
-            )
-        history = append_position_snapshot(
-            state.position_history, now_ts, positions, watermarks=state.funding_watermarks
-        )
-        return (
-            dataclasses.replace(state, positions=positions, cash_usdt=cash, position_history=history),
-            tuple(booked),
-        )
-    settled = settled_delisting_symbols(exchange_info, venue_positions, state.positions, now=now_ts)
-    if not settled:
-        return state, ()
-    live_positions = dict(state.positions)
-    live_booked: list[DelistingSettlement] = []
-    for symbol in settled:
-        qty = live_positions.get(symbol, Decimal(0))
-        info = schedule.get(symbol)
-        delivery = (
-            pd.Timestamp(info.delivery_time).tz_convert("UTC")
-            if info is not None and info.delivery_time is not None
-            else now_ts
-        )
-        live_positions[symbol] = Decimal(0)
-        live_booked.append(
-            DelistingSettlement(
-                symbol=symbol,
-                quantity=qty,
-                price=None,
-                fee=Decimal(0),
-                delivery_time=delivery,
-                evidence_source="venue_flat_position",
-            )
-        )
-    live_history = append_position_snapshot(
-        state.position_history, now_ts, live_positions, watermarks=state.funding_watermarks
-    )
-    return (
-        dataclasses.replace(state, positions=live_positions, position_history=live_history),
-        tuple(live_booked),
-    )
-
-
-def delisting_settlement_tax_records(
-    settlements: Sequence[DelistingSettlement], *, mode: str
-) -> tuple[TaxRecord, ...]:
-    """One TRADE TaxRecord per evidenced (PAPER) settlement for the cycle cash reconciliation.
-
-    LIVE settlements carry no price (the venue owns the cash), so they emit no record. The
-    record id is deterministic per symbol and delivery instant, so a retried cycle never
-    double-books.
-    """
-    records: list[TaxRecord] = []
-    for settlement in settlements:
-        if settlement.price is None:
-            continue
-        qty = abs(settlement.quantity)
-        price = settlement.price
-        notional = abs(settlement.quantity * price)
-        delivery = pd.Timestamp(settlement.delivery_time).tz_convert("UTC")
-        delivery_ms = int(delivery.value // 1_000_000)
-        records.append(
-            TaxRecord(
-                record_id=f"simulated:DELISTING_SETTLEMENT:{settlement.symbol}:{delivery_ms}",
-                kind="TRADE",
-                event_time=delivery,
-                symbol=settlement.symbol,
-                side="SELL" if settlement.quantity > 0 else "BUY",
-                quantity=float(qty),
-                price=float(price),
-                quote_qty=float(notional),
-                fee=float(settlement.fee),
-                fee_asset="USDT",
-                realized_pnl=0.0,
-                income_asset="USDT",
-                is_maker=False,
-                venue_id=0,
-                source="delisting_settlement",
-                mode=str(mode),
-            )
-        )
-    return tuple(records)
 
 
 def _settle_delisted_paper_positions(
@@ -1109,8 +954,10 @@ def run_shadow_cycle(
             )
         sweep = cancel_orphan_orders(order_client, run_id, audit, journal=journal, now=now_ts, taker_fee_bps=float(settings.taker_fee_bps))
         recovery = recover_unresolved_orders(order_client, journal, audit, now=now_ts, lookback=pd.Timedelta(hours=settings.journal_recovery_lookback_hours), taker_fee_bps=float(settings.taker_fee_bps))
+        unresolved_settlement = settle_unresolved_orders(order_client, journal, audit, recovery.unresolved, taker_fee_bps=float(settings.taker_fee_bps))
         ledger_state = _commit_and_record(settings, ledger_path, ledger_state, journal, audit, fallback_attempt=cycle_context, equity=None, executed_decision_time=None)
         ledger_positions = ledger_state.positions
+        frozen_symbols = _record_unresolved_orders(settings, audit, (*sweep.unconfirmed, *unresolved_settlement.still_open), decision_time=decision_time, now=now_ts)
         derisk_reasons: list[str] = []
         if settings.mode.suppresses_mutations:
             assert_suppressed_venue_flat(snapshot)
@@ -1193,10 +1040,11 @@ def run_shadow_cycle(
         # weights already loaded as effective row (reused)
         current_positions = effective_positions(settings.mode, snapshot, ledger_positions)
         wanted_symbols = sorted({str(s) for s in weights.index} | set(current_positions))
-        marks = _marks_from_tickers(market_client, wanted_symbols)
+        ticker_marks = _marks_from_tickers(market_client, wanted_symbols)
+        marks = ticker_marks.marks
         # microstructure capture — reuse quotes from _marks_from_tickers (single book_tickers call)
         try:
-            quotes = getattr(_marks_from_tickers, "_last_quotes", {})
+            quotes = ticker_marks.quotes
             premium = None
             try:
                 premium = market_client.premium_index()
@@ -1362,6 +1210,7 @@ def run_shadow_cycle(
 
         # NO-LIVE-ONLY-GATES: 전략 차원의 종목별 노셔널 상한은 없다(백테스트 패리티). LIVE에서는 거래소 브래킷 notionalCap을 넘는 주문만 거부한다.
         kept: list[OrderIntent] = list(intents)
+        kept, frozen_blocked_count = _apply_unresolved_freeze(kept, frozen_symbols, audit)
         if not settings.mode.suppresses_mutations and kept:
             brackets = parse_leverage_brackets(
                 order_client.request("GET", "/fapi/v1/leverageBracket", signed=True)
@@ -1422,7 +1271,12 @@ def run_shadow_cycle(
             with contextlib.suppress(Exception):
                 audit.record("position_uncovered", symbol=sym, reason=reason)
 
-        from src.live.executor import FeeSchedule, backtest_parity_execution_policy, strict_passive_execution_policy, strict_passive_repeg_execution_policy  # noqa: PLC0415
+        from src.live.executor import (  # noqa: PLC0415
+            FeeSchedule,
+            backtest_parity_execution_policy,
+            strict_passive_execution_policy,
+            strict_passive_repeg_execution_policy,
+        )
 
         fee_schedule = FeeSchedule(maker_fee_bps=settings.maker_fee_bps, taker_fee_bps=settings.taker_fee_bps)
         if settings.execution_policy == "strict_passive":
@@ -1443,7 +1297,7 @@ def run_shadow_cycle(
             try:
                 outcomes = list(execute_intents(order_client, kept, filters, policy, audit, _clock, time.sleep, rate_limits=rate_limits, outcome_sink=sink, shutdown=shutdown, paper_fill_model=paper_fill_model, journal=journal, attempt=attempt, shutdown_cleanup_budget_s=settings.execution_shutdown_cleanup_budget_s))
                 _alert_reject_cluster(settings, outcomes, audit, decision_time=decision_time, now=now_ts)
-                final_state = _commit_and_record(settings, ledger_path, ledger_state, journal, audit, fallback_attempt=attempt, equity=equity, executed_decision_time=None if derisk_active else decision_time, funding_records=funding_records, settlement_records=settlement_records, reconcile_cash_before=cash_before)
+                final_state = _commit_and_record(settings, ledger_path, ledger_state, journal, audit, fallback_attempt=attempt, equity=equity, executed_decision_time=None if (derisk_active or bool(frozen_symbols)) else decision_time, funding_records=funding_records, settlement_records=settlement_records, reconcile_cash_before=cash_before)
                 _write_execution_quality_once(settings, audit, decision_time=decision_time, weights=weights, marks=marks, intents=kept, outcomes=outcomes, observed_at=now_ts)
             except ExecutionInterrupted as exc:
                 partial = list(sink) if sink else _partial_outcomes(exc)
@@ -1511,79 +1365,77 @@ def run_shadow_cycle(
         try:
             tax_dir = Path(settings.tax_ledger_dir) if settings.tax_ledger_dir else default_tax_ledger_dir()
             tax_dir.mkdir(parents=True, exist_ok=True)
-            if not settings.mode.suppresses_mutations:
-                if settings.tax_collection_enabled:
-                    try:
-                        _, live_tax_issues = collect_and_persist_live_tax(
-                            order_client,
-                            wanted_symbols,
-                            tax_dir,
-                            settings.mode.value,
-                            now=now_ts,
-                            settings=settings,
+            if not settings.mode.suppresses_mutations and settings.tax_collection_enabled:
+                try:
+                    _, live_tax_issues = collect_and_persist_live_tax(
+                        order_client,
+                        wanted_symbols,
+                        tax_dir,
+                        settings.mode.value,
+                        now=now_ts,
+                        settings=settings,
+                    )
+                except DataIntegrityError as exc:
+                    audit.record("tax_watermark_invalid", error=str(exc))
+                    logger.warning("[SYS] tax_watermark_invalid error=%s", exc)
+                    dispatch_alert(
+                        settings,
+                        event="tax_ledger_corrupt",
+                        detail=f"path={tax_dir} error={type(exc).__name__}",
+                        decision_time=decision_time,
+                        dedupe_key=f"tax_ledger_corrupt:{decision_time.date()}",
+                        now=now_ts,
+                    )
+                else:
+                    for live_issue in live_tax_issues:
+                        audit.record(
+                            "tax_collect_issue",
+                            stream=live_issue.stream,
+                            stage=live_issue.stage,
+                            detail=live_issue.detail,
                         )
-                    except DataIntegrityError as exc:
-                        audit.record("tax_watermark_invalid", error=str(exc))
-                        logger.warning("[SYS] tax_watermark_invalid error=%s", exc)
-                        dispatch_alert(
-                            settings,
-                            event="tax_ledger_corrupt",
-                            detail=f"path={tax_dir} error={type(exc).__name__}",
-                            decision_time=decision_time,
-                            dedupe_key=f"tax_ledger_corrupt:{decision_time.date()}",
-                            now=now_ts,
+                        logger.warning(
+                            "[EXEC] tax_collect_issue stream=%s stage=%s",
+                            live_issue.stream,
+                            live_issue.stage,
                         )
-                    else:
-                        for live_issue in live_tax_issues:
-                            audit.record(
-                                "tax_collect_issue",
-                                stream=live_issue.stream,
-                                stage=live_issue.stage,
+                        if live_issue.stage == "retention_gap":
+                            dispatch_alert(
+                                settings,
+                                event="tax_income_gap",
                                 detail=live_issue.detail,
+                                decision_time=decision_time,
+                                dedupe_key=f"tax_income_gap:{live_issue.detail}",
+                                now=now_ts,
                             )
-                            logger.warning(
-                                "[EXEC] tax_collect_issue stream=%s stage=%s",
-                                live_issue.stream,
-                                live_issue.stage,
-                            )
-                            if live_issue.stage == "retention_gap":
-                                dispatch_alert(
-                                    settings,
-                                    event="tax_income_gap",
-                                    detail=live_issue.detail,
-                                    decision_time=decision_time,
-                                    dedupe_key=f"tax_income_gap:{live_issue.detail}",
-                                    now=now_ts,
-                                )
         except Exception as exc:  # noqa: BLE001
             with contextlib.suppress(Exception):
                 audit.record("tax_ledger_write_failed", error=str(exc))
             logger.warning("[SYS] tax_ledger write failed error=%s", exc)
 
+        degraded = derisk_active or bool(frozen_symbols)
+        report_reasons = sorted(set(derisk_reasons) | ({UNRESOLVED_ORDERS_REASON} if frozen_symbols else set()))
         report = CycleReport(
-            status="DEGRADED" if derisk_active else "COMPLETE",
-            reason=",".join(derisk_reasons) if derisk_active else None,
+            status="DEGRADED" if degraded else "COMPLETE",
+            reason=",".join(report_reasons) if degraded else None,
             decision_time=decision_time,
             intent_count=len(outcomes),
             outcomes=tuple(outcomes),
             dropped_notional_fraction=dropped_fraction,
         )
-        if derisk_active:
+        if degraded:
             derisk_since = load_ledger(ledger_path).derisk_since
             detail = (
-                f"reasons={','.join(derisk_reasons)} kept={len(kept)} "
+                f"reasons={','.join(report_reasons)} kept={len(kept)} "
                 f"blocked={derisk_blocked_count} derisk_since={derisk_since}"
             )
-            if not settings.venue_force_close_auto_adopt and "reconciliation_breach" in derisk_reasons:
+            if frozen_symbols:
+                detail += f" frozen_symbols={','.join(frozen_symbols)} frozen_blocked={frozen_blocked_count}"
+            if not settings.venue_force_close_auto_adopt and "reconciliation_breach" in report_reasons:
                 detail += " force_close_auto_adopt=off"
             audit.record("cycle_degraded", detail=detail)
-            _notify_event(
-                settings,
-                event="cycle_degraded",
-                detail=detail,
-                decision_time=decision_time,
-                now=now_ts,
-            )
+            if derisk_active:
+                _notify_event(settings, event="cycle_degraded", detail=detail, decision_time=decision_time, now=now_ts)
             return report
         _ensure_run_manifest(settings, now_ts)
         audit.record("cycle_complete", intents=len(outcomes))
@@ -1643,15 +1495,81 @@ def _partial_outcomes(exc: LiveTradingError) -> list[ExecutionOutcome]:
     return list(partial)
 
 
-def _marks_from_tickers(client: Any, symbols: Sequence[str]) -> dict[str, Decimal]:
-    """전 종목 호가를 배치 1회로 수집해 mid mark 를 만든다(N+1 호출 금지)."""
-    quotes = fetch_book_quotes(client, symbols)
-    _marks_from_tickers._last_quotes = quotes  # type: ignore[attr-defined]
-    marks: dict[str, Decimal] = {sym: q.mid for sym, q in quotes.items()}
-    return marks
+@dataclass(frozen=True, slots=True)
+class TickerMarks:
+    """Mid marks and the book quotes they came from, from one batched ticker fetch."""
 
-# cache for microstructure reuse (populated by _marks_from_tickers)
-_marks_from_tickers._last_quotes = {}  # type: ignore[attr-defined]
+    marks: dict[str, Decimal]
+    quotes: Mapping[str, BookQuote]
+
+
+def _apply_unresolved_freeze(
+    intents: Sequence[OrderIntent], frozen_symbols: Sequence[str], audit: AuditLog
+) -> tuple[list[OrderIntent], int]:
+    """Withhold intents on frozen symbols, auditing each blocked intent; return (kept, blocked count)."""
+    freeze = freeze_unresolved_symbols(intents, frozen_symbols)
+    for blocked_intent, block_reason in freeze.blocked:
+        audit.record(
+            "unresolved_order_blocked",
+            symbol=blocked_intent.symbol,
+            side=blocked_intent.side,
+            reduce_only=blocked_intent.reduce_only,
+            reason=block_reason,
+        )
+    return list(freeze.kept), len(freeze.blocked)
+
+
+def _record_unresolved_orders(
+    settings: LiveSettings,
+    audit: AuditLog,
+    unresolved: Sequence[UnresolvedOrder],
+    *,
+    decision_time: pd.Timestamp,
+    now: pd.Timestamp,
+) -> tuple[str, ...]:
+    """Audit own orders still open after confirmed cancels, alert once per symbol episode, and return the symbols to freeze this cycle.
+
+    The audit event is written every cycle (evidence). The alert is keyed by symbol and by the
+    smallest unresolved client order id on that symbol, so repeated cycles of one unresolved
+    episode collapse into one outbox record; the freeze itself carries no state and clears on
+    the first cycle the venue reports the order terminal.
+    """
+    seen: dict[str, UnresolvedOrder] = {}
+    for order in unresolved:
+        if order.client_order_id not in seen:
+            seen[order.client_order_id] = order
+    if not seen:
+        return ()
+    deduped = list(seen.values())
+    symbols = sorted({o.symbol for o in deduped})
+    audit.record(
+        "order_recovery_unresolved",
+        client_order_ids=[o.client_order_id for o in deduped],
+        symbols=symbols,
+    )
+    logger.warning("[RISK] unresolved_own_orders count=%d symbols=%s", len(deduped), ",".join(symbols))
+    for symbol in symbols:
+        ids = sorted(o.client_order_id for o in deduped if o.symbol == symbol)
+        dispatch_alert(
+            settings,
+            event="order_recovery_unresolved",
+            detail=f"symbol={symbol} ids={','.join(ids)}",
+            decision_time=decision_time,
+            dedupe_key=f"order_recovery_unresolved:{symbol}:{ids[0]}",
+            now=now,
+        )
+    return tuple(symbols)
+
+
+def _marks_from_tickers(client: Any, symbols: Sequence[str]) -> TickerMarks:
+    """Fetch all book quotes in one batch and derive mid marks (no N+1 calls).
+
+    Quotes are returned rather than cached so a later consumer (microstructure capture) can never read
+    a previous call's quotes.
+    """
+    quotes = fetch_book_quotes(client, symbols)
+    marks: dict[str, Decimal] = {sym: q.mid for sym, q in quotes.items()}
+    return TickerMarks(marks=marks, quotes=quotes)
 
 
 def _clock() -> float:

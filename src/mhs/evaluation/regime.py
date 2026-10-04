@@ -1,12 +1,14 @@
-# mypy: ignore-errors
-# ruff: noqa: F401, F821, I001, E402
-from __future__ import annotations  # mypy: ignore-errors
+from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
+
+if TYPE_CHECKING:
+    from src.mhs.evidence import AnchoredPurgedFold
 
 
 def _regime_reference_characterization(close: pd.Series) -> dict[str, float] | None:

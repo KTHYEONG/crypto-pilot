@@ -608,15 +608,28 @@ def test_funding_records_persist_before_ledger_save(tmp_path, monkeypatch) -> No
 
 
 def test_paper_cycle_trade_tax_rows_equal_fills_rows(tmp_path, monkeypatch) -> None:
-    """Paper TRADE tax records correspond one-to-one to the written fills; no globals fallback."""
-    import inspect
-
+    """Paper TRADE tax records correspond one-to-one to the written fills."""
     import src.live.runner as runner_mod
     from src.live.fills import load_fills
     from src.live.tax_ledger import load_tax_records
     from tests.unit.live._runner_stubs import DECISION_TIME, NOW
 
     runner_mod, settings, weights_path = _paper_cycle_harness(tmp_path, monkeypatch)
+    real_append = runner_mod.append_fills
+    real_tax = runner_mod.simulated_tax_records
+    append_calls: list[object] = []
+    tax_calls: list[tuple[object, object]] = []
+
+    def _recording_append(events, *args, **kwargs):
+        append_calls.append(events)
+        return real_append(events, *args, **kwargs)
+
+    def _recording_tax(events, mode, *args, **kwargs):
+        tax_calls.append((events, mode))
+        return real_tax(events, mode, *args, **kwargs)
+
+    monkeypatch.setattr(runner_mod, "append_fills", _recording_append)
+    monkeypatch.setattr(runner_mod, "simulated_tax_records", _recording_tax)
     report = runner_mod.run_shadow_cycle(settings, DECISION_TIME, weights_path, now=NOW)
     assert report.status == "COMPLETE"
     fills = load_fills(tmp_path / "fills")
@@ -629,9 +642,11 @@ def test_paper_cycle_trade_tax_rows_equal_fills_rows(tmp_path, monkeypatch) -> N
         assert len(match) == 1
         assert abs(match.iloc[0]["quantity"]) == abs(fill["quantity_delta"])
         assert match.iloc[0]["price"] == fill["fill_price"]
-    source = inspect.getsource(runner_mod._commit_and_record)
-    assert 'globals().get("fill_events")' not in source
-    assert "simulated_tax_records(events" in source
+    assert append_calls, "fills must be appended"
+    assert len(tax_calls) == len(append_calls)
+    for append_events, (tax_events, mode) in zip(append_calls, tax_calls, strict=True):
+        assert tax_events is append_events
+        assert mode == settings.mode.value
 
 
 def test_paper_cycle_emits_reconcile_audit(tmp_path, monkeypatch) -> None:

@@ -9,6 +9,11 @@ import pandas as pd
 
 from src.common.parquet_io import read_parquet_or_quarantine, write_parquet_atomic
 
+# Rotation bound shared by the live append-only observation logs so active
+# shards stay small enough to rewrite atomically each cycle.
+LIVE_RECORD_SHARD_MAX_BYTES: int = 262144
+LIVE_RECORD_MAX_SHARDS: int = 12
+
 
 def _enforce_dtypes(df: pd.DataFrame, dtypes: Mapping[str, str]) -> pd.DataFrame:
     for col, dtype in dtypes.items():

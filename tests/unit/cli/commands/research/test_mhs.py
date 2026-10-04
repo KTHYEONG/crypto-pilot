@@ -972,6 +972,21 @@ def test_research_mhs_process_leaf_is_absent() -> None:
         build_root_parser().parse_args(["research", "run", "portfolio", "mhs-process-backtest"])
 
 
+def test_register_procedure_help_names_the_canonical_registry() -> None:
+    """The procedure registry is gitignored runtime evidence, not documentation."""
+    import argparse
+
+    from src.cli.commands.research.mhs import add_mhs_commands
+
+    sub = argparse.ArgumentParser().add_subparsers()
+    add_mhs_commands(sub)
+    parser = sub.choices["mhs-horizon-diagnostic"]
+
+    action = next(a for a in parser._actions if a.dest == "register_procedure")
+    assert "procedure_registry.jsonl" in action.help
+    assert "git-tracked" not in action.help
+
+
 def test_research_diagnostic_output_has_data_boundary(monkeypatch) -> None:
     import argparse
     from pathlib import Path

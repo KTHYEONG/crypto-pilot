@@ -130,3 +130,61 @@ def test_build_fold_target_weights_threads_request_data_policy_to_loader(monkeyp
         fold_weights._build_fold_target_weights("root", fold, request, {}, require_minute_roster=False)
 
     assert captured["data_policy"] == "zombie_mask_v1"
+
+
+def _fold() -> object:
+    import pandas as pd
+    from src.mhs.evidence import AnchoredPurgedFold
+
+    return AnchoredPurgedFold(
+        train_start=pd.Timestamp("2021-01-01", tz="UTC"),
+        train_end=pd.Timestamp("2021-04-01", tz="UTC"),
+        validation_start=pd.Timestamp("2021-05-01", tz="UTC"),
+        validation_end=pd.Timestamp("2021-08-01", tz="UTC"),
+        forward_dependency_hours=24,
+        purge_hours=24,
+    )
+
+
+def test_effective_window_defaults_to_validation_span() -> None:
+    from src.mhs.evaluation.fold_weights import _resolve_effective_fold_window
+
+    fold = _fold()
+    assert _resolve_effective_fold_window(fold, None, None) == (fold.validation_start, fold.validation_end)
+
+
+def test_effective_window_rejects_naive_bounds() -> None:
+    import pandas as pd
+    import pytest
+    from src.mhs.evaluation.fold_weights import _resolve_effective_fold_window
+
+    fold = _fold()
+    with pytest.raises(ValueError, match="tz-aware UTC"):
+        _resolve_effective_fold_window(fold, pd.Timestamp("2021-05-01"), None)
+    with pytest.raises(ValueError, match="tz-aware UTC"):
+        _resolve_effective_fold_window(fold, None, pd.Timestamp("2021-06-01"))
+
+
+def test_effective_window_rejects_non_utc_zone() -> None:
+    import pandas as pd
+    import pytest
+    from src.mhs.evaluation.fold_weights import _resolve_effective_fold_window
+
+    fold = _fold()
+    start = pd.Timestamp("2021-05-01", tz="Asia/Seoul")
+    end = pd.Timestamp("2021-06-01", tz="Asia/Seoul")
+    with pytest.raises(ValueError, match="must be UTC"):
+        _resolve_effective_fold_window(fold, start, end)
+
+
+def test_effective_window_rejects_pre_train_start_and_empty_span() -> None:
+    import pandas as pd
+    import pytest
+    from src.mhs.evaluation.fold_weights import _resolve_effective_fold_window
+
+    fold = _fold()
+    with pytest.raises(ValueError, match="empty or precedes fold train_start"):
+        _resolve_effective_fold_window(fold, pd.Timestamp("2020-12-01", tz="UTC"), None)
+    same = pd.Timestamp("2021-05-01", tz="UTC")
+    with pytest.raises(ValueError, match="empty or precedes fold train_start"):
+        _resolve_effective_fold_window(fold, same, same)

@@ -8,8 +8,6 @@ import numpy as np
 import pandas as pd
 
 from src.mhs import statistics as _statistics
-from src.mhs.contracts import MhsBookReport
-from src.mhs.resources import _assert_stage_rss_budget, _StageRecorder
 from src.mhs.books import phase_tranche_book, scale_book_to_target_gross
 from src.mhs.committee import (
     committee_block_edges_from,
@@ -20,6 +18,7 @@ from src.mhs.committee import (
     train_evidence_weights,
     wealth_metrics,
 )
+from src.mhs.contracts import MhsBookReport
 from src.mhs.execution import mhs_ledger_pnl_multi_tier
 from src.mhs.features import (
     FEATURE_REGISTRY,
@@ -48,6 +47,7 @@ from src.mhs.params import (
 )
 from src.mhs.params import PERIODS_PER_YEAR_1H as _PERIODS_PER_YEAR_1H
 from src.mhs.regime import beta_neutralize_weights
+from src.mhs.resources import _assert_stage_rss_budget, _StageRecorder
 from src.quant.risk.growth_sizing import GrowthSizingConfig, diagnose_growth_headroom, solve_growth_optimal_risk
 
 from . import diagnostics
