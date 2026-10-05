@@ -8,11 +8,14 @@ for long-lived state (panel, config, grids, telemetry).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pandas as pd
 
 from src.mhs.telemetry import StageTelemetry
+
+if TYPE_CHECKING:
+    from src.mhs.contracts import MhsDiagnosticRequest
 
 
 @dataclass
@@ -25,7 +28,7 @@ class PipelineContext:
     """
 
     # Config
-    config: Any  # MhsDiagnosticRequest (renamed to MhsRunConfig in P3)
+    config: MhsDiagnosticRequest
 
     # Time bounds
     resolved_end: Any  # pd.Timestamp | None

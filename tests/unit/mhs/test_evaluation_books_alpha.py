@@ -3,6 +3,7 @@
 """MHS evaluation pipeline/gate tests (second-level split remainder)."""
 """MHS evaluation core contract tests (everything not in a domain-specific split file)."""
 """Contract coverage for the MHS application evaluation resource telemetry."""
+from tests.fixtures.mhs_requests import research_baseline
 import dataclasses
 import numpy as np
 import pandas as pd
@@ -18,7 +19,6 @@ from src.mhs.books import (
 )
 from src.mhs.diagnostic_run import run_mhs_horizon_diagnostic
 import src.mhs.scaling as scaling
-from src.mhs.contracts import MhsDiagnosticRequest
 from src.mhs.evaluation.books import _book_weights, _horizon_ensemble_execution_weights
 from src.mhs.evaluation.concurrency import _run_books_concurrent
 from src.mhs.evaluation.diagnostics import _phase_diagnostics
@@ -137,9 +137,9 @@ def test_mhs_fast_book_mode_default_is_identity(mhs_market, monkeypatch) -> None
     # run keeps real books; the production w_fast_execution matrix is captured
     # by a spy and must equal the verbatim pre-change chain (vol tilt +
     # renormalize) built on the same panel.
-    assert MhsDiagnosticRequest().fast_book_mode == "single_horizon"
+    assert research_baseline().fast_book_mode == "single_horizon"
     with pytest.raises(ValueError, match="unknown fast_book_mode"):
-        MhsDiagnosticRequest(fast_book_mode="bogus")
+        research_baseline(fast_book_mode="bogus")
 
     root, end = mhs_market
     captured: dict = {}
@@ -153,7 +153,7 @@ def test_mhs_fast_book_mode_default_is_identity(mhs_market, monkeypatch) -> None
     monkeypatch.setattr(concurrency_mod, "_run_post_book_concurrently",
         lambda *a, **k: (None, None, {}, {}, (), _deployment_readiness()),
     )
-    request = MhsDiagnosticRequest(
+    request = research_baseline(
         start=str(_START), end=str(end), data_root=str(root),
         execution_timeframe="3m", log_run=False,
         execution_universe_size=8,
@@ -197,9 +197,9 @@ def test_mhs_fast_book_mode_ensemble_produces_different_executed_book(mhs_market
         "execution_timeframe": "3m", "log_run": False,
         "execution_universe_size": 8,
     }
-    report_default = run_mhs_horizon_diagnostic(MhsDiagnosticRequest(**base))
+    report_default = run_mhs_horizon_diagnostic(research_baseline(**base))
     report_ensemble = run_mhs_horizon_diagnostic(
-        MhsDiagnosticRequest(**base, fast_book_mode="horizon_ensemble"),
+        research_baseline(**base, fast_book_mode="horizon_ensemble"),
     )
     fast_default = report_default.books["fast_reversal"]
     fast_ensemble = report_ensemble.books["fast_reversal"]
@@ -295,7 +295,7 @@ def test_mhs_alpha_engine_fold_portfolio_trigger_preserves_invariants(mhs_market
         return out
 
     monkeypatch.setattr(scaling, "_regime_cash_scale", _forced_step_scale)
-    request_trig = MhsDiagnosticRequest(
+    request_trig = research_baseline(
         start=str(_START), end=str(end), data_root=str(root),
         execution_timeframe="3m", log_run=False,
         rebalance_filter="portfolio_trigger",
@@ -319,16 +319,16 @@ def test_mhs_alpha_engine_request_field_validation() -> None:
     # SCENARIO_MHS_ALPHA_ENGINE_08 (second half): MhsDiagnosticRequest raises
     # ValueError on unknown slow_book_mode/rebalance_filter/ensemble_signal
     # values and on a non-bool beta_neutralize; the defaults stay frozen.
-    req = MhsDiagnosticRequest()
+    req = research_baseline()
     assert req.slow_book_mode == "single_horizon"
     assert req.rebalance_filter == "per_symbol_deadband"
     assert req.beta_neutralize is False
     assert req.ensemble_signal == "raw"
     with pytest.raises(ValueError, match="slow_book_mode"):
-        MhsDiagnosticRequest(slow_book_mode="bogus")
+        research_baseline(slow_book_mode="bogus")
     with pytest.raises(ValueError, match="rebalance_filter"):
-        MhsDiagnosticRequest(rebalance_filter="bogus")
+        research_baseline(rebalance_filter="bogus")
     with pytest.raises(ValueError, match="beta_neutralize"):
-        MhsDiagnosticRequest(beta_neutralize=1)  # type: ignore[arg-type]
+        research_baseline(beta_neutralize=1)  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="ensemble_signal"):
-        MhsDiagnosticRequest(ensemble_signal="bogus")
+        research_baseline(ensemble_signal="bogus")

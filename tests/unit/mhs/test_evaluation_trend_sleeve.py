@@ -1,6 +1,7 @@
 """MHS evaluation contract tests (split by behavioral domain; shared builders live in the original module)."""
 
 """Contract coverage for the MHS application evaluation resource telemetry."""
+from tests.fixtures.mhs_requests import research_baseline
 import numpy as np
 import pandas as pd
 import pytest
@@ -9,7 +10,6 @@ from src.mhs.data_policy import SOURCE_GAP_EXCLUDED_SYMBOLS
 from src.mhs.diagnostic_run import run_mhs_horizon_diagnostic
 import src.mhs.evaluation.folds as folds_mod
 import src.mhs.statistics as statistics
-from src.mhs.contracts import MhsDiagnosticRequest
 from src.mhs.evaluation.diagnostics import _trend_sleeve_diagnostic
 from src.mhs.evaluation.folds import _apply_trend_sleeve, _trend_sleeve_position
 from src.mhs.evaluation.fold_weights import _build_fold_target_weights
@@ -36,18 +36,18 @@ def test_trend_sleeve_request_validation() -> None:
     # 0.0). A positive gross without the opt-in, or a gross outside [0.0, 1.0],
     # raises ValueError (fail closed -- no silent no-op); the default
     # construction leaves both at their off values.
-    default = MhsDiagnosticRequest()
+    default = research_baseline()
     assert default.trend_sleeve is False
     assert default.trend_sleeve_gross == 0.0
     with pytest.raises(ValueError, match="trend_sleeve_gross"):
-        MhsDiagnosticRequest(trend_sleeve_gross=0.3)
+        research_baseline(trend_sleeve_gross=0.3)
     with pytest.raises(ValueError, match="trend_sleeve_gross"):
-        MhsDiagnosticRequest(trend_sleeve=True, trend_sleeve_gross=-0.1)
+        research_baseline(trend_sleeve=True, trend_sleeve_gross=-0.1)
     with pytest.raises(ValueError, match="trend_sleeve_gross"):
-        MhsDiagnosticRequest(trend_sleeve=True, trend_sleeve_gross=1.5)
+        research_baseline(trend_sleeve=True, trend_sleeve_gross=1.5)
     with pytest.raises(ValueError, match="trend_sleeve"):
-        MhsDiagnosticRequest(trend_sleeve="yes")
-    on = MhsDiagnosticRequest(trend_sleeve=True, trend_sleeve_gross=0.3)
+        research_baseline(trend_sleeve="yes")
+    on = research_baseline(trend_sleeve=True, trend_sleeve_gross=0.3)
     assert on.trend_sleeve is True
     assert on.trend_sleeve_gross == 0.3
 
@@ -67,9 +67,9 @@ def test_trend_sleeve_default_off_bit_identical(mhs_market, monkeypatch) -> None
         "execution_timeframe": "3m", "log_run": False,
         "execution_universe_size": 8,
     }
-    default_report = run_mhs_horizon_diagnostic(MhsDiagnosticRequest(**base))
+    default_report = run_mhs_horizon_diagnostic(research_baseline(**base))
     explicit_off = run_mhs_horizon_diagnostic(
-        MhsDiagnosticRequest(**base, trend_sleeve=False, trend_sleeve_gross=0.0),
+        research_baseline(**base, trend_sleeve=False, trend_sleeve_gross=0.0),
     )
     assert default_report.status == "COMPLETE"
     assert default_report.trend_sleeve_diagnostic is None
@@ -89,7 +89,7 @@ def test_trend_sleeve_diagnostic_populated(mhs_market, monkeypatch) -> None:
     monkeypatch.setattr(concurrency_mod, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
     monkeypatch.setattr(concurrency_mod, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
-    request = MhsDiagnosticRequest(
+    request = research_baseline(
         start=str(_START), end=str(end), data_root=str(root),
         execution_timeframe="3m", log_run=False,
         execution_universe_size=8, trend_sleeve=True, trend_sleeve_gross=0.3,
@@ -170,7 +170,7 @@ def test_trend_sleeve_overlay_off_byte_identical(mhs_market_with_taker_buy_quote
         "execution_timeframe": "3m", "log_run": False,
         "execution_universe_size": 8, "committee_capital": True,
     }
-    request = MhsDiagnosticRequest(**base)
+    request = research_baseline(**base)
 
     def _must_not_be_called(*_args, **_kwargs):
         raise AssertionError("sleeve machinery must not run when the overlay is off")
@@ -189,7 +189,7 @@ def test_trend_sleeve_overlay_off_byte_identical(mhs_market_with_taker_buy_quote
 
     target_gross0, _sig, _roster, _grid = _build_fold_target_weights(
         str(root), _FOLD,
-        MhsDiagnosticRequest(**base, trend_sleeve=True, trend_sleeve_gross=0.0),
+        research_baseline(**base, trend_sleeve=True, trend_sleeve_gross=0.0),
         funding_by_symbol,
     )
     pd.testing.assert_frame_equal(target_gross0, target_baseline)
@@ -205,7 +205,7 @@ def test_trend_sleeve_overlay_additive_fold(mhs_market_with_taker_buy_quote, mon
         if symbol_partition(s) == "dev"
     ]
     funding_by_symbol, _ = _load_funding_series(symbols)
-    request = MhsDiagnosticRequest(
+    request = research_baseline(
         start=str(_START), end=str(end), data_root=str(root),
         execution_timeframe="3m", log_run=False,
         execution_universe_size=8, committee_capital=True,
@@ -242,7 +242,7 @@ def test_trend_sleeve_overlay_additive_toplevel(mhs_market_with_taker_buy_quote,
     # the gross-budget sleeve, and -- with committee_capital -- the executed
     # committee book passed to the replay carries the same overlay.
     root, end = mhs_market_with_taker_buy_quote
-    request = MhsDiagnosticRequest(
+    request = research_baseline(
         start=str(_START), end=str(end), data_root=str(root),
         execution_timeframe="3m", log_run=False,
         execution_universe_size=8, committee_capital=True,
@@ -291,7 +291,7 @@ def test_trend_sleeve_overlay_roster_no_starvation(mhs_market_with_taker_buy_quo
         if symbol_partition(s) == "dev"
     ]
     funding_by_symbol, _ = _load_funding_series(symbols)
-    request = MhsDiagnosticRequest(
+    request = research_baseline(
         start=str(_START), end=str(end), data_root=str(root),
         execution_timeframe="3m", log_run=False,
         execution_universe_size=8, committee_capital=True,
@@ -328,7 +328,7 @@ def test_trend_sleeve_fold_memory_order(mhs_market_with_taker_buy_quote, monkeyp
         if symbol_partition(s) == "dev"
     ]
     funding_by_symbol, _ = _load_funding_series(symbols)
-    request = MhsDiagnosticRequest(
+    request = research_baseline(
         start=str(_START), end=str(end), data_root=str(root),
         execution_timeframe="3m", log_run=False,
         execution_universe_size=8, committee_capital=True,
@@ -387,7 +387,7 @@ def test_trend_sleeve_diagnostic_uses_deployed_book(mhs_market) -> None:
     eligible = liquid_half_eligibility(quote_vol, lookback_bars=720, min_history_bars=720)
     log_close = np.log(close)
     execution_mask = _pit_execution_mask(quote_vol, eligible, 8)
-    request = MhsDiagnosticRequest(trend_sleeve=True, trend_sleeve_gross=0.3)
+    request = research_baseline(trend_sleeve=True, trend_sleeve_gross=0.3)
 
     decision_grid = pd.date_range(grid_1h[0], grid_1h[-1], freq="24h", tz="UTC")
     basket = market_basket_log_price(log_close, eligible)
@@ -414,11 +414,11 @@ def test_trend_sleeve_gross_budget_bounds() -> None:
     # SCENARIO_MHS_TREND_SLEEVE_GROSS_BUDGET_BOUNDS: the existing __post_init__
     # validation is unchanged -- gross in [0.0, 1.0] inclusive is accepted and a
     # positive gross without the opt-in (or out of bounds) fails closed.
-    assert MhsDiagnosticRequest(trend_sleeve=True, trend_sleeve_gross=1.0).trend_sleeve_gross == 1.0
-    assert MhsDiagnosticRequest(trend_sleeve=True, trend_sleeve_gross=0.0).trend_sleeve_gross == 0.0
+    assert research_baseline(trend_sleeve=True, trend_sleeve_gross=1.0).trend_sleeve_gross == 1.0
+    assert research_baseline(trend_sleeve=True, trend_sleeve_gross=0.0).trend_sleeve_gross == 0.0
     with pytest.raises(ValueError, match="trend_sleeve_gross"):
-        MhsDiagnosticRequest(trend_sleeve=True, trend_sleeve_gross=1.0001)
+        research_baseline(trend_sleeve=True, trend_sleeve_gross=1.0001)
     with pytest.raises(ValueError, match="trend_sleeve_gross"):
-        MhsDiagnosticRequest(trend_sleeve=True, trend_sleeve_gross=-1e-9)
+        research_baseline(trend_sleeve=True, trend_sleeve_gross=-1e-9)
     with pytest.raises(ValueError, match="trend_sleeve_gross"):
-        MhsDiagnosticRequest(trend_sleeve_gross=0.3)
+        research_baseline(trend_sleeve_gross=0.3)

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from tests.fixtures.mhs_requests import research_baseline
 import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
@@ -380,7 +381,6 @@ def _build_books_args_from_market(root: Path, n_hours: int) -> dict[str, object]
     """Minimal ``_run_books_concurrent`` arg set from a written market."""
     from src.mhs import scaling as scaling_mod
     from src.mhs.books import renormalize_within_mask
-    from src.mhs.contracts import MhsDiagnosticRequest
     from src.mhs.evaluation.books import _book_weights
     from src.mhs.evaluation.diagnostics import _phase_diagnostics
     from src.mhs.execution.contracts import bar_funding_panel
@@ -393,7 +393,7 @@ def _build_books_args_from_market(root: Path, n_hours: int) -> dict[str, object]
     end = _START + pd.Timedelta(hours=n_hours)
     symbols = _SYMBOLS
     funding_by_symbol = _build_small_funding(root)
-    request = MhsDiagnosticRequest(
+    request = research_baseline(
         start=str(_START), end=str(end), data_root=str(root),
         execution_timeframe="3m", log_run=False,
         execution_universe_size=8,

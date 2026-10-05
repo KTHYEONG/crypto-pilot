@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from tests.fixtures.mhs_requests import research_baseline
 import numpy as np
 import pandas as pd
 import pytest
@@ -126,7 +127,7 @@ def _request(root: Path, end: pd.Timestamp, **overrides) -> MhsDiagnosticRequest
         "execution_timeframe": "3m", "log_run": False,
     }
     params.update(overrides)
-    return MhsDiagnosticRequest(**params)
+    return research_baseline(**params)
 
 
 def _synthetic_roster_targets(

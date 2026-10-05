@@ -3,6 +3,7 @@
 """MHS evaluation pipeline/gate tests (second-level split remainder)."""
 """MHS evaluation core contract tests (everything not in a domain-specific split file)."""
 """Contract coverage for the MHS application evaluation resource telemetry."""
+from tests.fixtures.mhs_requests import research_baseline
 import dataclasses
 import numpy as np
 import pandas as pd
@@ -13,7 +14,6 @@ from src.mhs.diagnostic_run import run_mhs_horizon_diagnostic
 import src.mhs.marks as marks
 import src.mhs.pipeline.stages.book as book_stage
 import src.mhs.statistics as statistics
-from src.mhs.contracts import MhsDiagnosticRequest
 from src.mhs.discovery import DiscoveryQualificationResult
 from src.mhs.execution.window_stream import _iter_mhs_execution_windows
 from src.mhs.marks import _load_funding_series
@@ -72,7 +72,7 @@ def test_mhs_funding_carry_top_level_discovery(mhs_market_funding_vary, monkeypa
     monkeypatch.setattr(concurrency_mod, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
     monkeypatch.setattr(concurrency_mod, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
-    request_on = MhsDiagnosticRequest(
+    request_on = research_baseline(
         start=str(_START), end=str(end), data_root=str(root),
         execution_timeframe="3m", log_run=False,
         execution_universe_size=8, discovery_gate=True,
@@ -88,7 +88,7 @@ def test_mhs_funding_carry_top_level_discovery(mhs_market_funding_vary, monkeypa
         assert isinstance(result, DiscoveryQualificationResult)
         assert result.yearly_net_t
 
-    request_off = MhsDiagnosticRequest(
+    request_off = research_baseline(
         start=str(_START), end=str(end), data_root=str(root),
         execution_timeframe="3m", log_run=False,
         execution_universe_size=8,
@@ -107,7 +107,7 @@ def test_mhs_full_history_yearly_net_t_and_worst_year_corr_exposed(mhs_market_fu
     monkeypatch.setattr(concurrency_mod, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
     monkeypatch.setattr(concurrency_mod, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
-    request_on = MhsDiagnosticRequest(
+    request_on = research_baseline(
         start=str(_START), end=str(end), data_root=str(root),
         execution_timeframe="3m", log_run=False,
         execution_universe_size=8, discovery_gate=True,
@@ -131,7 +131,7 @@ def test_mhs_full_history_yearly_net_t_and_worst_year_corr_exposed(mhs_market_fu
     slow_2021 = report_on.full_history_yearly_net_t["slow_momentum"][2021]
     assert np.isfinite(slow_2021)
 
-    request_off = MhsDiagnosticRequest(
+    request_off = research_baseline(
         start=str(_START), end=str(end), data_root=str(root),
         execution_timeframe="3m", log_run=False,
         execution_universe_size=8,
@@ -159,9 +159,9 @@ def test_mhs_execution_coverage_gate_default_off_bit_identical(mhs_market, monke
         "execution_timeframe": "3m", "log_run": False,
         "execution_universe_size": 8,
     }
-    default_report = run_mhs_horizon_diagnostic(MhsDiagnosticRequest(**base))
+    default_report = run_mhs_horizon_diagnostic(research_baseline(**base))
     explicit_off = run_mhs_horizon_diagnostic(
-        MhsDiagnosticRequest(**base, execution_coverage_gate=False),
+        research_baseline(**base, execution_coverage_gate=False),
     )
     assert default_report.status == "COMPLETE"
     for field in ("books", "blend", "blend_target_gross", "research_go", "folds"):
@@ -182,7 +182,7 @@ def test_mhs_execution_coverage_gate_on_fails_closed_early(mhs_market, monkeypat
         "execution_timeframe": "5m", "log_run": False,
         "execution_universe_size": 8,
     }
-    request = MhsDiagnosticRequest(**base)
+    request = research_baseline(**base)
     with pytest.raises(ValueError, match="unknown execution_timeframe"):
         run_mhs_horizon_diagnostic(
             dataclasses.replace(request, execution_coverage_gate=True, committee_target_gross=None),
@@ -223,7 +223,7 @@ def test_mhs_diagnostic_relevance_gate_passes_where_full_scope_blocked(mhs_marke
         monkeypatch.setattr(concurrency_mod, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
         monkeypatch.setattr(concurrency_mod, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
         )
-        request = MhsDiagnosticRequest(
+        request = research_baseline(
             start=str(_START), end=str(end), data_root=str(root),
             execution_timeframe="3m", log_run=False,
             execution_universe_size=8, execution_coverage_gate=True,
@@ -293,7 +293,7 @@ def test_mhs_diagnostic_mark_gate_fails_before_replay(mhs_market, monkeypatch) -
         import src.mhs.evaluation.windows as windows_mod
 
         monkeypatch.setattr(windows_mod, "_iter_mhs_execution_windows", counting)
-        request = MhsDiagnosticRequest(
+        request = research_baseline(
             start=str(_START), end=str(end), data_root=str(root),
             execution_timeframe="3m", log_run=False,
             execution_universe_size=8, execution_coverage_gate=True,
@@ -352,7 +352,7 @@ def test_mhs_diagnostic_large_gap_auto_excluded_not_raised(mhs_market, monkeypat
             return mask
 
         monkeypatch.setattr(book_stage, "_pit_execution_mask", _all_roster)
-        request = MhsDiagnosticRequest(
+        request = research_baseline(
             start=str(_START), end=str(end), data_root=str(root),
             execution_timeframe="3m", log_run=False,
             execution_universe_size=8, execution_coverage_gate=True,
@@ -393,15 +393,15 @@ def test_mhs_funding_load_reports_dropped_symbols(tmp_path, monkeypatch) -> None
 
 def test_mhs_diagnostic_execution_timeframe_3m_default() -> None:
     # SCENARIO_MHS_EXECUTION_TIMEFRAME_3M_DEFAULT: default timeframe is '3m'.
-    request = MhsDiagnosticRequest()
+    request = research_baseline()
     assert request.execution_timeframe == "3m"
 
 def test_mhs_diagnostic_execution_timeframe_3m_accepted() -> None:
     # SCENARIO_MHS_EXECUTION_TIMEFRAME_3M_ACCEPTED: '3m' is a valid contract
     # value; an out-of-contract '7m' still raises ValueError.
-    assert MhsDiagnosticRequest(execution_timeframe="3m").execution_timeframe == "3m"
+    assert research_baseline(execution_timeframe="3m").execution_timeframe == "3m"
     with pytest.raises(ValueError, match="unknown execution_timeframe"):
-        MhsDiagnosticRequest(execution_timeframe="7m")
+        research_baseline(execution_timeframe="7m")
 
 @pytest.mark.slow
 def test_mhs_diagnostic_3m_replay_end_to_end(mhs_market, monkeypatch) -> None:
@@ -418,7 +418,7 @@ def test_mhs_diagnostic_3m_replay_end_to_end(mhs_market, monkeypatch) -> None:
     monkeypatch.setattr(statistics, "_BOOTSTRAP_MEAN_BLOCK", 24)
     monkeypatch.setattr(statistics, "_bootstrap_ci", lambda *a, **k: None)
     monkeypatch.setattr(statistics, "_placebo_sharpe_percentile", lambda *a, **k: None)
-    request = MhsDiagnosticRequest(
+    request = research_baseline(
         start=str(_START), end=str(end), data_root=str(root),
         log_run=False, execution_universe_size=8,
     )
@@ -435,20 +435,20 @@ class TestMhsDiagnosticRequestParityGate:
     """SCENARIO_MHS_FILL_MARK_PARITY_05: request field validation."""
 
     def test_defaults(self) -> None:
-        req = MhsDiagnosticRequest()
+        req = research_baseline()
         assert req.exposure_scale_two_sided is False
 
     def test_non_bool_exposure_scale_two_sided_raises(self) -> None:
         with pytest.raises(ValueError, match="exposure_scale_two_sided"):
-            MhsDiagnosticRequest(exposure_scale_two_sided=1)  # type: ignore[arg-type]
+            research_baseline(exposure_scale_two_sided=1)  # type: ignore[arg-type]
 
     # SCENARIO_MHS_EXPOSURE_CEILING_08
     def test_scenario_mhs_exposure_ceiling_08_request_default_stays_false(self) -> None:
-        assert MhsDiagnosticRequest().exposure_scale_two_sided is False
+        assert research_baseline().exposure_scale_two_sided is False
         with pytest.raises(ValueError, match=r"exposure_scale_two_sided.*exante_target"):
-            MhsDiagnosticRequest(
+            research_baseline(
                 exposure_scale_two_sided=True,
                 pnl_vol_target_mode="median_relative",
             )
         with pytest.raises(ValueError, match="exposure_scale_two_sided"):
-            MhsDiagnosticRequest(exposure_scale_two_sided=1)  # type: ignore[arg-type]
+            research_baseline(exposure_scale_two_sided=1)  # type: ignore[arg-type]

@@ -1,13 +1,14 @@
 """MHS evaluation contract tests (split by behavioral domain; shared builders live in the original module)."""
 
 """Contract coverage for the MHS application evaluation resource telemetry."""
+from tests.fixtures.mhs_requests import research_baseline
 import numpy as np
 import pytest
 import src.mhs.evaluation.books as books_mod
 import src.mhs.evaluation.concurrency as concurrency_mod
 import src.mhs.evaluation.folds as folds_mod
 from src.mhs.diagnostic_run import run_mhs_horizon_diagnostic
-from src.mhs.contracts import MhsDiagnosticRequest, MhsFoldReport
+from src.mhs.contracts import MhsFoldReport
 from src.mhs.discovery import DiscoveryQualificationResult, fold_train_only_discovery_qualification
 from src.mhs.evaluation.books import _candidate_weight_books
 from src.mhs.evaluation.folds import (
@@ -74,7 +75,7 @@ def test_fold_safe_horizon_flag_off_is_byte_identical(mhs_market, monkeypatch) -
         if symbol_partition(s) == "dev"
     ][:8]
     funding_by_symbol, _ = _load_funding_series(symbols)
-    request = MhsDiagnosticRequest(
+    request = research_baseline(
         start=str(_START), end=str(end), data_root=str(root),
         execution_timeframe="3m", log_run=False,
         execution_universe_size=8,
@@ -143,7 +144,7 @@ def test_fold_safe_horizon_records_source(mhs_market, monkeypatch) -> None:
         if symbol_partition(s) == "dev"
     ][:8]
     funding_by_symbol, _ = _load_funding_series(symbols)
-    request = MhsDiagnosticRequest(
+    request = research_baseline(
         start=str(_START), end=str(end), data_root=str(root),
         execution_timeframe="3m", log_run=False,
         execution_universe_size=8,
@@ -179,7 +180,7 @@ def test_fold_safe_horizon_records_source(mhs_market, monkeypatch) -> None:
 
     monkeypatch.setattr(concurrency_mod, "_run_books_concurrent", _spy_books)
     monkeypatch.setattr(concurrency_mod, "_run_post_book_concurrently", _spy_post)
-    request_on = MhsDiagnosticRequest(
+    request_on = research_baseline(
         start=str(_START), end=str(end), data_root=str(root),
         execution_timeframe="3m", log_run=False,
         execution_universe_size=8, fold_safe_horizon_selection=True,
@@ -224,7 +225,7 @@ def test_fold_safe_horizon_builds_candidate_weights_once_and_shares_across_folds
 
     monkeypatch.setattr(concurrency_mod, "_run_books_concurrent", _spy_books)
     monkeypatch.setattr(concurrency_mod, "_run_post_book_concurrently", _spy_post)
-    request_on = MhsDiagnosticRequest(
+    request_on = research_baseline(
         start=str(_START), end=str(end), data_root=str(root),
         execution_timeframe="3m", log_run=False,
         execution_universe_size=8, fold_safe_horizon_selection=True,
@@ -251,7 +252,7 @@ def test_fold_safe_funding_carry_parent_wiring(mhs_market_funding_vary, monkeypa
             return (None, None, {}, {}, (), None)
 
         monkeypatch.setattr(concurrency_mod, "_run_post_book_concurrently", _spy_post)
-        request_on = MhsDiagnosticRequest(
+        request_on = research_baseline(
             start=str(_START), end=str(end), data_root=str(root),
             execution_timeframe="3m", log_run=False,
             execution_universe_size=8, fold_safe_horizon_selection=True,

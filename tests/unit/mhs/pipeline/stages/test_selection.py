@@ -8,6 +8,7 @@ existing evaluation/golden-identity suites; this isolates the opt-in wiring.
 """
 
 from __future__ import annotations
+from src.mhs.contracts import MhsDiagnosticRequest
 import src.mhs.evaluation.folds as folds_mod
 import src.mhs.evaluation.books as books_mod
 
@@ -18,7 +19,6 @@ import pandas as pd
 import pytest
 
 import src.mhs.pipeline.stages.selection as selection_stage
-from src.mhs.pipeline.config import MhsRunConfig
 from src.mhs.pipeline.context import PipelineContext
 from src.mhs.telemetry import StageTelemetry
 
@@ -29,7 +29,7 @@ _SYMS = ["AAAUSDT", "BBBUSDT"]
 def _bare_context(*, fold_safe: bool) -> PipelineContext:
     close = pd.DataFrame(1.0, index=_GRID, columns=_SYMS)
     ctx = PipelineContext(
-        config=dataclasses.replace(MhsRunConfig(), fold_safe_horizon_selection=fold_safe),
+        config=dataclasses.replace(MhsDiagnosticRequest(), fold_safe_horizon_selection=fold_safe),
         resolved_end=None,
         start=_GRID[0],
         end=_GRID[-1],

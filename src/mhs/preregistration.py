@@ -78,7 +78,6 @@ def procedure_payload(request: Any) -> dict[str, Any]:
     changes the digest. Inert dependent fields are recorded at their canonical value so one decision path has one digest.
     """
     from src.mhs.live_strategy import capture_params_snapshot
-    from src.mhs.research_go import _resolved_committee_target_gross
     from src.mhs.validation import inert_dependent_overrides
 
     payload = {
@@ -86,7 +85,6 @@ def procedure_payload(request: Any) -> dict[str, Any]:
         for f in fields(request)
         if f.name not in RESEARCH_NEUTRAL_FLAGS and f.name not in PROCEDURE_RUN_CONTROL_FIELDS
     }
-    payload["committee_target_gross"] = _resolved_committee_target_gross(request)
     payload["params_snapshot"] = capture_params_snapshot()
     payload.update(inert_dependent_overrides(request))
     raw = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"), default=str)

@@ -9,12 +9,12 @@ a real pipeline pass, so it stays fast per the repo's test-speed directive.
 
 from __future__ import annotations
 
+from src.mhs.contracts import MhsDiagnosticRequest
 import dataclasses
 
 import pandas as pd
 import pytest
 
-from src.mhs.pipeline.config import MhsRunConfig
 from src.quant.evaluation.policy import HOLDOUT_CUTOFF
 
 
@@ -28,7 +28,7 @@ def test_orchestrator_rejects_non_dev_partition() -> None:
     from src.mhs.pipeline.orchestrator import run_mhs_diagnostic
 
     with pytest.raises(RuntimeError, match="dev-only"):
-        run_mhs_diagnostic(MhsRunConfig(partition="holdout"))
+        run_mhs_diagnostic(MhsDiagnosticRequest(partition="holdout"))
 
 
 def test_orchestrator_rejects_end_past_holdout_cutoff() -> None:
@@ -36,7 +36,7 @@ def test_orchestrator_rejects_end_past_holdout_cutoff() -> None:
 
     past = str(HOLDOUT_CUTOFF + pd.Timedelta(days=1))
     with pytest.raises(RuntimeError, match="Holdout sealed"):
-        run_mhs_diagnostic(MhsRunConfig(end=past))
+        run_mhs_diagnostic(MhsDiagnosticRequest(end=past))
 
 
 def test_orchestrator_attaches_tree_memory_from_sampler(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -63,7 +63,7 @@ def test_orchestrator_attaches_tree_memory_from_sampler(monkeypatch: pytest.Monk
 
     monkeypatch.setattr(orchestrator, "_TreeMemorySampler", _FakeSampler)
 
-    result = orchestrator.run_mhs_diagnostic(MhsRunConfig())
+    result = orchestrator.run_mhs_diagnostic(MhsDiagnosticRequest())
 
     assert started == [True]
     assert stopped == [True]
@@ -99,7 +99,7 @@ def test_orchestrator_stops_sampler_even_if_run_stages_raises(
     monkeypatch.setattr(orchestrator, "_TreeMemorySampler", _FakeSampler)
 
     with pytest.raises(ValueError, match="boom"):
-        orchestrator.run_mhs_diagnostic(MhsRunConfig())
+        orchestrator.run_mhs_diagnostic(MhsDiagnosticRequest())
 
     assert stopped == [True]
 
@@ -136,19 +136,19 @@ def test_scenario_mhs_selection_exec_bounded_ceiling_02(
     monkeypatch.setattr(orchestrator, "run_stages", _fake_run_stages)
     monkeypatch.setattr(orchestrator, "_TreeMemorySampler", _FakeSampler)
 
-    orchestrator.run_mhs_diagnostic(MhsRunConfig(final_oos_2026h1=True))
+    orchestrator.run_mhs_diagnostic(MhsDiagnosticRequest(final_oos_2026h1=True))
     assert captured[-1].end == pd.Timestamp("2026-06-30 23:59:59", tz="UTC")
 
     with pytest.raises(RuntimeError, match="Holdout sealed") as excinfo:
         orchestrator.run_mhs_diagnostic(
-            MhsRunConfig(final_oos_2026h1=True, end="2026-07-15")
+            MhsDiagnosticRequest(final_oos_2026h1=True, end="2026-07-15")
         )
     message = str(excinfo.value)
     assert "2026-07-15" in message
     assert "2026-06-30" in message
 
     with pytest.raises(RuntimeError) as sealed_excinfo:
-        orchestrator.run_mhs_diagnostic(MhsRunConfig(end="2026-01-15"))
+        orchestrator.run_mhs_diagnostic(MhsDiagnosticRequest(end="2026-01-15"))
     assert "2025-12-31" in str(sealed_excinfo.value)
 
 
@@ -184,12 +184,12 @@ def test_SCENARIO_MHS_ORCHESTRATOR_RECORDS_CANONICAL_WINDOW(
     monkeypatch.setattr(orchestrator, "run_stages", _fake_run_stages)
     monkeypatch.setattr(orchestrator, "_TreeMemorySampler", _FakeSampler)
 
-    orchestrator.run_mhs_diagnostic(MhsRunConfig(final_oos_2026h1=True))
+    orchestrator.run_mhs_diagnostic(MhsDiagnosticRequest(final_oos_2026h1=True))
     final_ctx = captured[-1]
     assert final_ctx.resolved_end == final_ctx.end == MHS_FINAL_OOS_CUTOFF_2026H1
     assert str(final_ctx.resolved_end) != "None"
 
-    orchestrator.run_mhs_diagnostic(MhsRunConfig())
+    orchestrator.run_mhs_diagnostic(MhsDiagnosticRequest())
     default_ctx = captured[-1]
     assert str(default_ctx.resolved_end) == "2025-12-31 23:59:59+00:00"
 
@@ -201,5 +201,5 @@ def test_orchestrator_clears_all_market_data_caches(monkeypatch) -> None:
     monkeypatch.setattr(module, 'clear_mhs_market_data_caches', lambda: calls.append('clear'))
     monkeypatch.setattr(module, 'resolve_evaluation_end', lambda *a, **k: (_ for _ in ()).throw(RuntimeError('stop')) )
     with pytest.raises(RuntimeError, match='stop'):
-        module.run_mhs_diagnostic(module.MhsRunConfig())
+        module.run_mhs_diagnostic(module.MhsDiagnosticRequest())
     assert calls == ['clear']

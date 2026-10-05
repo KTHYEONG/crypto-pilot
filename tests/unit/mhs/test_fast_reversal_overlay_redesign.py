@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from tests.fixtures.mhs_requests import research_baseline
 import numpy as np
 import pandas as pd
 import pytest
@@ -159,7 +160,7 @@ def _request(root: Path, end: pd.Timestamp, **overrides) -> MhsDiagnosticRequest
         "execution_universe_size": 8,
     }
     kwargs.update(overrides)
-    return MhsDiagnosticRequest(**kwargs)
+    return research_baseline(**kwargs)
 
 
 def _fold_targets(mhs_market, request: MhsDiagnosticRequest, fold: AnchoredPurgedFold):
@@ -232,9 +233,9 @@ class TestTrendEfficiencyOverlayDefaultOff:
     """SCENARIO_MHS_TREND_EFFICIENCY_OVERLAY_DEFAULT_OFF_06"""
 
     def test_request_defaults_to_false(self) -> None:
-        request = MhsDiagnosticRequest()
+        request = research_baseline()
         assert request.trend_efficiency_overlay is False
-        assert MhsDiagnosticRequest(trend_efficiency_overlay=False) == request
+        assert research_baseline(trend_efficiency_overlay=False) == request
 
     def test_fold_targets_byte_identical_with_flag_omitted(self, mhs_market) -> None:
         root, end = mhs_market

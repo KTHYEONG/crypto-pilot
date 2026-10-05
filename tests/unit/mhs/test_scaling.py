@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+from tests.fixtures.mhs_requests import research_baseline
 import numpy as np
 import pandas as pd
 import pytest
 
-from src.mhs.contracts import MhsDiagnosticRequest
 from src.mhs import scaling
 from src.common.errors import DataIntegrityError
 from src.mhs.params import (
@@ -76,14 +76,14 @@ def test_replay_exposure_scale_override_equals_direct_composition() -> None:
     rng = np.random.default_rng(42)
     idx = pd.date_range("2021-01-01", periods=500, freq="D", tz="UTC")
     ref = pd.Series(rng.normal(0.0001, 0.01, 500), index=idx)
-    request = MhsDiagnosticRequest(pnl_vol_target_mode="growth_budget")
+    request = research_baseline(pnl_vol_target_mode="growth_budget")
     overridden = scaling._replay_exposure_scale(ref, request, 0.3509)
     composed = scaling._committee_capital_replay_scale(
         scaling._exante_vol_target_scale(ref, target_vol=0.3509, cap=1.0),
         ref, request.committee_capital, request.committee_kelly_sizing,
     )
     pd.testing.assert_series_equal(overridden, composed, check_exact=True)
-    default_request = MhsDiagnosticRequest(pnl_vol_target_mode="exante_target")
+    default_request = research_baseline(pnl_vol_target_mode="exante_target")
     expected_default = scaling._committee_capital_replay_scale(
         scaling._exante_vol_target_scale(ref, cap=1.0),
         ref, default_request.committee_capital, default_request.committee_kelly_sizing,
@@ -99,7 +99,7 @@ def test_replay_exposure_scale_growth_budget_mode() -> None:
     rng = np.random.default_rng(42)
     idx = pd.date_range("2021-01-01", periods=500, freq="D", tz="UTC")
     r = pd.Series(rng.normal(0.0001, 0.01, 500), index=idx)
-    request = MhsDiagnosticRequest(
+    request = research_baseline(
         pnl_vol_target_mode="growth_budget",
         committee_capital=True,
     )
@@ -281,12 +281,12 @@ def test_scenario_mhs_exposure_ceiling_04_replay_two_sided_uses_policy_ceiling(
     rng = np.random.default_rng(42)
     idx = pd.date_range("2021-01-01", periods=4 * 365, freq="D", tz="UTC")
     ref = pd.Series(rng.normal(0.0002, 0.015, len(idx)), index=idx)
-    two_sided = MhsDiagnosticRequest(
+    two_sided = research_baseline(
         pnl_vol_target_mode="growth_budget",
         growth_envelope="growth",
         exposure_scale_two_sided=True,
     )
-    one_sided = MhsDiagnosticRequest(
+    one_sided = research_baseline(
         pnl_vol_target_mode="growth_budget",
         growth_envelope="growth",
         exposure_scale_two_sided=False,
@@ -348,10 +348,10 @@ def test_scenario_mhs_kelly_two_sided_01_resolved_cap_policy_matrix() -> None:
         ),
     ]
     for kwargs, expected in cases:
-        assert scaling.resolved_exposure_cap(MhsDiagnosticRequest(**kwargs)) == expected
+        assert scaling.resolved_exposure_cap(research_baseline(**kwargs)) == expected
     # The (two_sided=True, median_relative) combination is rejected by request
     # validation; resolved_exposure_cap still resolves it to 1.0 defensively.
-    median_req = MhsDiagnosticRequest(pnl_vol_target_mode="median_relative")
+    median_req = research_baseline(pnl_vol_target_mode="median_relative")
     object.__setattr__(median_req, "exposure_scale_two_sided", True)
     assert scaling.resolved_exposure_cap(median_req) == 1.0
 
@@ -406,7 +406,7 @@ def test_scenario_mhs_kelly_two_sided_03_replay_threads_cap_through_blend(
     rng = np.random.default_rng(20260824)
     idx = pd.date_range("2021-01-01", periods=500, freq="D", tz="UTC")
     ref = pd.Series(rng.normal(0.002, 0.01, len(idx)), index=idx)
-    req = MhsDiagnosticRequest(
+    req = research_baseline(
         pnl_vol_target_mode="growth_budget",
         growth_envelope="growth_extreme",
         exposure_scale_two_sided=True,
@@ -427,7 +427,7 @@ def test_scenario_mhs_kelly_two_sided_03_replay_threads_cap_through_blend(
     monkeypatch.undo()
     assert threaded.mean() > de_threaded.mean()
 
-    no_kelly_req = MhsDiagnosticRequest(
+    no_kelly_req = research_baseline(
         pnl_vol_target_mode="growth_budget",
         growth_envelope="growth_extreme",
         exposure_scale_two_sided=True,
@@ -456,7 +456,7 @@ def test_scenario_mhs_kelly_two_sided_04_legacy_paths_byte_identical(
     rng = np.random.default_rng(42)
     idx = pd.date_range("2021-01-01", periods=500, freq="D", tz="UTC")
     ref = pd.Series(rng.normal(0.0001, 0.01, len(idx)), index=idx)
-    request = MhsDiagnosticRequest(
+    request = research_baseline(
         pnl_vol_target_mode=mode,
         growth_envelope=envelope,
         exposure_scale_two_sided=False,
@@ -623,7 +623,7 @@ def test_constant_risk_top_level_target_vol_matches_boundary() -> None:
     rng = np.random.default_rng(41)
     idx = pd.date_range("2021-01-01", periods=5 * 365, freq="D", tz="UTC")
     ref = pd.Series(rng.normal(0.0003, 0.02, len(idx)), index=idx)
-    req = MhsDiagnosticRequest(
+    req = research_baseline(
         pnl_vol_target_mode="constant_risk", growth_envelope="growth_extreme",
         exposure_scale_two_sided=True,
     )
@@ -642,13 +642,13 @@ def test_constant_risk_bypasses_kelly_blend() -> None:
     rng = np.random.default_rng(31)
     idx = pd.date_range("2021-01-01", periods=500, freq="D", tz="UTC")
     ref = pd.Series(rng.normal(0.0008, 0.02, 500), index=idx)
-    kelly_req = MhsDiagnosticRequest(
+    kelly_req = research_baseline(
         pnl_vol_target_mode="constant_risk",
         exposure_scale_two_sided=True,
         committee_capital=True,
         committee_kelly_sizing=True,
     )
-    plain_req = MhsDiagnosticRequest(
+    plain_req = research_baseline(
         pnl_vol_target_mode="constant_risk",
         exposure_scale_two_sided=True,
         committee_capital=True,
@@ -659,13 +659,13 @@ def test_constant_risk_bypasses_kelly_blend() -> None:
         scaling._replay_exposure_scale(ref, plain_req),
         check_exact=True,
     )
-    gb_kelly = MhsDiagnosticRequest(
+    gb_kelly = research_baseline(
         pnl_vol_target_mode="growth_budget",
         exposure_scale_two_sided=True,
         committee_capital=True,
         committee_kelly_sizing=True,
     )
-    gb_plain = MhsDiagnosticRequest(
+    gb_plain = research_baseline(
         pnl_vol_target_mode="growth_budget",
         exposure_scale_two_sided=True,
         committee_capital=True,
@@ -682,7 +682,7 @@ def test_legacy_exposure_modes_byte_identical() -> None:
     idx = pd.date_range("2021-01-01", periods=500, freq="D", tz="UTC")
     ref = pd.Series(rng.normal(0.0001, 0.01, 500), index=idx)
 
-    median_req = MhsDiagnosticRequest(pnl_vol_target_mode="median_relative")
+    median_req = research_baseline(pnl_vol_target_mode="median_relative")
     pd.testing.assert_series_equal(
         scaling._replay_exposure_scale(ref, median_req),
         scaling._pnl_vol_target_scale(ref),
@@ -690,7 +690,7 @@ def test_legacy_exposure_modes_byte_identical() -> None:
     )
     assert scaling.resolved_exposure_cap(median_req) == 1.0
 
-    exante_req = MhsDiagnosticRequest(pnl_vol_target_mode="exante_target")
+    exante_req = research_baseline(pnl_vol_target_mode="exante_target")
     pd.testing.assert_series_equal(
         scaling._replay_exposure_scale(ref, exante_req),
         scaling._exante_vol_target_scale(ref, cap=1.0),
@@ -698,7 +698,7 @@ def test_legacy_exposure_modes_byte_identical() -> None:
     )
     assert scaling.resolved_exposure_cap(exante_req) == 1.0
 
-    gb_req = MhsDiagnosticRequest(
+    gb_req = research_baseline(
         pnl_vol_target_mode="growth_budget",
         growth_envelope="growth",
         exposure_scale_two_sided=True,
@@ -717,7 +717,7 @@ def test_legacy_exposure_modes_byte_identical() -> None:
     )
     assert scaling.resolved_exposure_cap(gb_req) == 2.0
 
-    constant_req = MhsDiagnosticRequest(pnl_vol_target_mode="constant_risk")
+    constant_req = research_baseline(pnl_vol_target_mode="constant_risk")
     assert scaling.is_streaming_scale_mode(constant_req) is False
 
 
@@ -815,7 +815,7 @@ def test_scenario_mhs_dd_brake_06_drawdown_brake_replay_default_bit_identical() 
     rng = np.random.default_rng(37)
     idx = pd.date_range("2021-01-01", periods=500, freq="D", tz="UTC")
     ref = pd.Series(rng.normal(0.0005, 0.015, 500), index=idx)
-    request = MhsDiagnosticRequest(pnl_vol_target_mode="constant_risk")
+    request = research_baseline(pnl_vol_target_mode="constant_risk")
     expected = scaling._constant_risk_scale(
         ref,
         target_vol=scaling._constant_risk_target_vol(ref, _resolved_growth_envelope(request)),
@@ -824,7 +824,7 @@ def test_scenario_mhs_dd_brake_06_drawdown_brake_replay_default_bit_identical() 
     pd.testing.assert_series_equal(
         scaling._replay_exposure_scale(ref, request), expected, check_exact=True,
     )
-    braked_request = MhsDiagnosticRequest(
+    braked_request = research_baseline(
         pnl_vol_target_mode="constant_risk",
         exposure_drawdown_brake=True,
     )
@@ -862,7 +862,7 @@ def test_scenario_mhs_dd_brake_07_drawdown_brake_non_fitted_target_vol() -> None
 # SCENARIO_MHS_DD_BRAKE_08_NEVER_STREAMING
 @pytest.mark.parametrize("mode", ["median_relative", "exante_target"])
 def test_scenario_mhs_dd_brake_08_drawdown_brake_never_streaming(mode: str) -> None:
-    request = MhsDiagnosticRequest(
+    request = research_baseline(
         pnl_vol_target_mode=mode,
         growth_envelope="conservative",
         committee_capital=False,
@@ -870,7 +870,7 @@ def test_scenario_mhs_dd_brake_08_drawdown_brake_never_streaming(mode: str) -> N
     assert scaling.is_streaming_scale_mode(request) is True
     # 브레이크 ON + 비constant_risk는 validation이 거부하는 형태지만,
     # 스트리밍 가드의 방어깊이(I-BRAKE-NO-STREAM)는 모드 무관하게 단독 검증한다.
-    braked = MhsDiagnosticRequest(pnl_vol_target_mode="constant_risk")
+    braked = research_baseline(pnl_vol_target_mode="constant_risk")
     object.__setattr__(braked, "pnl_vol_target_mode", mode)
     object.__setattr__(braked, "exposure_drawdown_brake", True)
     assert scaling.is_streaming_scale_mode(braked) is False
@@ -879,17 +879,17 @@ def test_scenario_mhs_dd_brake_08_drawdown_brake_never_streaming(mode: str) -> N
 # SCENARIO_MHS_DD_BRAKE_09_REQUEST_VALIDATION
 def test_scenario_mhs_dd_brake_09_drawdown_brake_request_validation() -> None:
     with pytest.raises(ValueError, match="constant_risk"):
-        MhsDiagnosticRequest(
+        research_baseline(
             pnl_vol_target_mode="growth_budget",
             exposure_drawdown_brake=True,
         )
     with pytest.raises(ValueError, match="pnl_vol_target"):
-        MhsDiagnosticRequest(
+        research_baseline(
             pnl_vol_target=False,
             pnl_vol_target_mode="constant_risk",
             exposure_drawdown_brake=True,
         )
-    MhsDiagnosticRequest(
+    research_baseline(
         pnl_vol_target=True,
         pnl_vol_target_mode="constant_risk",
         exposure_drawdown_brake=True,
@@ -1045,13 +1045,12 @@ def test_compute_exposure_scale_uses_sealed_kelly_values_and_rejects_overlap() -
 
 def test_replay_exposure_scale_wires_resolved_policy_and_warmup(monkeypatch) -> None:
     import pandas as pd
-    from src.mhs.contracts import MhsDiagnosticRequest
     import src.mhs.scaling as module
 
     idx = pd.date_range("2026-01-03", periods=3, freq="1D", tz="UTC")
     ref = pd.Series([0.01, -0.01, 0.02], index=idx, dtype="float64")
     warm = pd.Series([0.01, 0.01], index=pd.date_range("2026-01-01", periods=2, freq="1D", tz="UTC"), dtype="float64")
-    request = MhsDiagnosticRequest(pnl_vol_target_mode="growth_budget", committee_capital=True, committee_kelly_sizing=True, exposure_scale_two_sided=True, growth_envelope="growth")
+    request = research_baseline(pnl_vol_target_mode="growth_budget", committee_capital=True, committee_kelly_sizing=True, exposure_scale_two_sided=True, growth_envelope="growth")
     captured = {}
     def fake_compute(reference, policy, *, warmup_returns=None):
         captured.update(reference=reference, policy=policy, warmup=warmup_returns)

@@ -1,17 +1,17 @@
+from tests.fixtures.mhs_requests import research_baseline
 # ruff: noqa
 def test_build_deployment_policy_is_single_typed_conversion_seam() -> None:
     import dataclasses
     import pandas as pd
     from src.mhs.contracts import MhsDiagnosticRequest
     from src.mhs.deployment_policy import build_deployment_policy
-    from src.mhs.pipeline.config import MhsRunConfig
 
-    request = MhsDiagnosticRequest(**dataclasses.asdict(MhsRunConfig()))
+    request = MhsDiagnosticRequest()
     policy = build_deployment_policy(request, slow_horizon_hours=168, committee_member_weights={"flow_imb_720h": 0.4, "flow_imb_168h": 0.6}, admitted_members=("flow_imb_720h", "flow_imb_168h"), target_annual_vol=0.35, exposure_cap=3.0)
-    restored = policy.target_weights.to_request()
-    assert restored.execution_universe_size == request.execution_universe_size
-    assert restored.committee_member_set == request.committee_member_set
-    assert restored.committee_target_gross == request.committee_target_gross
+    from src.mhs.deployment_policy import TargetWeightPolicy
+
+    for field in dataclasses.fields(TargetWeightPolicy):
+        assert getattr(policy.target_weights, field.name) == getattr(request, field.name)
     assert policy.sizing.target_annual_vol == 0.35
     assert policy.sizing.kelly_window_days == 42
     assert policy.sizing.kelly_lcb_z == 0.0
@@ -69,7 +69,6 @@ def test_live_parity_blockers_is_single_registry_seam() -> None:
         LIVE_UNSUPPORTED_REQUEST_FLAGS,
         live_parity_blockers,
     )
-    from src.mhs.pipeline.config import MhsRunConfig
 
     # Given: 등록부의 모든 키는 실제 요청 필드여야 한다(오탈자 fail-closed)
     request_fields = {f.name for f in fields(MhsDiagnosticRequest)}
@@ -77,14 +76,11 @@ def test_live_parity_blockers_is_single_registry_seam() -> None:
     assert "name_drift_trim" in LIVE_UNSUPPORTED_REQUEST_FLAGS
 
     # When / Then: 기본값은 차단 없음
-    assert live_parity_blockers(MhsRunConfig()) == ()
-    assert live_parity_blockers(MhsDiagnosticRequest(**dataclasses.asdict(MhsRunConfig()))) == ()
+    assert live_parity_blockers(MhsDiagnosticRequest()) == ()
     assert live_parity_blockers(None) == ()
 
-    # When / Then: trim ON 은 두 타입 모두에서 동일하게 차단
-    trim_config = MhsRunConfig(name_drift_trim=True)
-    trim_request = MhsDiagnosticRequest(**dataclasses.asdict(trim_config))
-    assert live_parity_blockers(trim_config) == ("name_drift_trim",)
+    # When / Then: trim ON 차단
+    trim_request = MhsDiagnosticRequest(name_drift_trim=True)
     assert live_parity_blockers(trim_request) == ("name_drift_trim",)
 
 
@@ -95,4 +91,4 @@ def test_request_parser_rejects_retired_parity_flags() -> None:
     from src.mhs.contracts import MhsDiagnosticRequest
 
     with pytest.raises(TypeError):
-        MhsDiagnosticRequest(fill_mark_parity_gate=True)  # type: ignore[call-arg]
+        research_baseline(fill_mark_parity_gate=True)  # type: ignore[call-arg]

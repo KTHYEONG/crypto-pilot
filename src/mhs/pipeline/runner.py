@@ -1,10 +1,10 @@
 """Shared stage runner for the MHS horizon diagnostic.
 
-Both ``run_mhs_horizon_diagnostic`` (``MhsDiagnosticRequest`` entry) and
-``run_mhs_diagnostic`` (``MhsRunConfig`` entry) build a ``PipelineContext`` and
-drive the same six stage functions in the original computation order. Stage
-functions are imported lazily so there is no import-time cycle with
-``evaluation.py`` (which the stage modules import from).
+One entry type (``MhsDiagnosticRequest``), two entry functions
+(``run_mhs_diagnostic``, delegating ``run_mhs_horizon_diagnostic``), build a
+``PipelineContext`` and drive the same six stage functions in the original
+computation order. Stage functions are imported lazily so there is no
+import-time cycle with ``evaluation.py`` (which the stage modules import from).
 """
 
 from __future__ import annotations

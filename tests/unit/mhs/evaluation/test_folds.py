@@ -6,6 +6,7 @@ Behavioral coverage lives in the moved suite
 
 from __future__ import annotations
 
+from tests.fixtures.mhs_requests import research_baseline
 import src.mhs.evaluation.folds as folds
 
 
@@ -16,11 +17,10 @@ def test_folds_module_present() -> None:
 
 def test_run_anchored_fold_in_memory_window_reuse(monkeypatch) -> None:
     from src.mhs.evidence import phase_1_anchored_purged_folds
-    from src.mhs.contracts import MhsDiagnosticRequest
     from src.mhs.evaluation import folds
 
     fold_list = phase_1_anchored_purged_folds()
-    req = MhsDiagnosticRequest(start="2021-01-01", end="2021-03-31", execution_universe_size=8)
+    req = research_baseline(start="2021-01-01", end="2021-03-31", execution_universe_size=8)
     # Verified invocation signature accepts shared_token
     assert callable(folds._run_anchored_fold)
 
@@ -113,7 +113,6 @@ def test_fold_train_reference_rejects_empty_window() -> None:
 def test_run_anchored_fold_records_sizing_reference_telemetry(mhs_market, monkeypatch) -> None:
     import pandas as pd
     import src.mhs.evaluation.folds as folds_mod
-    from src.mhs.contracts import MhsDiagnosticRequest
     from src.mhs.evaluation.folds import _run_anchored_fold
     from src.mhs.marks import _load_funding_series
     from src.mhs.resources import _StageRecorder
@@ -127,7 +126,7 @@ def test_run_anchored_fold_records_sizing_reference_telemetry(mhs_market, monkey
         if symbol_partition(s) == "dev"
     ][:8]
     funding_by_symbol, _ = _load_funding_series(symbols)
-    request = MhsDiagnosticRequest(
+    request = research_baseline(
         start=str(_START), end=str(end), data_root=str(root),
         execution_timeframe="3m", log_run=False,
     )

@@ -6,6 +6,7 @@ Behavioral coverage lives in the moved suite
 
 from __future__ import annotations
 
+from tests.fixtures.mhs_requests import research_baseline
 import pytest
 import src.mhs.evaluation.windows as windows
 from src.mhs.backtest.contracts import ProcessPath
@@ -1820,7 +1821,6 @@ def test_book_outcome_propagates_live_bound_count(monkeypatch, tmp_path) -> None
     import pandas as pd
 
     import src.mhs.evaluation.windows as _w
-    from src.mhs.contracts import MhsDiagnosticRequest
     from src.mhs.types import BOOK_SPECS, ExecutionSpec
 
     start = pd.Timestamp("2022-01-01", tz="UTC")
@@ -1848,7 +1848,7 @@ def test_book_outcome_propagates_live_bound_count(monkeypatch, tmp_path) -> None
         return iter(())
 
     monkeypatch.setattr(_w, "_iter_mhs_execution_windows", _capture)
-    request = MhsDiagnosticRequest(touch_diagnostic=True)
+    request = research_baseline(touch_diagnostic=True)
     phase = type("P", (), {})()
     report, _ = _w._book_outcome(
         "blend", BOOK_SPECS["fast_reversal"], 1, step_grid, weights_step, grid_1h, opens, bar_funding,

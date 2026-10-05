@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+from tests.fixtures.mhs_requests import research_baseline
 import numpy as np
 import pandas as pd
 
@@ -59,7 +60,6 @@ ev = _types.SimpleNamespace(
     renormalize_within_mask=_books.renormalize_within_mask,
 )
 import src.mhs.scaling as scaling
-from src.mhs.contracts import MhsDiagnosticRequest
 from src.common.errors import DataIntegrityError
 from src.mhs.types import BookSpec, ExecutionSpec, HorizonBand
 from src.mhs.execution import SimulatedInventoryLedgerResult
@@ -299,7 +299,7 @@ def _build_book_outcome_args(mhs_market) -> dict[str, object]:
         if symbol_partition(s) == "dev"
     ][:8]
     funding_by_symbol, _ = ev._load_funding_series(symbols)
-    request = MhsDiagnosticRequest(
+    request = research_baseline(
         start=str(_START), end=str(end), data_root=str(root),
         execution_timeframe="3m", log_run=False,
     )
@@ -627,7 +627,7 @@ def _build_books_concurrent_args(
         if symbol_partition(s) == "dev"
     ]
     funding_by_symbol, _ = ev._load_funding_series(symbols)
-    request = MhsDiagnosticRequest(
+    request = research_baseline(
         start=str(_START), end=str(end), data_root=str(root),
         execution_timeframe="3m", log_run=False,
         **({"execution_universe_size": universe_size} if universe_size is not None else {}),
@@ -1086,7 +1086,7 @@ def _slow_book_panel_inputs(mhs_market):
         if symbol_partition(s) == "dev"
     ]
     funding_by_symbol, _ = ev._load_funding_series(symbols)
-    request = MhsDiagnosticRequest(
+    request = research_baseline(
         start=str(_START), end=str(end), data_root=str(root),
         execution_timeframe="3m", log_run=False,
         execution_universe_size=8,

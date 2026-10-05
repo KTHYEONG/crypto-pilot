@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import logging
 import re
 import types
@@ -81,17 +82,16 @@ def test_mhs_diagnostic_touch_flag_threaded_to_request(monkeypatch) -> None:
     """SCENARIO_MHS_TOUCH_CLI_FLAG: ``--touch-diagnostic`` is parsed and
     threaded into the constructed ``MhsDiagnosticRequest``; omitting it
     defaults to False."""
-    from src.mhs.contracts import MhsDiagnosticRequest
+    from src.mhs.pipeline.config import request_from_namespace as real_request_from_namespace
 
     captured: dict = {}
 
-    real_request = MhsDiagnosticRequest
-
     def _spy_request(*args, **kwargs):
-        captured.update(kwargs)
-        return real_request(*args, **kwargs)
+        request = real_request_from_namespace(*args, **kwargs)
+        captured.update(dataclasses.asdict(request))
+        return request
 
-    monkeypatch.setattr("src.mhs.contracts.MhsDiagnosticRequest", _spy_request)
+    monkeypatch.setattr("src.mhs.pipeline.config.request_from_namespace", _spy_request)
     monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda config: _fake_report())
     monkeypatch.setattr("src.mhs.report.persist.persist_mhs_horizon_diagnostic_report", lambda *a, **k: None)
 
@@ -115,17 +115,16 @@ def test_mhs_diagnostic_fold_safe_horizon_flag_threaded_to_request(monkeypatch) 
     """SCENARIO_MHS_FOLD_SAFE_HORIZON_08_CLI_FLAG_THREADS_THROUGH:
     ``--fold-safe-horizon`` is parsed and threaded into the constructed
     ``MhsDiagnosticRequest``; omitting it defaults to False."""
-    from src.mhs.contracts import MhsDiagnosticRequest
+    from src.mhs.pipeline.config import request_from_namespace as real_request_from_namespace
 
     captured: dict = {}
 
-    real_request = MhsDiagnosticRequest
-
     def _spy_request(*args, **kwargs):
-        captured.update(kwargs)
-        return real_request(*args, **kwargs)
+        request = real_request_from_namespace(*args, **kwargs)
+        captured.update(dataclasses.asdict(request))
+        return request
 
-    monkeypatch.setattr("src.mhs.contracts.MhsDiagnosticRequest", _spy_request)
+    monkeypatch.setattr("src.mhs.pipeline.config.request_from_namespace", _spy_request)
     monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda config: _fake_report())
     monkeypatch.setattr("src.mhs.report.persist.persist_mhs_horizon_diagnostic_report", lambda *a, **k: None)
 
@@ -149,17 +148,16 @@ def test_mhs_diagnostic_ladder_flag_threaded_to_request(monkeypatch) -> None:
     """SCENARIO_MHS_LADDER_CLI_FLAG: ``--ladder-diagnostic`` is parsed and
     threaded into the constructed ``MhsDiagnosticRequest``; omitting it
     defaults to False."""
-    from src.mhs.contracts import MhsDiagnosticRequest
+    from src.mhs.pipeline.config import request_from_namespace as real_request_from_namespace
 
     captured: dict = {}
 
-    real_request = MhsDiagnosticRequest
-
     def _spy_request(*args, **kwargs):
-        captured.update(kwargs)
-        return real_request(*args, **kwargs)
+        request = real_request_from_namespace(*args, **kwargs)
+        captured.update(dataclasses.asdict(request))
+        return request
 
-    monkeypatch.setattr("src.mhs.contracts.MhsDiagnosticRequest", _spy_request)
+    monkeypatch.setattr("src.mhs.pipeline.config.request_from_namespace", _spy_request)
     monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda config: _fake_report())
     monkeypatch.setattr("src.mhs.report.persist.persist_mhs_horizon_diagnostic_report", lambda *a, **k: None)
 
@@ -183,17 +181,16 @@ def test_mhs_diagnostic_crash_tilt_alpha_flag_threaded_to_request(monkeypatch) -
     """The opt-in ``--crash-regime-tilt-alpha`` is parsed and threaded into the
     constructed ``MhsDiagnosticRequest``; the default stays None (disabled,
     byte-identical to the fully dollar-neutral book)."""
-    from src.mhs.contracts import MhsDiagnosticRequest
+    from src.mhs.pipeline.config import request_from_namespace as real_request_from_namespace
 
     captured: dict = {}
 
-    real_request = MhsDiagnosticRequest
-
     def _spy_request(*args, **kwargs):
-        captured.update(kwargs)
-        return real_request(*args, **kwargs)
+        request = real_request_from_namespace(*args, **kwargs)
+        captured.update(dataclasses.asdict(request))
+        return request
 
-    monkeypatch.setattr("src.mhs.contracts.MhsDiagnosticRequest", _spy_request)
+    monkeypatch.setattr("src.mhs.pipeline.config.request_from_namespace", _spy_request)
     monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda config: _fake_report())
     monkeypatch.setattr("src.mhs.report.persist.persist_mhs_horizon_diagnostic_report", lambda *a, **k: None)
 
@@ -221,17 +218,16 @@ def test_mhs_diagnostic_trend_sleeve_flags_threaded_to_request(monkeypatch) -> N
     False) and ``--trend-sleeve-gross`` (type=float, default 0.0) are parsed and
     threaded into the constructed ``MhsDiagnosticRequest``; omitting both yields
     the off values."""
-    from src.mhs.contracts import MhsDiagnosticRequest
+    from src.mhs.pipeline.config import request_from_namespace as real_request_from_namespace
 
     captured: dict = {}
 
-    real_request = MhsDiagnosticRequest
-
     def _spy_request(*args, **kwargs):
-        captured.update(kwargs)
-        return real_request(*args, **kwargs)
+        request = real_request_from_namespace(*args, **kwargs)
+        captured.update(dataclasses.asdict(request))
+        return request
 
-    monkeypatch.setattr("src.mhs.contracts.MhsDiagnosticRequest", _spy_request)
+    monkeypatch.setattr("src.mhs.pipeline.config.request_from_namespace", _spy_request)
     monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda config: _fake_report())
     monkeypatch.setattr("src.mhs.report.persist.persist_mhs_horizon_diagnostic_report", lambda *a, **k: None)
 
@@ -264,17 +260,16 @@ def test_mhs_diagnostic_alpha_engine_flags_threaded_to_request(monkeypatch) -> N
     ``--beta-neutralize`` and ``--ensemble-signal`` parse into the matching
     ``MhsDiagnosticRequest`` fields, and omitting all three reproduces the
     current defaults."""
-    from src.mhs.contracts import MhsDiagnosticRequest
+    from src.mhs.pipeline.config import request_from_namespace as real_request_from_namespace
 
     captured: dict = {}
 
-    real_request = MhsDiagnosticRequest
-
     def _spy_request(*args, **kwargs):
-        captured.update(kwargs)
-        return real_request(*args, **kwargs)
+        request = real_request_from_namespace(*args, **kwargs)
+        captured.update(dataclasses.asdict(request))
+        return request
 
-    monkeypatch.setattr("src.mhs.contracts.MhsDiagnosticRequest", _spy_request)
+    monkeypatch.setattr("src.mhs.pipeline.config.request_from_namespace", _spy_request)
     monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda config: _fake_report())
     monkeypatch.setattr("src.mhs.report.persist.persist_mhs_horizon_diagnostic_report", lambda *a, **k: None)
 
@@ -315,17 +310,16 @@ def test_mhs_diagnostic_multi_feature_flag_threaded_to_request(monkeypatch) -> N
     """SCENARIO_CLI_MULTI_FEATURE_FLAG: ``--multi-feature-book`` (store_true,
     default False) is parsed and threaded into the constructed
     ``MhsDiagnosticRequest``; omitting it yields multi_feature_book=False."""
-    from src.mhs.contracts import MhsDiagnosticRequest
+    from src.mhs.pipeline.config import request_from_namespace as real_request_from_namespace
 
     captured: dict = {}
 
-    real_request = MhsDiagnosticRequest
-
     def _spy_request(*args, **kwargs):
-        captured.update(kwargs)
-        return real_request(*args, **kwargs)
+        request = real_request_from_namespace(*args, **kwargs)
+        captured.update(dataclasses.asdict(request))
+        return request
 
-    monkeypatch.setattr("src.mhs.contracts.MhsDiagnosticRequest", _spy_request)
+    monkeypatch.setattr("src.mhs.pipeline.config.request_from_namespace", _spy_request)
     monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda config: _fake_report())
     monkeypatch.setattr("src.mhs.report.persist.persist_mhs_horizon_diagnostic_report", lambda *a, **k: None)
 
@@ -352,17 +346,16 @@ def test_mhs_diagnostic_committee_flag_threaded_to_request(monkeypatch) -> None:
     """SCENARIO_CLI_COMMITTEE_FLAG: ``--committee-book`` (store_true, default
     False) is parsed and threaded into the constructed ``MhsDiagnosticRequest``;
     omitting it yields committee_book=False."""
-    from src.mhs.contracts import MhsDiagnosticRequest
+    from src.mhs.pipeline.config import request_from_namespace as real_request_from_namespace
 
     captured: dict = {}
 
-    real_request = MhsDiagnosticRequest
-
     def _spy_request(*args, **kwargs):
-        captured.update(kwargs)
-        return real_request(*args, **kwargs)
+        request = real_request_from_namespace(*args, **kwargs)
+        captured.update(dataclasses.asdict(request))
+        return request
 
-    monkeypatch.setattr("src.mhs.contracts.MhsDiagnosticRequest", _spy_request)
+    monkeypatch.setattr("src.mhs.pipeline.config.request_from_namespace", _spy_request)
     monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda config: _fake_report())
     monkeypatch.setattr("src.mhs.report.persist.persist_mhs_horizon_diagnostic_report", lambda *a, **k: None)
 
@@ -392,17 +385,16 @@ def test_mhs_diagnostic_committee_kelly_sizing_defaults_on_and_opt_out(monkeypat
     ADR_20260823_MHS_KELLY_TWO_SIDED_SIZING) is on by default whenever
     committee capital is active; ``--no-committee-kelly-sizing`` opts back out
     to the pure vol-target scale while leaving committee capital on."""
-    from src.mhs.contracts import MhsDiagnosticRequest
+    from src.mhs.pipeline.config import request_from_namespace as real_request_from_namespace
 
     captured: dict = {}
 
-    real_request = MhsDiagnosticRequest
-
     def _spy_request(*args, **kwargs):
-        captured.update(kwargs)
-        return real_request(*args, **kwargs)
+        request = real_request_from_namespace(*args, **kwargs)
+        captured.update(dataclasses.asdict(request))
+        return request
 
-    monkeypatch.setattr("src.mhs.contracts.MhsDiagnosticRequest", _spy_request)
+    monkeypatch.setattr("src.mhs.pipeline.config.request_from_namespace", _spy_request)
     monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda config: _fake_report())
     monkeypatch.setattr("src.mhs.report.persist.persist_mhs_horizon_diagnostic_report", lambda *a, **k: None)
 
@@ -432,17 +424,16 @@ def test_mhs_diagnostic_committee_growth_diagnostic_flag_threaded_to_request(mon
     ``--committee-growth-diagnostic`` (store_true, default False, requires
     ``--committee-book``) is parsed and threaded into the constructed
     ``MhsDiagnosticRequest``; omitting it yields committee_growth_diagnostic=False."""
-    from src.mhs.contracts import MhsDiagnosticRequest
+    from src.mhs.pipeline.config import request_from_namespace as real_request_from_namespace
 
     captured: dict = {}
 
-    real_request = MhsDiagnosticRequest
-
     def _spy_request(*args, **kwargs):
-        captured.update(kwargs)
-        return real_request(*args, **kwargs)
+        request = real_request_from_namespace(*args, **kwargs)
+        captured.update(dataclasses.asdict(request))
+        return request
 
-    monkeypatch.setattr("src.mhs.contracts.MhsDiagnosticRequest", _spy_request)
+    monkeypatch.setattr("src.mhs.pipeline.config.request_from_namespace", _spy_request)
     monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda config: _fake_report())
     monkeypatch.setattr("src.mhs.report.persist.persist_mhs_horizon_diagnostic_report", lambda *a, **k: None)
 
@@ -511,17 +502,16 @@ def test_mhs_diagnostic_committee_capital_defaults_on_and_opt_out(monkeypatch) -
     ``--no-committee-capital`` opts back out to committee_capital=False (which
     also forces committee_regime_adaptive_tranche=False, since it requires
     committee capital)."""
-    from src.mhs.contracts import MhsDiagnosticRequest
+    from src.mhs.pipeline.config import request_from_namespace as real_request_from_namespace
 
     captured: dict = {}
 
-    real_request = MhsDiagnosticRequest
-
     def _spy_request(*args, **kwargs):
-        captured.update(kwargs)
-        return real_request(*args, **kwargs)
+        request = real_request_from_namespace(*args, **kwargs)
+        captured.update(dataclasses.asdict(request))
+        return request
 
-    monkeypatch.setattr("src.mhs.contracts.MhsDiagnosticRequest", _spy_request)
+    monkeypatch.setattr("src.mhs.pipeline.config.request_from_namespace", _spy_request)
     monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda config: _fake_report())
     monkeypatch.setattr("src.mhs.report.persist.persist_mhs_horizon_diagnostic_report", lambda *a, **k: None)
 
@@ -552,17 +542,16 @@ def test_mhs_diagnostic_committee_tranche_smoothing_flag_threaded_to_request(mon
     threaded into the constructed ``MhsDiagnosticRequest``; passing it
     overrides the regime-adaptive main-logic default (the two are mutually
     exclusive) rather than raising."""
-    from src.mhs.contracts import MhsDiagnosticRequest
+    from src.mhs.pipeline.config import request_from_namespace as real_request_from_namespace
 
     captured: dict = {}
 
-    real_request = MhsDiagnosticRequest
-
     def _spy_request(*args, **kwargs):
-        captured.update(kwargs)
-        return real_request(*args, **kwargs)
+        request = real_request_from_namespace(*args, **kwargs)
+        captured.update(dataclasses.asdict(request))
+        return request
 
-    monkeypatch.setattr("src.mhs.contracts.MhsDiagnosticRequest", _spy_request)
+    monkeypatch.setattr("src.mhs.pipeline.config.request_from_namespace", _spy_request)
     monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda config: _fake_report())
     monkeypatch.setattr("src.mhs.report.persist.persist_mhs_horizon_diagnostic_report", lambda *a, **k: None)
 
@@ -595,17 +584,16 @@ def test_mhs_diagnostic_committee_regime_adaptive_tranche_defaults_on_and_opt_ou
     regime-adaptive tranche (the best-measured configuration) is on by default
     whenever committee capital is active; ``--no-committee-regime-adaptive-tranche``
     opts back out to the raw committee book while leaving committee capital on."""
-    from src.mhs.contracts import MhsDiagnosticRequest
+    from src.mhs.pipeline.config import request_from_namespace as real_request_from_namespace
 
     captured: dict = {}
 
-    real_request = MhsDiagnosticRequest
-
     def _spy_request(*args, **kwargs):
-        captured.update(kwargs)
-        return real_request(*args, **kwargs)
+        request = real_request_from_namespace(*args, **kwargs)
+        captured.update(dataclasses.asdict(request))
+        return request
 
-    monkeypatch.setattr("src.mhs.contracts.MhsDiagnosticRequest", _spy_request)
+    monkeypatch.setattr("src.mhs.pipeline.config.request_from_namespace", _spy_request)
     monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda config: _fake_report())
     monkeypatch.setattr("src.mhs.report.persist.persist_mhs_horizon_diagnostic_report", lambda *a, **k: None)
 
@@ -635,17 +623,16 @@ def test_mhs_diagnostic_execution_coverage_gate_flag_threaded(monkeypatch) -> No
     ``--execution-coverage-gate`` (store_true, default False) is parsed and
     threaded into the constructed ``MhsDiagnosticRequest``; omitting it yields
     execution_coverage_gate=False."""
-    from src.mhs.contracts import MhsDiagnosticRequest
+    from src.mhs.pipeline.config import request_from_namespace as real_request_from_namespace
 
     captured: dict = {}
 
-    real_request = MhsDiagnosticRequest
-
     def _spy_request(*args, **kwargs):
-        captured.update(kwargs)
-        return real_request(*args, **kwargs)
+        request = real_request_from_namespace(*args, **kwargs)
+        captured.update(dataclasses.asdict(request))
+        return request
 
-    monkeypatch.setattr("src.mhs.contracts.MhsDiagnosticRequest", _spy_request)
+    monkeypatch.setattr("src.mhs.pipeline.config.request_from_namespace", _spy_request)
     monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda config: _fake_report())
     monkeypatch.setattr("src.mhs.report.persist.persist_mhs_horizon_diagnostic_report", lambda *a, **k: None)
 
@@ -692,18 +679,17 @@ def test_mhs_diagnostic_persist_stage_logged(monkeypatch, caplog) -> None:
 def test_mhs_diagnostic_persist_receives_request_object(monkeypatch) -> None:
     """SCENARIO_MHS_RESULT_LOG_07: ``_run_mhs_horizon_diagnostic`` threads the
     constructed ``MhsDiagnosticRequest`` into the persist call via ``request=``."""
-    from src.mhs.contracts import MhsDiagnosticRequest
+    from src.mhs.pipeline.config import request_from_namespace as real_request_from_namespace
 
     captured: dict = {}
     requests: list = []
-    real_request = MhsDiagnosticRequest
 
     def _spy_request(*args, **kwargs):
-        req = real_request(*args, **kwargs)
+        req = real_request_from_namespace(*args, **kwargs)
         requests.append(req)
         return req
 
-    monkeypatch.setattr("src.mhs.contracts.MhsDiagnosticRequest", _spy_request)
+    monkeypatch.setattr("src.mhs.pipeline.config.request_from_namespace", _spy_request)
     monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda config: _fake_report())
 
     def _spy_persist(*args, **kwargs):
@@ -729,17 +715,16 @@ def test_mhs_diagnostic_execution_timeframe_3m_default(monkeypatch) -> None:
     ``args.execution_timeframe == "3m"``; ``--execution-timeframe 3m`` is
     accepted; and the constructed ``MhsDiagnosticRequest`` carries
     ``execution_timeframe="3m"``."""
-    from src.mhs.contracts import MhsDiagnosticRequest
+    from src.mhs.pipeline.config import request_from_namespace as real_request_from_namespace
 
     captured: dict = {}
 
-    real_request = MhsDiagnosticRequest
-
     def _spy_request(*args, **kwargs):
-        captured.update(kwargs)
-        return real_request(*args, **kwargs)
+        request = real_request_from_namespace(*args, **kwargs)
+        captured.update(dataclasses.asdict(request))
+        return request
 
-    monkeypatch.setattr("src.mhs.contracts.MhsDiagnosticRequest", _spy_request)
+    monkeypatch.setattr("src.mhs.pipeline.config.request_from_namespace", _spy_request)
     monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda config: _fake_report())
     monkeypatch.setattr("src.mhs.report.persist.persist_mhs_horizon_diagnostic_report", lambda *a, **k: None)
 
@@ -764,18 +749,17 @@ def test_mhs_diagnostic_execution_timeframe_3m_default(monkeypatch) -> None:
 
 def test_cli_flags_threaded(monkeypatch) -> None:
     """SCENARIO_CLI_FLAGS_THREADED: new CLI args are threaded into MhsDiagnosticRequest."""
-    from src.mhs.contracts import MhsDiagnosticRequest
+    from src.mhs.pipeline.config import request_from_namespace as real_request_from_namespace
     import src.mhs.pipeline.orchestrator as orchestrator
     from src.mhs.types import FUNDING_CARRY_SLEEVE_WEIGHT
 
     captured: dict = {}
-    real_request = MhsDiagnosticRequest
-
     def _spy_request(*args, **kwargs):
-        captured.update(kwargs)
-        return real_request(*args, **kwargs)
+        request = real_request_from_namespace(*args, **kwargs)
+        captured.update(dataclasses.asdict(request))
+        return request
 
-    monkeypatch.setattr("src.mhs.contracts.MhsDiagnosticRequest", _spy_request)
+    monkeypatch.setattr("src.mhs.pipeline.config.request_from_namespace", _spy_request)
     monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda config: _fake_report())
     monkeypatch.setattr("src.mhs.report.persist.persist_mhs_horizon_diagnostic_report", lambda *a, **k: None)
 
@@ -848,7 +832,7 @@ def test_mhs_diagnostic_leverage_frontier_scan_short_circuit_scenario_mhs_levera
     assert args.leverage_frontier_scan is True
     assert args.leverage_frontier_multiples == LEVERAGE_FRONTIER_SCAN_MULTIPLES
     _run_mhs_horizon_diagnostic(args)
-    from src.mhs.pipeline.config import (
+    from src.mhs.params import (
         CLI_GROWTH_ENVELOPE_DEFAULT as _CLI_GROWTH_ENVELOPE_DEFAULT,
     )
 

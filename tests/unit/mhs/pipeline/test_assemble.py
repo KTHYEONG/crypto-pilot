@@ -12,12 +12,12 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any
 
+from src.mhs.contracts import MhsDiagnosticRequest
 import numpy as np
 import pandas as pd
 import pytest
 
 from src.mhs.resources import _StageRecorder
-from src.mhs.pipeline.config import MhsRunConfig
 from src.mhs.pipeline.context import PipelineContext
 from src.mhs.pipeline.stages.assemble import assemble_report
 from src.mhs.params import COMMITTEE_OOS_START
@@ -29,7 +29,7 @@ def _bare_context(recorder: _StageRecorder) -> PipelineContext:
     """Minimal PipelineContext: only the fields assemble_report reads."""
     grid = pd.DatetimeIndex([])
     ctx = PipelineContext(
-        config=MhsRunConfig(),
+        config=MhsDiagnosticRequest(),
         resolved_end=None,
         start=pd.Timestamp("2021-01-01", tz="UTC"),
         end=pd.Timestamp("2021-01-02", tz="UTC"),

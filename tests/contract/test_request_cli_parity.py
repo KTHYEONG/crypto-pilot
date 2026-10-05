@@ -92,24 +92,25 @@ def test_pnl_vol_target_mode_choices_match_cli_and_metadata() -> None:
 def test_scenario_mhs_dd_brake_10_cli_request_parity() -> None:
     """SCENARIO_MHS_DD_BRAKE_10_CLI_REQUEST_PARITY: --exposure-drawdown-brake is declared exactly
     once on the request (cli_param metadata) and mirrored by the hand-written
-    CLI; the MhsRunConfig no-arg parity stays intact with brake=False."""
+    CLI; the single-type no-arg parity stays intact with brake=False."""
     cli_flags = _mhs_cli_flags()
     meta_flags = _metadata_flags()
     assert "--exposure-drawdown-brake" in cli_flags
     assert "--exposure-drawdown-brake" in meta_flags
 
     from src.cli.main import build_root_parser
-    from src.mhs.pipeline.config import MhsRunConfig
+    from src.mhs.contracts import MhsDiagnosticRequest
+    from src.mhs.pipeline.config import request_from_namespace
 
     args = build_root_parser().parse_args(
         ["research", "run", "portfolio", "mhs-horizon-diagnostic"],
     )
     assert args.exposure_drawdown_brake is False
     assert (
-        dataclasses.asdict(MhsRunConfig.from_namespace(args))
-        == dataclasses.asdict(MhsRunConfig())
+        dataclasses.asdict(request_from_namespace(args))
+        == dataclasses.asdict(MhsDiagnosticRequest())
     )
-    assert dataclasses.asdict(MhsRunConfig())["exposure_drawdown_brake"] is False
+    assert dataclasses.asdict(MhsDiagnosticRequest())["exposure_drawdown_brake"] is False
 
 
 def test_data_policy_choices_match_cli_and_metadata() -> None:
@@ -166,36 +167,28 @@ def test_request_timeout_must_align_to_three_minutes() -> None:
 
 
 def test_deployment_policy_converts_3m_and_rejects_legacy() -> None:
+    import dataclasses
+
     import pytest
 
-    from src.mhs.deployment_policy import TargetWeightPolicy
     from src.mhs.contracts import MhsDiagnosticRequest
+    from src.mhs.deployment_policy import TargetWeightPolicy, build_deployment_policy
+    from tests.fixtures.mhs_requests import research_baseline
 
-    base = {
-        "execution_universe_size": 8,
-        "fast_book_mode": "single_horizon",
-        "slow_book_mode": "single_horizon",
-        "rebalance_filter": "per_symbol_deadband",
-        "beta_neutralize": False,
-        "ensemble_signal": "raw",
-        "trend_efficiency_overlay": False,
-        "trend_sleeve": False,
-        "trend_sleeve_gross": 0.0,
-        "crash_regime_tilt_alpha": None,
-        "committee_capital": False,
-        "committee_member_set": "risk_premia",
-        "committee_tranche_smoothing": False,
-        "committee_regime_adaptive_tranche": False,
-        "committee_target_gross": None,
-        "funding_carry_sleeve": False,
-        "funding_carry_weight": 0.0,
-    }
-    request = TargetWeightPolicy(execution_timeframe="3m", **base).to_request()  # type: ignore[arg-type]
-    assert isinstance(request, MhsDiagnosticRequest)
-    assert request.execution_timeframe == "3m"
-    for legacy in ("1m", "5m"):
-        with pytest.raises(ValueError, match="execution_timeframe"):
-            TargetWeightPolicy(execution_timeframe=legacy, **base).to_request()  # type: ignore[arg-type]
+    request = research_baseline(committee_capital=True)
+    policy = build_deployment_policy(
+        request,
+        slow_horizon_hours=168,
+        committee_member_weights={"a": 1.0},
+        admitted_members=("a",),
+        target_annual_vol=0.20,
+        exposure_cap=3.0,
+    )
+    for field in dataclasses.fields(TargetWeightPolicy):
+        assert getattr(policy.target_weights, field.name) == getattr(request, field.name)
+    assert policy.target_weights.execution_timeframe == "3m"
+    with pytest.raises(ValueError, match="execution_timeframe"):
+        MhsDiagnosticRequest(execution_timeframe="1m")  # type: ignore[arg-type]
 
 
 def test_execution_grids_use_three_minute_steps() -> None:

@@ -10,10 +10,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from src.mhs.data_policy import MHS_DATA_POLICY_DEFAULT
-from src.mhs.params import COMMITTEE_TARGET_GROSS_UNSET, COMMITTEE_TRANCHE_COUNT, GROWTH_ENVELOPE_DEFAULT
+from src.mhs.params import (
+    CLI_EXECUTION_UNIVERSE_SIZE_DEFAULT,
+    CLI_GROWTH_ENVELOPE_DEFAULT,
+    COMMITTEE_DEFAULT_MEMBER_SET,
+    COMMITTEE_TARGET_GROSS,
+    COMMITTEE_TRANCHE_COUNT,
+    FUNDING_CARRY_SLEEVE_WEIGHT,
+)
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -61,7 +68,15 @@ def cli_param(
 
 @dataclass(frozen=True, slots=True)
 class MhsDiagnosticRequest:
-    """Describe an MHS research replay against completed Binance trade OHLCV and settled funding. The request has a single fixed three-minute execution and valuation source; changing a research flag cannot silently switch the accounting price."""
+    """One MHS research replay request; the single configuration type from CLI to pipeline.
+
+    Defaults are the production configuration a no-argument CLI run executes,
+    so programmatic callers and the CLI cannot drift. Dependent features are
+    validated, never auto-normalized: turning committee capital off requires
+    stating its dependents explicitly (or using the CLI opt-out, which
+    resolves them). Three-minute OHLCV and settled funding are the only
+    historical economic feeds; no flag can switch the accounting price.
+    """
 
     start: str | pd.Timestamp | None = field(
         default=None,
@@ -82,7 +97,7 @@ class MhsDiagnosticRequest:
         ),
     )
     execution_universe_size: int = field(
-        default=30,
+        default=CLI_EXECUTION_UNIVERSE_SIZE_DEFAULT,
         metadata=cli_param(
             flag="--execution-universe-size",
             help="Number of top-liquidity symbols in the execution replay roster.",
@@ -182,7 +197,7 @@ class MhsDiagnosticRequest:
         ),
     )
     pnl_vol_target_mode: Literal["median_relative", "exante_target", "growth_budget", "constant_risk"] = field(
-        default="median_relative",
+        default="growth_budget",
         metadata=cli_param(
             flag="--pnl-vol-target-mode",
             help="P&L vol-target mode.",
@@ -206,7 +221,7 @@ class MhsDiagnosticRequest:
         metadata=cli_param(flag="--committee-book", help="Measure the wealth committee."),
     )
     committee_kelly_sizing: bool = field(
-        default=False,
+        default=True,
         metadata=cli_param(
             flag="--committee-kelly-sizing", help="Blend kelly sizing with vol target.",
             negate_flag="--no-committee-kelly-sizing",
@@ -217,13 +232,13 @@ class MhsDiagnosticRequest:
         metadata=cli_param(flag="--committee-growth-diagnostic", help="Report growth headroom."),
     )
     committee_capital: bool = field(
-        default=False,
+        default=True,
         metadata=cli_param(
             flag="--committee-capital", help="Build the committee capital book.", negate_flag="--no-committee-capital",
         ),
     )
     committee_member_set: Literal["risk_premia", "flow_momentum"] = field(
-        default="risk_premia",
+        default=cast(Literal["risk_premia", "flow_momentum"], COMMITTEE_DEFAULT_MEMBER_SET),
         metadata=cli_param(
             flag="--committee-member-set",
             help="Registered committee axis set.",
@@ -236,7 +251,7 @@ class MhsDiagnosticRequest:
         metadata=cli_param(flag="--committee-tranche-smoothing", help="Smooth the committee book."),
     )
     committee_regime_adaptive_tranche: bool = field(
-        default=False,
+        default=True,
         metadata=cli_param(
             flag="--committee-regime-adaptive-tranche",
             help="Per-row adaptive tranche choice.",
@@ -252,7 +267,7 @@ class MhsDiagnosticRequest:
         ),
     )
     committee_target_gross: float | None = field(
-        default=COMMITTEE_TARGET_GROSS_UNSET,  # type: ignore[assignment]
+        default=COMMITTEE_TARGET_GROSS,
         metadata=cli_param(
             flag="--committee-target-gross",
             help="Committee book target gross exposure.",
@@ -260,20 +275,20 @@ class MhsDiagnosticRequest:
         ),
     )
     committee_evidence_weighting: bool = field(
-        default=False,
+        default=True,
         metadata=cli_param(
             flag="--committee-evidence-weighting", help="Weight members by train evidence.",
             negate_flag="--no-committee-evidence-weighting",
         ),
     )
     funding_carry_sleeve: bool = field(
-        default=False,
+        default=True,
         metadata=cli_param(
             flag="--funding-carry-sleeve", help="Short the highest funding.", negate_flag="--no-funding-carry-sleeve",
         ),
     )
     funding_carry_weight: float = field(
-        default=0.0,
+        default=FUNDING_CARRY_SLEEVE_WEIGHT,
         metadata=cli_param(flag="--funding-carry-weight", help="Gross share of the carry sleeve."),
     )
     execution_coverage_gate: bool = field(
@@ -281,12 +296,10 @@ class MhsDiagnosticRequest:
         metadata=cli_param(flag="--execution-coverage-gate", help="Pre-flight coverage check."),
     )
     exposure_scale_two_sided: bool = field(
-        default=False,
+        default=True,
         metadata=cli_param(
             flag="--exposure-scale-two-sided",
             help="Allow lever-up above 1.0x.",
-            # Main logic default is ON at the MhsRunConfig effective-default
-            # owner layer; the CLI only exposes the negation.
             negate_flag="--no-exposure-scale-two-sided",
         ),
     )
@@ -303,7 +316,7 @@ class MhsDiagnosticRequest:
         metadata=cli_param(flag="--ram-guard", help="Enable the RAM guard.", negate_flag="--no-ram-guard"),
     )
     growth_envelope: str = field(
-        default=GROWTH_ENVELOPE_DEFAULT,
+        default=CLI_GROWTH_ENVELOPE_DEFAULT,
         metadata=cli_param(
             flag="--growth-envelope",
             help="Registered growth risk envelope.",
@@ -338,7 +351,7 @@ class MhsDiagnosticRequest:
 
     def __post_init__(self) -> None:
         from src.mhs.validation import validate_request
-        validate_request(self, COMMITTEE_TARGET_GROSS_UNSET)
+        validate_request(self)
 
 
 @dataclass(frozen=True, slots=True)

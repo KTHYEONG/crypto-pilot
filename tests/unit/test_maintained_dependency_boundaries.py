@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from tests.fixtures.mhs_requests import research_baseline
 import inspect
 import subprocess
 import sys
@@ -186,9 +187,9 @@ def test_full_three_minute_equivalence_scope() -> None:
     import dataclasses
 
     import src.application.mhs_supervisor as sup_mod
-    from src.mhs.pipeline.config import MhsRunConfig
+    from src.mhs.contracts import MhsDiagnosticRequest
 
-    fields = {f.name: f.default for f in dataclasses.fields(MhsRunConfig)}
+    fields = {f.name: f.default for f in dataclasses.fields(MhsDiagnosticRequest)}
     assert fields.get("execution_timeframe") == "3m"
     supervised_fields = {f.name for f in dataclasses.fields(sup_mod.MhsSupervisedRun)}
     assert {"wall_seconds", "sampled_tree_pss_peak_bytes", "memory_scope"} <= supervised_fields
@@ -259,7 +260,6 @@ def test_direct_owner_window_batch_call(monkeypatch: object) -> None:
     import pytest
 
     import src.mhs.evaluation.windows as windows
-    from src.mhs.contracts import MhsDiagnosticRequest
     from src.mhs.types import BOOK_SPECS
 
     grid = pd.date_range("2021-01-01", periods=4, freq="1h", tz="UTC")
@@ -293,7 +293,7 @@ def test_direct_owner_window_batch_call(monkeypatch: object) -> None:
 
     monkeypatch.setattr(windows, "replay_execution_window_batch_isolated", _boom)  # type: ignore[attr-defined]
 
-    request = MhsDiagnosticRequest()
+    request = research_baseline()
     with pytest.raises(SystemExit, match="batch-reached"):
         windows._book_outcome(
             "blend", BOOK_SPECS["fast_reversal"], 1, grid, weights, grid, opens, funding,
@@ -308,7 +308,6 @@ def test_direct_owner_fold_target_weights() -> None:
     import numpy as np
     import pandas as pd
 
-    from src.mhs.contracts import MhsDiagnosticRequest
     from src.mhs.evaluation.fold_weights import _build_fold_target_weights
     from src.mhs.evidence import AnchoredPurgedFold
 
@@ -329,7 +328,7 @@ def test_direct_owner_fold_target_weights() -> None:
         forward_dependency_hours=24, purge_hours=24,
     )
     funding = {c: pd.Series(0.0, index=idx) for c in cols}
-    req = dataclasses.replace(MhsDiagnosticRequest(), committee_capital=True, crash_regime_tilt_alpha=0.5)
+    req = dataclasses.replace(research_baseline(), committee_capital=True, crash_regime_tilt_alpha=0.5)
     targets, signal_at, roster, grid = _build_fold_target_weights(
         "root", fold, req, funding, base_panel=base_panel,
         require_minute_roster=False, panel_warmup_hours=24,

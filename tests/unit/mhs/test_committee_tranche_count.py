@@ -1,22 +1,24 @@
 # ruff: noqa
 from __future__ import annotations
 
+from tests.fixtures.mhs_requests import research_baseline
 import dataclasses
 
 import pytest
 
 from src.mhs.params import COMMITTEE_TRANCHE_COUNT, COMMITTEE_TRANCHE_COUNT_MAX
+from src.mhs.pipeline.config import request_from_namespace
 
 _CLI_BASE = ["research", "run", "portfolio", "mhs-horizon-diagnostic"]
 
 
 def _request(**overrides):
     from src.mhs.contracts import MhsDiagnosticRequest
-    from src.mhs.pipeline.config import MhsRunConfig
+    from src.mhs.pipeline.config import request_from_namespace
 
-    base = dataclasses.asdict(MhsRunConfig())
+    base = dataclasses.asdict(MhsDiagnosticRequest())
     base.update(overrides)
-    return MhsDiagnosticRequest(**base)
+    return research_baseline(**base)
 
 
 def _policy(request):
@@ -37,20 +39,20 @@ def test_committee_tranche_count_max_matches_shortest_member_lookback() -> None:
 
 def test_cli_committee_tranche_count_defaults_and_threads_to_config() -> None:
     from src.cli.main import build_root_parser
-    from src.mhs.pipeline.config import MhsRunConfig
+    from src.mhs.contracts import MhsDiagnosticRequest
 
     # Given no flag
-    default_cfg = MhsRunConfig.from_namespace(build_root_parser().parse_args(_CLI_BASE))
+    default_cfg = request_from_namespace(build_root_parser().parse_args(_CLI_BASE))
     # Then the default equals the registered constant and the bare config
     assert default_cfg.committee_tranche_count == COMMITTEE_TRANCHE_COUNT
-    assert MhsRunConfig().committee_tranche_count == COMMITTEE_TRANCHE_COUNT
-    assert dataclasses.asdict(default_cfg) == dataclasses.asdict(MhsRunConfig())
+    assert MhsDiagnosticRequest().committee_tranche_count == COMMITTEE_TRANCHE_COUNT
+    assert dataclasses.asdict(default_cfg) == dataclasses.asdict(MhsDiagnosticRequest())
 
     # When smoothing with an explicit count is requested
     args = build_root_parser().parse_args(
         [*_CLI_BASE, "--committee-tranche-smoothing", "--committee-tranche-count", "7"]
     )
-    cfg = MhsRunConfig.from_namespace(args)
+    cfg = request_from_namespace(args)
     # Then the count threads through and adaptive is disabled
     assert cfg.committee_tranche_count == 7
     assert cfg.committee_tranche_smoothing is True
@@ -110,11 +112,8 @@ def test_deployment_policy_roundtrips_committee_tranche_count() -> None:
         committee_tranche_smoothing=True, committee_regime_adaptive_tranche=False, committee_tranche_count=7,
     )
     policy = _policy(request)
-    # When the live seam restores the request
-    restored = policy.target_weights.to_request()
-    # Then the live book is rebuilt with the identical count and resolution
+    # Then the policy carries the identical count and resolution
     from src.mhs.research_go import _resolved_committee_tranche_count
 
     assert policy.target_weights.committee_tranche_count == 7
-    assert restored.committee_tranche_count == 7
-    assert _resolved_committee_tranche_count(restored) == _resolved_committee_tranche_count(request) == 7
+    assert _resolved_committee_tranche_count(request) == 7

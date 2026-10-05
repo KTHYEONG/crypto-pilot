@@ -6,6 +6,7 @@ through the ``stage_services`` seam after the P4 refactor (previously private
 """
 
 from __future__ import annotations
+from src.mhs.contracts import MhsDiagnosticRequest
 import src.mhs.evaluation.concurrency as concurrency_mod
 import src.mhs.evaluation.guards as guards_mod
 
@@ -15,7 +16,6 @@ import pandas as pd
 import pytest
 
 import src.mhs.pipeline.stages.replay as replay_stage
-from src.mhs.pipeline.config import MhsRunConfig
 from src.mhs.pipeline.context import PipelineContext
 from src.mhs.telemetry import StageTelemetry
 
@@ -27,7 +27,7 @@ def _bare_context() -> PipelineContext:
     frame = pd.DataFrame(1.0, index=_GRID, columns=_SYMS)
     ctx = PipelineContext(
         config=dataclasses.replace(
-            MhsRunConfig(), committee_capital=True, execution_timeframe="3m",
+            MhsDiagnosticRequest(), committee_capital=True, execution_timeframe="3m",
             committee_member_attribution=False,
         ),
         resolved_end=None,

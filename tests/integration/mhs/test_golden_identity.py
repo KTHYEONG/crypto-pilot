@@ -20,6 +20,7 @@ SCENARIO_GOLDEN_IDENTITY_REGENERATED_AFTER_SCHEMA_CHANGE: report schema 키가
 
 from __future__ import annotations
 
+from tests.fixtures.mhs_requests import research_baseline
 import json
 from pathlib import Path
 from typing import Any
@@ -157,11 +158,10 @@ MATRIX_OVERRIDES: dict[str, dict[str, object]] = {
 def test_golden_identity_matrix(name, matrix_market, matrix_golden):
     """SCENARIO_MHS_PERF_P0_01_GOLDEN_GATE_LIVE: each named golden matches the
     decomposed pipeline bit-exactly under the sha256 digest gate."""
-    from src.mhs.contracts import MhsDiagnosticRequest
     from src.mhs.diagnostic_run import run_mhs_horizon_diagnostic
 
     root, end, start = matrix_market
-    request = MhsDiagnosticRequest(
+    request = research_baseline(
         start=str(start), end=str(end), data_root=str(root),
         execution_timeframe="3m", log_run=False,
         **MATRIX_OVERRIDES[name],
@@ -180,11 +180,10 @@ def test_golden_identity_matrix(name, matrix_market, matrix_golden):
 def test_golden_identity(name, matrix_market, matrix_golden):
     """SCENARIO_ANALYSIS_ARCHITECTURE_04: full pipeline on the synthetic market
     yields the baseline golden bit-exactly (digest + row-count summary)."""
-    from src.mhs.contracts import MhsDiagnosticRequest
     from src.mhs.diagnostic_run import run_mhs_horizon_diagnostic
 
     root, end, start = matrix_market
-    request = MhsDiagnosticRequest(
+    request = research_baseline(
         start=str(start), end=str(end), data_root=str(root),
         execution_timeframe="3m", log_run=False,
         **MATRIX_OVERRIDES[name],
@@ -201,39 +200,30 @@ def test_golden_identity(name, matrix_market, matrix_golden):
     indirect=["matrix_market", "matrix_golden"],
 )
 def test_run_mhs_diagnostic_entry_point_matches_golden(name, matrix_market, matrix_golden):
-    """The CLI's actual entry point (MhsRunConfig -> run_mhs_diagnostic) is
-    bit-exact against the same baseline golden test_golden_identity validates
-    via the MhsDiagnosticRequest -> run_mhs_horizon_diagnostic entry point.
-
-    Exercises the full six-stage decomposition end to end through
-    src/mhs/pipeline/orchestrator.py -> runner.py -> stages/{panel,selection,
-    book,committee,replay,fold}.py -> stages/assemble.py:
-    SCENARIO_MHS_STAGE_DECOMP_01_ASSEMBLE
-    SCENARIO_MHS_STAGE_DECOMP_02_FOLDS
-    SCENARIO_MHS_STAGE_DECOMP_03_REPLAY
-    SCENARIO_MHS_STAGE_DECOMP_04_PANEL_SELECTION
-    SCENARIO_MHS_STAGE_DECOMP_05_BOOKS_COMMITTEE
-    SCENARIO_MHS_STAGE_DECOMP_06_ORCHESTRATOR
+    """The CLI entry point reproduces the baseline golden bit-identically
+    (I-ENTRY-EQUIV): the no-arg CLI request with the research opt-outs equals
+    ``research_baseline`` and ``run_mhs_diagnostic`` matches the golden.
     """
-    from src.mhs.pipeline.config import MhsRunConfig, MemberSet
+    import dataclasses
+
+    from src.cli.main import build_root_parser
+    from src.mhs.pipeline.config import request_from_namespace
     from src.mhs.pipeline.orchestrator import run_mhs_diagnostic
 
     root, end, start = matrix_market
-    config = MhsRunConfig(
-        start=str(start), end=str(end), data_root=str(root),
-        execution_timeframe="3m", log_run=False,
-        committee_capital=False, committee_regime_adaptive_tranche=False,
-        funding_carry_sleeve=False, committee_target_gross=None,
-        pnl_vol_target_mode="median_relative",
-        committee_kelly_sizing=False, committee_evidence_weighting=False,
-        exposure_scale_two_sided=False, funding_carry_weight=0.0,
-        committee_member_set=MemberSet.RISK_PREMIA,
-        # MhsRunConfig의 CLI 실효 기본값(60/growth_extreme)이 아니라 golden이 잡힌
-        # MhsDiagnosticRequest의 동결 기본값(30/conservative)과 맞춰야 bit-exact parity가 성립한다.
-        execution_universe_size=30,
-        growth_envelope="conservative",
+    base = ["research", "run", "portfolio", "mhs-horizon-diagnostic"]
+    args = build_root_parser().parse_args([
+        *base, "--start", str(start), "--end", str(end),
+        "--no-log-run", "--no-committee-capital",
+        "--execution-universe-size", "30",
+        "--pnl-vol-target-mode", "median_relative",
+        "--growth-envelope", "conservative",
+    ])
+    request = dataclasses.replace(request_from_namespace(args), data_root=str(root))
+    assert request == research_baseline(
+        start=str(start), end=str(end), data_root=str(root), log_run=False,
     )
-    report = run_mhs_diagnostic(config)
+    report = run_mhs_diagnostic(request)
     golden_digest, golden_summary = matrix_golden
     _assert_matches_golden(golden_digest, golden_summary, report)
 

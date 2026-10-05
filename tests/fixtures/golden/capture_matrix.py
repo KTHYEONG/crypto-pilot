@@ -23,6 +23,7 @@ Run with::
 
 from __future__ import annotations
 
+from tests.fixtures.mhs_requests import research_baseline
 import json
 import sys
 from pathlib import Path
@@ -32,7 +33,6 @@ import src.mhs.marks as marks
 import src.market_data.services.futures_collection as fc
 import src.mhs.pipeline.stages.fold as fold_stage
 from src.mhs import statistics as _statistics
-from src.mhs.contracts import MhsDiagnosticRequest
 from src.mhs.diagnostic_run import run_mhs_horizon_diagnostic
 from tests.fixtures.golden.compare import GOLDEN_MATRIX_NAMES, assert_report_digest_identical
 from tests.fixtures.golden.digest import build_report_digest, build_report_summary
@@ -103,7 +103,7 @@ def capture_golden_matrix(out_dir: Path) -> dict[str, Path]:
             # (_pin_trials_attempted_history in test_golden_identity.py).
             fold_stage.derive_trials_attempted = lambda *args, **kwargs: (80, "constant_plus_ledger")
             try:
-                request = MhsDiagnosticRequest(
+                request = research_baseline(
                     start=str(_START),
                     end=str(end),
                     data_root=str(root),

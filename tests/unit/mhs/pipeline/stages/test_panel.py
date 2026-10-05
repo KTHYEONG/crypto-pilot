@@ -8,13 +8,13 @@ the real end-to-end path is covered by tests/integration/mhs/test_golden_identit
 """
 
 from __future__ import annotations
+from src.mhs.contracts import MhsDiagnosticRequest
 import src.mhs.evaluation.guards as guards_mod
 
 import pandas as pd
 import pytest
 
 import src.mhs.pipeline.stages.panel as panel_stage
-from src.mhs.pipeline.config import MhsRunConfig
 from src.mhs.pipeline.context import PipelineContext
 from src.mhs.telemetry import StageTelemetry
 
@@ -24,7 +24,7 @@ _SYMS = ["AAAUSDT", "BBBUSDT"]
 
 def _bare_context() -> PipelineContext:
     return PipelineContext(
-        config=MhsRunConfig(),
+        config=MhsDiagnosticRequest(),
         resolved_end=None,
         start=_GRID[0],
         end=_GRID[-1],
@@ -121,7 +121,7 @@ def test_load_panel_threads_config_data_policy_to_loader(monkeypatch: pytest.Mon
     monkeypatch.setattr(panel_stage, "_resolve_ram_budget", lambda *_a, **_k: (None, None), raising=False)
     monkeypatch.setattr(panel_stage, "load_base_panel", _fake_loader)
     ctx = _bare_context()
-    ctx.config = dataclasses.replace(MhsRunConfig(), data_policy="zombie_mask_v1")
+    ctx.config = dataclasses.replace(MhsDiagnosticRequest(), data_policy="zombie_mask_v1")
 
     with pytest.raises(_StopError):
         panel_stage.load_panel(ctx, StageTelemetry(log_run=False))

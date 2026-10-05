@@ -10,6 +10,7 @@ evaluation/golden-identity suites.
 
 from __future__ import annotations
 
+from tests.fixtures.mhs_requests import research_baseline
 import dataclasses
 
 import pandas as pd
@@ -19,7 +20,6 @@ import src.mhs.pipeline.stages.committee as committee_stage
 import src.mhs.evaluation.books as books_mod
 import src.mhs.evaluation.committee as committee_mod
 import src.mhs.evaluation.diagnostics as diagnostics_mod
-from src.mhs.pipeline.config import MhsRunConfig
 from src.mhs.pipeline.context import PipelineContext
 from src.mhs.telemetry import StageTelemetry
 
@@ -42,9 +42,7 @@ class _FakeSpec:
 def _bare_context() -> PipelineContext:
     frame = pd.DataFrame(1.0, index=_GRID, columns=_SYMS)
     ctx = PipelineContext(
-        config=dataclasses.replace(
-            MhsRunConfig(),
-            committee_capital=False,
+        config=research_baseline(
             discovery_gate=False,
             trend_sleeve=False,
             trend_efficiency_overlay=False,

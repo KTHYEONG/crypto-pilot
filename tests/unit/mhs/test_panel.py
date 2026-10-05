@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from src.mhs.contracts import MhsDiagnosticRequest
 import os
 from pathlib import Path
 
@@ -317,7 +318,6 @@ def test_load_panel_stage_uses_pit_min_history_bars(monkeypatch) -> None:
     import pytest
     import src.mhs.pipeline.stages.panel as stage
     from src.mhs.params import PANEL_MIN_HISTORY_BARS
-    from src.mhs.pipeline.config import MhsRunConfig
 
     captured: dict[str, object] = {}
 
@@ -327,7 +327,7 @@ def test_load_panel_stage_uses_pit_min_history_bars(monkeypatch) -> None:
 
     monkeypatch.setattr(stage, "load_base_panel", fake_load)
     ctx = types.SimpleNamespace(
-        config=MhsRunConfig(data_root="/nonexistent-root", log_run=False),
+        config=MhsDiagnosticRequest(data_root="/nonexistent-root", log_run=False),
         start=pd.Timestamp("2024-01-01", tz="UTC"),
         end=pd.Timestamp("2024-03-01", tz="UTC"),
     )
