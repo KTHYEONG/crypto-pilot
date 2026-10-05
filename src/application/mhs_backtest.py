@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import sqlite3
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -47,6 +48,33 @@ class MhsBacktestRequest:
     procedure_code_digest: str | None = None
 
 
+def require_fresh_destinations(candidates: Sequence[tuple[str, Path]]) -> None:
+    """Reject colliding or occupied evidence destinations before any run is registered.
+
+    A run publishes each destination exactly once via atomic replace; a reused or
+    pre-existing path (including a dangling symlink) would silently overwrite or
+    alias prior evidence, so freshness is checked with ``os.path.lexists`` and
+    distinctness on resolved paths.
+
+    Args:
+        candidates: Ordered ``(label, path)`` pairs; labels appear in error text.
+    Returns:
+        None when every resolved path is unique and nothing exists at any path.
+    Raises:
+        ValueError: ``"<label> must be distinct from other destinations"`` for the
+            first resolved duplicate, or ``"<label> must be fresh: <path> already
+            exists"`` for the first occupied path, evaluated in candidate order.
+    """
+    seen: set[Path] = set()
+    for label, candidate in candidates:
+        resolved = candidate.resolve()
+        if resolved in seen:
+            raise ValueError(f"{label} must be distinct from other destinations")
+        seen.add(resolved)
+        if os.path.lexists(candidate):
+            raise ValueError(f"{label} must be fresh: {candidate} already exists")
+
+
 def _validate_managed_run(registry_path: Path, run_id: str) -> None:
     """Require managed publication context to match an already registered run."""
     if (
@@ -66,6 +94,31 @@ def _validate_managed_run(registry_path: Path, run_id: str) -> None:
         conn.close()
     if registered is None:
         raise ValueError(f"managed run is not registered: {run_id!r}")
+
+
+def _validate_managed_context(request: MhsBacktestRequest) -> None:
+    """Require coherent managed publication context and procedure identity."""
+    managed = (request.evidence_root, request.registry_path, request.run_id)
+    if any(item is None for item in managed) and not all(item is None for item in managed):
+        raise ValueError("managed publication context must be fully provided or all None")
+    if all(item is not None for item in managed):
+        assert request.evidence_root is not None
+        assert request.registry_path is not None
+        assert request.run_id is not None
+        if not isinstance(request.evidence_root, Path):
+            raise ValueError(f"evidence_root must be a Path or None, got {request.evidence_root!r}")
+        if not isinstance(request.registry_path, Path):
+            raise ValueError(f"registry_path must be a Path or None, got {request.registry_path!r}")
+        _validate_managed_run(request.registry_path, request.run_id)
+    digest = request.procedure_code_digest
+    managed_complete = all(item is not None for item in managed)
+    managed_empty = all(item is None for item in managed)
+    if digest is not None and (not isinstance(digest, str) or _PROCEDURE_DIGEST_RE.fullmatch(digest) is None):
+        raise ValueError(f"procedure_code_digest must be a lowercase SHA-256 hex identity, got {digest!r}")
+    if managed_complete and digest is None:
+        raise ValueError("managed canonical run requires procedure_code_digest")
+    if managed_empty and digest is not None:
+        raise ValueError("standalone run must not carry procedure_code_digest")
 
 
 def validate_mhs_backtest_request(request: MhsBacktestRequest) -> None:
@@ -97,38 +150,11 @@ def validate_mhs_backtest_request(request: MhsBacktestRequest) -> None:
         not isinstance(request.targets_output, Path) or request.targets_output.suffix != ".parquet"
     ):
         raise ValueError(f"targets_output must be a parquet path, got {request.targets_output!r}")
-    managed = (request.evidence_root, request.registry_path, request.run_id)
-    if any(item is None for item in managed) and not all(item is None for item in managed):
-        raise ValueError("managed publication context must be fully provided or all None")
-    if all(item is not None for item in managed):
-        assert request.evidence_root is not None
-        assert request.registry_path is not None
-        assert request.run_id is not None
-        if not isinstance(request.evidence_root, Path):
-            raise ValueError(f"evidence_root must be a Path or None, got {request.evidence_root!r}")
-        if not isinstance(request.registry_path, Path):
-            raise ValueError(f"registry_path must be a Path or None, got {request.registry_path!r}")
-        _validate_managed_run(request.registry_path, request.run_id)
-    digest = request.procedure_code_digest
-    managed_complete = all(item is not None for item in managed)
-    managed_empty = all(item is None for item in managed)
-    if digest is not None and (not isinstance(digest, str) or _PROCEDURE_DIGEST_RE.fullmatch(digest) is None):
-        raise ValueError(f"procedure_code_digest must be a lowercase SHA-256 hex identity, got {digest!r}")
-    if managed_complete and digest is None:
-        raise ValueError("managed canonical run requires procedure_code_digest")
-    if managed_empty and digest is not None:
-        raise ValueError("standalone run must not carry procedure_code_digest")
+    _validate_managed_context(request)
     candidates: list[tuple[str, Path]] = [("result_output", request.result_output)]
     if request.targets_output is not None:
         candidates.append(("targets_output", request.targets_output))
-    seen: set[Path] = set()
-    for label, candidate in candidates:
-        resolved = candidate.resolve()
-        if resolved in seen:
-            raise ValueError(f"{label} must be distinct from other destinations")
-        seen.add(resolved)
-        if os.path.lexists(candidate):
-            raise ValueError(f"{label} must be fresh: {candidate} already exists")
+    require_fresh_destinations(candidates)
 
 
 def execute_mhs_backtest(request: MhsBacktestRequest) -> ProcessInventoryReport:
