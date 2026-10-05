@@ -1,19 +1,87 @@
-"""I3 REQUEST/CLI DECLARE-ONCE contract.
-
-The argparse flag set exposed by the mhs CLI must equal the flag set derived
-from ``MhsDiagnosticRequest`` field ``cli`` metadata. Every CLI-exposed request
-field carries that metadata, so adding one execution option requires editing
-exactly one field.
-"""
+"""I-NOARG-PARITY contract: generated MHS CLI is the production path."""
 
 from __future__ import annotations
 
 import argparse
 import dataclasses
 
-from src.mhs.contracts import MhsDiagnosticRequest
+import pytest
+
 from src.cli.commands.research.mhs import add_mhs_commands
-from src.cli.dataclass_args import build_parser_from_dataclass
+from src.cli.dataclass_args import explicit_field_values
+from src.mhs.contracts import MhsDiagnosticRequest
+from src.mhs.pipeline.config import resolve_cli_request
+
+BASE = ["research", "run", "portfolio", "mhs-horizon-diagnostic"]
+
+FROZEN_FLAGS = frozenset(
+    [
+        "--beta-neutralize",
+        "--committee-book",
+        "--committee-growth-diagnostic",
+        "--committee-member-attribution",
+        "--committee-member-set",
+        "--committee-target-gross",
+        "--committee-tranche-count",
+        "--committee-tranche-smoothing",
+        "--crash-regime-tilt-alpha",
+        "--data-policy",
+        "--discovery-gate",
+        "--discovery-gate-adjusted-net-t",
+        "--discovery-gate-regime-scaled-net-t",
+        "--end",
+        "--ensemble-signal",
+        "--execution-coverage-gate",
+        "--execution-timeframe",
+        "--execution-universe-size",
+        "--exposure-drawdown-brake",
+        "--fast-book-mode",
+        "--final-oos-2026h1",
+        "--fold-safe-horizon",
+        "--forward-execution-quality-dir",
+        "--forward-registration",
+        "--forward-strategy-digest",
+        "--funding-carry-weight",
+        "--growth-envelope",
+        "--input-manifest-path",
+        "--ladder-diagnostic",
+        "--leverage-frontier-multiples",
+        "--leverage-frontier-scan",
+        "--liquidity-cost-model",
+        "--max-rss-bytes",
+        "--multi-feature-book",
+        "--name-drift-trim",
+        "--no-committee-capital",
+        "--no-committee-evidence-weighting",
+        "--no-committee-kelly-sizing",
+        "--no-committee-regime-adaptive-tranche",
+        "--no-committee-target-gross",
+        "--no-exposure-scale-two-sided",
+        "--no-funding-carry-sleeve",
+        "--no-log-run",
+        "--no-pnl-vol-target",
+        "--no-ram-guard",
+        "--output-tier",
+        "--passive-timeout-minutes",
+        "--peg-chase-diagnostic",
+        "--pnl-vol-target-mode",
+        "--rebalance-filter",
+        "--register-procedure",
+        "--run-id",
+        "--slow-book-mode",
+        "--start",
+        "--touch-diagnostic",
+        "--trend-efficiency-overlay",
+        "--trend-sleeve",
+        "--trend-sleeve-gross",
+    ]
+)
+
+
+def _mhs_parser() -> argparse.ArgumentParser:
+    sub = argparse.ArgumentParser().add_subparsers()
+    add_mhs_commands(sub)
+    return sub.choices["mhs-horizon-diagnostic"]
 
 
 def _flag_set(parser: argparse.ArgumentParser) -> set[str]:
@@ -25,113 +93,141 @@ def _flag_set(parser: argparse.ArgumentParser) -> set[str]:
     }
 
 
-def _mhs_cli_flags() -> set[str]:
-    sub = argparse.ArgumentParser().add_subparsers()
-    add_mhs_commands(sub)
-    parser = sub.choices["mhs-horizon-diagnostic"]
-    flags = _flag_set(parser)
-    # The output tier is a persistence switch on the parser, not a request field.
-    flags.discard("--output-tier")
-    # SCENARIO_MHS_LEVERAGE_SCAN_07: diagnostic-only short-circuit switches,
-    # never construct MhsDiagnosticRequest.
-    flags.discard("--leverage-frontier-scan")
-    flags.discard("--leverage-frontier-multiples")
-    # 연구-라이브 seam 스위치: 완료된 리포트를 사후 소비할 뿐 요청 필드가 아니다.
-    flags.discard("--emit-target-weights")
-    flags.discard("--emit-signal-state")
-    # 배포 후처리 사이드 이펙트 스위치: 완료된 리포트를 소비할 뿐 요청 필드가 아니다.
-    flags.discard("--emit-deployment")
-    flags.discard("--deploy-push")
-    # 절차 등록 사이드 이펙트 스위치: 플래그 세트를 레지스트리에 동결할 뿐 요청 필드가 아니다.
-    flags.discard("--register-procedure")
-    # 실행 식별자는 결과 저장 위치만 결정하며 MHS 요청 경제학을 바꾸지 않는다.
-    flags.discard("--run-id")
-    return flags
-
-
-def _metadata_flags() -> set[str]:
-    parser = argparse.ArgumentParser()
-    build_parser_from_dataclass(parser, MhsDiagnosticRequest)
-    return _flag_set(parser)
-
-
-def test_cli_flags_equal_metadata_derived_flags() -> None:
-    cli_flags = _mhs_cli_flags()
-    meta_flags = _metadata_flags()
-    assert cli_flags == meta_flags, (
-        f"CLI/metadata flag divergence: only_cli={sorted(cli_flags - meta_flags)} "
-        f"only_metadata={sorted(meta_flags - cli_flags)}"
-    )
-
-
-def test_every_cli_exposed_field_carries_flag_metadata() -> None:
-    for field in dataclasses.fields(MhsDiagnosticRequest):
-        if "flag" in field.metadata:
-            assert field.metadata["flag"], f"field {field.name} has empty flag metadata"
-
-
-def test_pnl_vol_target_mode_choices_match_cli_and_metadata() -> None:
-    """SCENARIO_MHS_CONSTANT_RISK_REQUEST_CLI_PARITY: the request contract's
-    cli_param choices and the hand-written CLI argparse choices for
-    --pnl-vol-target-mode stay exactly equal (4 registered values)."""
-    sub = argparse.ArgumentParser().add_subparsers()
-    add_mhs_commands(sub)
-    parser = sub.choices["mhs-horizon-diagnostic"]
-    cli_action = next(a for a in parser._actions if a.dest == "pnl_vol_target_mode")
-    field = next(
-        f for f in dataclasses.fields(MhsDiagnosticRequest)
-        if f.name == "pnl_vol_target_mode"
-    )
-    meta_choices = field.metadata["choices"]
-    # 선언 순서는 계약/CLI 간 다를 수 있으므로 등록 값집합의 정확한 일치를 단언한다.
-    assert sorted(cli_action.choices) == sorted(meta_choices)
-    assert len(meta_choices) == 4
-    assert "constant_risk" in meta_choices
-
-
-def test_scenario_mhs_dd_brake_10_cli_request_parity() -> None:
-    """SCENARIO_MHS_DD_BRAKE_10_CLI_REQUEST_PARITY: --exposure-drawdown-brake is declared exactly
-    once on the request (cli_param metadata) and mirrored by the hand-written
-    CLI; the single-type no-arg parity stays intact with brake=False."""
-    cli_flags = _mhs_cli_flags()
-    meta_flags = _metadata_flags()
-    assert "--exposure-drawdown-brake" in cli_flags
-    assert "--exposure-drawdown-brake" in meta_flags
-
+def _parse(extra: list[str]) -> argparse.Namespace:
     from src.cli.main import build_root_parser
-    from src.mhs.contracts import MhsDiagnosticRequest
-    from src.mhs.pipeline.config import request_from_namespace
 
-    args = build_root_parser().parse_args(
-        ["research", "run", "portfolio", "mhs-horizon-diagnostic"],
-    )
-    assert args.exposure_drawdown_brake is False
-    assert (
-        dataclasses.asdict(request_from_namespace(args))
-        == dataclasses.asdict(MhsDiagnosticRequest())
-    )
-    assert dataclasses.asdict(MhsDiagnosticRequest())["exposure_drawdown_brake"] is False
+    return build_root_parser().parse_args([*BASE, *extra])
 
 
-def test_data_policy_choices_match_cli_and_metadata() -> None:
-    import argparse
-    import dataclasses
+def test_exposed_option_set_frozen() -> None:
+    assert _flag_set(_mhs_parser()) == set(FROZEN_FLAGS)
+    assert len(FROZEN_FLAGS) == 58
 
-    from src.cli.commands.research.mhs import add_mhs_commands
-    from src.mhs.data_policy import MHS_DATA_POLICY_DEFAULT
-    from src.mhs.contracts import MhsDiagnosticRequest
+
+def test_no_arg_parity() -> None:
+    from src.cli.main import build_root_parser
+
+    args = build_root_parser().parse_args(BASE)
+    explicit = explicit_field_values(MhsDiagnosticRequest, args)
+    assert explicit == {}
+    assert resolve_cli_request(explicit) == MhsDiagnosticRequest()
+
+
+def _value_cases() -> list[tuple[str, list[str], str, object]]:
+    return [
+        ("start", ["--start", "2025-01-01"], "start", "2025-01-01"),
+        ("end", ["--end", "2025-01-01"], "end", "2025-01-01"),
+        ("execution_timeframe", ["--execution-timeframe", "3m"], "execution_timeframe", "3m"),
+        ("execution_universe_size", ["--execution-universe-size", "60"], "execution_universe_size", 60),
+        ("max_rss_bytes", ["--max-rss-bytes", "8000000000"], "max_rss_bytes", 8000000000),
+        ("liquidity_cost_model", ["--liquidity-cost-model", "flat"], "liquidity_cost_model", "flat"),
+        ("passive_timeout_minutes", ["--passive-timeout-minutes", "33"], "passive_timeout_minutes", 33),
+        ("crash_regime_tilt_alpha", ["--crash-regime-tilt-alpha", "0.5"], "crash_regime_tilt_alpha", 0.5),
+        ("slow_book_mode", ["--slow-book-mode", "single_horizon"], "slow_book_mode", "single_horizon"),
+        ("fast_book_mode", ["--fast-book-mode", "single_horizon"], "fast_book_mode", "single_horizon"),
+        ("rebalance_filter", ["--rebalance-filter", "per_symbol_deadband"], "rebalance_filter", "per_symbol_deadband"),
+        ("ensemble_signal", ["--ensemble-signal", "raw"], "ensemble_signal", "raw"),
+        ("pnl_vol_target_mode", ["--pnl-vol-target-mode", "median_relative"], "pnl_vol_target_mode", "median_relative"),
+        ("trend_sleeve_gross", ["--trend-sleeve", "--trend-sleeve-gross", "0.2"], "trend_sleeve_gross", 0.2),
+        ("committee_member_set", ["--committee-member-set", "flow_momentum"], "committee_member_set", "flow_momentum"),
+        ("committee_tranche_count", ["--committee-tranche-count", "5"], "committee_tranche_count", 5),
+        ("committee_target_gross", ["--committee-target-gross", "1.2"], "committee_target_gross", 1.2),
+        ("funding_carry_weight", ["--funding-carry-weight", "0.25"], "funding_carry_weight", 0.25),
+        ("growth_envelope", ["--growth-envelope", "balanced"], "growth_envelope", "balanced"),
+        ("data_policy", ["--data-policy", "legacy"], "data_policy", "legacy"),
+        ("input_manifest_path", ["--input-manifest-path", "/x"], "input_manifest_path", "/x"),
+        (
+            "forward_execution_quality_dir",
+            ["--forward-execution-quality-dir", "/x"],
+            "forward_execution_quality_dir",
+            "/x",
+        ),
+        ("forward_strategy_digest", ["--forward-strategy-digest", "a" * 32], "forward_strategy_digest", "a" * 32),
+        (
+            "forward_registration_digest",
+            ["--forward-registration", "a" * 32, "--end", "2025-12-31"],
+            "forward_registration_digest",
+            "a" * 32,
+        ),
+    ]
+
+
+@pytest.mark.parametrize(("label", "argv", "field", "value"), _value_cases())
+def test_every_value_flag_round_trips(label: str, argv: list[str], field: str, value: object) -> None:
+    args = _parse(argv)
+    explicit = explicit_field_values(MhsDiagnosticRequest, args)
+    if field == "trend_sleeve_gross":
+        assert explicit == {"trend_sleeve": True, "trend_sleeve_gross": value}
+    elif field == "forward_registration_digest":
+        assert explicit[field] == value
+        assert explicit["end"] == "2025-12-31"
+    else:
+        assert explicit == {field: value}
+
+
+def test_switch_polarity_matches_defaults() -> None:
+    for f in dataclasses.fields(MhsDiagnosticRequest):
+        meta = f.metadata
+        if not meta.get("flag") or not isinstance(f.default, bool):
+            continue
+        assert (meta["flag"].startswith("--no-")) == (f.default is True), f.name
+        args = _parse([meta["flag"]])
+        explicit = explicit_field_values(MhsDiagnosticRequest, args)
+        assert explicit == {f.name: (not f.default)}, f.name
+
+
+def test_gross_opt_out_pair_exclusive() -> None:
+    with pytest.raises(SystemExit):
+        _parse(["--committee-target-gross", "1.2", "--no-committee-target-gross"])
+    args = _parse(["--no-committee-target-gross"])
+    explicit = explicit_field_values(MhsDiagnosticRequest, args)
+    assert explicit == {"committee_target_gross": None}
+    req = resolve_cli_request(explicit)
+    assert req.committee_target_gross is None
+    assert req.funding_carry_sleeve is False
+    assert req.funding_carry_weight == 0.0
+
+
+def test_metadata_key_set_closed() -> None:
+    for f in dataclasses.fields(MhsDiagnosticRequest):
+        meta = f.metadata
+        if not meta.get("flag"):
+            continue
+        assert set(meta.keys()) == {"flag", "help", "choices", "negate_flag", "arg_type"}, f.name
+        assert meta["help"]
+
+
+def test_choices_come_from_registries() -> None:
     from src.mhs.panel import DATA_POLICIES
+    from src.mhs.params import (
+        CLI_GROWTH_ENVELOPE_DEFAULT,
+        COMMITTEE_MEMBER_SETS,
+        GROWTH_RISK_ENVELOPES,
+    )
 
-    sub = argparse.ArgumentParser().add_subparsers()
-    add_mhs_commands(sub)
-    parser = sub.choices["mhs-horizon-diagnostic"]
-    cli_action = next(a for a in parser._actions if a.dest == "data_policy")
-    field = next(f for f in dataclasses.fields(MhsDiagnosticRequest) if f.name == "data_policy")
+    by_name = {f.name: f for f in dataclasses.fields(MhsDiagnosticRequest)}
+    assert by_name["growth_envelope"].metadata["choices"] == tuple(sorted(GROWTH_RISK_ENVELOPES))
+    assert CLI_GROWTH_ENVELOPE_DEFAULT in by_name["growth_envelope"].metadata["choices"]
+    assert by_name["committee_member_set"].metadata["choices"] == tuple(sorted(COMMITTEE_MEMBER_SETS))
+    assert set(by_name["data_policy"].metadata["choices"]) == set(DATA_POLICIES)
+    assert len(by_name["pnl_vol_target_mode"].metadata["choices"]) == 4
+    assert "constant_risk" in by_name["pnl_vol_target_mode"].metadata["choices"]
+    for f in dataclasses.fields(MhsDiagnosticRequest):
+        choices = f.metadata.get("choices")
+        if choices is not None:
+            assert f.default in choices, f.name
 
-    assert cli_action.default == MHS_DATA_POLICY_DEFAULT
-    assert MhsDiagnosticRequest().data_policy == MHS_DATA_POLICY_DEFAULT
-    assert set(cli_action.choices) == set(DATA_POLICIES)
-    assert set(field.metadata["choices"]) == set(DATA_POLICIES)
+
+def test_generator_is_production_path() -> None:
+    import pathlib
+
+    import src.cli.dataclass_args as da
+
+    text = pathlib.Path("src/cli/commands/research/mhs.py").read_text(encoding="utf-8")
+    assert "add_dataclass_arguments" in text
+    assert 'add_argument("--start"' not in text
+    assert not hasattr(da, "build_parser_from_dataclass")
+    assert not hasattr(da, "request_from_namespace")
 
 
 def test_request_default_execution_is_3m() -> None:

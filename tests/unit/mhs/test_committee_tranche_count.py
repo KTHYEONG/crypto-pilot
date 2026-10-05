@@ -6,15 +6,16 @@ import dataclasses
 
 import pytest
 
+from src.cli.dataclass_args import explicit_field_values
+from src.mhs.contracts import MhsDiagnosticRequest
 from src.mhs.params import COMMITTEE_TRANCHE_COUNT, COMMITTEE_TRANCHE_COUNT_MAX
-from src.mhs.pipeline.config import request_from_namespace
+from src.mhs.pipeline.config import resolve_cli_request
 
 _CLI_BASE = ["research", "run", "portfolio", "mhs-horizon-diagnostic"]
 
 
 def _request(**overrides):
     from src.mhs.contracts import MhsDiagnosticRequest
-    from src.mhs.pipeline.config import request_from_namespace
 
     base = dataclasses.asdict(MhsDiagnosticRequest())
     base.update(overrides)
@@ -42,7 +43,9 @@ def test_cli_committee_tranche_count_defaults_and_threads_to_config() -> None:
     from src.mhs.contracts import MhsDiagnosticRequest
 
     # Given no flag
-    default_cfg = request_from_namespace(build_root_parser().parse_args(_CLI_BASE))
+    default_cfg = resolve_cli_request(
+        explicit_field_values(MhsDiagnosticRequest, build_root_parser().parse_args(_CLI_BASE))
+    )
     # Then the default equals the registered constant and the bare config
     assert default_cfg.committee_tranche_count == COMMITTEE_TRANCHE_COUNT
     assert MhsDiagnosticRequest().committee_tranche_count == COMMITTEE_TRANCHE_COUNT
@@ -52,7 +55,7 @@ def test_cli_committee_tranche_count_defaults_and_threads_to_config() -> None:
     args = build_root_parser().parse_args(
         [*_CLI_BASE, "--committee-tranche-smoothing", "--committee-tranche-count", "7"]
     )
-    cfg = request_from_namespace(args)
+    cfg = resolve_cli_request(explicit_field_values(MhsDiagnosticRequest, args))
     # Then the count threads through and adaptive is disabled
     assert cfg.committee_tranche_count == 7
     assert cfg.committee_tranche_smoothing is True

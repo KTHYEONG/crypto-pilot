@@ -109,3 +109,23 @@ def test_canonical_inert_constant_matches_identity_baseline() -> None:
 
     assert TRIAL_IDENTITY_BASELINE["committee_member_set"] == COMMITTEE_MEMBER_SET_INERT
     assert TRIAL_IDENTITY_BASELINE["committee_tranche_count"] == COMMITTEE_TRANCHE_COUNT
+
+
+def test_choice_errors_name_registered_set() -> None:
+    with pytest.raises(ValueError, match=re.escape("unknown growth_envelope 'nope'")) as exc_info:
+        MhsDiagnosticRequest(growth_envelope="nope")  # type: ignore[arg-type]
+    assert "growth_extreme_budgeted" in str(exc_info.value)
+    assert "registered:" in str(exc_info.value)
+
+
+def test_production_envelope_accepted() -> None:
+    from src.mhs.params import GROWTH_RISK_ENVELOPES
+
+    for g in GROWTH_RISK_ENVELOPES:
+        validate_request(MhsDiagnosticRequest(growth_envelope=g))
+
+
+def test_bounds_helper_gone() -> None:
+    import src.mhs.validation as validation
+
+    assert not hasattr(validation, "_validate_field_bounds")
