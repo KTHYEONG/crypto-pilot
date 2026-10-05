@@ -1578,55 +1578,34 @@ class _BoundExecutionReplayAccumulator:
         before the kept region (window-overlap backlog) join inventory
         without cash flow, mirroring the ledger chunk handoff. Unknown
         funding over held inventory records MISSING_HELD_FUNDING and
-        invalidates instead of settling an invented cost.
+        invalidates instead of settling an invented cost. Arithmetic lives in
+        ``CausalPortfolioState.settle_window``.
         """
-        grid_ns = frame.grid_ns
-        n_grid = frame.n_grid
-        marks_values = frame.marks_values
-        funding_matrix = frame.funding_matrix
-        funding_known = self._w_fknown
-        gpos = frame.gpos
-        grid = frame.grid
-        state = self.accounting_state
-        p0_ns = int(grid_ns[p0])
-        queue = sorted(self._mirror_pending, key=lambda entry: entry[0])
+        pending = self._mirror_pending
         self._mirror_pending = []
-        qi = 0
-        while qi < len(queue) and queue[qi][0] < p0_ns:
-            state.units[int(queue[qi][1])] += float(queue[qi][2])
-            qi += 1
-        gmarks = np.full(self.n_cols, np.nan, dtype="float64")
-        grates = np.zeros(self.n_cols, dtype="float64")
-        gknown = np.ones(self.n_cols, dtype=bool)
-        all_known = np.ones(self.n_cols, dtype=bool)
-        for b in range(int(p0), int(n_grid)):
-            bns = int(grid_ns[b])
-            gmarks[gpos] = marks_values[b]
-            grates[gpos] = funding_matrix[b]
-            gknown[gpos] = funding_known[b]
-            held_unknown = (np.abs(state.units) >= QTY_EPS) & ~gknown
-            if bool(held_unknown.any()):
-                self.ledger_valid = False
-                self.invalid_reasons.add("MISSING_DATA")
-                witness = int(np.flatnonzero(held_unknown)[0])
-                self.data_gaps.append(
-                    ExecutionDataGap(
-                        code="MISSING_HELD_FUNDING", symbol=self.columns[witness],
-                        timestamp=grid[b], execution_bound=self.execution_bound,
-                    )
+        settlement = self.accounting_state.settle_window(
+            bar_ns=frame.grid_ns[p0:],
+            columns=frame.gpos,
+            marks=frame.marks_values[p0:],
+            funding_rates=frame.funding_matrix[p0:],
+            funding_known=self._w_fknown[p0:],
+            fill_ns=np.fromiter((e[0] for e in pending), dtype="int64", count=len(pending)),
+            fill_columns=np.fromiter((e[1] for e in pending), dtype=np.intp, count=len(pending)),
+            fill_quantities=np.fromiter((e[2] for e in pending), dtype="float64", count=len(pending)),
+            fill_prices=np.fromiter((e[3] for e in pending), dtype="float64", count=len(pending)),
+            fill_fee_bps=np.fromiter((e[4] for e in pending), dtype="float64", count=len(pending)),
+        )
+        if settlement.gap_bar_offsets.size:
+            self.ledger_valid = False
+            self.invalid_reasons.add("MISSING_DATA")
+            stamps = frame.grid[p0 + settlement.gap_bar_offsets]
+            self.data_gaps.extend(
+                ExecutionDataGap(
+                    code="MISSING_HELD_FUNDING", symbol=self.columns[int(c)], timestamp=ts,
+                    execution_bound=self.execution_bound,
                 )
-                state.advance_to(
-                    event_ns=bns, marks=gmarks,
-                    funding_rates=np.where(gknown, grates, 0.0), funding_known=all_known,
-                )
-            else:
-                state.advance_to(event_ns=bns, marks=gmarks, funding_rates=grates, funding_known=gknown)
-            while qi < len(queue) and queue[qi][0] == bns:
-                state.apply_fill(
-                    symbol_index=int(queue[qi][1]), quantity_delta=float(queue[qi][2]),
-                    fill_price=float(queue[qi][3]), fee_bps=float(queue[qi][4]),
-                )
-                qi += 1
+                for ts, c in zip(stamps, settlement.gap_witness_columns.tolist(), strict=True)
+            )
 
     def _consume_update_spreads(self, frame: _WindowFrame) -> None:
         """Roll the liquidity-aware spread estimate forward, causally."""
