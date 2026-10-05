@@ -203,6 +203,15 @@ def test_destinations_reject_invalid_targets_and_occupied_paths(tmp_path, monkey
         _resolve_retention_policy(bad_budget)
 
 
+def test_interrupted_supervised_run_exits_nonzero_without_index_append(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(backtest_mod, "BACKTESTS_DIR", tmp_path)
+    _install_supervisor(monkeypatch, status="interrupted")
+    with pytest.raises(SystemExit) as excinfo:
+        run_mhs_backtest(_parse(["backtest", "mhs"]))
+    assert excinfo.value.code == 1
+    assert not (tmp_path / "index.jsonl").exists()
+
+
 def test_ops_verify_history_migration_wiring(tmp_path) -> None:
     import argparse as _argparse
     import json as _json

@@ -97,6 +97,40 @@ def test_validate_mhs_backtest_request_rejects_bad_boundaries(tmp_path, monkeypa
     assert list(tmp_path.iterdir()) == []
 
 
+def test_require_fresh_destinations_rejects_resolved_duplicates_first(tmp_path) -> None:
+    """Resolved aliases collide before freshness: the second label reports distinctness."""
+    from src.application.mhs_backtest import require_fresh_destinations
+
+    target = tmp_path / "result.json"
+    alias = tmp_path / "alias.parquet"
+    os.symlink(target, alias)
+    with pytest.raises(ValueError, match="distinct"):
+        require_fresh_destinations([("result_output", target), ("targets_output", alias)])
+    assert not target.exists()
+
+
+def test_require_fresh_destinations_rejects_dangling_symlink(tmp_path) -> None:
+    """A dangling symlink still occupies its destination and creates nothing."""
+    from src.application.mhs_backtest import require_fresh_destinations
+
+    link = tmp_path / "dangle.json"
+    os.symlink(tmp_path / "missing.json", link)
+    with pytest.raises(ValueError, match="fresh"):
+        require_fresh_destinations([("result_output", link)])
+    assert not (tmp_path / "missing.json").exists()
+
+
+def test_require_fresh_destinations_accepts_new_distinct_paths(tmp_path) -> None:
+    """Two absent, distinct destinations validate without side effects."""
+    from src.application.mhs_backtest import require_fresh_destinations
+
+    first = tmp_path / "a" / "result.json"
+    second = tmp_path / "b" / "targets.parquet"
+    assert require_fresh_destinations([("result_output", first), ("targets_output", second)]) is None
+    assert not first.exists()
+    assert not second.exists()
+
+
 def test_validate_mhs_backtest_request_rejects_occupied_destinations(tmp_path, monkeypatch) -> None:
     """Fresh distinct evidence: aliased, existing or symlinked destinations are rejected."""
     import src.application.mhs_backtest as svc

@@ -24,10 +24,11 @@ import uuid
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Literal, TextIO
 
 import pandas as pd
 
+from src.application.mhs_backtest import require_fresh_destinations
 from src.backtests.contracts import (
     ArtifactReference,
     JsonValue,
@@ -64,11 +65,92 @@ _GNU_LINE_RE = re.compile(
 )
 
 
+SupervisedStatus = Literal["completed", "failed", "timed_out", "signaled", "resource_rejected", "interrupted"]
+
+
+@dataclass(frozen=True, slots=True)
+class _TerminationOutcome:
+    """Classified terminal status with its disclosed reason and decoded exit identity."""
+
+    status: SupervisedStatus
+    termination_reason: str | None
+    exit_code: int | None
+    signal_number: int | None
+
+
+def _classify_termination(
+    *,
+    launch_error: str | None,
+    timed_out: bool,
+    resource_reason: str | None,
+    interrupted: bool,
+    failure_code: str | None,
+    returncode: int | None,
+    primary_completed: bool,
+    wall_seconds: float,
+) -> _TerminationOutcome:
+    """Map observed supervision facts to exactly one terminal status.
+
+    Supervisor-imposed stops outrank worker self-reports because the supervisor
+    killed the process group and any later worker evidence is truncated; an
+    operator interrupt outranks worker-reported resource codes because the run
+    was not allowed to finish. A zero exit is never ``completed`` without a new
+    completed primary artifact, so process success cannot masquerade as
+    financial evidence.
+
+    Precedence (first match wins):
+        launch_error -> "failed" ("launch failed: <launch_error>")
+        timed_out -> "timed_out" ("deadline exceeded after <wall_seconds:.1f>s")
+        resource_reason -> "resource_rejected" (resource_reason verbatim)
+        interrupted -> "interrupted" ("supervisor interrupted")
+        failure_code in _RESOURCE_ERROR_CODES -> "resource_rejected" ("worker reported <code>")
+        returncode < 0 -> "signaled" ("signal <-returncode>")
+        returncode == 0 and primary_completed -> "completed" (None)
+        returncode == 0 -> "failed" ("exit zero without a new completed domain artifact")
+        otherwise -> "failed" ("exit_code=<returncode>")
+
+    Args:
+        launch_error: ``str(exc)`` of the launch ``OSError``; None when the
+            worker launched or launch was never attempted.
+        timed_out: Supervisor deadline fired before the worker exited.
+        resource_reason: First supervisor-sampled resource rejection reason.
+        interrupted: A KeyboardInterrupt reached the supervisor.
+        failure_code: ``error_code`` from the worker staging artifact, if any.
+        returncode: Reaped ``Popen`` return code; None when unobservable.
+        primary_completed: Staging artifact is a dict with ``status == "completed"``.
+        wall_seconds: Supervisor wall time used only in the timeout reason.
+    Returns:
+        Status, reason, ``exit_code`` (returncode when >= 0) and
+        ``signal_number`` (``-returncode`` when < 0), both None when returncode is None.
+    """
+    exit_code = returncode if returncode is not None and returncode >= 0 else None
+    signal_number = -returncode if returncode is not None and returncode < 0 else None
+    if launch_error is not None:
+        return _TerminationOutcome("failed", f"launch failed: {launch_error}", exit_code, signal_number)
+    if timed_out:
+        return _TerminationOutcome("timed_out", f"deadline exceeded after {wall_seconds:.1f}s", exit_code, signal_number)
+    if resource_reason is not None:
+        return _TerminationOutcome("resource_rejected", resource_reason, exit_code, signal_number)
+    if interrupted:
+        return _TerminationOutcome("interrupted", "supervisor interrupted", exit_code, signal_number)
+    if failure_code is not None and failure_code in _RESOURCE_ERROR_CODES:
+        return _TerminationOutcome("resource_rejected", f"worker reported {failure_code}", exit_code, signal_number)
+    if returncode is not None and returncode < 0:
+        return _TerminationOutcome("signaled", f"signal {-returncode}", exit_code, signal_number)
+    if returncode == 0 and primary_completed:
+        return _TerminationOutcome("completed", None, exit_code, signal_number)
+    if returncode == 0:
+        return _TerminationOutcome(
+            "failed", "exit zero without a new completed domain artifact", exit_code, signal_number
+        )
+    return _TerminationOutcome("failed", f"exit_code={returncode}", exit_code, signal_number)
+
+
 @dataclass(frozen=True, slots=True)
 class MhsSupervisedRun:
     """Observed completed subprocess outcome and resource scope. GNU maximum RSS is a maximum individual-process metric; tree PSS/USS are sampled sums, not instantaneous guarantees. Unknown observations stay null. A signal or failed exit is not operating-system OOM evidence by itself."""
 
-    status: Literal["completed", "failed", "timed_out", "signaled", "resource_rejected", "interrupted"]
+    status: SupervisedStatus
     command: tuple[str, ...]
     exit_code: int | None
     signal_number: int | None
@@ -736,6 +818,204 @@ def _failure_resource_code(path: Path) -> str | None:
     return None
 
 
+@dataclass(slots=True)
+class _SupervisionState:
+    """Mutable observations accumulated while one worker process group is alive.
+
+    Stop flags are recorded here before termination begins so an interrupt that
+    lands during group termination cannot downgrade a deadline or resource stop
+    to a plain interrupt.
+    """
+
+    pid: int
+    swap_baseline: int | None
+    last_heartbeat: float
+    samples: int = 0
+    pss_peak: int | None = None
+    uss_peak: int | None = None
+    min_available: int | None = None
+    swap_growth: int | None = None
+    timed_out: bool = False
+    resource_reason: str | None = None
+
+
+def _optional_swap_bytes(pid: int) -> int | None:
+    """Best-effort process-tree swap bytes; any telemetry failure is unobserved (None)."""
+    try:
+        return _workload_swap_bytes(pid)
+    except Exception:  # noqa: BLE001 - optional measurement
+        return None
+
+
+def _sample_once(state: _SupervisionState, budget: MhsMemoryBudget) -> str | None:
+    """Take one safety sample of the worker tree and return the first violated limit.
+
+    PSS/USS and host headroom are mandatory safety telemetry: losing them must
+    stop the run rather than let it continue unmonitored. Swap is optional
+    telemetry, but any observed growth above the launch baseline is treated as
+    a memory-pressure breach because swapping invalidates wall-time evidence.
+
+    Args:
+        state: Live supervision state; ``samples``, peaks, ``min_available`` and
+            ``swap_growth`` are updated in place.
+        budget: Resolved tree PSS and available-memory floor.
+    Returns:
+        None when the sample is within budget, else the rejection reason:
+        ``"missing safety telemetry: <exc>"``, ``"sampled tree PSS <pss> exceeds <limit>"``,
+        ``"headroom <headroom> below <floor>"`` or ``"swap growth <bytes> bytes observed"``.
+    """
+    try:
+        pss, uss = _workload_pss_uss(state.pid)
+        headroom = current_mhs_headroom_bytes()
+    except Exception as tel_exc:  # noqa: BLE001
+        return f"missing safety telemetry: {tel_exc}"
+    state.samples += 1
+    state.pss_peak = pss if state.pss_peak is None else max(state.pss_peak, pss)
+    state.uss_peak = uss if state.uss_peak is None else max(state.uss_peak, uss)
+    state.min_available = headroom if state.min_available is None else min(state.min_available, headroom)
+    swap_current = _optional_swap_bytes(state.pid)
+    if state.swap_baseline is not None and swap_current is not None:
+        growth = swap_current - state.swap_baseline
+        if growth > 0:
+            state.swap_growth = growth if state.swap_growth is None else max(state.swap_growth, growth)
+    if pss > budget.total_tree_pss_bytes:
+        return f"sampled tree PSS {pss} exceeds {budget.total_tree_pss_bytes}"
+    if headroom < budget.min_available_bytes:
+        return f"headroom {headroom} below {budget.min_available_bytes}"
+    if state.swap_growth is not None and state.swap_growth > 0:
+        return f"swap growth {state.swap_growth} bytes observed"
+    return None
+
+
+def _await_worker(
+    proc: subprocess.Popen[bytes],
+    state: _SupervisionState,
+    budget: MhsMemoryBudget,
+    *,
+    timeout_seconds: float | None,
+    poll_seconds: float,
+    wall_start: float,
+) -> int:
+    """Wait for the worker exit while enforcing deadline and resource limits.
+
+    Each poll interval: wait, emit a heartbeat when due, enforce the deadline,
+    then sample. On a stop decision the reason is recorded in ``state`` before
+    the process group is terminated and reaped, so precedence survives an
+    interrupt during termination.
+
+    Args:
+        proc: Launched worker in its own process group.
+        state: Supervision state mutated in place.
+        budget: Resolved memory budget.
+        timeout_seconds: Wall deadline from ``wall_start``; None disables it.
+        poll_seconds: Positive poll interval used as the wait timeout.
+        wall_start: ``time.monotonic()`` captured before launch.
+    Returns:
+        The reaped worker return code.
+    Raises:
+        KeyboardInterrupt: Propagated unchanged for the caller's interrupt path.
+    """
+    pid = state.pid
+    while True:
+        try:
+            return proc.wait(timeout=float(poll_seconds))
+        except subprocess.TimeoutExpired:
+            pass
+        now = time.monotonic()
+        wall = now - wall_start
+        if now - state.last_heartbeat >= HEARTBEAT_SECONDS:
+            _logger.info("[SYS] heartbeat wall_s=%.1f pid=%d", wall, pid)
+            state.last_heartbeat = time.monotonic()
+        if timeout_seconds is not None and wall >= float(timeout_seconds):
+            state.timed_out = True
+            _terminate_group(proc)
+            return proc.wait()
+        reason = _sample_once(state, budget)
+        if reason is not None:
+            state.resource_reason = reason
+            _terminate_group(proc)
+            return proc.wait()
+
+
+def _reap_after_interrupt(proc: subprocess.Popen[bytes]) -> int | None:
+    """Stop the worker group after an operator interrupt and observe its exit without raising.
+
+    The interrupt path must always reach envelope publication, so neither a
+    failing wait nor a second interrupt may escape; a second interrupt only
+    abandons the remaining graceful wait.
+
+    Args:
+        proc: Launched worker.
+    Returns:
+        The reaped return code, or None when it cannot be observed.
+    """
+    try:
+        _terminate_group(proc)
+        return proc.wait()
+    except (Exception, KeyboardInterrupt):  # noqa: BLE001, S110
+        pass
+    try:
+        return proc.poll()
+    except (Exception, KeyboardInterrupt):  # noqa: BLE001
+        return None
+
+
+def _build_supervised_run(
+    *,
+    outcome: _TerminationOutcome,
+    command: tuple[str, ...],
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+    data_root: str | None,
+    staging: Path,
+    log_path: Path,
+    domain_written: bool,
+    wall_seconds: float,
+    cpu_seconds: float | None,
+    gnu_rss: int | None,
+    state: _SupervisionState | None,
+    poll_seconds: float,
+    budget: MhsMemoryBudget,
+    run_id: str,
+) -> MhsSupervisedRun:
+    """Assemble the single immutable run record from a classified outcome and observations.
+
+    Args:
+        state: Supervision observations, or None when no worker was launched
+            (all sampled metrics stay null and ``samples_taken`` is 0).
+    Returns:
+        ``MhsSupervisedRun`` with ``cpu_scope=CPU_SCOPE``, ``memory_scope=MEMORY_SCOPE``,
+        ``result_output_path=str(staging)``, ``log_path=str(log_path)``,
+        ``start/end`` as ISO strings and ``sample_interval_seconds=float(poll_seconds)``.
+    """
+    return MhsSupervisedRun(
+        status=outcome.status,
+        command=command,
+        exit_code=outcome.exit_code,
+        signal_number=outcome.signal_number,
+        start=start.isoformat(),
+        end=end.isoformat(),
+        data_root=data_root,
+        result_output_path=str(staging),
+        log_path=str(log_path),
+        domain_artifact_written=bool(domain_written),
+        wall_seconds=float(wall_seconds),
+        cpu_seconds=cpu_seconds,
+        gnu_max_individual_rss_bytes=gnu_rss,
+        sampled_tree_pss_peak_bytes=state.pss_peak if state is not None else None,
+        sampled_tree_uss_peak_bytes=state.uss_peak if state is not None else None,
+        min_available_bytes=state.min_available if state is not None else None,
+        process_swap_growth_bytes=state.swap_growth if state is not None else None,
+        samples_taken=int(state.samples) if state is not None else 0,
+        sample_interval_seconds=float(poll_seconds),
+        cpu_scope=CPU_SCOPE,
+        memory_scope=MEMORY_SCOPE,
+        termination_reason=outcome.termination_reason,
+        memory_budget=budget,
+        run_id=run_id,
+    )
+
+
 def _validate_positive_interval(value: float | None, label: str) -> None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ValueError(f"{label} must be a positive finite number, got {value!r}")
@@ -744,22 +1024,22 @@ def _validate_positive_interval(value: float | None, label: str) -> None:
         raise ValueError(f"{label} must be a positive finite number, got {value!r}")
 
 
-def run_mhs_process_backtest(
-    *, start: pd.Timestamp, end: pd.Timestamp, data_root: str | None,
-    result_output: Path, targets_output: Path | None = None,
-    tracking_error_threshold: float | None = None,
-    timeout_seconds: float | None = None, poll_seconds: float = 0.25,
-    memory_budget: MhsMemoryBudget | None = None,
-    registry_path: Path, run_id: str | None = None,
-    retention_policy: RetentionPolicy | None = None,
-) -> MhsSupervisedRun:
-    """Execute one 3-minute MHS evaluation and atomically publish its complete outcome.
+def _validate_supervised_request(
+    *,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+    result_output: Path,
+    targets_output: Path | None,
+    tracking_error_threshold: float | None,
+    timeout_seconds: float | None,
+    poll_seconds: float,
+    retention_policy: RetentionPolicy | None,
+    run_id: str | None,
+) -> tuple[Path, str]:
+    """Validate supervised controls and resolve fresh destinations before registration.
 
-    The worker is bound to the source identity used at registration, so procedure
-    and lifecycle fingerprint describe one executable strategy; the envelope keeps
-    process completion distinct from financial validity. ``registry_path`` has no
-    default: only the CLI resolves the operator registry, so library callers
-    (tests, scripts) can never append to it or its evidence root implicitly.
+    Check order and messages match the historical inline validation so invalid
+    controls, occupied destinations and bad run identities fail identically.
     """
     if not isinstance(start, pd.Timestamp) or start.tzinfo is None:
         raise ValueError("start must be a timezone-aware Timestamp")
@@ -783,24 +1063,49 @@ def run_mhs_process_backtest(
     ProcessExecutionPolicy(tracking_error_threshold=tracking_error_threshold)
     if retention_policy is not None and not isinstance(retention_policy, RetentionPolicy):
         raise ValueError(f"retention_policy must be a RetentionPolicy or None, got {retention_policy!r}")
-    resolved_registry = Path(registry_path)
     resolved_run_id = _resolve_run_id(run_id)
-    evidence_root = resolved_registry.resolve().parent / "evidence"
     log_path = result_output.parent / f"{result_output.stem}.log"
-    candidates: list[tuple[str, Path]] = [
-        ("result_output", result_output),
-        ("log", log_path),
-    ]
+    candidates: list[tuple[str, Path]] = [("result_output", result_output), ("log", log_path)]
     if targets_output is not None:
         candidates.append(("targets_output", targets_output))
-    seen: set[Path] = set()
-    for label, candidate in candidates:
-        resolved = candidate.resolve() if isinstance(candidate, Path) else candidate
-        if resolved in seen:
-            raise ValueError(f"{label} must be distinct from other destinations")
-        seen.add(resolved)
-        if os.path.lexists(candidate):
-            raise ValueError(f"{label} must be fresh: {candidate} already exists")
+    require_fresh_destinations(candidates)
+    return log_path, resolved_run_id
+
+
+def run_mhs_process_backtest(
+    *, start: pd.Timestamp, end: pd.Timestamp, data_root: str | None,
+    result_output: Path, targets_output: Path | None = None,
+    tracking_error_threshold: float | None = None,
+    timeout_seconds: float | None = None, poll_seconds: float = 0.25,
+    memory_budget: MhsMemoryBudget | None = None,
+    registry_path: Path, run_id: str | None = None,
+    retention_policy: RetentionPolicy | None = None,
+) -> MhsSupervisedRun:
+    """Execute one 3-minute MHS evaluation and atomically publish its complete outcome.
+
+    Bind the supervised worker to the exact MHS source identity used in run
+    registration so its typed baseline procedure and the lifecycle fingerprint
+    describe the same executable strategy. Every registered run publishes
+    exactly one envelope and one registry finalization, including launch
+    failure and operator interrupt, so no registration is left dangling.
+    The envelope keeps process completion distinct from financial validity so a
+    successful subprocess can never be mistaken for deployable evidence.
+
+    Returns:
+        The observed run; an operator interrupt yields ``status="interrupted"``.
+    Raises:
+        ValueError: Invalid controls, occupied/colliding destinations or missing
+            source identity, all before registration.
+        OSError: Worker launch (or log creation) failed; raised after the
+            ``failed`` envelope is published, retention is skipped.
+    """
+    resolved_registry = Path(registry_path)
+    log_path, resolved_run_id = _validate_supervised_request(
+        start=start, end=end, result_output=result_output, targets_output=targets_output,
+        tracking_error_threshold=tracking_error_threshold, timeout_seconds=timeout_seconds,
+        poll_seconds=poll_seconds, retention_policy=retention_policy, run_id=run_id,
+    )
+    evidence_root = resolved_registry.resolve().parent / "evidence"
     budget = resolve_mhs_memory_budget(memory_budget)
     source_digest = _code_identity()
     if not isinstance(source_digest, str) or re.fullmatch(r"[0-9a-f]{64}", source_digest) is None:
@@ -849,194 +1154,63 @@ def run_mhs_process_backtest(
         command += ["--rebalance-tracking-error-threshold", str(tracking_error_threshold)]
     scoped_command = _gnu_time_prefix() + command
     wall_start = time.monotonic()
-    samples = 0
-    pss_peak: int | None = None
-    uss_peak: int | None = None
-    min_available: int | None = None
-    swap_baseline: int | None = None
-    swap_growth: int | None = None
-    timed_out = False
-    resource_reason: str | None = None
-    interrupted = False
-    last_heartbeat = wall_start
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    log_handle = open(log_path, "w", encoding="utf-8")  # noqa: PTH123, SIM115
+    state: _SupervisionState | None = None
     proc: subprocess.Popen[bytes] | None = None
+    log_handle: TextIO | None = None
+    returncode: int | None = None
+    interrupted = False
+    launch_exc: OSError | None = None
+    launch_error: str | None = None
     try:
         try:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_handle = open(log_path, "w", encoding="utf-8")  # noqa: PTH123, SIM115
             proc = subprocess.Popen(  # noqa: S603
                 scoped_command, stdout=log_handle, stderr=subprocess.STDOUT,
                 start_new_session=True, shell=False,
             )
         except OSError as exc:
-            log_handle.close()
-            failed = MhsSupervisedRun(
-                status="failed",
-                command=tuple(scoped_command),
-                exit_code=None,
-                signal_number=None,
-                start=start.isoformat(),
-                end=end.isoformat(),
-                data_root=data_root,
-                result_output_path=str(staging),
-                log_path=str(log_path),
-                domain_artifact_written=staging.exists(),
-                wall_seconds=time.monotonic() - wall_start,
-                cpu_seconds=None,
-                gnu_max_individual_rss_bytes=None,
-                sampled_tree_pss_peak_bytes=None,
-                sampled_tree_uss_peak_bytes=None,
-                min_available_bytes=None,
-                process_swap_growth_bytes=None,
-                samples_taken=0,
-                sample_interval_seconds=float(poll_seconds),
-                cpu_scope=CPU_SCOPE,
-                memory_scope=MEMORY_SCOPE,
-                termination_reason=f"launch failed: {exc}",
-                memory_budget=budget,
-                run_id=resolved_run_id,
+            launch_exc = exc
+            launch_error = str(exc)
+        else:
+            pid = proc.pid
+            state = _SupervisionState(
+                pid=pid, swap_baseline=_optional_swap_bytes(pid), last_heartbeat=wall_start
             )
-            _publish_envelope(
-                start=start, end=end, data_root=data_root, fingerprint=fingerprint,
-                registry_path=resolved_registry, run_id=resolved_run_id, run=failed,
-                evidence_root=evidence_root, result_output=result_output,
-                targets_output=targets_output, staging=staging, log_path=log_path,
-                command=tuple(scoped_command),
+            returncode = _await_worker(
+                proc, state, budget,
+                timeout_seconds=timeout_seconds,
+                poll_seconds=float(poll_seconds),
+                wall_start=wall_start,
             )
-            raise
-        pid = proc.pid
-        try:
-            swap_baseline = _workload_swap_bytes(pid)
-        except Exception:  # noqa: BLE001 - optional measurement
-            swap_baseline = None
-        while True:
-            try:
-                returncode = proc.wait(timeout=float(poll_seconds))
-                break
-            except subprocess.TimeoutExpired:
-                pass
-            wall = time.monotonic() - wall_start
-            if wall - (last_heartbeat - wall_start) >= HEARTBEAT_SECONDS:
-                _logger.info(
-                    "[SYS] heartbeat wall_s=%.1f pid=%d", wall, pid,
-                )
-                last_heartbeat = time.monotonic()
-            if timeout_seconds is not None and wall >= float(timeout_seconds):
-                timed_out = True
-                _terminate_group(proc)
-                returncode = proc.wait()
-                break
-            try:
-                pss, uss = _workload_pss_uss(pid)
-                headroom = current_mhs_headroom_bytes()
-            except Exception as tel_exc:  # noqa: BLE001
-                resource_reason = f"missing safety telemetry: {tel_exc}"
-                _terminate_group(proc)
-                returncode = proc.wait()
-                break
-            samples += 1
-            pss_peak = pss if pss_peak is None else max(pss_peak, pss)
-            uss_peak = uss if uss_peak is None else max(uss_peak, uss)
-            min_available = headroom if min_available is None else min(min_available, headroom)
-            try:
-                swap_current = _workload_swap_bytes(pid)
-            except Exception:  # noqa: BLE001 - optional measurement
-                swap_current = None
-            if swap_baseline is not None and swap_current is not None:
-                growth = swap_current - swap_baseline
-                if growth > 0:
-                    swap_growth = growth if swap_growth is None else max(swap_growth, growth)
-            if pss > budget.total_tree_pss_bytes:
-                resource_reason = (
-                    f"sampled tree PSS {pss} exceeds {budget.total_tree_pss_bytes}"
-                )
-                _terminate_group(proc)
-                returncode = proc.wait()
-                break
-            if headroom < budget.min_available_bytes:
-                resource_reason = (
-                    f"headroom {headroom} below {budget.min_available_bytes}"
-                )
-                _terminate_group(proc)
-                returncode = proc.wait()
-                break
-            if swap_growth is not None and swap_growth > 0:
-                resource_reason = f"swap growth {swap_growth} bytes observed"
-                _terminate_group(proc)
-                returncode = proc.wait()
-                break
     except KeyboardInterrupt:
         interrupted = True
-        if proc is not None:
-            _terminate_group(proc)
-            with suppress(Exception):  # noqa: BLE001
-                returncode = proc.wait()
-        else:
-            returncode = None
+        returncode = _reap_after_interrupt(proc) if proc is not None else None
     finally:
-        with suppress(Exception):  # noqa: BLE001
-            log_handle.close()
+        if log_handle is not None:
+            with suppress(Exception):  # noqa: BLE001
+                log_handle.close()
     wall_seconds = time.monotonic() - wall_start
-    if proc is None:
-        raise OSError("child process failed to launch")
-    cpu_seconds, gnu_rss = _parse_gnu_metrics(log_path)
+    cpu_seconds, gnu_rss = _parse_gnu_metrics(log_path) if proc is not None else (None, None)
     domain_written = staging.exists()
     failure_code = _failure_resource_code(staging) if domain_written else None
-    exit_code: int | None = returncode if returncode is not None and returncode >= 0 else None
-    signal_number: int | None = -returncode if returncode is not None and returncode < 0 else None
-    termination_reason: str | None = None
-    if timed_out:
-        status: Literal[
-            "completed", "failed", "timed_out", "signaled", "resource_rejected", "interrupted"
-        ] = "timed_out"
-        termination_reason = f"deadline exceeded after {wall_seconds:.1f}s"
-        exit_code = returncode if returncode is not None and returncode >= 0 else exit_code
-        signal_number = -returncode if returncode is not None and returncode < 0 else signal_number
-    elif resource_reason is not None:
-        status = "resource_rejected"
-        termination_reason = resource_reason
-    elif interrupted:
-        status = "interrupted"
-        termination_reason = "supervisor interrupted"
-    elif failure_code in _RESOURCE_ERROR_CODES:
-        status = "resource_rejected"
-        termination_reason = f"worker reported {failure_code}"
-    elif returncode is not None and returncode < 0:
-        status = "signaled"
-        termination_reason = f"signal {-returncode}"
-    elif returncode == 0 and _primary_completed(staging):
-        status = "completed"
-    elif returncode == 0:
-        status = "failed"
-        termination_reason = "exit zero without a new completed domain artifact"
-    else:
-        status = "failed"
-        termination_reason = f"exit_code={returncode}"
-    run = MhsSupervisedRun(
-        status=status,
-        command=tuple(scoped_command),
-        exit_code=exit_code,
-        signal_number=signal_number,
-        start=start.isoformat(),
-        end=end.isoformat(),
-        data_root=data_root,
-        result_output_path=str(staging),
-        log_path=str(log_path),
-        domain_artifact_written=bool(domain_written),
-        wall_seconds=float(wall_seconds),
-        cpu_seconds=cpu_seconds,
-        gnu_max_individual_rss_bytes=gnu_rss,
-        sampled_tree_pss_peak_bytes=pss_peak,
-        sampled_tree_uss_peak_bytes=uss_peak,
-        min_available_bytes=min_available,
-        process_swap_growth_bytes=swap_growth,
-        samples_taken=int(samples),
-        sample_interval_seconds=float(poll_seconds),
-        cpu_scope=CPU_SCOPE,
-        memory_scope=MEMORY_SCOPE,
-        termination_reason=termination_reason,
-        memory_budget=budget,
-        run_id=resolved_run_id,
+    primary_completed = _primary_completed(staging) if domain_written and returncode == 0 else False
+    outcome = _classify_termination(
+        launch_error=launch_error,
+        timed_out=state is not None and state.timed_out,
+        resource_reason=state.resource_reason if state is not None else None,
+        interrupted=interrupted,
+        failure_code=failure_code,
+        returncode=returncode,
+        primary_completed=primary_completed,
+        wall_seconds=wall_seconds,
+    )
+    run = _build_supervised_run(
+        outcome=outcome, command=tuple(scoped_command), start=start, end=end,
+        data_root=data_root, staging=staging, log_path=log_path,
+        domain_written=domain_written, wall_seconds=wall_seconds,
+        cpu_seconds=cpu_seconds, gnu_rss=gnu_rss, state=state,
+        poll_seconds=float(poll_seconds), budget=budget, run_id=resolved_run_id,
     )
     _publish_envelope(
         start=start, end=end, data_root=data_root, fingerprint=fingerprint,
@@ -1045,6 +1219,8 @@ def run_mhs_process_backtest(
         targets_output=targets_output, staging=staging, log_path=log_path,
         command=tuple(scoped_command),
     )
+    if launch_exc is not None:
+        raise launch_exc
     if retention_policy is not None:
         _run_retention(resolved_registry, resolved_run_id, evidence_root, retention_policy)
     return run
