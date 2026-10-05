@@ -15,7 +15,6 @@ from typing import TYPE_CHECKING, Any, Final
 
 if TYPE_CHECKING:
     from src.mhs.contracts import MhsDiagnosticRequest
-    from src.mhs.pipeline.config import MhsRunConfig
 
 from src.mhs.params import (
     COMMITTEE_MEMBER_SET_INERT,
@@ -104,13 +103,13 @@ def _choice_error(field: str, value: Any, choices: tuple[str, ...]) -> str:
     return f"unknown {field} '{value}'"
 
 
-def _validate_field_choices(request: MhsDiagnosticRequest | MhsRunConfig, field: str, choices: tuple[str, ...]) -> None:
+def _validate_field_choices(request: MhsDiagnosticRequest, field: str, choices: tuple[str, ...]) -> None:
     value = getattr(request, field)
     if value not in choices:
         raise ValueError(_choice_error(field, value, choices))
 
 
-def _validate_field_bounds(request: MhsDiagnosticRequest | MhsRunConfig, field: str, bounds: tuple[float, float]) -> None:
+def _validate_field_bounds(request: MhsDiagnosticRequest, field: str, bounds: tuple[float, float]) -> None:
     value = getattr(request, field)
     if value is None:
         return
@@ -119,7 +118,7 @@ def _validate_field_bounds(request: MhsDiagnosticRequest | MhsRunConfig, field: 
         raise ValueError(f"{field} must be in [{lo}, {hi}]")
 
 
-def _validate_committee_tranche_count(request: MhsDiagnosticRequest | MhsRunConfig) -> None:
+def _validate_committee_tranche_count(request: MhsDiagnosticRequest) -> None:
     """Fail-closed bounds for the committee tranche count.
 
     Raises:
@@ -146,12 +145,11 @@ def _validate_committee_tranche_count(request: MhsDiagnosticRequest | MhsRunConf
         )
 
 
-def validate_request(request: MhsDiagnosticRequest | MhsRunConfig, committee_target_gross_unset: object) -> None:
+def validate_request(request: MhsDiagnosticRequest) -> None:
     """Validate the single-source MHS diagnostic request and its timing, capital and execution controls without authorizing a mark-price valuation branch.
 
     Args:
         request: Complete diagnostic request.
-        committee_target_gross_unset: Existing sentinel for unset gross controls.
 
     Returns:
         None for a valid request.
@@ -246,7 +244,7 @@ def validate_request(request: MhsDiagnosticRequest | MhsRunConfig, committee_tar
     if request.committee_evidence_weighting and not request.committee_capital:
         raise ValueError("committee_evidence_weighting requires committee_capital=True")
     raw_target_gross = request.committee_target_gross
-    if raw_target_gross is not committee_target_gross_unset and raw_target_gross is not None:
+    if raw_target_gross is not None:
         if not (0.0 < raw_target_gross <= 2.0):
             raise ValueError("committee_target_gross must be in (0.0, 2.0] when set")
         if not request.committee_capital:
@@ -309,7 +307,7 @@ def validate_request(request: MhsDiagnosticRequest | MhsRunConfig, committee_tar
         raise ValueError("funding_carry_weight > 0.0 requires funding_carry_sleeve=True")
 
 
-def _validate_forward_registration(request: MhsDiagnosticRequest | MhsRunConfig) -> None:
+def _validate_forward_registration(request: MhsDiagnosticRequest) -> None:
     """Fail-closed preconditions for a registered forward evaluation."""
     digest = request.forward_registration_digest
     if digest is None:

@@ -887,8 +887,8 @@ def anchored_purged_folds_through(final_boundary: pd.Timestamp) -> tuple[Anchore
 def resolved_anchored_folds(request: Any) -> tuple[AnchoredPurgedFold, ...]:
     """Fold set for one run: legacy sealed folds, or folds through a registered forward end.
 
-    ``request`` is ``Any`` because callers pass both ``MhsDiagnosticRequest`` and
-    ``MhsRunConfig``.
+    ``request`` is ``Any`` because callers pass ``MhsDiagnosticRequest``
+    through untyped seams.
     """
     if getattr(request, "forward_registration_digest", None) is None:
         return phase_1_anchored_purged_folds()

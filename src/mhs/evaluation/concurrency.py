@@ -263,20 +263,7 @@ def _run_post_book_concurrently(
     """
     fold_list = resolved_anchored_folds(request)
     has_primary = blend_report is not None and blend_report.primary is not None
-    # The request crosses a fork-worker pickle boundary below. Resolve the
-    # identity sentinel in the parent so a default committee gross is preserved.
-    from dataclasses import replace
-
-    from src.mhs.research_go import _resolved_committee_target_gross
-
-    worker_request = (
-        replace(
-            request,
-            committee_target_gross=_resolved_committee_target_gross(request),
-        )
-        if request is not None and request.committee_capital
-        else request
-    )
+    worker_request = request
 
     bootstrap_ci: tuple[float, float] | None = None
     placebo_percentile: float | None = None

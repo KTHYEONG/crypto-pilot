@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 
+from tests.fixtures.mhs_requests import research_baseline
 import json
 from pathlib import Path
 import numpy as np
@@ -11,7 +12,6 @@ import pytest
 import src.mhs.marks as marks
 import src.mhs.marks as mhs_marks
 import src.mhs.statistics as statistics
-from src.mhs.contracts import MhsDiagnosticRequest
 from src.mhs.diagnostic_run import run_mhs_horizon_diagnostic
 from src.mhs.evaluation.folds import _run_anchored_fold
 from src.mhs.evaluation.fold_weights import _build_fold_target_weights
@@ -267,7 +267,7 @@ class TestFoldWindowTelemetryOracle:
         fold = FOLD_WINDOW_FOLD
         vs, ve = fold.validation_start, fold.validation_end
         ve_eff = ve - pd.Timedelta(minutes=3)
-        request = MhsDiagnosticRequest(
+        request = research_baseline(
             start=str(fold.train_start), end=str(fold.validation_end),
             data_root=str(root), execution_timeframe="3m", log_run=False,
         )
@@ -334,7 +334,7 @@ class TestFoldWindowTelemetryOracle:
         root, end = fold_market
         symbols = list(DEV_SYMBOLS)
         funding_by_symbol, _ = _load_funding_series(symbols)
-        request = MhsDiagnosticRequest(
+        request = research_baseline(
             start=str(START), end=str(end), data_root=str(root),
             execution_timeframe="3m", log_run=False,
         )
@@ -528,7 +528,7 @@ class TestMhsSingleSourceReport:
         statistics._placebo_sharpe_percentile = statistics._placebo_sharpe_percentile
         try:
             return run_mhs_horizon_diagnostic(
-                MhsDiagnosticRequest(
+                research_baseline(
                     start=str(START), end=str(end), data_root=str(root),
                     execution_timeframe="3m", log_run=False, discovery_gate=True,
                 ),

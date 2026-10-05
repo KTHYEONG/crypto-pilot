@@ -19,7 +19,6 @@ from src.mhs import preregistration as _prereg
 from src.mhs.contracts import MhsDiagnosticRequest
 from src.mhs.marks import clear_mhs_market_data_caches
 from src.mhs.params import DISCOVERY_START, MHS_FINAL_OOS_CUTOFF_2026H1
-from src.mhs.pipeline.config import MhsRunConfig
 from src.mhs.pipeline.context import PipelineContext
 from src.mhs.pipeline.runner import run_stages
 from src.mhs.report.schema import MhsHorizonDiagnosticReport
@@ -28,7 +27,7 @@ from src.mhs.telemetry import StageTelemetry
 from src.quant.evaluation.policy import HOLDOUT_CUTOFF, resolve_evaluation_end
 
 
-def run_mhs_diagnostic(config: MhsRunConfig) -> MhsHorizonDiagnosticReport:
+def run_mhs_diagnostic(config: MhsDiagnosticRequest) -> MhsHorizonDiagnosticReport:
     """Compose the dev-only MHS diagnostic: six stages + report assembly.
 
     Constructs a ``PipelineContext`` from the run config and drives the stage
@@ -44,7 +43,7 @@ def run_mhs_diagnostic(config: MhsRunConfig) -> MhsHorizonDiagnosticReport:
     if config.forward_registration_digest is not None:
         _now = pd.Timestamp.now(tz="UTC")
         _registration = _prereg.find_registration(config.forward_registration_digest)
-        if _prereg.procedure_identity_digest(MhsDiagnosticRequest(**dataclasses.asdict(config))) != _registration.procedure_digest:
+        if _prereg.procedure_identity_digest(config) != _registration.procedure_digest:
             raise DataIntegrityError("run flags do not match the registered procedure digest")
         _evaluation_ceiling = _prereg.forward_evaluation_end_ceiling(_now)
         resolved_end = resolve_evaluation_end(config.end, unseal_holdout=True, ceiling=_evaluation_ceiling)

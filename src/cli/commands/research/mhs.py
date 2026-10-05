@@ -51,19 +51,13 @@ def _run_mhs_horizon_diagnostic(args: argparse.Namespace) -> None:
         run_leverage_frontier_scan(args.growth_envelope, tuple(args.leverage_frontier_multiples))
         return
 
-    import dataclasses
-
     from src.common.paths import DATA_DIR
-    from src.mhs.contracts import MhsDiagnosticRequest, MhsOutputTier
-    from src.mhs.pipeline.config import MhsRunConfig
+    from src.mhs.contracts import MhsOutputTier
+    from src.mhs.pipeline.config import request_from_namespace
     from src.mhs.pipeline.orchestrator import run_mhs_diagnostic
     from src.mhs.report.persist import persist_mhs_horizon_diagnostic_report
 
-    # FIX D1: MhsRunConfig is the sole owner of the derived-default logic
-    # (committee_capital/regime-adaptive tranche/target-gross/funding-carry-sleeve
-    # opt-out semantics); the CLI only parses and adapts to MhsDiagnosticRequest.
-    config = MhsRunConfig.from_namespace(args)
-    request = MhsDiagnosticRequest(**dataclasses.asdict(config))
+    request = request_from_namespace(args)
     if getattr(args, "register_procedure", False):
         import pandas as pd
 
@@ -71,7 +65,7 @@ def _run_mhs_horizon_diagnostic(args: argparse.Namespace) -> None:
         registration = register_procedure(request, now=pd.Timestamp.now(tz="UTC"))
         _logger.info("[EVAL] procedure_registered digest=%s effective_start=%s", registration.procedure_digest, registration.effective_start.isoformat())
         return
-    report = run_mhs_diagnostic(config)
+    report = run_mhs_diagnostic(request)
     persist_start = time.perf_counter()
     from uuid import uuid4
 

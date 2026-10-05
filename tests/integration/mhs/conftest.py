@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from tests.fixtures.mhs_requests import research_baseline
 import pandas as pd
 from pathlib import Path
 
@@ -10,7 +11,6 @@ import inspect
 
 from src.mhs import scaling
 from src.mhs import statistics
-from src.mhs.contracts import MhsDiagnosticRequest
 from src.mhs.diagnostic_run import run_mhs_horizon_diagnostic
 
 
@@ -86,7 +86,7 @@ def report(synthetic_market):
     _, start, _ = _load_horizon_diagnostic_helpers()
     root, end = synthetic_market
     return run_mhs_horizon_diagnostic(
-        MhsDiagnosticRequest(start=str(start), end=str(end), data_root=str(root), execution_timeframe="3m", log_run=False),
+        research_baseline(start=str(start), end=str(end), data_root=str(root), execution_timeframe="3m", log_run=False),
     )
 
 
@@ -95,7 +95,7 @@ def touch_report(synthetic_market):
     _, start, _ = _load_horizon_diagnostic_helpers()
     root, end = synthetic_market
     return run_mhs_horizon_diagnostic(
-        MhsDiagnosticRequest(
+        research_baseline(
             start=str(start), end=str(end), data_root=str(root),
             execution_timeframe="3m", log_run=False, touch_diagnostic=True,
         ),
@@ -127,7 +127,7 @@ def annualization_report(synthetic_market):
     )
     try:
         return run_mhs_horizon_diagnostic(
-            MhsDiagnosticRequest(
+            research_baseline(
                 start=str(start), end=str(end), data_root=str(root),
                 execution_timeframe="3m", log_run=False,
             ),
@@ -221,7 +221,7 @@ def calibrated_report(synthetic_market):
     scaling._apply_rebalance_deadband = _deadband
     try:
         report = run_mhs_horizon_diagnostic(
-            MhsDiagnosticRequest(
+            research_baseline(
                 start=str(start), end=str(end), data_root=str(root),
                 execution_timeframe="3m", log_run=False,
             ),

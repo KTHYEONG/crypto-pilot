@@ -4,6 +4,7 @@ from __future__ import annotations
 
 
 from pathlib import Path
+from tests.fixtures.mhs_requests import research_baseline
 import numpy as np
 import pandas as pd
 import pytest
@@ -97,7 +98,7 @@ class TestQualityCalibrationWiring:
 
         monkeypatch.setattr(replay_stage, "run_replays", _spy)
         report = run_mhs_horizon_diagnostic(
-            MhsDiagnosticRequest(
+            research_baseline(
                 start=str(START), end=str(end), data_root=str(root),
                 execution_timeframe="3m", log_run=False,
             ),
@@ -120,9 +121,8 @@ class TestMhsHorizonDiagnostic:
 
     def test_mhs_3m_01_default_execution_timeframe(self) -> None:
         """MHS-3M-01-DEFAULT: production requests default to 3m."""
-        from src.mhs.contracts import MhsDiagnosticRequest
 
-        assert MhsDiagnosticRequest().execution_timeframe == "3m"
+        assert research_baseline().execution_timeframe == "3m"
 
     def test_diagnostic_ensemble_separate_from_executable_tranche(self, report) -> None:
         fast = report.books["fast_reversal"]
@@ -136,7 +136,7 @@ class TestMhsHorizonDiagnostic:
         root, end = synthetic_market
         with pytest.raises(RuntimeError):
             run_mhs_horizon_diagnostic(
-                MhsDiagnosticRequest(
+                research_baseline(
                     start=str(START), end=str(end), data_root=str(root),
                     partition="holdout", execution_timeframe="3m", log_run=False,
                 ),
@@ -147,7 +147,7 @@ class TestMhsHorizonDiagnostic:
         root, end = synthetic_market
         with pytest.raises(RuntimeError):
             run_mhs_horizon_diagnostic(
-                MhsDiagnosticRequest(
+                research_baseline(
                     start=str(START),
                     end=str(HOLDOUT_CUTOFF + pd.Timedelta(days=1)),
                     data_root=str(root),
@@ -410,7 +410,7 @@ class TestPitExecutionGrid:
         statistics._bootstrap_ci = lambda *a, **k: None
         try:
             yield run_mhs_horizon_diagnostic(
-                MhsDiagnosticRequest(
+                research_baseline(
                     start=str(START), end=str(end), data_root=str(root),
                     execution_timeframe="3m", log_run=False,
                 ),
@@ -571,7 +571,7 @@ class TestFoldSafeHorizonEfficiency:
     def fold_safe_report(self, synthetic_market) -> MhsHorizonDiagnosticReport:
         root, end = synthetic_market
         return run_mhs_horizon_diagnostic(
-            MhsDiagnosticRequest(
+            research_baseline(
                 start=str(START), end=str(end), data_root=str(root),
                 execution_timeframe="3m", log_run=False,
                 fold_safe_horizon_selection=True,
@@ -592,7 +592,7 @@ class TestFoldSafeHorizonEfficiency:
         evaluation_folds.fold_train_only_discovery_qualification = _no_cache
         try:
             return run_mhs_horizon_diagnostic(
-                MhsDiagnosticRequest(
+                research_baseline(
                     start=str(START), end=str(end), data_root=str(root),
                     execution_timeframe="3m", log_run=False,
                     fold_safe_horizon_selection=True,
@@ -650,7 +650,7 @@ class TestMhsPerfOptimizationO3FoldParity:
 
         root, end = fold_parity_request
         funding, _ = marks._load_funding_series(DEV_SYMBOLS)
-        request = MhsDiagnosticRequest(
+        request = research_baseline(
             start=str(START), end=str(end), data_root=str(root),
             execution_timeframe="3m", log_run=False,
         )
@@ -689,27 +689,25 @@ class TestSingleSourceDiagnosticControls:
         import dataclasses
 
         from src.cli.main import build_root_parser
-        from src.mhs.contracts import MhsDiagnosticRequest
-        from src.mhs.pipeline.config import MhsRunConfig
+        from src.mhs.pipeline.config import request_from_namespace
 
         args = build_root_parser().parse_args(
             ["research", "run", "portfolio", "mhs-horizon-diagnostic"],
         )
-        from_cli = dataclasses.asdict(MhsRunConfig.from_namespace(args))
-        bare = dataclasses.asdict(MhsRunConfig())
+        from_cli = dataclasses.asdict(request_from_namespace(args))
+        bare = dataclasses.asdict(MhsDiagnosticRequest())
         assert from_cli == bare
         assert "mark_mode" not in bare
         assert bare["execution_timeframe"] == "3m"
-        request = MhsDiagnosticRequest(**bare)
+        request = research_baseline(**bare)
         assert request.execution_timeframe == "3m"
         assert not hasattr(request, "mark_mode")
 
     def test_old_mark_flag_does_not_silently_pass(self) -> None:
         """An old serialized request carrying mark_mode fails explicitly."""
-        from src.mhs.contracts import MhsDiagnosticRequest
 
         with pytest.raises(TypeError):
-            MhsDiagnosticRequest(mark_mode="cache_required")  # type: ignore[call-arg]
+            research_baseline(mark_mode="cache_required")  # type: ignore[call-arg]
 
     def test_pipeline_book_stage_reads_no_mark_mode(self) -> None:
         """build_books consumes the fixed OHLCV contract without mark-gap or mark-coverage branches."""
@@ -747,7 +745,7 @@ class TestSingleSourceDiagnosticControls:
             lambda symbol, timeframe: gap_dir / f"{symbol}.parquet",
         )
         report = run_mhs_horizon_diagnostic(
-            MhsDiagnosticRequest(
+            research_baseline(
                 start=str(START), end=str(end), data_root=str(root),
                 execution_timeframe="3m", log_run=False,
             ),
@@ -788,7 +786,7 @@ class TestDiagnosticCanonicalOhlcvEconomics:
             lambda symbol, timeframe: gap_dir / f"{symbol}.parquet",
         )
         report = run_mhs_horizon_diagnostic(
-            MhsDiagnosticRequest(
+            research_baseline(
                 start=str(START), end=str(end), data_root=str(root),
                 execution_timeframe="3m", log_run=False,
             ),
@@ -803,7 +801,7 @@ class TestDiagnosticCanonicalOhlcvEconomics:
         """Base and stress differ in declared costs, never in price source."""
         root, end = ohlcv_market
         report = run_mhs_horizon_diagnostic(
-            MhsDiagnosticRequest(
+            research_baseline(
                 start=str(START), end=str(end), data_root=str(root),
                 execution_timeframe="3m", log_run=False,
             ),
@@ -823,7 +821,7 @@ class TestDiagnosticCanonicalOhlcvEconomics:
         import shutil
 
         root, end = ohlcv_market
-        request = MhsDiagnosticRequest(
+        request = research_baseline(
             start=str(START), end=str(end), data_root=str(root),
             execution_timeframe="3m", log_run=False,
         )
@@ -837,7 +835,7 @@ class TestDiagnosticCanonicalOhlcvEconomics:
         frame = pd.read_parquet(perturbed_root / "3m" / f"{last_symbol}.parquet")
         frame.loc[frame.index[-10:], "close"] = frame.loc[frame.index[-10:], "close"] * 1.5
         frame.to_parquet(perturbed_root / "3m" / f"{last_symbol}.parquet")
-        perturbed_request = MhsDiagnosticRequest(
+        perturbed_request = research_baseline(
             start=str(START), end=str(end), data_root=str(perturbed_root),
             execution_timeframe="3m", log_run=False,
         )

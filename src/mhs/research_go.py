@@ -18,14 +18,12 @@ from src.mhs.contracts import (
     MhsResearchGoResult,
 )
 from src.mhs.params import (
-    COMMITTEE_TARGET_GROSS_UNSET,
     GO_PRIMARY_SHARPE_FLOOR,
     GROWTH_RISK_ENVELOPES,
     GrowthRiskEnvelope,
 )
 from src.mhs.types import (
     COMMITTEE_GROWTH_MAX_DRAWDOWN,
-    COMMITTEE_TARGET_GROSS,
     REGISTERED_POLICY_THRESHOLDS,
 )
 
@@ -74,15 +72,6 @@ GO_REASON_DATA_INTEGRITY_CODES = frozenset[str]({
     GO_REASON_RESOURCE_BREACH,
     GO_REASON_PATH_DIVERGENCE,
 })
-
-
-def _resolved_committee_target_gross(request: MhsDiagnosticRequest) -> float | None:
-    """The effective committee target gross: the registered default when the
-    caller never set the field, else the caller's explicit value (including
-    an explicit ``None``, which keeps the diluted book)."""
-    if request.committee_target_gross is COMMITTEE_TARGET_GROSS_UNSET:
-        return COMMITTEE_TARGET_GROSS
-    return request.committee_target_gross
 
 
 def _resolved_committee_tranche_count(request: MhsDiagnosticRequest) -> int:

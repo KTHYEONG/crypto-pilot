@@ -217,7 +217,7 @@ def _build_fold_target_weights(
                 COMMITTEE_REGIME_ADAPTIVE_WINDOW
                 if request.committee_regime_adaptive_tranche else None
             ),
-            target_gross=_research_go._resolved_committee_target_gross(request),
+            target_gross=request.committee_target_gross,
             member_weights=committee_member_weights,
             carry_book=funding_carry_execution_book(bar_funding, execution_mask, FUNDING_CARRY_SLEEVE_LOOKBACK_HOURS, slow_grid, request.committee_tranche_count, slow.min_symbols) if request.funding_carry_sleeve else None, carry_weight=request.funding_carry_weight if request.funding_carry_sleeve else 0.0,
             members=_research_go._resolved_committee_members(request),
