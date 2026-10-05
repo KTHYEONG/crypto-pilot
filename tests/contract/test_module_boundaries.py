@@ -383,6 +383,8 @@ def test_source_module_size_budget() -> None:
         "src/mhs/backtest/journal.py": 1091,
         "src/mhs/backtest/inventory.py": 877,
         "src/mhs/evaluation/windows.py": 713,
+        # Unified MhsDiagnosticRequest carries per-field CLI/validation metadata as the single schema source (spec 10 parts 2-3).
+        "src/mhs/contracts.py": 872,
         # Checkpoint advancement, retention and the loop stay co-located for review;
         # _run_retention_pass persists the checkpoint and is not split out.
         "src/market_data/streams/normalizer.py": 1112,
@@ -468,7 +470,6 @@ def test_no_function_exceeds_length_budget() -> None:
         "src/mhs/backtest/paths.py::run_process_paths": 263,
         "src/mhs/backtest/inventory.py::evaluate_process_inventory_backtest": 289,
         "src/mhs/discovery.py::select_horizon_by_discovery_qualification": 270,
-        "src/cli/commands/research/mhs.py::add_mhs_commands": 559,
         "src/mhs/evaluation/committee.py::_committee_diagnostic": 282,
         "src/mhs/pipeline/stages/committee.py::build_committee": 278,
     }
