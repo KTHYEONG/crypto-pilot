@@ -778,3 +778,85 @@ def test_wrapper_rejects_occupied_destination_and_format_checks(tmp_path: Path) 
     with pytest.raises(ValueError, match=r".+"):
         rep_inventory.persist_process_inventory_report(report, tmp_path / "inventory.csv")
     assert hourly_path.read_text(encoding="utf-8") == '{"hourly": true}'
+
+
+def _utc_oracle(x):  # type: ignore[no-untyped-def]
+    import numpy as np
+    import pandas as pd
+    import pyarrow as pa
+
+    from src.mhs.reporting.inventory import _utc_index
+
+    out = _utc_index(x)
+    ref = pd.DatetimeIndex(pd.to_datetime(list(x), utc=True))
+    assert out.equals(ref)
+    assert out.dtype == ref.dtype
+    assert np.array_equal(out.asi8, ref.asi8)
+    assert pa.array(out, type=pa.timestamp("ns", tz="UTC")).equals(
+        pa.array(ref, type=pa.timestamp("ns", tz="UTC"))
+    )
+    return out, ref
+
+
+def test_utc_index_matches_list_path_across_resolutions_and_zones() -> None:
+    import pandas as pd
+
+    base = pd.date_range("2024-03-10 06:00", periods=5, freq="30min", tz="UTC")
+    for unit in ("s", "ms", "us", "ns"):
+        _utc_oracle(base.as_unit(unit))
+        _utc_oracle(base.as_unit(unit).tz_convert("Asia/Seoul"))
+        _utc_oracle(base.as_unit(unit).tz_convert("America/New_York"))
+        _utc_oracle(base.as_unit(unit).tz_localize(None))
+
+
+def test_utc_index_boundary_rows_match_list_path() -> None:
+    import numpy as np
+    import pandas as pd
+
+    base = pd.date_range("2024-03-10 06:00", periods=5, freq="30min", tz="UTC")
+    _utc_oracle(base[:1])
+    _utc_oracle(pd.DatetimeIndex([base[0], base[0], base[2]]))
+    _utc_oracle(pd.DatetimeIndex([base[2], base[0], base[1]]))
+    aware_nat = pd.DatetimeIndex([base[0], pd.NaT], tz="UTC")
+    _utc_oracle(aware_nat)
+    naive_nat = pd.DatetimeIndex([base[0].tz_localize(None), pd.NaT])
+    _utc_oracle(naive_nat)
+    all_nat = pd.DatetimeIndex([pd.NaT, pd.NaT], tz="UTC")
+    _utc_oracle(all_nat)
+    ns_vals = base.as_unit("ns").asi8 + np.array([0, 1, 0, 0, 1], dtype="int64")
+    _utc_oracle(pd.DatetimeIndex(ns_vals, tz="UTC"))
+
+
+def test_utc_index_empty_input_keeps_list_path_resolution() -> None:
+    import pandas as pd
+
+    out, ref = _utc_oracle(pd.DatetimeIndex([], tz="UTC").as_unit("ns"))
+    assert out.dtype == ref.dtype == pd.DatetimeIndex(pd.to_datetime([], utc=True)).dtype
+    assert len(out) == 0
+    out2, ref2 = _utc_oracle([])
+    assert len(out2) == 0
+    assert out2.dtype == ref2.dtype
+
+
+def test_utc_index_non_index_sequences_use_list_path() -> None:
+    import pandas as pd
+
+    base = pd.date_range("2024-03-10 06:00", periods=3, freq="30min", tz="UTC")
+    _utc_oracle(list(base))
+    _utc_oracle(tuple(base))
+    _utc_oracle(pd.Index(list(base), dtype="object"))
+    _utc_oracle([1_700_000_000, 1_700_000_060])
+
+
+def test_ledger_table_timestamps_unchanged() -> None:
+    import pandas as pd
+    import pyarrow as pa
+
+    from src.mhs.reporting.inventory import _ledger_table
+
+    idx = pd.date_range("2022-01-01", periods=4, freq="D", tz="UTC").as_unit("us")
+    idx = idx.rename("stamp")
+    series = pd.Series([1.0, 2.0, 3.0, 4.0], index=idx, name="equity")
+    table = _ledger_table(series, "equity")
+    ref = pd.DatetimeIndex(pd.to_datetime(list(idx), utc=True))
+    assert table.column("timestamp").equals(pa.chunked_array([pa.array(ref, type=pa.timestamp("ns", tz="UTC"))]))

@@ -772,3 +772,144 @@ def test_common_mature_rows_meet_minimum_without_imputation() -> None:
     unknown = ~evidence.known.to_numpy(dtype=bool)
     values = evidence.returns.to_numpy(dtype="float64")
     assert bool(np.isnan(values[unknown]).all())
+
+
+def _p5b_matured(n_days: int = 500):  # type: ignore[no-untyped-def]
+    from src.mhs.backtest.labels import ProcessClockSpec
+    from src.mhs.backtest.labels import build_proxy_member_returns as _build
+
+    data = _synthetic_data(n_days=n_days)
+    clock = ProcessClockSpec(
+        decision_period=pd.Timedelta(hours=24),
+        bar_completion_lag=pd.Timedelta(hours=1),
+        fit_latency=pd.Timedelta(0),
+    )
+    evidence = _build(data, clock=clock, one_way_bps=8.0, procedure_digest="ab" * 32, input_manifest_digest=None)
+    schedule = _schedule(data)
+    return data, clock, evidence, schedule
+
+
+def test_p5b_matured_paths_skip_member_smoothing(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    import src.mhs.backtest.paths as paths
+
+    data, clock, evidence, schedule = _p5b_matured()
+    calls = {"n": 0}
+    real = paths.smoothed_book_path
+
+    def _spy(*args, **kwargs):
+        calls["n"] += 1
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(paths, "smoothed_book_path", _spy)
+    first = paths.run_process_paths(
+        data, schedule, decision_bps=8.0, evaluation_bps=(8.0,), leverage_cap=2.0,
+        clock=clock, member_evidence=evidence,
+    )
+    assert calls["n"] == 1
+    monkeypatch.setattr(paths, "smoothed_book_path", real)
+    second = paths.run_process_paths(
+        data, schedule, decision_bps=8.0, evaluation_bps=(8.0,), leverage_cap=2.0,
+        clock=clock, member_evidence=evidence,
+    )
+    pd.testing.assert_frame_equal(first[0].target_weights, second[0].target_weights)
+
+
+def test_p5b_legacy_paths_smooth_every_member_once(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    import src.mhs.backtest.paths as paths
+
+    data = _synthetic_data()
+    schedule = _schedule(data)
+    names = list(data.member_books.keys())
+    calls = {"n": 0}
+    real = paths.smoothed_book_path
+
+    def _spy(*args, **kwargs):
+        calls["n"] += 1
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(paths, "smoothed_book_path", _spy)
+    before = paths.run_process_paths(data, schedule, decision_bps=8.0, evaluation_bps=(8.0,), leverage_cap=2.0)
+    assert calls["n"] == len(names) + 1
+    monkeypatch.setattr(paths, "smoothed_book_path", real)
+    after = paths.run_process_paths(data, schedule, decision_bps=8.0, evaluation_bps=(8.0,), leverage_cap=2.0)
+    pd.testing.assert_frame_equal(before[0].target_weights, after[0].target_weights)
+
+
+def test_p5b_matured_path_rejects_misaligned_execution_mask() -> None:
+    import src.mhs.backtest.paths as paths
+    from src.common.errors import DataIntegrityError
+
+    data, clock, evidence, schedule = _p5b_matured()
+    bad = data.execution_mask.iloc[:-1]
+    import dataclasses
+
+    bad_data = dataclasses.replace(data, execution_mask=bad)
+    with pytest.raises(DataIntegrityError, match="execution_mask must share target_weights decision labels exactly"):
+        paths.run_process_paths(
+            bad_data, schedule, decision_bps=8.0, evaluation_bps=(8.0,), leverage_cap=2.0,
+            clock=clock, member_evidence=evidence,
+        )
+
+
+def test_p5b_matured_path_rejects_non_boolean_or_missing_mask() -> None:
+    import dataclasses
+
+    import src.mhs.backtest.paths as paths
+    from src.common.errors import DataIntegrityError
+
+    data, clock, evidence, schedule = _p5b_matured()
+    float_mask = data.execution_mask.astype("float64")
+    with pytest.raises(DataIntegrityError, match="execution_mask must be boolean"):
+        paths.run_process_paths(
+            dataclasses.replace(data, execution_mask=float_mask), schedule,
+            decision_bps=8.0, evaluation_bps=(8.0,), leverage_cap=2.0, clock=clock, member_evidence=evidence,
+        )
+    na_mask = data.execution_mask.astype("boolean")
+    na_mask.iloc[0, 0] = pd.NA
+    with pytest.raises(DataIntegrityError, match="execution_mask must not be missing"):
+        paths.run_process_paths(
+            dataclasses.replace(data, execution_mask=na_mask), schedule,
+            decision_bps=8.0, evaluation_bps=(8.0,), leverage_cap=2.0, clock=clock, member_evidence=evidence,
+        )
+
+
+def test_p5b_matured_path_rejects_mask_column_mismatch() -> None:
+    import dataclasses
+
+    import src.mhs.backtest.paths as paths
+    from src.common.errors import DataIntegrityError
+
+    data, clock, evidence, schedule = _p5b_matured()
+    reordered = data.execution_mask[list(reversed(list(data.execution_mask.columns)))]
+    with pytest.raises(DataIntegrityError, match="execution_mask must share target_weights symbol columns exactly"):
+        paths.run_process_paths(
+            dataclasses.replace(data, execution_mask=reordered), schedule,
+            decision_bps=8.0, evaluation_bps=(8.0,), leverage_cap=2.0, clock=clock, member_evidence=evidence,
+        )
+
+
+def test_p5b_availability_application_unchanged() -> None:
+    import pytest
+
+    from src.common.errors import DataIntegrityError
+    from src.mhs.backtest.market_data import apply_process_execution_availability, validate_process_execution_availability
+
+    idx = pd.date_range("2022-01-01", periods=3, freq="24h", tz="UTC")
+    book = pd.DataFrame([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]], index=idx, columns=["A", "B"])
+    mask = pd.DataFrame([[True, False], [False, True], [True, True]], index=idx, columns=["A", "B"])
+    out = apply_process_execution_availability(book, mask)
+    assert out.loc[idx[0], "A"] == 1.0
+    assert out.loc[idx[0], "B"] == 0.0
+    assert out.loc[idx[1], "A"] == 0.0
+    pd.testing.assert_frame_equal(out[mask], book[mask])
+    validate_process_execution_availability(book, mask)
+    with pytest.raises(DataIntegrityError, match="decision labels exactly"):
+        validate_process_execution_availability(book, mask.iloc[:-1])
+    with pytest.raises(DataIntegrityError, match="symbol columns exactly"):
+        validate_process_execution_availability(book, mask[["B", "A"]])
+    with pytest.raises(DataIntegrityError, match="must be boolean"):
+        validate_process_execution_availability(book, mask.astype("float64"))
+    na = mask.astype("boolean")
+    na.iloc[0, 0] = pd.NA
+    with pytest.raises(DataIntegrityError, match="must not be missing"):
+        validate_process_execution_availability(book, na)

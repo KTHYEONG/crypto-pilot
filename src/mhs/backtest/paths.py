@@ -32,6 +32,7 @@ from src.mhs.backtest.market_data import (
     _process_memory_budget,
     apply_process_execution_availability,
     load_process_market_data,
+    validate_process_execution_availability,
 )
 from src.mhs.backtest.selection import (
     InnerFitAudit,
@@ -218,27 +219,25 @@ def run_process_paths(
     names = list(data.member_books.keys())
     if member_evidence is not None and list(member_evidence.returns.columns) != names:
         raise DataIntegrityError("member evidence must cover the declared candidate books exactly")
-    smoothed_members = {
-        name: smoothed_book_path(data.member_books[name], pd.Series(rate, index=data.member_books[name].index))
-        for name in names
-    }
-    masked_members = {
-        name: apply_process_execution_availability(book, data.execution_mask)
-        for name, book in smoothed_members.items()
-    }
-    del smoothed_members
     member_net: pd.DataFrame | None = None
     step: pd.Timedelta | None = None
     if member_evidence is None:
         member_net = pd.DataFrame(
             {
-                name: step_proxy_net_returns(masked_members[name], data.log_close_step, data.funding_step, decision_bps)
+                name: step_proxy_net_returns(
+                    apply_process_execution_availability(
+                        smoothed_book_path(data.member_books[name], pd.Series(rate, index=data.member_books[name].index)),
+                        data.execution_mask,
+                    ),
+                    data.log_close_step, data.funding_step, decision_bps,
+                )
                 for name in names
             }
         )
-    del masked_members
-    if member_net is not None:
         step = member_net.index[1] - member_net.index[0]
+    else:
+        for name in names:
+            validate_process_execution_availability(data.member_books[name], data.execution_mask)
     oos_start = schedule[0].effective_from
     oos_end = schedule[-1].effective_to
     oos_days = data.decision_grid[(data.decision_grid >= oos_start) & (data.decision_grid < oos_end)]

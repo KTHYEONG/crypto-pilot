@@ -132,11 +132,11 @@ class TestIsolatedBoundReplay:
         window_index = [0]
         second_start = windows[1].window_start if len(windows) > 1 else None
 
-        def _failing_consume(self, w):
+        def _failing_consume(self, w, staging=None):
             window_index[0] += 1
             if self.execution_bound == "OHLCV_STRICT_PROXY" and w.window_start == second_start:
                 raise DataIntegrityError("pre-trade equity must be positive and finite (ts=fail)")
-            return original_consume(self, w)
+            return original_consume(self, w, staging)
         _BoundExecutionReplayAccumulator.consume = _failing_consume
         try:
             consumed = {"n": 0}
@@ -321,3 +321,110 @@ def test_held_only_tail_and_legacy_mode() -> None:
     legacy = dataclasses.replace(legacy, logical_partition=None)
     res2 = replay_execution_windows(iter([legacy]), 1000.0, "OHLCV_IMMEDIATE_TAKER", spec)
     assert res2 is not None
+
+
+def _p5a_windows():  # type: ignore[no-untyped-def]
+    fx = _split_fixture()
+    key = (0, 3)
+    g = fx["grid"]
+    return [
+        _make_window(fx, g[:100], fx["weights"].iloc[:1], fx["signals"][:1], key),
+        _make_window(fx, g[60:150], fx["weights"].iloc[1:2], fx["signals"][1:2], key),
+        _make_window(fx, g[120:], fx["weights"].iloc[2:], fx["signals"][2:], key),
+    ]
+
+
+def test_p5a_batch_with_shared_staging_equals_single_bound_replays() -> None:
+    from src.mhs.execution import ExecutionSpec, replay_execution_window_batch, replay_execution_windows
+
+    windows = _p5a_windows()
+    base, stress = ExecutionSpec(), ExecutionSpec(maker_fee_bps=6.0)
+    bounds = [
+        ("OHLCV_IMMEDIATE_TAKER", base),
+        ("OHLCV_IMMEDIATE_TAKER", stress),
+        ("OHLCV_STRICT_PROXY", base),
+    ]
+    batched = replay_execution_window_batch(iter(windows), 1000.0, bounds)
+    assert len(batched) == 3
+    for (bound, spec), got in zip(bounds, batched, strict=True):
+        ref = replay_execution_windows(iter(windows), 1000.0, bound, spec)
+        _assert_pair_equivalent(ref, got, f"p5a[{bound}]")
+        assert got.funding_coverage_gaps == ref.funding_coverage_gaps
+        assert [(p.symbol, p.quantity, p.status) for p in got.terminal_positions] == [
+            (p.symbol, p.quantity, p.status) for p in ref.terminal_positions
+        ]
+
+
+def test_p5a_staging_computed_once_per_window_in_batch(monkeypatch) -> None:
+    import src.mhs.execution.window_staging as staging_mod
+    from src.mhs.execution import ExecutionSpec, replay_execution_window_batch
+
+    windows = _p5a_windows()
+    calls = {"n": 0}
+    real = staging_mod.stage_window_arrays
+
+    def _spy(w):
+        calls["n"] += 1
+        return real(w)
+
+    monkeypatch.setattr(staging_mod, "stage_window_arrays", _spy)
+    spec = ExecutionSpec()
+    replay_execution_window_batch(iter(windows), 1000.0, [("OHLCV_IMMEDIATE_TAKER", spec), ("OHLCV_STRICT_PROXY", spec)])
+    assert calls["n"] == 3
+
+
+def test_p5a_per_bound_held_position_error_keeps_precedence() -> None:
+    import pandas as pd
+
+    from src.mhs.execution import ExecutionReplayWindow, ExecutionSpec, replay_execution_window_batch_isolated
+
+    grid1 = pd.date_range("2025-01-01", periods=5, freq="3min", tz="UTC")
+    dec1, sig1 = pd.DatetimeIndex([grid1[0]]), pd.DatetimeIndex([grid1[1]])
+    px1 = pd.DataFrame({"A": 100.0, "B": 50.0}, index=grid1)
+
+    def _win(grid, dec, sig, symbols, px, funding=None):  # type: ignore[no-untyped-def]
+        fund = funding if funding is not None else pd.DataFrame(0.0, index=grid, columns=list(symbols))
+        tw = pd.DataFrame([[0.5 if s == "A" else 0.0 for s in symbols]], index=dec, columns=list(symbols))
+        return ExecutionReplayWindow(
+            window_start=grid[0], window_end=grid[-1], columns=("A", "B"), symbols=tuple(symbols),
+            minute_grid=grid, highs=px.loc[grid, list(symbols)], lows=px.loc[grid, list(symbols)],
+            closes=px.loc[grid, list(symbols)], marks=px.loc[grid, list(symbols)], bar_funding=fund,
+            target_weights=tw, signal_available_at=sig,
+            quote_volumes=pd.DataFrame(1.0, index=grid, columns=list(symbols)),
+            funding_known=pd.DataFrame(True, index=grid, columns=list(symbols)),
+            bar_available_at=grid + pd.Timedelta(minutes=3),
+        )
+
+    w1 = _win(grid1, dec1, sig1, ("A", "B"), px1)
+    grid2 = pd.date_range("2025-01-01 01:00", periods=5, freq="3min", tz="UTC")
+    fund2 = pd.DataFrame({"B": [0.0, float("nan"), 0.0, 0.0, 0.0]}, index=grid2)
+    w2 = _win(grid2, pd.DatetimeIndex([grid2[0]]), pd.DatetimeIndex([grid2[1]]), ("B",), pd.DataFrame({"B": 50.0}, index=grid2), funding=fund2)
+    spec = ExecutionSpec()
+    outcome = replay_execution_window_batch_isolated(
+        iter([w1, w2]), 1000.0, [("OHLCV_IMMEDIATE_TAKER", spec), ("OHLCV_STRICT_PROXY", spec)],
+        isolated_bound_indices=frozenset({0, 1}),
+    )
+    assert outcome.results == (None, None)
+    by_idx = {f.bound_index: f for f in outcome.isolated_failures}
+    assert by_idx[0].message.startswith("held position outside execution window roster")
+    assert by_idx[1].message == "bar_funding must be finite"
+    assert by_idx[0].windows_consumed == by_idx[1].windows_consumed == 1
+
+
+def test_p5a_coupled_replay_unchanged() -> None:
+    import pandas as pd
+
+    from src.mhs.execution import ExecutionSpec, replay_execution_window_batch, replay_execution_windows, replay_execution_windows_coupled
+
+    fx = _split_fixture()
+    spec = ExecutionSpec()
+    key = (0, 3)
+    whole = _make_window(fx, fx["grid"], fx["weights"], fx["signals"], key)
+    ref_coupled, _ = replay_execution_windows_coupled(
+        iter([whole]), 1000.0, ("OHLCV_IMMEDIATE_TAKER", spec),
+        [("OHLCV_IMMEDIATE_TAKER", spec)], scale_fn=lambda daily: pd.Series(1.0, index=daily.index),
+    )
+    ref_single = replay_execution_windows(iter([whole]), 1000.0, "OHLCV_IMMEDIATE_TAKER", spec)
+    _assert_pair_equivalent(ref_single, ref_coupled, "p5a-coupled-reference")
+    pair = replay_execution_window_batch(iter([whole]), 1000.0, [("OHLCV_IMMEDIATE_TAKER", spec)])
+    _assert_pair_equivalent(ref_single, pair[0], "p5a-coupled-batch")

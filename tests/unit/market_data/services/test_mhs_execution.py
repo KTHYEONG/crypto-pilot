@@ -947,8 +947,9 @@ def test_bounded_scan_boundary_and_decode_failures(tmp_path, monkeypatch) -> Non
         raise RuntimeError("time boom")
 
     monkeypatch.setattr(pd, "to_datetime", _boom_dt)
-    with pytest.raises(DataIntegrityError, match=r"S0"):
-        mod._read_ohlcv_labels("S0", "3m", str(root))
+    intact = mod._read_ohlcv_labels("S0", "3m", str(root))
+    assert intact is not None
+    assert intact.tolist() == _ns_of(grid).tolist()
     with pytest.raises(DataIntegrityError, match=r"S0"):
         mod._read_mark_labels("S0", "1h")
     monkeypatch.setattr(pd, "to_datetime", orig_to_datetime)
@@ -986,3 +987,109 @@ def test_bounded_mark_scan_skips_future_row_groups(tmp_path, monkeypatch) -> Non
     assert out is not None
     assert out.tolist() == _ns_of(grid[:4]).tolist()
     assert decoded == [0]
+
+
+def _ref_decode_ms(raw):  # type: ignore[no-untyped-def]
+    import numpy as np
+    import pandas as pd
+
+    idx = pd.to_datetime(raw, unit="ms", utc=True, errors="coerce")
+    valid = pd.DatetimeIndex(idx).dropna()
+    if len(valid) == 0:
+        return np.zeros(0, dtype="int64")
+    return np.asarray(valid.as_unit("ns").asi8, dtype="int64")
+
+
+def _ref_merge(chunks):  # type: ignore[no-untyped-def]
+    import numpy as np
+
+    if not chunks:
+        return np.zeros(0, dtype="int64")
+    return np.unique(np.concatenate(chunks)).astype("int64", copy=False)
+
+
+def test_ohlcv_labels_identical_for_chronological_multi_group(tmp_path) -> None:
+    import numpy as np
+    import pandas as pd
+    from src.market_data.services.mhs_execution import _read_ohlcv_labels
+
+    grid = pd.date_range("2022-01-01", periods=12, freq="3min", tz="UTC")
+    ms = ((grid - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta(milliseconds=1)).to_numpy(dtype="int64")
+    root = tmp_path / "ohlcv"
+    (root / "3m").mkdir(parents=True)
+    pd.DataFrame({"timestamp": ms}).to_parquet(root / "3m" / "S0.parquet", row_group_size=4)
+    full = _read_ohlcv_labels("S0", "3m", str(root))
+    assert full is not None
+    assert full.dtype == np.dtype("int64")
+    assert np.array_equal(full, _ref_merge([_ref_decode_ms(ms[i : i + 4]) for i in (0, 4, 8)]))
+    bound = int(_ref_decode_ms(ms)[5])
+    bounded = _read_ohlcv_labels("S0", "3m", str(root), observed_through_ns=bound)
+    assert bounded is not None
+    oracle = _ref_merge([c[c <= bound] for c in [_ref_decode_ms(ms[i : i + 4]) for i in (0, 4, 8)] if len(c[c <= bound])])
+    assert np.array_equal(bounded, oracle)
+
+
+def test_ohlcv_labels_identical_for_duplicated_and_unsorted_groups(tmp_path) -> None:
+    import numpy as np
+    import pandas as pd
+    from src.market_data.services.mhs_execution import _read_ohlcv_labels
+
+    grid = pd.date_range("2022-01-01", periods=8, freq="3min", tz="UTC")
+    order = [3, 1, 3, 0, 7, 2, 1, 5]
+    ms = ((grid[order] - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta(milliseconds=1)).to_numpy(dtype="int64")
+    root = tmp_path / "ohlcv"
+    (root / "3m").mkdir(parents=True)
+    pd.DataFrame({"timestamp": ms}).to_parquet(root / "3m" / "S0.parquet", row_group_size=3)
+    out = _read_ohlcv_labels("S0", "3m", str(root))
+    assert out is not None
+    assert np.array_equal(out, _ref_merge([_ref_decode_ms(ms)]))
+
+
+def test_ohlcv_null_timestamps_dropped(tmp_path) -> None:
+    import numpy as np
+    import pandas as pd
+    from src.market_data.services.mhs_execution import _read_ohlcv_labels
+
+    grid = pd.date_range("2022-01-01", periods=4, freq="3min", tz="UTC")
+    ms = ((grid - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta(milliseconds=1)).to_numpy(dtype="float64")
+    ms[1] = float("nan")
+    root = tmp_path / "ohlcv"
+    (root / "3m").mkdir(parents=True)
+    pd.DataFrame({"timestamp": ms}).to_parquet(root / "3m" / "S0.parquet", row_group_size=2)
+    out = _read_ohlcv_labels("S0", "3m", str(root))
+    assert out is not None
+    oracle = _ref_decode_ms(ms)
+    assert np.array_equal(out, np.unique(oracle).astype("int64", copy=False))
+    assert len(out) == 3
+
+
+def test_ohlcv_out_of_range_label_fails_closed(tmp_path) -> None:
+    import numpy as np
+    import pandas as pd
+    import pytest
+    from src.common.errors import DataIntegrityError
+    from src.market_data.services.mhs_execution import _read_ohlcv_labels
+
+    big = int(np.iinfo(np.int64).max // 1_000_000) + 1
+    root = tmp_path / "ohlcv"
+    (root / "3m").mkdir(parents=True)
+    pd.DataFrame({"timestamp": np.array([big], dtype="int64")}).to_parquet(root / "3m" / "S0.parquet")
+    with pytest.raises(DataIntegrityError, match="execution source unreadable"):
+        _read_ohlcv_labels("S0", "3m", str(root))
+
+
+def test_mark_labels_tail_unchanged(tmp_path, monkeypatch) -> None:
+    import numpy as np
+    import pandas as pd
+    import src.market_data.services.futures_collection as fc
+    from src.market_data.services.mhs_execution import _read_mark_labels
+
+    grid = pd.date_range("2022-01-01", periods=8, freq="1h", tz="UTC")
+    close = [100.0, 101.0, -1.0, 102.0, 103.0, 104.0, 105.0, 106.0]
+    path = tmp_path / "M.parquet"
+    pd.DataFrame({"datetime": grid, "close": close}).to_parquet(path, row_group_size=4)
+    monkeypatch.setattr(fc, "_mark_price_path", lambda symbol, timeframe: path)
+    out = _read_mark_labels("M", "1h")
+    assert out is not None
+    keep = grid[[0, 1, 3, 4, 5, 6, 7]]
+    assert np.array_equal(out, np.asarray(pd.DatetimeIndex(keep).as_unit("ns").asi8, dtype="int64"))
