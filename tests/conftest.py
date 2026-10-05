@@ -37,6 +37,8 @@ _PROJECT_TEMP_ROOT = Path(__file__).resolve().parents[1] / "tmp" / "pytest"
 _PROC_RUN_ID = f"proc_{os.getpid()}_{uuid.uuid4().hex[:8]}"
 _PROC_TEMP_ROOT = _PROJECT_TEMP_ROOT / _PROC_RUN_ID
 
+_PREIMPORTED_SRC_MODULES = tuple(sorted(name for name in sys.modules if name == "src" or name.startswith("src.")))
+
 # Route process logs and the backtest registry to this run's temp root *before* any ``src`` import:
 # ``setup_logger`` opens its log files and registry defaults resolve at import time, so an
 # unconditional override here keeps tests from writing into the developer's real ``logs/`` and
@@ -72,6 +74,18 @@ _GUARDED_BEFORE = _snapshot_guarded_trees()
 @pytest.hookimpl(tryfirst=True)
 def pytest_configure(config: pytest.Config) -> None:
     _PROC_TEMP_ROOT.mkdir(parents=True, exist_ok=True)
+    from src.common import logging as _src_logging, paths as _src_paths
+    from tests.fixtures.hermetic import assert_storage_roots_hermetic
+
+    assert_storage_roots_hermetic(
+        {
+            "BACKTESTS_DIR": _src_paths.BACKTESTS_DIR,
+            "FROZEN_BACKTESTS_DIR": _src_paths.FROZEN_BACKTESTS_DIR,
+            "LOG_DIR": _src_logging.LOG_DIR,
+        },
+        _PROC_TEMP_ROOT,
+        _PREIMPORTED_SRC_MODULES,
+    )
     os.environ["PYTEST_DEBUG_TEMPROOT"] = str(_PROC_TEMP_ROOT)
     os.environ["TMPDIR"] = str(_PROC_TEMP_ROOT)
     tempfile.tempdir = str(_PROC_TEMP_ROOT)
