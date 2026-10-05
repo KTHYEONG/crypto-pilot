@@ -4,14 +4,20 @@ from __future__ import annotations
 
 from tests.fixtures.mhs_requests import research_baseline
 import pandas as pd
+from collections.abc import Iterator
 from pathlib import Path
 
 import src.mhs.marks as marks
-import inspect
 
-from src.mhs import scaling
 from src.mhs import statistics
 from src.mhs.diagnostic_run import run_mhs_horizon_diagnostic
+from tests.integration.mhs._report_cache import (
+    SYNTHETIC_DEFAULT_PROFILE,
+    CachedDiagnostic,
+    DiagnosticReportCache,
+    DiagnosticRunSpec,
+    report_cache_group_violations,
+)
 
 
 def _load_horizon_diagnostic_helpers():
@@ -81,13 +87,30 @@ def synthetic_market(tmp_path_factory) -> tuple[Path, pd.Timestamp]:
         else:
             setattr(statistics, name, value)
 
-@pytest.fixture(scope="module")
-def report(synthetic_market):
+@pytest.fixture(scope="session")
+def mhs_report_cache() -> Iterator[DiagnosticReportCache]:
+    cache = DiagnosticReportCache()
+    yield cache
+    cache.clear()
+
+
+@pytest.fixture
+def canonical_report_run(mhs_report_cache, synthetic_market, request) -> Iterator[CachedDiagnostic]:
     _, start, _ = _load_horizon_diagnostic_helpers()
     root, end = synthetic_market
-    return run_mhs_horizon_diagnostic(
-        research_baseline(start=str(start), end=str(end), data_root=str(root), execution_timeframe="3m", log_run=False),
+    spec = DiagnosticRunSpec(
+        research_baseline(start=str(start), end=str(end), data_root=str(root),
+                          execution_timeframe="3m", log_run=False),
+        SYNTHETIC_DEFAULT_PROFILE,
     )
+    with mhs_report_cache.lease(spec, consumer=request.node.nodeid) as entry:
+        yield entry
+
+
+@pytest.fixture
+def report(canonical_report_run):
+    """Projection of the canonical run; shares one execution via the report cache."""
+    return canonical_report_run.report
 
 
 @pytest.fixture(scope="module")
@@ -101,150 +124,19 @@ def touch_report(synthetic_market):
         ),
     )
 
-@pytest.fixture(scope="module")
-def annualization_report(synthetic_market):
-    """SCENARIO_MHS_ANNUALIZATION_04: a full diagnostic on the default 5m
-    execution grid, used to prove the corrected hourly-grid annualization of
-    every real-execution-ledger headline metric against the pre-fix formulas
-    applied to the same raw ledger.
+@pytest.fixture
+def annualization_report(canonical_report_run):
+    """Projection of the canonical run on the 3m execution grid."""
+    return canonical_report_run.report
 
-    Module-scoped sibling fixtures (``fold_market``/``late_market_report``)
-    re-point ``fc._mark_price_path``/``marks.funding_path`` at their own roots and
-    only restore them at module teardown, so this fixture re-asserts the
-    synthetic-market paths itself before running the diagnostic.
-    """
-    import src.market_data.services.futures_collection as fc
 
-    _, start, _ = _load_horizon_diagnostic_helpers()
-    root, end = synthetic_market
-    originals = {
-        "funding_path": marks.funding_path,
-        "mark_price_path": fc._mark_price_path,
-    }
-    marks.funding_path = lambda sym: root / "funding" / f"{sym}.parquet"
-    fc._mark_price_path = (
-        lambda symbol, timeframe: root / "markPriceKlines" / timeframe / f"{symbol}.parquet"
-    )
-    try:
-        return run_mhs_horizon_diagnostic(
-            research_baseline(
-                start=str(start), end=str(end), data_root=str(root),
-                execution_timeframe="3m", log_run=False,
-            ),
-        )
-    finally:
-        marks.funding_path = originals["funding_path"]
-        fc._mark_price_path = originals["mark_price_path"]
+@pytest.fixture
+def calibrated_report(canonical_report_run):
+    """Projection of the canonical run with wiring captures."""
+    return canonical_report_run.report, canonical_report_run.observations.calibration_captures()
 
-@pytest.fixture(scope="module")
-def calibrated_report(synthetic_market):
-    """Full diagnostic run with spies on the R1/R3 wiring seams: records the
-    ``ema_span`` passed to every ``_book_weights`` call and which callers invoke
-    the regime cash scale and turnover deadband.
 
-    The top-level book replays and anchored folds now run in forked workers
-    (Phase 3, P10/P14), so the capture stores use ``multiprocessing.Manager``
-    proxies: a fork child's writes are reflected in the parent's proxy instead
-    of mutating a copy-on-write shadow.
-    """
-    from multiprocessing import Manager
-    from queue import Empty
-
-    _, start, _ = _load_horizon_diagnostic_helpers()
-    root, end = synthetic_market
-    # Some constrained CI/sandbox runners deny the socket option used by
-    # ``multiprocessing.Manager``.  The diagnostic itself only needs a small
-    # append-only observation stream; use an inherited queue in that case so
-    # fork workers remain observable without weakening the production path.
-    try:
-        mgr = Manager()
-    except (EOFError, OSError, PermissionError):
-        mgr = None
-        event_queue = __import__("multiprocessing").Queue()
-        captured = {
-            "ema_spans": {},
-            "regime_callers": [],
-            "deadband_callers": [],
-        }
-    else:
-        event_queue = None
-        captured = mgr.dict({
-            "ema_spans": mgr.dict(),
-            "regime_callers": mgr.list(),
-            "deadband_callers": mgr.list(),
-        })
-    from src.mhs.evaluation import books as eval_books
-
-    real_book_weights = eval_books._book_weights
-    real_regime = scaling._regime_cash_scale
-    real_helper = scaling.regime_cash_scale_1h
-    real_deadband = scaling._apply_rebalance_deadband
-
-    def _book_weights(log_close, eligible, spec, step_grid, ema_span=None):
-        if mgr is None:
-            event_queue.put(("ema", spec.band.name, ema_span))
-        else:
-            spans = captured["ema_spans"].get(spec.band.name)
-            if spans is None:
-                spans = mgr.list()
-                captured["ema_spans"][spec.band.name] = spans
-            spans.append(ema_span)
-        return real_book_weights(log_close, eligible, spec, step_grid, ema_span=ema_span)
-
-    def _regime(*args, **kwargs):
-        caller = inspect.currentframe().f_back.f_code.co_name
-        if mgr is None:
-            event_queue.put(("regime", caller))
-        else:
-            captured["regime_callers"].append(caller)
-        return real_regime(*args, **kwargs)
-
-    def _helper(*args, **kwargs):
-        caller = inspect.currentframe().f_back.f_code.co_name
-        if mgr is None:
-            event_queue.put(("regime", caller))
-        else:
-            captured["regime_callers"].append(caller)
-        return real_helper(*args, **kwargs)
-
-    def _deadband(*args, **kwargs):
-        caller = inspect.currentframe().f_back.f_code.co_name
-        if mgr is None:
-            event_queue.put(("deadband", caller))
-        else:
-            captured["deadband_callers"].append(caller)
-        return real_deadband(*args, **kwargs)
-
-    eval_books._book_weights = _book_weights
-    scaling._regime_cash_scale = _regime
-    scaling.regime_cash_scale_1h = _helper
-    scaling._apply_rebalance_deadband = _deadband
-    try:
-        report = run_mhs_horizon_diagnostic(
-            research_baseline(
-                start=str(start), end=str(end), data_root=str(root),
-                execution_timeframe="3m", log_run=False,
-            ),
-        )
-    finally:
-        eval_books._book_weights = real_book_weights
-        scaling._regime_cash_scale = real_regime
-        scaling.regime_cash_scale_1h = real_helper
-        scaling._apply_rebalance_deadband = real_deadband
-    if mgr is None:
-        while True:
-            try:
-                kind, value, *extra = event_queue.get_nowait()
-            except Empty:
-                break
-            if kind == "ema":
-                captured["ema_spans"].setdefault(value, []).append(extra[0])
-            elif kind == "regime":
-                captured["regime_callers"].append(value)
-            elif kind == "deadband":
-                captured["deadband_callers"].append(value)
-        event_queue.close()
-        event_queue.join_thread()
-    yield report, captured
-    if mgr is not None:
-        mgr.shutdown()
+def pytest_collection_modifyitems(config, items):
+    violations = report_cache_group_violations(items, Path(__file__).parent)
+    if violations:
+        raise pytest.UsageError("MHS report-cache xdist groups:\n" + "\n".join(violations))
