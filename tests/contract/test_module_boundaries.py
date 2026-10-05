@@ -340,7 +340,7 @@ def test_execution_module_size_budget_with_allowlist() -> None:
 
     default_budget = 700
     # frozen at measured size; growth fails, shrink requires deleting/lowering the entry.
-    allowlist = {"src/mhs/execution/accumulator.py": 1969}
+    allowlist = {"src/mhs/execution/accumulator.py": 1948}
 
     measured = {
         str(path): len(path.read_text(encoding="utf-8").splitlines())
@@ -362,7 +362,7 @@ def test_source_module_size_budget() -> None:
     default_budget = 700
     # frozen at measured size; growth fails, shrink requires deleting/lowering the entry.
     allowlist = {
-        "src/mhs/execution/accumulator.py": 1969,
+        "src/mhs/execution/accumulator.py": 1948,
         "src/live/runner.py": 1656,
         "src/live/scheduler.py": 999,
         "src/live/executor.py": 1848,
