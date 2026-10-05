@@ -773,3 +773,174 @@ def test_idle_holdings_never_settle() -> None:
     assert "delist_settlement" not in set(acc.fill_reason)
     assert "DELIST_SETTLEMENT" not in result.termination_counts
 
+
+def _head_mirror_window(self, frame, p0: int) -> None:
+    import numpy as np
+
+    from src.mhs.execution.accumulator import QTY_EPS
+    from src.mhs.execution.contracts import ExecutionDataGap
+
+    grid_ns = frame.grid_ns
+    n_grid = frame.n_grid
+    marks_values = frame.marks_values
+    funding_matrix = frame.funding_matrix
+    funding_known = self._w_fknown
+    gpos = frame.gpos
+    grid = frame.grid
+    state = self.accounting_state
+    p0_ns = int(grid_ns[p0])
+    queue = sorted(self._mirror_pending, key=lambda entry: entry[0])
+    self._mirror_pending = []
+    qi = 0
+    while qi < len(queue) and queue[qi][0] < p0_ns:
+        state.units[int(queue[qi][1])] += float(queue[qi][2])
+        qi += 1
+    gmarks = np.full(self.n_cols, np.nan, dtype="float64")
+    grates = np.zeros(self.n_cols, dtype="float64")
+    gknown = np.ones(self.n_cols, dtype=bool)
+    all_known = np.ones(self.n_cols, dtype=bool)
+    for b in range(int(p0), int(n_grid)):
+        bns = int(grid_ns[b])
+        gmarks[gpos] = marks_values[b]
+        grates[gpos] = funding_matrix[b]
+        gknown[gpos] = funding_known[b]
+        held_unknown = (np.abs(state.units) >= QTY_EPS) & ~gknown
+        if bool(held_unknown.any()):
+            self.ledger_valid = False
+            self.invalid_reasons.add("MISSING_DATA")
+            witness = int(np.flatnonzero(held_unknown)[0])
+            self.data_gaps.append(
+                ExecutionDataGap(
+                    code="MISSING_HELD_FUNDING", symbol=self.columns[witness],
+                    timestamp=grid[b], execution_bound=self.execution_bound,
+                )
+            )
+            state.advance_to(
+                event_ns=bns, marks=gmarks,
+                funding_rates=np.where(gknown, grates, 0.0), funding_known=all_known,
+            )
+        else:
+            state.advance_to(event_ns=bns, marks=gmarks, funding_rates=grates, funding_known=gknown)
+        while qi < len(queue) and queue[qi][0] == bns:
+            state.apply_fill(
+                symbol_index=int(queue[qi][1]), quantity_delta=float(queue[qi][2]),
+                fill_price=float(queue[qi][3]), fee_bps=float(queue[qi][4]),
+            )
+            qi += 1
+
+
+def _twelve_symbol_windows():  # noqa: ANN202
+    import dataclasses
+
+    import pandas as pd
+
+    from src.mhs.execution.contracts import InstrumentSettlementEvent
+    from tests.unit.mhs.test_execution import _partition_windows
+
+    wl = _probe_like_workload(days=2, n_symbols=12, seed=11)
+    spec = __import__("src.mhs.execution", fromlist=["ExecutionSpec"]).ExecutionSpec()
+    wins = _partition_windows(
+        wl["grid"], wl["weights"], wl["signals"], wl["highs"], wl["lows"],
+        wl["closes"], wl["marks"], wl["funding"], spec, n_windows=3,
+    )
+    patched = []
+    for i, w in enumerate(wins):
+        fk = pd.DataFrame(True, index=w.minute_grid, columns=list(w.symbols))
+        if i in (0, 2):
+            lo = len(fk) // 3
+            hi = min(len(fk), lo + 20)
+            fk.iloc[lo:hi, 0:2] = False
+        patched.append(dataclasses.replace(w, funding_known=fk))
+    grid1 = patched[1].minute_grid
+    at = grid1[len(grid1) // 2]
+    sym = next(iter(patched[1].symbols))
+    event = InstrumentSettlementEvent(
+        event_id="mirror-settle", symbol=sym, effective_at=at, available_at=at,
+        settlement_price=90.0, fee_bps=5.0, source_digest="perf03a",
+    )
+    patched[1] = dataclasses.replace(patched[1], settlement_events=(event,))
+    return patched
+
+
+def _assert_mirror_equal(result_a, acc_a, result_b, acc_b) -> None:
+    import numpy as np
+
+    assert acc_a.accounting_state.cash == acc_b.accounting_state.cash
+    np.testing.assert_array_equal(acc_a.accounting_state.units, acc_b.accounting_state.units)
+    np.testing.assert_array_equal(
+        acc_a.accounting_state.last_marks, acc_b.accounting_state.last_marks,
+    )
+    assert acc_a.accounting_state.last_event_ns == acc_b.accounting_state.last_event_ns
+    assert result_a.ledger.primary_valid == result_b.ledger.primary_valid
+    assert tuple(sorted(result_a.ledger.invalid_reasons)) == tuple(sorted(result_b.ledger.invalid_reasons))
+    ga, gb = list(result_a.ledger.data_gaps), list(result_b.ledger.data_gaps)
+    assert len(ga) == len(gb)
+    for x, y in zip(ga, gb, strict=True):
+        assert x.code == y.code
+        assert x.symbol == y.symbol
+        assert x.timestamp == y.timestamp
+        assert x.timestamp.unit == y.timestamp.unit
+        assert str(x.timestamp.tz) == str(y.timestamp.tz)
+        assert x.execution_bound == y.execution_bound
+    for field in ("equity", "net_returns", "mark_to_market_pnl", "funding_charge", "fee_charge", "fill_turnover"):
+        sa, sb = getattr(result_a.ledger, field), getattr(result_b.ledger, field)
+        np.testing.assert_array_equal(sa.to_numpy(), sb.to_numpy())
+        np.testing.assert_array_equal(sa.index.asi8, sb.index.asi8)
+    assert result_a.simulated_fills.equals(result_b.simulated_fills)
+
+
+def test_vectorized_mirror_replay_equals_scalar_mirror_replay() -> None:
+    from src.mhs.execution import ExecutionSpec, replay_execution_windows
+    from src.mhs.execution.accumulator import _BoundExecutionReplayAccumulator
+
+    for bound in ("OHLCV_IMMEDIATE_TAKER", "OHLCV_STRICT_PROXY"):
+        wins = _twelve_symbol_windows()
+        live_a: list = []
+        result_a = replay_execution_windows(wins, 1000.0, bound, ExecutionSpec(), live_accumulators=live_a)
+        acc_a = live_a[0][0]
+        orig = _BoundExecutionReplayAccumulator._settle_mirror_window
+        _BoundExecutionReplayAccumulator._settle_mirror_window = _head_mirror_window  # type: ignore[method-assign]
+        try:
+            live_b: list = []
+            result_b = replay_execution_windows(wins, 1000.0, bound, ExecutionSpec(), live_accumulators=live_b)
+            acc_b = live_b[0][0]
+        finally:
+            _BoundExecutionReplayAccumulator._settle_mirror_window = orig  # type: ignore[method-assign]
+        _assert_mirror_equal(result_a, acc_a, result_b, acc_b)
+
+
+def test_mirror_gap_timestamps_are_grid_elements() -> None:
+    import dataclasses
+
+    import pandas as pd
+
+    grid = pd.date_range("2025-01-01 00:00", periods=15, freq="3min", tz="UTC")
+    window = _ledger_window(grid, ["BTCUSDT"], [grid[0]], {"BTCUSDT": [0.1]})
+    fk = window.funding_known.copy()
+    fk.iloc[4:10, 0] = False
+    window = dataclasses.replace(window, funding_known=fk)
+    result, _acc = _replay_with_acc(window)
+    mirror_gaps = [g for g in result.ledger.data_gaps if g.code == "MISSING_HELD_FUNDING"]
+    assert len(mirror_gaps) == 6
+    for g, ts in zip(mirror_gaps, list(window.minute_grid[4:10]), strict=True):
+        assert g.timestamp == ts
+        assert g.timestamp.unit == ts.unit
+        assert str(g.timestamp.tz) == str(ts.tz)
+
+
+def test_reconcile_tripwire_still_fires() -> None:
+    import pandas as pd
+    import pytest
+
+    from src.common.errors import DataIntegrityError
+    from src.mhs.execution import ExecutionSpec
+    from src.mhs.execution.accumulator import _BoundExecutionReplayAccumulator
+
+    grid = pd.date_range("2025-01-01 00:00", periods=10, freq="3min", tz="UTC")
+    window = _ledger_window(grid, ["BTCUSDT"], [grid[0]], {"BTCUSDT": [0.1]})
+    acc = _BoundExecutionReplayAccumulator(window, 1000.0, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec(), False)
+    acc.consume(window)
+    acc.accounting_state.cash += 1e-6 * 1000.0
+    with pytest.raises(DataIntegrityError, match="causal accounting diverged"):
+        acc.finalize()
+
