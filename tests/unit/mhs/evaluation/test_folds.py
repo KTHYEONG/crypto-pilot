@@ -310,3 +310,122 @@ def test_validation_plan_matches_direct_target_build(mhs_market) -> None:
     assert list(plan.target_replay.columns) == list(target_weights[roster].columns)
     assert len(plan.signal_available_at) == len(plan.target_replay)
     assert plan.decision_intents == int(np.isfinite(plan.target_replay.to_numpy()).sum())
+
+
+def _reference_window_fold():
+    from src.mhs.evidence import AnchoredPurgedFold
+
+    return AnchoredPurgedFold(
+        train_start=pd.Timestamp("2020-06-01", tz="UTC"),
+        train_end=pd.Timestamp("2021-02-01", tz="UTC"),
+        validation_start=pd.Timestamp("2021-02-10", tz="UTC"),
+        validation_end=pd.Timestamp("2021-03-01", tz="UTC"),
+        forward_dependency_hours=168,
+        purge_hours=168,
+    )
+
+
+def _certified_reference_replay(equity: pd.Series):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        ledger=SimpleNamespace(
+            primary_valid=True, invalid_reasons=(), data_gaps=(), equity=equity,
+        ),
+        terminal_positions=(SimpleNamespace(status="open_marked", funding_complete=True),),
+    )
+
+
+def _uncertified_reference_replay(equity: pd.Series):
+    from types import SimpleNamespace
+
+    import pandas as pd
+
+    from src.mhs.execution import ExecutionDataGap
+
+    return SimpleNamespace(
+        ledger=SimpleNamespace(
+            primary_valid=False,
+            invalid_reasons=("MISSING_DATA",),
+            data_gaps=(
+                ExecutionDataGap(
+                    code="MISSING_HELD_FUNDING", symbol="AAAUSDT",
+                    timestamp=pd.Timestamp("2021-01-15", tz="UTC"),
+                ),
+            ),
+            equity=equity,
+        ),
+        terminal_positions=(SimpleNamespace(status="unresolved", funding_complete=False),),
+    )
+
+
+def _daily_equity_before(train_end: pd.Timestamp, rows: int) -> pd.Series:
+    import numpy as np
+
+    idx = pd.date_range(end=train_end - pd.Timedelta(days=1), periods=rows, freq="1D", tz="UTC")
+    return pd.Series(np.linspace(1.0, 1.0 + 0.001 * rows, len(idx)), index=idx, dtype="float64")
+
+
+def test_uncertified_train_reference_yields_gap_code(mhs_market, monkeypatch) -> None:
+    root, request, funding = _plan_args(mhs_market)
+    fold = _reference_window_fold()
+    build_calls: list[dict] = []
+
+    def _counting(*args, **kwargs):
+        build_calls.append(kwargs)
+        decision_start = kwargs.get("decision_start", fold.validation_start)
+        index = pd.DatetimeIndex([decision_start])
+        targets = pd.DataFrame({"BTCUSDT": [0.1]}, index=index)
+        return targets, index, ["BTCUSDT"], index
+
+    monkeypatch.setattr(folds.fold_weights, "_build_fold_target_weights", _counting)
+    equity = _daily_equity_before(fold.train_end, 100)
+    monkeypatch.setattr(folds, "replay_execution_windows", lambda *a, **k: _uncertified_reference_replay(equity))
+    report = folds._run_anchored_fold(root, fold, request, funding, 1.0, 0)
+    assert report.strict is None
+    assert report.primary_valid is False
+    assert report.failures == ("RELEVANT_EXECUTION_DATA_GAP",)
+    assert len(build_calls) == 2
+    assert build_calls[0] == {}
+    assert build_calls[1] == {
+        "decision_start": fold.train_start + pd.Timedelta(hours=folds.FOLD_PANEL_WARMUP_HOURS),
+        "decision_end": fold.train_end,
+    }
+
+
+def test_train_reference_certification_precedes_returns_validation(mhs_market, monkeypatch) -> None:
+    import pytest
+
+    from src.common.errors import DataIntegrityError
+
+    root, request, funding = _plan_args(mhs_market)
+    fold = _reference_window_fold()
+    monkeypatch.setattr(
+        folds.fold_weights, "_build_fold_target_weights",
+        lambda *a, **k: (pd.DataFrame(), pd.DatetimeIndex([], tz="UTC"), [], pd.DataFrame()),
+    )
+    equity = _daily_equity_before(fold.train_end, 5)
+    monkeypatch.setattr(folds, "replay_execution_windows", lambda *a, **k: _uncertified_reference_replay(equity))
+    with pytest.raises(DataIntegrityError) as excinfo:
+        folds._fold_train_reference_returns(root, fold, request, funding, 1.0, 0, None, None)
+    assert "ledger not certified" in str(excinfo.value)
+    assert "require >=" not in str(excinfo.value)
+
+
+def test_certified_train_reference_keeps_current_behaviour(mhs_market, monkeypatch) -> None:
+    root, request, funding = _plan_args(mhs_market)
+    fold = _reference_window_fold()
+    monkeypatch.setattr(
+        folds.fold_weights, "_build_fold_target_weights",
+        lambda *a, **k: (pd.DataFrame(), pd.DatetimeIndex([], tz="UTC"), [], pd.DataFrame()),
+    )
+    equity = _daily_equity_before(fold.train_end, 100)
+    monkeypatch.setattr(folds, "replay_execution_windows", lambda *a, **k: _certified_reference_replay(equity))
+    daily = folds._fold_train_reference_returns(root, fold, request, funding, 1.0, 0, None, None)
+    expected = equity.pct_change().dropna().astype("float64")
+    pd.testing.assert_series_equal(daily, expected, check_exact=True)
+    assert str(daily.index.tz) == "UTC"
+    assert daily.index.is_unique
+    assert daily.index.is_monotonic_increasing
+    assert (daily.index < fold.train_end).all()
+    assert str(daily.dtype) == "float64"

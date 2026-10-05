@@ -197,6 +197,56 @@ def _assert_cache_required_marks(
                 )
 
 
+def _assert_train_reference_ledger_certified(
+    replay: StrategyExecutionReplayResult,
+    fold_index: int,
+) -> None:
+    """Fail closed unless a fold's train-reference replay ledger is certified accounting.
+
+    The reference equity sets the validation fold's target volatility and exposure
+    warm-up, so a curve accrued over unknown held funding, missing held marks or
+    blocked orders would size real exposure from fictional risk. Certification is
+    the shared ``replay_ledger_certified`` verdict applied to the validation
+    primary; priced, funded open inventory at the train cutoff is accepted because
+    the reference ends at an observation cutoff, not an exit. Terminal-only gap
+    classifications never certify.
+
+    Args:
+        replay: Train-reference replay result (ledger, gaps, terminal evidence).
+        fold_index: Anchored fold index, reported in the error.
+    Raises:
+        DataIntegrityError: ``"fold <fold_index>: train reference ledger not
+            certified: primary_valid=<bool> invalid_reasons=<r,...|none>
+            gap_codes=<CODE:count,...|none> unresolved_terminal=<n>
+            funding_incomplete_terminal=<n>"``; maps to
+            ``RELEVANT_EXECUTION_DATA_GAP`` via ``_classify_execution_failure``.
+    """
+    if replay_ledger_certified(replay) is True:
+        return None
+    ledger = getattr(replay, "ledger", None)
+    primary_valid = bool(getattr(ledger, "primary_valid", False)) if ledger is not None else False
+    raw_reasons = getattr(ledger, "invalid_reasons", ()) if ledger is not None else ()
+    reasons = tuple(raw_reasons) if raw_reasons else ()
+    invalid_text = ",".join(str(r) for r in reasons) if reasons else "none"
+    raw_gaps = getattr(ledger, "data_gaps", ()) if ledger is not None else ()
+    gaps = list(raw_gaps) if raw_gaps else []
+    counts: dict[str, int] = {}
+    for gap in gaps:
+        code = str(getattr(gap, "code", gap))
+        counts[code] = counts.get(code, 0) + 1
+    gap_text = ",".join(f"{code}:{counts[code]}" for code in sorted(counts)) if counts else "none"
+    positions = getattr(replay, "terminal_positions", ()) if replay is not None else ()
+    items = list(positions) if positions else []
+    unresolved = sum(1 for p in items if getattr(p, "status", None) == "unresolved")
+    funding_incomplete = sum(1 for p in items if getattr(p, "funding_complete", None) is not True)
+    raise DataIntegrityError(
+        f"fold {fold_index}: train reference ledger not certified: "
+        f"primary_valid={primary_valid} invalid_reasons={invalid_text} "
+        f"gap_codes={gap_text} unresolved_terminal={unresolved} "
+        f"funding_incomplete_terminal={funding_incomplete}"
+    )
+
+
 def _assert_train_reference_returns_valid(daily: pd.Series, train_end: pd.Timestamp, fold_index: int) -> None:
     """Fail closed unless the fold's train-only sizing reference is causally usable.
 

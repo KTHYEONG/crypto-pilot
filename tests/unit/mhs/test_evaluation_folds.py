@@ -1139,10 +1139,20 @@ def test_fold_train_reference_returns_uses_only_fold_train_window(monkeypatch) -
         return pd.DataFrame({"BTCUSDT": 1.0}, index=idx), idx, ["BTCUSDT"], idx
 
     def fake_replay(*args, **kwargs):
+        from types import SimpleNamespace
+
         list(args[0])
         idx = pd.date_range(fold.train_start, fold.train_end, periods=120, tz="UTC")
-        ledger = type("Ledger", (), {"equity": pd.Series(np.linspace(1.0, 1.2, len(idx)), index=idx)})()
-        return type("Replay", (), {"ledger": ledger})()
+        ledger = SimpleNamespace(
+            equity=pd.Series(np.linspace(1.0, 1.2, len(idx)), index=idx),
+            primary_valid=True,
+            invalid_reasons=(),
+            data_gaps=(),
+        )
+        return SimpleNamespace(
+            ledger=ledger,
+            terminal_positions=(SimpleNamespace(status="open_marked", funding_complete=True),),
+        )
 
     monkeypatch.setattr(subject.fold_weights, "_build_fold_target_weights", fake_targets)
     monkeypatch.setattr(subject.specs, "_resolved_base_execution_spec", lambda _request: object())
