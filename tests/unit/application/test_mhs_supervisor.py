@@ -62,9 +62,8 @@ def _install_fake(monkeypatch, returncode=0, delay=0.0, on_start=None):
     monkeypatch.setattr(subprocess, "Popen", _factory)
     monkeypatch.setattr(sup, "_gnu_time_prefix", lambda: [])
     monkeypatch.setattr(sup, "_parse_gnu_metrics", lambda *a, **k: (None, None))
-    monkeypatch.setattr(sup, "_workload_pss_uss", lambda pid: (100, 50))
+    monkeypatch.setattr(sup, "_workload_memory", lambda pid: (100, 50, 0))
     monkeypatch.setattr(sup, "current_mhs_headroom_bytes", lambda: 8 * 2**30)
-    monkeypatch.setattr(sup, "_workload_swap_bytes", lambda pid: 0)
     monkeypatch.setattr(sup, "_terminate_group", lambda proc, timeout=5.0: setattr(proc, "terminated", True))
 
 
@@ -256,7 +255,7 @@ def test_supervised_resource_stop_without_success_claim(tmp_path, monkeypatch) -
         result = _result(tmp_path, f"res_{label}")
         _install_fake(monkeypatch, 0, 5.0)
         if label == "pss":
-            monkeypatch.setattr(sup, "_workload_pss_uss", lambda pid: (10 * 2**30, 1))
+            monkeypatch.setattr(sup, "_workload_memory", lambda pid: (10 * 2**30, 1, 0))
         elif label == "headroom":
             monkeypatch.setattr(sup, "current_mhs_headroom_bytes", lambda: 100)
         else:
@@ -264,9 +263,9 @@ def test_supervised_resource_stop_without_success_claim(tmp_path, monkeypatch) -
 
             def _swap(_calls=calls):
                 _calls["n"] += 1
-                return 0 if _calls["n"] < 2 else 10**9
+                return (100, 50, 0 if _calls["n"] < 2 else 10**9)
 
-            monkeypatch.setattr(sup, "_workload_swap_bytes", lambda pid: _swap())
+            monkeypatch.setattr(sup, "_workload_memory", lambda pid: _swap())
         run = sup.run_mhs_process_backtest(start=start, end=end, data_root=None, result_output=result, poll_seconds=0.05, registry_path=_registry(tmp_path))
         assert run.status == "resource_rejected"
 
@@ -1069,3 +1068,264 @@ def test_explicit_registry_receives_run_and_nothing_else(tmp_path, monkeypatch) 
     if before_stat is not None:
         after_stat = operator_registry.stat()
         assert (after_stat.st_size, after_stat.st_mtime_ns) == before_key
+
+
+def _fake_psutil_tree(monkeypatch, payloads):
+    import psutil as _psutil
+
+    calls: dict[int, int] = {}
+
+    class _Proc:
+        def __init__(self, index, payload) -> None:
+            self._index = index
+            self._payload = payload
+
+        def memory_full_info(self):
+            calls[self._index] = calls.get(self._index, 0) + 1
+            if isinstance(self._payload, Exception):
+                raise self._payload
+            return self._payload
+
+        def children(self, recursive=True):
+            return []
+
+    root_payload, *child_payloads = payloads
+    children = [_Proc(i + 1, payload) for i, payload in enumerate(child_payloads)]
+
+    class _Root(_Proc):
+        def children(self, recursive=True):
+            return children
+
+    root = _Root(0, root_payload)
+
+    def _factory(pid=None, *args, **kwargs):
+        return root
+
+    monkeypatch.setattr(_psutil, "Process", _factory)
+    return calls
+
+
+def _ns(pss, uss, swap="__unset__"):
+    from types import SimpleNamespace
+
+    kwargs = {"pss": pss, "uss": uss}
+    if swap != "__unset__":
+        kwargs["swap"] = swap
+    return SimpleNamespace(**kwargs)
+
+
+def test_workload_memory_reads_each_process_once(monkeypatch) -> None:
+    """One sweep returns summed PSS, USS and swap with one read per process."""
+    calls = _fake_psutil_tree(
+        monkeypatch, [_ns(100, 10, 1), _ns(200, 20, 2), _ns(300, 30, 3)],
+    )
+    assert sup._workload_memory(1234) == (600, 60, 6)
+    assert calls == {0: 1, 1: 1, 2: 1}
+
+
+def test_workload_memory_skips_vanished_and_denied_processes(monkeypatch) -> None:
+    """Vanished and access-denied processes leave all three sums."""
+    import psutil as _psutil
+
+    calls = _fake_psutil_tree(
+        monkeypatch,
+        [_ns(100, 10, 1), _psutil.NoSuchProcess(pid=9), _psutil.AccessDenied(pid=10)],
+    )
+    assert sup._workload_memory(1234) == (100, 10, 1)
+    assert calls.get(0) == 1
+
+
+def test_workload_memory_missing_pss_or_uss_fails(monkeypatch) -> None:
+    """A process without PSS or USS fails the safety sample."""
+    _fake_psutil_tree(monkeypatch, [_ns(None, 10, 1)])
+    with pytest.raises(OSError, match="PSS/USS telemetry unavailable"):
+        sup._workload_memory(1)
+    _fake_psutil_tree(monkeypatch, [_ns(100, None, 1)])
+    with pytest.raises(OSError, match="PSS/USS telemetry unavailable"):
+        sup._workload_memory(1)
+
+
+def test_workload_memory_missing_swap_is_unknown_not_zero(monkeypatch) -> None:
+    """Missing or unusable swap nulls the sample swap without touching PSS/USS."""
+    _fake_psutil_tree(monkeypatch, [_ns(100, 10), _ns(200, 20, 5)])
+    pss, uss, swap = sup._workload_memory(1)
+    assert (pss, uss, swap) == (300, 30, None)
+    _fake_psutil_tree(monkeypatch, [_ns(100, 10, "x")])
+    pss, uss, swap = sup._workload_memory(1)
+    assert (pss, uss, swap) == (100, 10, None)
+
+
+def test_workload_memory_root_failure_propagates(monkeypatch) -> None:
+    """Root enumeration failures propagate to the missing-telemetry path."""
+    import psutil as _psutil
+
+    def _boom(pid=None, *args, **kwargs):
+        raise _psutil.NoSuchProcess(pid=pid)
+
+    monkeypatch.setattr(_psutil, "Process", _boom)
+    with pytest.raises(_psutil.NoSuchProcess):
+        sup._workload_memory(999)
+
+
+def test_one_sweep_per_poll(tmp_path, monkeypatch) -> None:
+    """Each counted sample plus the launch baseline costs exactly one sweep."""
+    start, end = _stamps()
+    result = _result(tmp_path, "sweep")
+
+    def _on_start(proc):
+        staging = result.parent / ".staging_domain.json"
+        staging.parent.mkdir(parents=True, exist_ok=True)
+        staging.write_text(json.dumps(_completed_domain()))
+
+    _install_fake(monkeypatch, 0, 0.3, _on_start)
+    calls = {"n": 0}
+
+    def _counted(pid):
+        calls["n"] += 1
+        return (100, 50, 0)
+
+    monkeypatch.setattr(sup, "_workload_memory", _counted)
+    run = sup.run_mhs_process_backtest(
+        start=start, end=end, data_root=None, result_output=result,
+        poll_seconds=0.05, registry_path=_registry(tmp_path),
+    )
+    assert run.status == "completed"
+    assert calls["n"] == run.samples_taken + 1
+    assert run.samples_taken >= 1
+
+
+def test_peaks_equal_scripted_sample_extremes(tmp_path, monkeypatch) -> None:
+    """Sampled peaks and floors equal the extremes of the scripted sequence."""
+    start, end = _stamps()
+    result = _result(tmp_path, "peaks")
+
+    def _on_start(proc):
+        staging = result.parent / ".staging_domain.json"
+        staging.parent.mkdir(parents=True, exist_ok=True)
+        staging.write_text(json.dumps(_completed_domain()))
+
+    _install_fake(monkeypatch, 0, 0.4, _on_start)
+    pss_seq = [300, 900, 500]
+    uss_seq = [30, 20, 90]
+    head_seq = [8 * 2**30, 5 * 2**30, 7 * 2**30]
+    state = {"n": 0}
+
+    def _scripted(pid):
+        i = min(state["n"], 2)
+        return (pss_seq[i], uss_seq[i], 0)
+
+    def _head():
+        i = min(max(state["n"] - 1, 0), 2)
+        return head_seq[i]
+
+    def _counted(pid):
+        out = _scripted(pid)
+        state["n"] += 1
+        return out
+
+    monkeypatch.setattr(sup, "_workload_memory", _counted)
+    monkeypatch.setattr(sup, "current_mhs_headroom_bytes", _head)
+    run = sup.run_mhs_process_backtest(
+        start=start, end=end, data_root=None, result_output=result,
+        poll_seconds=0.05, registry_path=_registry(tmp_path),
+    )
+    assert run.status == "completed"
+    assert run.sampled_tree_pss_peak_bytes == 900
+    assert run.sampled_tree_uss_peak_bytes == 90
+    assert run.min_available_bytes == 5 * 2**30
+    assert run.samples_taken >= 3
+
+
+def test_swap_growth_uses_same_sample_swap(tmp_path, monkeypatch) -> None:
+    """Swap growth compares the same-sample swap against the launch baseline."""
+    start, end = _stamps()
+    result = _result(tmp_path, "growth")
+    _install_fake(monkeypatch, 0, 5.0)
+    swaps = iter([100, 100, 160, 120])
+
+    def _scripted(pid):
+        try:
+            value = next(swaps)
+        except StopIteration:
+            value = 120
+        return (100, 50, value)
+
+    monkeypatch.setattr(sup, "_workload_memory", _scripted)
+    run = sup.run_mhs_process_backtest(
+        start=start, end=end, data_root=None, result_output=result,
+        poll_seconds=0.05, registry_path=_registry(tmp_path),
+    )
+    assert run.status == "resource_rejected"
+    assert run.termination_reason == "swap growth 60 bytes observed"
+    assert run.process_swap_growth_bytes == 60
+
+
+def test_telemetry_loss_rejects_without_counting(tmp_path, monkeypatch) -> None:
+    """A failing safety sample rejects without counting the poll."""
+    start, end = _stamps()
+    result = _result(tmp_path, "loss")
+    _install_fake(monkeypatch, 0, 5.0)
+
+    def _gone(pid):
+        raise OSError("gone")
+
+    monkeypatch.setattr(sup, "_workload_memory", _gone)
+    run = sup.run_mhs_process_backtest(
+        start=start, end=end, data_root=None, result_output=result,
+        poll_seconds=0.05, registry_path=_registry(tmp_path),
+    )
+    assert run.status == "resource_rejected"
+    assert run.termination_reason == "missing safety telemetry: gone"
+    assert run.samples_taken == 0
+
+
+def test_unknown_baseline_never_reports_growth(tmp_path, monkeypatch) -> None:
+    """An unobservable launch baseline never yields swap growth."""
+    start, end = _stamps()
+    result = _result(tmp_path, "nobase")
+
+    def _on_start(proc):
+        staging = result.parent / ".staging_domain.json"
+        staging.parent.mkdir(parents=True, exist_ok=True)
+        staging.write_text(json.dumps(_completed_domain()))
+
+    _install_fake(monkeypatch, 0, 0.15, _on_start)
+    calls = {"n": 0}
+
+    def _scripted(pid):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError("no baseline")
+        return (100, 50, 10**9)
+
+    monkeypatch.setattr(sup, "_workload_memory", _scripted)
+    run = sup.run_mhs_process_backtest(
+        start=start, end=end, data_root=None, result_output=result,
+        poll_seconds=0.05, registry_path=_registry(tmp_path),
+    )
+    assert run.status == "completed"
+    assert run.process_swap_growth_bytes is None
+
+
+def test_status_precedence_unchanged(tmp_path, monkeypatch) -> None:
+    """An elapsed deadline outranks a simultaneous resource breach."""
+    start, end = _stamps()
+    result = _result(tmp_path, "precedence")
+    _install_fake(monkeypatch, 0, 30.0)
+    monkeypatch.setattr(sup, "_workload_memory", lambda pid: (10 * 2**30, 1, 0))
+    run = sup.run_mhs_process_backtest(
+        start=start, end=end, data_root=None, result_output=result,
+        poll_seconds=0.05, timeout_seconds=0.01, registry_path=_registry(tmp_path),
+    )
+    assert run.status == "timed_out"
+
+
+def test_workload_memory_all_skipped_returns_zeros(monkeypatch) -> None:
+    """Every process skipped yields zero PSS/USS and unknown swap."""
+    import psutil as _psutil
+
+    _fake_psutil_tree(
+        monkeypatch,
+        [_psutil.NoSuchProcess(pid=1), _psutil.AccessDenied(pid=2)],
+    )
+    assert sup._workload_memory(1) == (0, 0, None)
