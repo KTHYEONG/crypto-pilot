@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from tests.fixtures.mhs_requests import research_baseline
 import ast
 from pathlib import Path
 
@@ -156,14 +157,12 @@ def test_exception_roster_values() -> None:
 
 
 def test_moved_defaults_match_legacy_values() -> None:
-    """Defaults parity: moved CLI defaults keep values; frozen request untouched."""
-    from src.mhs.contracts import MhsDiagnosticRequest
+    """Defaults parity: production CLI defaults keep values; research baseline stays frozen."""
     from src.mhs import params as _params
-    from src.mhs.pipeline import config as _config
 
-    assert _params.CLI_GROWTH_ENVELOPE_DEFAULT == _config.CLI_GROWTH_ENVELOPE_DEFAULT == "growth_extreme_budgeted"
-    assert _params.CLI_EXECUTION_UNIVERSE_SIZE_DEFAULT == _config.CLI_EXECUTION_UNIVERSE_SIZE_DEFAULT == 60
-    assert MhsDiagnosticRequest().execution_universe_size == 30
+    assert _params.CLI_GROWTH_ENVELOPE_DEFAULT == "growth_extreme_budgeted"
+    assert _params.CLI_EXECUTION_UNIVERSE_SIZE_DEFAULT == 60
+    assert research_baseline().execution_universe_size == 30
 
 
 def test_iter_rejects_invalid_coverage(tmp_path) -> None:

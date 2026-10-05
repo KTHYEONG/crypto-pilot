@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+from tests.fixtures.mhs_requests import research_baseline
 import numpy as np
 import pandas as pd
 import pytest
@@ -11,7 +12,6 @@ import pytest
 from src.mhs.evaluation.committee import (
     _committee_execution_book,
 )
-from src.mhs.contracts import MhsDiagnosticRequest
 from src.mhs.scaling import (
     _committee_capital_replay_scale,
     _exante_vol_target_scale,
@@ -201,7 +201,7 @@ class TestReplayExposureScale:
         rng = np.random.default_rng(42)
         idx = pd.date_range("2021-01-01", periods=400, freq="1D", tz="UTC")
         daily = pd.Series(rng.normal(0, 0.02, 400), index=idx)
-        request = MhsDiagnosticRequest()
+        request = research_baseline()
         result = _replay_exposure_scale(daily, request)
         expected = _committee_capital_replay_scale(
             _pnl_vol_target_scale(daily), daily,
@@ -216,7 +216,7 @@ class TestReplayExposureScale:
         rng = np.random.default_rng(42)
         idx = pd.date_range("2021-01-01", periods=400, freq="1D", tz="UTC")
         daily = pd.Series(rng.normal(0, 0.02, 400), index=idx)
-        request = MhsDiagnosticRequest(pnl_vol_target_mode="exante_target")
+        request = research_baseline(pnl_vol_target_mode="exante_target")
         result = _replay_exposure_scale(daily, request)
         expected = _committee_capital_replay_scale(
             _exante_vol_target_scale(daily), daily,
@@ -228,7 +228,7 @@ class TestReplayExposureScale:
         rng = np.random.default_rng(42)
         idx = pd.date_range("2021-01-01", periods=400, freq="1D", tz="UTC")
         daily = pd.Series(rng.normal(0, 0.02, 400), index=idx)
-        request = MhsDiagnosticRequest()
+        request = research_baseline()
         object.__setattr__(request, "pnl_vol_target_mode", "nope")
         with pytest.raises(ValueError, match="unknown pnl_vol_target_mode"):
             _replay_exposure_scale(daily, request)
@@ -340,15 +340,15 @@ class TestRequestValidationCarrySleeve:
 
     def test_carry_sleeve_requires_committee_capital(self) -> None:
         with pytest.raises(ValueError, match="funding_carry_sleeve requires committee_capital"):
-            MhsDiagnosticRequest(funding_carry_sleeve=True)
+            research_baseline(funding_carry_sleeve=True)
 
     def test_carry_weight_requires_sleeve(self) -> None:
         with pytest.raises(ValueError, match=r"funding_carry_weight > 0.0 requires funding_carry_sleeve"):
-            MhsDiagnosticRequest(funding_carry_weight=0.3)
+            research_baseline(funding_carry_weight=0.3)
 
     def test_carry_sleeve_requires_target_gross(self) -> None:
         with pytest.raises(ValueError, match="funding_carry_sleeve is mutually exclusive"):
-            MhsDiagnosticRequest(
+            research_baseline(
                 committee_capital=True,
                 funding_carry_sleeve=True,
                 committee_target_gross=None,
@@ -356,10 +356,10 @@ class TestRequestValidationCarrySleeve:
 
     def test_unknown_pnl_vol_target_mode(self) -> None:
         with pytest.raises(ValueError, match="unknown pnl_vol_target_mode"):
-            MhsDiagnosticRequest(pnl_vol_target_mode="nope")
+            research_baseline(pnl_vol_target_mode="nope")
 
     def test_defaults(self) -> None:
-        req = MhsDiagnosticRequest()
+        req = research_baseline()
         assert req.pnl_vol_target_mode == "median_relative"
         assert req.funding_carry_sleeve is False
         assert req.funding_carry_weight == 0.0

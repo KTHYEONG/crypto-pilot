@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from tests.fixtures.mhs_requests import research_baseline
 import itertools
 import math
 
@@ -895,13 +896,11 @@ def test_diagnostic_validation_without_mark_mode() -> None:
     import inspect
 
     import src.mhs.evaluation.windows as windows
-    from src.mhs.contracts import MhsDiagnosticRequest
-    from src.mhs.params import COMMITTEE_TARGET_GROSS_UNSET
     from src.mhs.validation import validate_request
 
-    request = MhsDiagnosticRequest()
+    request = research_baseline()
     assert not hasattr(request, "mark_mode")
-    validate_request(request, COMMITTEE_TARGET_GROSS_UNSET)
+    validate_request(request)
     assert "mark_mode" not in inspect.getsource(validate_request)
     assert "request.mark_mode" not in inspect.getsource(windows._book_outcome)
     assert "cache_required" not in inspect.getsource(windows._book_outcome)
@@ -911,9 +910,8 @@ def test_non_3m_timeframe_fails_before_market_reads() -> None:
     """A non-3m execution timeframe fails closed at request construction."""
     import pytest
 
-    from src.mhs.contracts import MhsDiagnosticRequest
 
     with pytest.raises(ValueError, match="execution_timeframe"):
-        MhsDiagnosticRequest(execution_timeframe="5m", passive_timeout_minutes=10)  # type: ignore[arg-type]
+        research_baseline(execution_timeframe="5m", passive_timeout_minutes=10)  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="execution_timeframe"):
-        MhsDiagnosticRequest(execution_timeframe="1m", passive_timeout_minutes=30)  # type: ignore[arg-type]
+        research_baseline(execution_timeframe="1m", passive_timeout_minutes=30)  # type: ignore[arg-type]

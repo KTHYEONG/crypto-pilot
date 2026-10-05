@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+from tests.fixtures.mhs_requests import research_baseline
 import pytest
 
 from src.mhs.contracts import (
-    MhsDiagnosticRequest,
     MhsFoldReport,
 )
 from src.mhs.research_go import (
@@ -25,21 +25,21 @@ from src.mhs.types import REGISTERED_POLICY_THRESHOLDS
 
 
 def test_resolved_committee_members_risk_premia() -> None:
-    req = MhsDiagnosticRequest(committee_capital=True, committee_member_set="risk_premia")
+    req = research_baseline(committee_capital=True, committee_member_set="risk_premia")
     result = _resolved_committee_members(req)
     assert result == COMMITTEE_MEMBER_SETS["risk_premia"]
     assert len(result) == 5
 
 
 def test_resolved_committee_members_flow_momentum() -> None:
-    req = MhsDiagnosticRequest(committee_capital=True, committee_member_set="flow_momentum")
+    req = research_baseline(committee_capital=True, committee_member_set="flow_momentum")
     result = _resolved_committee_members(req)
     assert result == COMMITTEE_MEMBER_SETS["flow_momentum"]
     assert len(result) == 5
 
 
 def test_resolved_committee_members_unregistered_raises() -> None:
-    req = MhsDiagnosticRequest(committee_capital=True, committee_member_set="risk_premia")
+    req = research_baseline(committee_capital=True, committee_member_set="risk_premia")
     # Simulate an unregistered key by replacing the field (bypassing validation)
     object.__setattr__(req, "committee_member_set", "unregistered")
     with pytest.raises(ValueError, match="unknown committee_member_set"):
@@ -82,17 +82,17 @@ class TestDrawdownGateReadsEnvelope:
 
 class TestResolvedGrowthEnvelope:
     def test_default_returns_conservative(self) -> None:
-        req = MhsDiagnosticRequest()
+        req = research_baseline()
         env = _resolved_growth_envelope(req)
         assert env is GROWTH_RISK_ENVELOPES["conservative"]
 
     def test_balanced_returns_balanced(self) -> None:
-        req = MhsDiagnosticRequest(growth_envelope="balanced")
+        req = research_baseline(growth_envelope="balanced")
         env = _resolved_growth_envelope(req)
         assert env is GROWTH_RISK_ENVELOPES["balanced"]
 
     def test_unregistered_key_raises(self) -> None:
-        req = MhsDiagnosticRequest()
+        req = research_baseline()
         object.__setattr__(req, "growth_envelope", "unregistered")
         with pytest.raises(ValueError, match="unknown growth_envelope"):
             _resolved_growth_envelope(req)

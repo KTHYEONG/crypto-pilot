@@ -7,6 +7,7 @@ flags=None when request is None, and tolerate absent optional report fields
 
 from __future__ import annotations
 
+from tests.fixtures.mhs_requests import research_baseline
 import dataclasses
 import json
 from pathlib import Path
@@ -15,7 +16,6 @@ import pytest
 
 from src.mhs.contracts import (
     MhsBookReport,
-    MhsDiagnosticRequest,
     MhsFoldReport,
     MhsOutputTier,
     MhsResearchGoResult,
@@ -154,7 +154,7 @@ def _representative_report() -> MhsHorizonDiagnosticReport:
 
 def test_record_round_trips_and_curates_representative_report() -> None:
     report = _representative_report()
-    request = MhsDiagnosticRequest(start="2021-01-01", end="2025-12-31")
+    request = research_baseline(start="2021-01-01", end="2025-12-31")
     record = build_mhs_run_history_record(report, request, MhsOutputTier.FULL, Path("docs/results/x.json"))
 
     assert json.loads(json.dumps(record)) == record
@@ -182,7 +182,7 @@ def test_record_includes_data_integrity_reason_codes() -> None:
         data_integrity_reason_codes=("RELEVANT_EXECUTION_DATA_GAP",),
     )
     report = dataclasses.replace(report, research_go=go)
-    request = MhsDiagnosticRequest(start="2021-01-01", end="2025-12-31")
+    request = research_baseline(start="2021-01-01", end="2025-12-31")
     record = build_mhs_run_history_record(
         report, request, MhsOutputTier.FULL, Path("docs/results/x.json"),
     )
@@ -235,7 +235,7 @@ def test_record_includes_committee_diagnostic_when_committee_book() -> None:
     without_committee = dataclasses.replace(
         _representative_report(), committee_diagnostic=None,
     )
-    request = MhsDiagnosticRequest(start="2021-01-01", end="2025-12-31")
+    request = research_baseline(start="2021-01-01", end="2025-12-31")
     record_with = build_mhs_run_history_record(
         with_committee, request, MhsOutputTier.COMPACT, None,
     )
@@ -268,7 +268,7 @@ def test_record_includes_holdout_tail_and_parameter_oos_split() -> None:
     without_either = dataclasses.replace(
         _representative_report(), holdout_tail=None, parameter_oos_split=None,
     )
-    request = MhsDiagnosticRequest(start="2021-01-01", end="2025-12-31")
+    request = research_baseline(start="2021-01-01", end="2025-12-31")
     record_with = build_mhs_run_history_record(
         with_both, request, MhsOutputTier.COMPACT, None,
     )
@@ -285,12 +285,12 @@ def test_record_includes_holdout_tail_and_parameter_oos_split() -> None:
 def test_mhs_kelly_z0_history_record_carries_live_policy_snapshot() -> None:
     import json
     from pathlib import Path
-    from src.mhs.contracts import MhsDiagnosticRequest, MhsOutputTier
+    from src.mhs.contracts import MhsOutputTier
     from src.mhs.params import COMMITTEE_KELLY_LCB_Z
     from src.mhs.report.persist import build_mhs_run_history_record
 
     report = _representative_report()
-    request = MhsDiagnosticRequest(start='2021-01-01', end='2025-12-31')
+    request = research_baseline(start='2021-01-01', end='2025-12-31')
     record = build_mhs_run_history_record(report, request, MhsOutputTier.COMPACT, Path('docs/results/x.json'))
     assert json.loads(json.dumps(record)) == record
     assert record['params_snapshot']['COMMITTEE_KELLY_WINDOW_DAYS'] == 42

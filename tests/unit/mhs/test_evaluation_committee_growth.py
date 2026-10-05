@@ -1,12 +1,12 @@
 """MHS evaluation contract tests (split by behavioral domain; shared builders live in the original module)."""
 
 """Contract coverage for the MHS application evaluation resource telemetry."""
+from tests.fixtures.mhs_requests import research_baseline
 import dataclasses
 import pytest
 import src.mhs.evaluation.concurrency as concurrency_mod
 from src.mhs.committee import long_only_equal_risk_weights, score_weighted_net
 from src.mhs.diagnostic_run import run_mhs_horizon_diagnostic
-from src.mhs.contracts import MhsDiagnosticRequest
 from src.mhs.evaluation.committee import _committee_growth_headroom
 from src.mhs.params import COMMITTEE_OOS_START
 
@@ -58,13 +58,13 @@ def test_committee_growth_diagnostic_requires_committee_book() -> None:
     # SCENARIO_MHS_DIAGNOSTIC_COMMITTEE_GROWTH_DIAGNOSTIC_REQUIRES_COMMITTEE_BOOK:
     # committee_growth_diagnostic=True without committee_book=True fails closed
     # in __post_init__.
-    assert MhsDiagnosticRequest().committee_growth_diagnostic is False
+    assert research_baseline().committee_growth_diagnostic is False
     with pytest.raises(ValueError, match="committee_growth_diagnostic requires committee_book"):
-        MhsDiagnosticRequest(committee_growth_diagnostic=True, committee_book=False)
+        research_baseline(committee_growth_diagnostic=True, committee_book=False)
     with pytest.raises(ValueError, match="committee_growth_diagnostic must be a bool"):
-        MhsDiagnosticRequest(committee_growth_diagnostic="yes")
+        research_baseline(committee_growth_diagnostic="yes")
     assert (
-        MhsDiagnosticRequest(committee_book=True, committee_growth_diagnostic=True)
+        research_baseline(committee_book=True, committee_growth_diagnostic=True)
         .committee_growth_diagnostic
         is True
     )
@@ -78,7 +78,7 @@ def test_committee_growth_diagnostic_default_off_byte_identical(mhs_market_long,
     monkeypatch.setattr(concurrency_mod, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
     monkeypatch.setattr(concurrency_mod, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
-    request = MhsDiagnosticRequest(
+    request = research_baseline(
         start=str(_START), end=str(end), data_root=str(root),
         execution_timeframe="3m", log_run=False,
         execution_universe_size=8, committee_book=True,
@@ -97,7 +97,7 @@ def test_committee_growth_diagnostic_observational_only(mhs_market_long, monkeyp
     monkeypatch.setattr(concurrency_mod, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
     monkeypatch.setattr(concurrency_mod, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
-    base = MhsDiagnosticRequest(
+    base = research_baseline(
         start=str(_START), end=str(end), data_root=str(root),
         execution_timeframe="3m", log_run=False,
         execution_universe_size=8, committee_book=True,

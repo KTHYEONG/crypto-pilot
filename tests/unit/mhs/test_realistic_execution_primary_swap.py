@@ -10,6 +10,7 @@ the top-level ``fill_source`` metadata reports the new primary.
 
 from __future__ import annotations
 
+from tests.fixtures.mhs_requests import research_baseline
 import json
 from pathlib import Path
 
@@ -20,7 +21,6 @@ import pytest
 import src.market_data.services.futures_collection as fc
 from src.mhs.contracts import (
     MhsBookReport,
-    MhsDiagnosticRequest,
     MhsOutputTier,
     MhsResearchGoResult,
 )
@@ -137,7 +137,7 @@ def _build_book_outcome_args(mhs_market) -> dict[str, object]:
     root, end = mhs_market
     symbols = _DEV_SYMBOLS[:8]
     funding_by_symbol, _ = _load_funding_series(symbols)
-    request = MhsDiagnosticRequest(
+    request = research_baseline(
         start=str(_START), end=str(end), data_root=str(root),
         execution_timeframe="3m", log_run=False,
     )
@@ -229,7 +229,7 @@ def test_fold_primary_is_immediate_taker(mhs_market) -> None:
     root, end = mhs_market
     symbols = _DEV_SYMBOLS[:8]
     funding_by_symbol, _ = _load_funding_series(symbols)
-    request = MhsDiagnosticRequest(
+    request = research_baseline(
         start=str(_START), end=str(end), data_root=str(root),
         execution_timeframe="3m", log_run=False,
     )
@@ -278,7 +278,7 @@ def test_report_fill_source_is_immediate_taker(mhs_market, monkeypatch) -> None:
     # there too so injection holds regardless of import order.
     monkeypatch.setattr(folds_mod, "phase_1_anchored_purged_folds", lambda: ())
     monkeypatch.setattr(evidence_mod, "phase_1_anchored_purged_folds", lambda: ())
-    request = MhsDiagnosticRequest(
+    request = research_baseline(
         start=str(_START), end=str(end), data_root=str(root),
         execution_timeframe="3m", log_run=False,
         execution_universe_size=8,

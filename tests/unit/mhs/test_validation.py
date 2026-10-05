@@ -2,53 +2,50 @@
 
 from __future__ import annotations
 
+from tests.fixtures.mhs_requests import research_baseline
 import re
 
 import pytest
 
 from src.mhs.contracts import MhsDiagnosticRequest
 from src.mhs.validation import validate_request
-from src.mhs.params import COMMITTEE_TARGET_GROSS_UNSET
 
 
 def test_validate_request_committee_member_set() -> None:
     """committee_member_set validation accepts valid choices."""
-    req = MhsDiagnosticRequest(
+    req = research_baseline(
         committee_capital=True, committee_member_set="risk_premia"
     )
     # Should not raise
-    validate_request(req, COMMITTEE_TARGET_GROSS_UNSET)
+    validate_request(req)
 
 
 def test_validate_request_pnl_vol_target_mode_growth_budget() -> None:
     """pnl_vol_target_mode accepts 'growth_budget'."""
-    req = MhsDiagnosticRequest(pnl_vol_target_mode="growth_budget")
+    req = research_baseline(pnl_vol_target_mode="growth_budget")
     # Should not raise
-    validate_request(req, COMMITTEE_TARGET_GROSS_UNSET)
+    validate_request(req)
 
 
 def test_request_rejects_unknown_data_policy() -> None:
     import pytest
 
-    from src.mhs.contracts import MhsDiagnosticRequest
 
     with pytest.raises(ValueError, match="data_policy"):
-        MhsDiagnosticRequest(data_policy="zombie_mask_v9")  # type: ignore[arg-type]
+        research_baseline(data_policy="zombie_mask_v9")  # type: ignore[arg-type]
 
 
 def test_bogus_liquidity_model_rejected() -> None:
-    from src.mhs.pipeline.config import MhsRunConfig
 
     with pytest.raises(ValueError, match=re.escape("unknown liquidity_cost_model 'bogus'")):
-        MhsDiagnosticRequest(liquidity_cost_model="bogus")  # type: ignore[arg-type]
+        research_baseline(liquidity_cost_model="bogus")  # type: ignore[arg-type]
     with pytest.raises(ValueError, match=re.escape("unknown liquidity_cost_model 'bogus'")):
-        MhsRunConfig(liquidity_cost_model="bogus")  # type: ignore[arg-type]
+        MhsDiagnosticRequest(liquidity_cost_model="bogus")  # type: ignore[arg-type]
+    research_baseline(liquidity_cost_model="corwin_schultz")
     MhsDiagnosticRequest(liquidity_cost_model="corwin_schultz")
-    MhsRunConfig(liquidity_cost_model="corwin_schultz")
 
 
 def test_run_config_is_validated_at_construction() -> None:
-    from src.mhs.pipeline.config import MhsRunConfig
 
     cases = [
         ({"committee_capital": False}, "committee_kelly_sizing requires committee_book=True or committee_capital=True"),
@@ -61,25 +58,24 @@ def test_run_config_is_validated_at_construction() -> None:
     ]
     for kwargs, message in cases:
         with pytest.raises(ValueError, match=re.escape(message)):
-            MhsRunConfig(**kwargs)  # type: ignore[arg-type]
+            MhsDiagnosticRequest(**kwargs)  # type: ignore[arg-type]
 
 
 def test_replace_revalidates() -> None:
     import dataclasses
 
-    from src.mhs.pipeline.config import MhsRunConfig
 
     with pytest.raises(ValueError, match=">= 8"):
-        dataclasses.replace(MhsRunConfig(), execution_universe_size=1)
+        dataclasses.replace(MhsDiagnosticRequest(), execution_universe_size=1)
 
 
 def test_inactive_member_set_must_be_canonical() -> None:
     with pytest.raises(
         ValueError, match=re.escape("committee_member_set requires committee_capital=True")
     ):
-        MhsDiagnosticRequest(committee_capital=False, committee_member_set="flow_momentum")
-    MhsDiagnosticRequest(committee_capital=False, committee_member_set="risk_premia")
-    MhsDiagnosticRequest(committee_capital=True, committee_member_set="flow_momentum")
+        research_baseline(committee_capital=False, committee_member_set="flow_momentum")
+    research_baseline(committee_capital=False, committee_member_set="risk_premia")
+    research_baseline(committee_capital=True, committee_member_set="flow_momentum")
 
 
 def test_rule_table_parity() -> None:
@@ -104,7 +100,7 @@ def test_rule_table_parity() -> None:
         if rule.field == "committee_target_gross":
             kwargs["committee_target_gross"] = samples[rule.field]
         with pytest.raises(ValueError, match=re.escape(rule.message)):
-            MhsDiagnosticRequest(**kwargs)  # type: ignore[arg-type]
+            research_baseline(**kwargs)  # type: ignore[arg-type]
 
 
 def test_canonical_inert_constant_matches_identity_baseline() -> None:

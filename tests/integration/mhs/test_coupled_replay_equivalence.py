@@ -21,6 +21,7 @@ synthetic workload per the repo's minimal-synthetic-data testing directive.
 
 from __future__ import annotations
 
+from tests.fixtures.mhs_requests import research_baseline
 import numpy as np
 import pandas as pd
 import pytest
@@ -150,9 +151,8 @@ def _two_pass_scaled_ledger(windows: list[ExecutionReplayWindow], scale: pd.Seri
 def test_streaming_mode_is_median_relative_only_for_this_probe() -> None:
     """Sanity: the scale function this test uses is one of the two modes the
     production `is_streaming_scale_mode` actually accepts."""
-    from src.mhs.contracts import MhsDiagnosticRequest
 
-    assert is_streaming_scale_mode(MhsDiagnosticRequest(pnl_vol_target_mode="median_relative"))
+    assert is_streaming_scale_mode(research_baseline(pnl_vol_target_mode="median_relative"))
 
 
 def test_coupled_scale_matches_two_pass_exactly() -> None:

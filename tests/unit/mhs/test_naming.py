@@ -30,7 +30,7 @@ PERSISTED_VERSIONED_IDENTIFIERS: Final[dict[tuple[str, str], int]] = {
     ("src/mhs/frozen_research_candidate.py", "frozen_mhs_top20_v2"): 2,
     ("src/mhs/frozen_research_candidate.py", "frozen_mhs_top40_control_v2"): 1,
     ("src/mhs/panel.py", "zombie_mask_v1"): 2,
-    ("src/mhs/pipeline/config.py", "zombie_mask_v1"): 1,
+    ("src/mhs/run_history.py", "zombie_mask_v1"): 1,
     ("src/quant/technical_experts/trend_screen_catalog.py", "baseline_gate_performance_v1"): 1,
 }
 

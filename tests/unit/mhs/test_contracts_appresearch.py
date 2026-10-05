@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from tests.fixtures.mhs_requests import research_baseline
 import dataclasses
 
 from src.mhs.contracts import MhsDiagnosticRequest
@@ -17,5 +18,5 @@ def test_exposure_drawdown_brake_default_inert_and_declared_once() -> None:
     assert field.metadata["flag"] == "--exposure-drawdown-brake"
     assert field.metadata.get("negate_flag") is None
 
-    request = MhsDiagnosticRequest()
+    request = research_baseline()
     assert request.exposure_drawdown_brake is False

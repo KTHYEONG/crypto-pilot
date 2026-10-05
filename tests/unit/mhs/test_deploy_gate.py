@@ -280,10 +280,9 @@ def test_integrity_reasons_from_report_is_fail_closed_on_missing_evidence() -> N
         GATE_REPORT_NOT_COMPLETE,
         integrity_reasons_from_report,
     )
-    from src.mhs.pipeline.config import MhsRunConfig
 
-    plain = MhsDiagnosticRequest(**dataclasses.asdict(MhsRunConfig()))
-    trim = MhsDiagnosticRequest(**dataclasses.asdict(MhsRunConfig(name_drift_trim=True)))
+    plain = MhsDiagnosticRequest()
+    trim = MhsDiagnosticRequest(name_drift_trim=True)
 
     # Given: 아무 증거도 없는 리포트 -> 전부 fail-closed
     empty = types.SimpleNamespace()
@@ -333,9 +332,8 @@ def test_deploy_gate_from_report_reads_strict_fold_ledgers() -> None:
 
     from src.mhs.contracts import MhsDiagnosticRequest
     from src.mhs.deploy_gate import GATE_REPORT_NOT_COMPLETE, deploy_gate_from_report, fold_daily_returns
-    from src.mhs.pipeline.config import MhsRunConfig
 
-    request = MhsDiagnosticRequest(**dataclasses.asdict(MhsRunConfig(growth_envelope="growth_extreme_budgeted")))
+    request = MhsDiagnosticRequest(growth_envelope="growth_extreme_budgeted")
 
     def _replay(mu: float, start: str, seed: int) -> types.SimpleNamespace:
         rng = np.random.default_rng(seed)
@@ -600,9 +598,8 @@ def test_integrity_reasons_require_eligible_reliability() -> None:
         GATE_BACKTEST_RELIABILITY_NOT_ELIGIBLE,
         integrity_reasons_from_report,
     )
-    from src.mhs.pipeline.config import MhsRunConfig
 
-    request = MhsDiagnosticRequest(**dataclasses.asdict(MhsRunConfig()))
+    request = MhsDiagnosticRequest()
     good_fold = types.SimpleNamespace(fold_index=0, strict=object(), stress=object(), failures=())
     report = types.SimpleNamespace(
         status="COMPLETE",

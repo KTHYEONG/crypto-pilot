@@ -1,40 +1,41 @@
-"""Tests for MhsRunConfig: D1 fix verification."""
+"""Tests for MhsDiagnosticRequest: D1 fix verification."""
 
 from __future__ import annotations
 
 import dataclasses
 
-from src.mhs.pipeline.config import MhsRunConfig, MemberSet
+from src.mhs.contracts import MhsDiagnosticRequest
+from src.mhs.pipeline.config import request_from_namespace
 
 
 def test_config_defaults_match_cli_derived():
-    """SCENARIO_ANALYSIS_ARCHITECTURE_08: MhsRunConfig() defaults must match
+    """SCENARIO_ANALYSIS_ARCHITECTURE_08: MhsDiagnosticRequest() defaults must match
     what the CLI handler currently derives at lines 28-52.
 
     Concretely: committee_capital=True, committee_regime_adaptive_tranche=True,
-    funding_carry_sleeve=True, committee_member_set=MemberSet.FLOW_MOMENTUM,
+    funding_carry_sleeve=True, committee_member_set="flow_momentum",
     committee_target_gross=0.92.
     """
-    config = MhsRunConfig()
+    config = MhsDiagnosticRequest()
     d = dataclasses.asdict(config)
     assert d["committee_capital"] is True
     assert d["committee_regime_adaptive_tranche"] is True
     assert d["funding_carry_sleeve"] is True
-    assert d["committee_member_set"] == MemberSet.FLOW_MOMENTUM
+    assert d["committee_member_set"] == "flow_momentum"
     assert d["committee_target_gross"] == 0.92
     assert d["funding_carry_weight"] == 0.3
 
 
 def test_member_set_values():
-    """MemberSet members have no _v<N> suffix (I_NOVERSION)."""
-    assert MemberSet.RISK_PREMIA == "risk_premia"
-    assert MemberSet.FLOW_MOMENTUM == "flow_momentum"
-    assert len(MemberSet) == 2
+    """Registered committee member sets have no _v<N> suffix (I_NOVERSION)."""
+    from src.mhs.params import COMMITTEE_MEMBER_SETS
+
+    assert set(COMMITTEE_MEMBER_SETS) == {"risk_premia", "flow_momentum"}
 
 
 def test_from_namespace_no_arg_cli_matches_bare_config():
-    """SCENARIO_ANALYSIS_ARCHITECTURE_08: dataclasses.asdict(MhsRunConfig())
-    == dataclasses.asdict(MhsRunConfig.from_namespace(<no-arg CLI parse>)).
+    """SCENARIO_ANALYSIS_ARCHITECTURE_08: dataclasses.asdict(MhsDiagnosticRequest())
+    == dataclasses.asdict(request_from_namespace(<no-arg CLI parse>)).
 
     Pins the exact CLI defaults from src/cli/commands/research/mhs.py
     (committee_capital=True, committee_regime_adaptive_tranche=True,
@@ -47,8 +48,8 @@ def test_from_namespace_no_arg_cli_matches_bare_config():
     args = build_root_parser().parse_args(
         ["research", "run", "portfolio", "mhs-horizon-diagnostic"],
     )
-    from_cli = dataclasses.asdict(MhsRunConfig.from_namespace(args))
-    bare = dataclasses.asdict(MhsRunConfig())
+    from_cli = dataclasses.asdict(request_from_namespace(args))
+    bare = dataclasses.asdict(MhsDiagnosticRequest())
     assert from_cli == bare
 
 
@@ -62,7 +63,7 @@ def test_from_namespace_respects_negate_flags():
             "--no-committee-capital",
         ],
     )
-    config = MhsRunConfig.from_namespace(args)
+    config = request_from_namespace(args)
     assert config.committee_capital is False
     assert config.committee_regime_adaptive_tranche is False
     assert config.funding_carry_sleeve is False
@@ -79,7 +80,7 @@ def test_from_namespace_fold_safe_horizon_flag_maps_to_selection_field():
             "--fold-safe-horizon",
         ],
     )
-    config = MhsRunConfig.from_namespace(args)
+    config = request_from_namespace(args)
     assert config.fold_safe_horizon_selection is True
 
 
@@ -89,7 +90,7 @@ def test_config_defaults_growth_envelope_and_attribution():
     of the 2026-08-23 main-logic rung (ADR_20260823_MHS_KELLY_TWO_SIDED_SIZING)
     with the identical leverage_ceiling, so the deployed exposure is unchanged;
     attribution stays False."""
-    config = MhsRunConfig()
+    config = MhsDiagnosticRequest()
     d = dataclasses.asdict(config)
     assert d["growth_envelope"] == "growth_extreme_budgeted"
     assert d["committee_member_attribution"] is False
@@ -97,7 +98,7 @@ def test_config_defaults_growth_envelope_and_attribution():
 
 def test_config_defaults_growth_budget_main_logic():
     """Main-logic default (2026-08-22): growth_budget mode + evidence weighting on."""
-    config = MhsRunConfig()
+    config = MhsDiagnosticRequest()
     d = dataclasses.asdict(config)
     assert d["pnl_vol_target_mode"] == "growth_budget"
     assert d["committee_evidence_weighting"] is True
@@ -110,17 +111,17 @@ def test_from_namespace_committee_evidence_weighting_cascades_with_capital():
     args = build_root_parser().parse_args(
         ["research", "run", "portfolio", "mhs-horizon-diagnostic"],
     )
-    assert MhsRunConfig.from_namespace(args).committee_evidence_weighting is True
+    assert request_from_namespace(args).committee_evidence_weighting is True
 
     args_off = build_root_parser().parse_args(
         ["research", "run", "portfolio", "mhs-horizon-diagnostic", "--no-committee-evidence-weighting"],
     )
-    assert MhsRunConfig.from_namespace(args_off).committee_evidence_weighting is False
+    assert request_from_namespace(args_off).committee_evidence_weighting is False
 
     args_no_capital = build_root_parser().parse_args(
         ["research", "run", "portfolio", "mhs-horizon-diagnostic", "--no-committee-capital"],
     )
-    assert MhsRunConfig.from_namespace(args_no_capital).committee_evidence_weighting is False
+    assert request_from_namespace(args_no_capital).committee_evidence_weighting is False
 
 
 def test_from_namespace_growth_envelope_flag():
@@ -133,7 +134,7 @@ def test_from_namespace_growth_envelope_flag():
             "--growth-envelope", "balanced",
         ],
     )
-    config = MhsRunConfig.from_namespace(args)
+    config = request_from_namespace(args)
     assert config.growth_envelope == "balanced"
 
 
@@ -147,19 +148,19 @@ def test_from_namespace_committee_member_attribution_flag():
             "--committee-member-attribution",
         ],
     )
-    config = MhsRunConfig.from_namespace(args)
+    config = request_from_namespace(args)
     assert config.committee_member_attribution is True
 
 
 def test_golden_identity_preserved():
-    """I-CONFIG: MhsRunConfig() and a no-arg CLI invocation produce identical dicts."""
+    """I-CONFIG: MhsDiagnosticRequest() and a no-arg CLI invocation produce identical dicts."""
     from src.cli.main import build_root_parser
 
     args = build_root_parser().parse_args(
         ["research", "run", "portfolio", "mhs-horizon-diagnostic"],
     )
-    from_cli = dataclasses.asdict(MhsRunConfig.from_namespace(args))
-    bare = dataclasses.asdict(MhsRunConfig())
+    from_cli = dataclasses.asdict(request_from_namespace(args))
+    bare = dataclasses.asdict(MhsDiagnosticRequest())
     # New fields must be identical
     assert from_cli["growth_envelope"] == bare["growth_envelope"]
     assert from_cli["committee_member_attribution"] == bare["committee_member_attribution"]
@@ -167,41 +168,39 @@ def test_golden_identity_preserved():
 
 # SCENARIO_MHS_EXPOSURE_CEILING_06
 def test_scenario_mhs_exposure_ceiling_06_two_sided_default_flipped_universe_wired():
-    """exposure_scale_two_sided flips to True at the MhsRunConfig (CLI
+    """exposure_scale_two_sided flips to True at the MhsDiagnosticRequest (CLI
     effective-default owner) layer only; --no-exposure-scale-two-sided opts
     back out; --execution-universe-size exposes the roster breadth field."""
     from src.cli.main import build_root_parser
 
-    assert MhsRunConfig().exposure_scale_two_sided is True
+    assert MhsDiagnosticRequest().exposure_scale_two_sided is True
     argv = ["research", "run", "portfolio", "mhs-horizon-diagnostic"]
     args = build_root_parser().parse_args(argv)
-    assert dataclasses.asdict(MhsRunConfig.from_namespace(args)) == dataclasses.asdict(MhsRunConfig())
+    assert dataclasses.asdict(request_from_namespace(args)) == dataclasses.asdict(MhsDiagnosticRequest())
     off = build_root_parser().parse_args([*argv, "--no-exposure-scale-two-sided"])
-    assert MhsRunConfig.from_namespace(off).exposure_scale_two_sided is False
+    assert request_from_namespace(off).exposure_scale_two_sided is False
     wide = build_root_parser().parse_args([*argv, "--execution-universe-size", "60"])
-    assert MhsRunConfig.from_namespace(wide).execution_universe_size == 60
-    assert MhsRunConfig.from_namespace(args).execution_universe_size == 60
+    assert request_from_namespace(wide).execution_universe_size == 60
+    assert request_from_namespace(args).execution_universe_size == 60
 
 
 # SCENARIO_MHS_KELLY_TWO_SIDED_06
 def test_scenario_mhs_kelly_two_sided_06_universe_default_promotion() -> None:
-    """CLI effective breadth default moves to 60 at the MhsRunConfig single
-    owner only; the contract object MhsDiagnosticRequest keeps its frozen 30
-    default (bit-exact fixtures), and an explicit --execution-universe-size
-    still overrides."""
+    """Breadth default is 60 on the single request type, matching the CLI;
+    an explicit --execution-universe-size still overrides."""
     from src.mhs.contracts import MhsDiagnosticRequest
     from src.cli.main import build_root_parser
-    from src.mhs.pipeline.config import CLI_EXECUTION_UNIVERSE_SIZE_DEFAULT
+    from src.mhs.params import CLI_EXECUTION_UNIVERSE_SIZE_DEFAULT
 
-    assert MhsRunConfig().execution_universe_size == 60
-    assert MhsRunConfig().execution_universe_size == CLI_EXECUTION_UNIVERSE_SIZE_DEFAULT
+    assert MhsDiagnosticRequest().execution_universe_size == 60
+    assert MhsDiagnosticRequest().execution_universe_size == CLI_EXECUTION_UNIVERSE_SIZE_DEFAULT
 
     argv = ["research", "run", "portfolio", "mhs-horizon-diagnostic"]
     args = build_root_parser().parse_args(argv)
     assert args.execution_universe_size == 60
     narrow = build_root_parser().parse_args([*argv, "--execution-universe-size", "30"])
     assert narrow.execution_universe_size == 30
-    assert MhsDiagnosticRequest().execution_universe_size == 30
+    assert request_from_namespace(narrow).execution_universe_size == 30
 
 
 # SCENARIO_MHS_CONSTANT_RISK_CLI_AND_CONFIG_PARITY
@@ -215,15 +214,15 @@ def test_constant_risk_cli_and_config_parity():
     args = build_root_parser().parse_args(
         [*argv, "--pnl-vol-target-mode", "constant_risk"],
     )
-    config = MhsRunConfig.from_namespace(args)
+    config = request_from_namespace(args)
     assert config.pnl_vol_target_mode == "constant_risk"
     assert config.exposure_scale_two_sided is True
-    assert MhsRunConfig().pnl_vol_target_mode == "growth_budget"
+    assert MhsDiagnosticRequest().pnl_vol_target_mode == "growth_budget"
 
 
 # SCENARIO_MHS_SELECTION_EXEC_DEFAULT_UNCHANGED_01
 def test_scenario_mhs_selection_exec_default_unchanged_01() -> None:
-    """MhsRunConfig() and a no-arg CLI parse stay identical, both resolving
+    """MhsDiagnosticRequest() and a no-arg CLI parse stay identical, both resolving
     final_oos_2026h1=False and data_policy='zombie_mask_v1' as the ONLY keys added
     to the pre-spec field set, plus the sealed committee_tranche_count field."""
     from src.cli.main import build_root_parser
@@ -252,8 +251,8 @@ def test_scenario_mhs_selection_exec_default_unchanged_01() -> None:
     args = build_root_parser().parse_args(
         ["research", "run", "portfolio", "mhs-horizon-diagnostic"],
     )
-    bare = dataclasses.asdict(MhsRunConfig())
-    from_cli = dataclasses.asdict(MhsRunConfig.from_namespace(args))
+    bare = dataclasses.asdict(MhsDiagnosticRequest())
+    from_cli = dataclasses.asdict(request_from_namespace(args))
     assert from_cli == bare
     assert bare["final_oos_2026h1"] is False
     assert bare["data_policy"] == "zombie_mask_v1"
@@ -269,16 +268,15 @@ def test_mhs_run_config_data_policy_defaults_legacy_and_cli_flag() -> None:
 
     from src.cli.main import build_root_parser
     from src.mhs.contracts import MhsDiagnosticRequest
-    from src.mhs.pipeline.config import MhsRunConfig
 
     # Given: 기본 설정과 --data-policy 지정 CLI
-    assert MhsRunConfig().data_policy == "zombie_mask_v1"
+    assert MhsDiagnosticRequest().data_policy == "zombie_mask_v1"
     args = build_root_parser().parse_args(
         ["research", "run", "portfolio", "mhs-horizon-diagnostic", "--data-policy", "legacy"],
     )
 
     # When
-    config = MhsRunConfig.from_namespace(args)
+    config = request_from_namespace(args)
     request = MhsDiagnosticRequest(**dataclasses.asdict(config))
 
     # Then
@@ -290,14 +288,13 @@ def test_mhs_run_config_data_policy_defaults_legacy_and_cli_flag() -> None:
 def test_cli_uses_shared_data_policy_and_manifest_flags() -> None:
     import argparse
     from src.cli.commands.research.mhs import add_mhs_commands
-    from src.mhs.pipeline.config import MhsRunConfig
     parser = argparse.ArgumentParser()
     root = parser.add_subparsers(dest='root')
     research = root.add_parser('research')
     portfolio = research.add_subparsers(dest='portfolio')
     add_mhs_commands(portfolio)
     args = parser.parse_args(['research', 'mhs-horizon-diagnostic', '--input-manifest-path', 'inputs.json', '--forward-execution-quality-dir', 'quality', '--forward-strategy-digest', 'abc'])
-    config = MhsRunConfig.from_namespace(args)
+    config = request_from_namespace(args)
     assert config.data_policy == 'zombie_mask_v1'
     assert config.input_manifest_path == 'inputs.json'
     assert config.forward_execution_quality_dir == 'quality'
@@ -308,15 +305,14 @@ def test_name_drift_trim_cli_flag_maps_to_config_and_request() -> None:
 
     from src.cli.main import build_root_parser
     from src.mhs.contracts import MhsDiagnosticRequest
-    from src.mhs.pipeline.config import MhsRunConfig
 
     parser = build_root_parser()
     base_argv = ["research", "run", "portfolio", "mhs-horizon-diagnostic"]
-    default_config = MhsRunConfig.from_namespace(parser.parse_args(base_argv))
+    default_config = request_from_namespace(parser.parse_args(base_argv))
     assert default_config.name_drift_trim is False
-    assert MhsRunConfig().name_drift_trim is False
+    assert MhsDiagnosticRequest().name_drift_trim is False
 
-    config = MhsRunConfig.from_namespace(parser.parse_args([*base_argv, "--name-drift-trim"]))
+    config = request_from_namespace(parser.parse_args([*base_argv, "--name-drift-trim"]))
     assert config.name_drift_trim is True
     assert MhsDiagnosticRequest(**dataclasses.asdict(config)).name_drift_trim is True
 
@@ -327,22 +323,20 @@ def test_name_drift_trim_cli_flag_maps_to_config_and_request() -> None:
 
 
 def test_config_forward_registration_default_none():
-    from src.mhs.pipeline.config import MhsRunConfig
 
-    assert MhsRunConfig().forward_registration_digest is None
+    assert MhsDiagnosticRequest().forward_registration_digest is None
 
 
 def test_from_namespace_is_pure_and_idempotent() -> None:
     import copy
 
     from src.cli.main import build_root_parser
-    from src.mhs.pipeline.config import MhsRunConfig
 
     base = ["research", "run", "portfolio", "mhs-horizon-diagnostic"]
     args = build_root_parser().parse_args([*base, "--pnl-vol-target-mode", "median_relative"])
     before = copy.deepcopy(vars(args))
-    first = MhsRunConfig.from_namespace(args)
-    second = MhsRunConfig.from_namespace(args)
+    first = request_from_namespace(args)
+    second = request_from_namespace(args)
     assert vars(args) == before
     assert first == second
     assert first.exposure_scale_two_sided is False
@@ -352,11 +346,10 @@ def test_from_namespace_no_arg_parity_preserved() -> None:
     import dataclasses
 
     from src.cli.main import build_root_parser
-    from src.mhs.pipeline.config import MhsRunConfig
 
     base = ["research", "run", "portfolio", "mhs-horizon-diagnostic"]
     args = build_root_parser().parse_args(base)
-    assert dataclasses.asdict(MhsRunConfig.from_namespace(args)) == dataclasses.asdict(MhsRunConfig())
+    assert dataclasses.asdict(request_from_namespace(args)) == dataclasses.asdict(MhsDiagnosticRequest())
 
 
 def test_from_namespace_rejects_explicit_inert_flags() -> None:
@@ -365,7 +358,6 @@ def test_from_namespace_rejects_explicit_inert_flags() -> None:
     import pytest
 
     from src.cli.main import build_root_parser
-    from src.mhs.pipeline.config import MhsRunConfig
 
     base = ["research", "run", "portfolio", "mhs-horizon-diagnostic"]
     cases = [
@@ -379,7 +371,7 @@ def test_from_namespace_rejects_explicit_inert_flags() -> None:
     for extra, message in cases:
         args = build_root_parser().parse_args([*base, *extra])
         with pytest.raises(ValueError, match=re.escape(message)):
-            MhsRunConfig.from_namespace(args)
+            request_from_namespace(args)
 
 
 def test_mutually_exclusive_gross_flags() -> None:
@@ -395,10 +387,9 @@ def test_mutually_exclusive_gross_flags() -> None:
 def test_capital_opt_out_yields_canonical_dependents() -> None:
     from src.cli.main import build_root_parser
     from src.mhs.params import COMMITTEE_TRANCHE_COUNT
-    from src.mhs.pipeline.config import MhsRunConfig
 
     base = ["research", "run", "portfolio", "mhs-horizon-diagnostic"]
-    config = MhsRunConfig.from_namespace(build_root_parser().parse_args([*base, "--no-committee-capital"]))
+    config = request_from_namespace(build_root_parser().parse_args([*base, "--no-committee-capital"]))
     assert config.committee_member_set == "risk_premia"
     assert config.committee_tranche_count == COMMITTEE_TRANCHE_COUNT
     assert config.committee_target_gross is None
@@ -412,30 +403,29 @@ def test_capital_opt_out_yields_canonical_dependents() -> None:
 
 def test_active_explicit_values_pass_through() -> None:
     from src.cli.main import build_root_parser
-    from src.mhs.pipeline.config import MhsRunConfig
 
     base = ["research", "run", "portfolio", "mhs-horizon-diagnostic"]
-    cfg = MhsRunConfig.from_namespace(
+    cfg = request_from_namespace(
         build_root_parser().parse_args([*base, "--committee-tranche-smoothing", "--committee-tranche-count", "7"])
     )
     assert cfg.committee_tranche_count == 7
-    cfg = MhsRunConfig.from_namespace(
+    cfg = request_from_namespace(
         build_root_parser().parse_args([*base, "--trend-sleeve", "--trend-sleeve-gross", "0.3"])
     )
     assert cfg.trend_sleeve_gross == 0.3
-    cfg = MhsRunConfig.from_namespace(
+    cfg = request_from_namespace(
         build_root_parser().parse_args([*base, "--funding-carry-weight", "0.25"])
     )
     assert cfg.funding_carry_weight == 0.25
-    cfg = MhsRunConfig.from_namespace(
+    cfg = request_from_namespace(
         build_root_parser().parse_args([*base, "--committee-member-set", "risk_premia"])
     )
     assert cfg.committee_member_set == "risk_premia"
-    cfg = MhsRunConfig.from_namespace(
+    cfg = request_from_namespace(
         build_root_parser().parse_args([*base, "--committee-target-gross", "1.2"])
     )
     assert cfg.committee_target_gross == 1.2
-    cfg = MhsRunConfig.from_namespace(
+    cfg = request_from_namespace(
         build_root_parser().parse_args([*base, "--no-committee-target-gross", "--no-funding-carry-sleeve"])
     )
     assert cfg.committee_target_gross is None

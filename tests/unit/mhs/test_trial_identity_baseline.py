@@ -87,9 +87,8 @@ _BASELINE_V1: dict[str, Any] = {
 
 
 def _pinned_records() -> list[dict[str, Any]]:
-    from src.mhs.pipeline.config import MhsRunConfig
 
-    run_config_flags = json.loads(json.dumps(dataclasses.asdict(MhsRunConfig())))
+    run_config_flags = json.loads(json.dumps(dataclasses.asdict(MhsDiagnosticRequest())))
     return [
         {"flags": {}, "params_snapshot": {"K": 1}},
         {
@@ -124,9 +123,8 @@ _PINNED_KEYS = (
 
 
 def _unified_request_cls():  # type: ignore[no-untyped-def]
-    from src.mhs.pipeline.config import MhsRunConfig
 
-    cfg = MhsRunConfig()
+    cfg = MhsDiagnosticRequest()
     spec = []
     for f in fields(MhsDiagnosticRequest):
         v = getattr(cfg, f.name)

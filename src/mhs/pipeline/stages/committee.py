@@ -116,7 +116,7 @@ def build_committee(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
                 COMMITTEE_REGIME_ADAPTIVE_WINDOW
                 if ctx.config.committee_regime_adaptive_tranche else None
             ),
-            target_gross=_research_go._resolved_committee_target_gross(ctx.config),
+            target_gross=ctx.config.committee_target_gross,
             member_weights=(ctx._committee_weights_by_boundary.get("top_level") if ctx.config.committee_evidence_weighting else None),
             carry_book=funding_carry_execution_book(ctx.bar_funding, ctx.execution_mask, FUNDING_CARRY_SLEEVE_LOOKBACK_HOURS, ctx.slow_grid, ctx.config.committee_tranche_count, ctx.slow.min_symbols) if ctx.config.funding_carry_sleeve else None, carry_weight=ctx.config.funding_carry_weight if ctx.config.funding_carry_sleeve else 0.0,
             members=_research_go._resolved_committee_members(ctx.config),
@@ -137,7 +137,7 @@ def build_committee(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
                 ctx.close, ctx.quote_vol, ctx.taker_buy_quote, ctx.execution_mask,
                 ctx.slow_grid, ctx.slow.min_symbols,
                 _research_go._resolved_committee_members(ctx.config),
-                _research_go._resolved_committee_target_gross(ctx.config),
+                ctx.config.committee_target_gross,
             )
             # D6: independent 1h prescreen-proxy Sharpe per member -- the
             # historical selection signal (yearly_net_t_diagnostic /

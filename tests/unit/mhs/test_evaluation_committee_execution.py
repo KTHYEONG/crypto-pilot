@@ -1,6 +1,7 @@
 """MHS evaluation contract tests (split by behavioral domain; shared builders live in the original module)."""
 
 """Contract coverage for the MHS application evaluation resource telemetry."""
+from tests.fixtures.mhs_requests import research_baseline
 import dataclasses
 import numpy as np
 import pandas as pd
@@ -8,7 +9,6 @@ import pytest
 import src.mhs.evaluation.committee as committee_mod
 import src.mhs.evaluation.concurrency as concurrency_mod
 from src.mhs.diagnostic_run import run_mhs_horizon_diagnostic
-from src.mhs.contracts import MhsDiagnosticRequest
 from src.mhs.evaluation.committee import _committee_evidence_weights_by_boundary, _committee_execution_book
 from src.mhs.evaluation.fold_weights import _build_fold_target_weights
 from src.mhs.features import FEATURE_REGISTRY, build_feature_books
@@ -110,13 +110,13 @@ def test_committee_tranche_smoothing_requires_committee_capital() -> None:
     # SCENARIO_MHS_DIAGNOSTIC_TRANCHE_SMOOTHING_REQUIRES_COMMITTEE_CAPITAL: the
     # opt-in flag fails closed unless committee_capital is enabled and is
     # strictly bool.
-    assert MhsDiagnosticRequest().committee_tranche_smoothing is False
+    assert research_baseline().committee_tranche_smoothing is False
     with pytest.raises(ValueError, match="committee_tranche_smoothing requires committee_capital"):
-        MhsDiagnosticRequest(committee_tranche_smoothing=True, committee_capital=False)
+        research_baseline(committee_tranche_smoothing=True, committee_capital=False)
     with pytest.raises(ValueError, match="committee_tranche_smoothing must be a bool"):
-        MhsDiagnosticRequest(committee_tranche_smoothing="yes")
+        research_baseline(committee_tranche_smoothing="yes")
     assert (
-        MhsDiagnosticRequest(committee_capital=True, committee_tranche_smoothing=True).committee_tranche_smoothing
+        research_baseline(committee_capital=True, committee_tranche_smoothing=True).committee_tranche_smoothing
         is True
     )
 
@@ -133,7 +133,7 @@ def test_committee_tranche_smoothing_default_off_byte_identical(mhs_market_with_
         if symbol_partition(s) == "dev"
     ]
     funding_by_symbol, _ = _load_funding_series(symbols)
-    request = MhsDiagnosticRequest(
+    request = research_baseline(
         start=str(_START), end=str(end), data_root=str(root),
         execution_timeframe="3m", log_run=False,
         execution_universe_size=8, committee_capital=True,
@@ -171,7 +171,7 @@ def test_committee_tranche_smoothing_threads_both_call_sites(mhs_market_with_tak
         if symbol_partition(s) == "dev"
     ]
     funding_by_symbol, _ = _load_funding_series(symbols)
-    request = MhsDiagnosticRequest(
+    request = research_baseline(
         start=str(_START), end=str(end), data_root=str(root),
         execution_timeframe="3m", log_run=False,
         execution_universe_size=8, committee_capital=True, committee_tranche_smoothing=True,
@@ -215,7 +215,7 @@ def test_committee_tranche_count_threads_committee_and_carry_books_at_both_call_
     funding_by_symbol, _ = _load_funding_series(symbols)
     count = 5
     assert count != COMMITTEE_TRANCHE_COUNT
-    request = MhsDiagnosticRequest(
+    request = research_baseline(
         start=str(_START), end=str(end), data_root=str(root),
         execution_timeframe="3m", log_run=False,
         execution_universe_size=8, committee_capital=True, committee_tranche_smoothing=True,
@@ -317,15 +317,15 @@ def test_committee_execution_book_regime_adaptive_no_member_still_fails_closed(
 
 def test_committee_regime_adaptive_tranche_requires_committee_capital() -> None:
     # SCENARIO_MHS_DIAGNOSTIC_REGIME_ADAPTIVE_TRANCHE_REQUIRES_COMMITTEE_CAPITAL
-    assert MhsDiagnosticRequest().committee_regime_adaptive_tranche is False
+    assert research_baseline().committee_regime_adaptive_tranche is False
     with pytest.raises(
         ValueError, match="committee_regime_adaptive_tranche requires committee_capital",
     ):
-        MhsDiagnosticRequest(committee_regime_adaptive_tranche=True, committee_capital=False)
+        research_baseline(committee_regime_adaptive_tranche=True, committee_capital=False)
     with pytest.raises(ValueError, match="committee_regime_adaptive_tranche must be a bool"):
-        MhsDiagnosticRequest(committee_regime_adaptive_tranche="yes")
+        research_baseline(committee_regime_adaptive_tranche="yes")
     assert (
-        MhsDiagnosticRequest(
+        research_baseline(
             committee_capital=True, committee_regime_adaptive_tranche=True,
         ).committee_regime_adaptive_tranche
     )
@@ -337,7 +337,7 @@ def test_committee_regime_adaptive_tranche_mutually_exclusive_with_tranche_smoot
         match="committee_regime_adaptive_tranche is mutually exclusive with "
         "committee_tranche_smoothing",
     ):
-        MhsDiagnosticRequest(
+        research_baseline(
             committee_capital=True,
             committee_regime_adaptive_tranche=True,
             committee_tranche_smoothing=True,
@@ -358,7 +358,7 @@ def test_committee_regime_adaptive_tranche_default_off_byte_identical(
         if symbol_partition(s) == "dev"
     ]
     funding_by_symbol, _ = _load_funding_series(symbols)
-    request = MhsDiagnosticRequest(
+    request = research_baseline(
         start=str(_START), end=str(end), data_root=str(root),
         execution_timeframe="3m", log_run=False,
         execution_universe_size=8, committee_capital=True,
@@ -399,7 +399,7 @@ def test_committee_regime_adaptive_tranche_threads_both_call_sites(
         if symbol_partition(s) == "dev"
     ]
     funding_by_symbol, _ = _load_funding_series(symbols)
-    request = MhsDiagnosticRequest(
+    request = research_baseline(
         start=str(_START), end=str(end), data_root=str(root),
         execution_timeframe="3m", log_run=False,
         execution_universe_size=8, committee_capital=True,
@@ -440,7 +440,7 @@ def test_committee_beta_neutralize_threads_both_call_sites(
         if symbol_partition(s) == "dev"
     ]
     funding_by_symbol, _ = _load_funding_series(symbols)
-    request_on = MhsDiagnosticRequest(
+    request_on = research_baseline(
         start=str(_START), end=str(end), data_root=str(root),
         execution_timeframe="3m", log_run=False,
         execution_universe_size=8, committee_capital=True, beta_neutralize=True,
@@ -464,7 +464,7 @@ def test_committee_beta_neutralize_threads_both_call_sites(
     assert isinstance(seen["beta"], pd.DataFrame)
 
     seen.clear()
-    request_default = MhsDiagnosticRequest(
+    request_default = research_baseline(
         start=str(_START), end=str(end), data_root=str(root),
         execution_timeframe="3m", log_run=False,
         execution_universe_size=8, committee_capital=True,
@@ -488,12 +488,12 @@ def test_committee_kelly_sizing_requires_committee_book() -> None:
     # SCENARIO_MHS_DIAGNOSTIC_COMMITTEE_KELLY_SIZING_REQUIRES_COMMITTEE_BOOK:
     # committee_kelly_sizing=True without committee_book=True fails closed in
     # __post_init__ (mirrors discovery_gate_adjusted_net_t-requires-discovery_gate).
-    assert MhsDiagnosticRequest().committee_kelly_sizing is False
+    assert research_baseline().committee_kelly_sizing is False
     with pytest.raises(ValueError, match="committee_kelly_sizing requires committee_book"):
-        MhsDiagnosticRequest(committee_kelly_sizing=True, committee_book=False)
+        research_baseline(committee_kelly_sizing=True, committee_book=False)
     with pytest.raises(ValueError, match="committee_kelly_sizing must be a bool"):
-        MhsDiagnosticRequest(committee_kelly_sizing="yes")
-    assert MhsDiagnosticRequest(committee_book=True, committee_kelly_sizing=True).committee_kelly_sizing is True
+        research_baseline(committee_kelly_sizing="yes")
+    assert research_baseline(committee_book=True, committee_kelly_sizing=True).committee_kelly_sizing is True
 
 @pytest.mark.slow
 def test_committee_kelly_sizing_default_off_byte_identical(mhs_market_long, monkeypatch) -> None:
@@ -505,7 +505,7 @@ def test_committee_kelly_sizing_default_off_byte_identical(mhs_market_long, monk
     monkeypatch.setattr(concurrency_mod, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
     monkeypatch.setattr(concurrency_mod, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
-    request = MhsDiagnosticRequest(
+    request = research_baseline(
         start=str(_START), end=str(end), data_root=str(root),
         execution_timeframe="3m", log_run=False,
         execution_universe_size=8, committee_book=True,
@@ -525,7 +525,7 @@ def test_committee_kelly_sizing_on_changes_report(mhs_market_long, monkeypatch) 
     monkeypatch.setattr(concurrency_mod, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
     monkeypatch.setattr(concurrency_mod, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
-    base = MhsDiagnosticRequest(
+    base = research_baseline(
         start=str(_START), end=str(end), data_root=str(root),
         execution_timeframe="3m", log_run=False,
         execution_universe_size=8, committee_book=True,
@@ -537,17 +537,17 @@ def test_committee_kelly_sizing_on_changes_report(mhs_market_long, monkeypatch) 
     assert report.committee_diagnostic["walk_forward"]["sizing_mode"] == "kelly_blend"
 
 def test_evidence_weighting_request_validation() -> None:
-    default = MhsDiagnosticRequest()
+    default = research_baseline()
     assert default.committee_evidence_weighting is False
 
-    valid = MhsDiagnosticRequest(committee_evidence_weighting=True, committee_capital=True)
+    valid = research_baseline(committee_evidence_weighting=True, committee_capital=True)
     assert valid.committee_evidence_weighting is True
 
     with pytest.raises(ValueError, match="committee_capital"):
-        MhsDiagnosticRequest(committee_evidence_weighting=True, committee_capital=False)
+        research_baseline(committee_evidence_weighting=True, committee_capital=False)
 
     with pytest.raises(ValueError, match="committee_evidence_weighting"):
-        MhsDiagnosticRequest(committee_evidence_weighting="yes")  # type: ignore[arg-type]
+        research_baseline(committee_evidence_weighting="yes")  # type: ignore[arg-type]
 
 def test_evidence_weights_by_boundary_builds_once(monkeypatch) -> None:
     # PERF-BOUNDARY-FEATURE-ONCE: one boundary-admitted build across all
@@ -826,7 +826,7 @@ def test_fold_target_weights_threads_committee_member_weights(monkeypatch, mhs_m
         if symbol_partition(s) == "dev"
     ][:8]
     funding_by_symbol, _ = _load_funding_series(symbols)
-    request = MhsDiagnosticRequest(
+    request = research_baseline(
         start=str(_START), end=str(end), data_root=str(root),
         execution_timeframe="3m", log_run=False,
         execution_universe_size=8, committee_capital=True,
@@ -853,12 +853,11 @@ def test_fold_target_weights_threads_committee_member_weights(monkeypatch, mhs_m
 def test_top_level_committee_regime_scale_uses_shared_hourly_helper(mhs_market_with_taker_buy_quote, monkeypatch) -> None:
     import pandas as pd
     import src.mhs.scaling as scaling
-    from src.mhs.contracts import MhsDiagnosticRequest
     from src.mhs.diagnostic_run import run_mhs_horizon_diagnostic
     from tests.unit.mhs.test_evaluation_appresearch import _START
 
     root, end = mhs_market_with_taker_buy_quote
-    request = MhsDiagnosticRequest(
+    request = research_baseline(
         start=str(_START), end=str(end), data_root=str(root),
         execution_timeframe="3m", log_run=False,
         execution_universe_size=8, committee_capital=True,

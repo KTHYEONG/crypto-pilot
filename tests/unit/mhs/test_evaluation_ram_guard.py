@@ -2,13 +2,13 @@
 
 """MHS evaluation core contract tests (everything not in a domain-specific split file)."""
 """Contract coverage for the MHS application evaluation resource telemetry."""
+from tests.fixtures.mhs_requests import research_baseline
 import numpy as np
 import pandas as pd
 import pytest
 import src.mhs.resources as resources
 from src.mhs.diagnostic_run import run_mhs_horizon_diagnostic
 from src.common.errors import DataIntegrityError as _DataIntegrityError
-from src.mhs.contracts import MhsDiagnosticRequest
 from src.mhs.research_go import GO_REASON_RESOURCE_BREACH as _GO_REASON_RESOURCE_BREACH
 from src.mhs.resources import _StageRecorder, _assert_execution_rss_budget
 import types as _types
@@ -72,12 +72,12 @@ def test_mhs_mem_03_rss_budget_fails_closed(monkeypatch) -> None:
     """MHS-MEM-03: a configured RSS budget produces deterministic
     DataIntegrityError provenance rather than a process-level OOM or a valid
     partial report."""
-    assert MhsDiagnosticRequest().max_rss_bytes is None
+    assert research_baseline().max_rss_bytes is None
     with pytest.raises(ValueError, match="max_rss_bytes"):
-        MhsDiagnosticRequest(max_rss_bytes=0)
+        research_baseline(max_rss_bytes=0)
     with pytest.raises(ValueError, match="max_rss_bytes"):
-        MhsDiagnosticRequest(max_rss_bytes=-1)
-    assert MhsDiagnosticRequest(max_rss_bytes=1_000_000_000).max_rss_bytes == 1_000_000_000
+        research_baseline(max_rss_bytes=-1)
+    assert research_baseline(max_rss_bytes=1_000_000_000).max_rss_bytes == 1_000_000_000
 
     monkeypatch.setattr("src.mhs.resources._current_tree_pss_bytes", lambda: 5_000_000_000)
     with pytest.raises(DataIntegrityError, match="execution RSS budget exceeded") as excinfo:
@@ -198,11 +198,11 @@ def test_ram_guard_request_field() -> None:
     # SCENARIO_MHS_RAM_GUARD_REQUEST_FIELD: ram_guard defaults True on the
     # request; a non-bool value fails closed; max_rss_bytes stays None (auto
     # resolution happens at run time).
-    assert MhsDiagnosticRequest().ram_guard is True
-    assert MhsDiagnosticRequest().max_rss_bytes is None
+    assert research_baseline().ram_guard is True
+    assert research_baseline().max_rss_bytes is None
     with pytest.raises(ValueError, match="ram_guard"):
-        MhsDiagnosticRequest(ram_guard="yes")
-    assert MhsDiagnosticRequest(ram_guard=False).ram_guard is False
+        research_baseline(ram_guard="yes")
+    assert research_baseline(ram_guard=False).ram_guard is False
 
 @pytest.mark.slow
 def test_pipeline_ram_guard_fails_closed_before_oom(mhs_market_long) -> None:
@@ -211,7 +211,7 @@ def test_pipeline_ram_guard_fails_closed_before_oom(mhs_market_long) -> None:
     # terminal COMPLETE report (MHS-28) carrying RESOURCE_BUDGET_BREACH instead
     # of letting the OS OOM killer terminate the process or raising uncaught.
     root, end = mhs_market_long
-    request = MhsDiagnosticRequest(
+    request = research_baseline(
         start=str(_START), end=str(end), data_root=str(root),
         execution_timeframe="3m", log_run=False,
         execution_universe_size=8, max_rss_bytes=1,

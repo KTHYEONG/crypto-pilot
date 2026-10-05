@@ -1,6 +1,7 @@
 """MHS evaluation contract tests (split by behavioral domain; shared builders live in the original module)."""
 
 """Contract coverage for the MHS application evaluation resource telemetry."""
+from tests.fixtures.mhs_requests import research_baseline
 import logging
 import numpy as np
 import pandas as pd
@@ -10,7 +11,6 @@ import src.mhs.evaluation.concurrency as concurrency_mod
 import src.mhs.evaluation.diagnostics as diagnostics_mod
 from src.mhs.committee import purged_walk_forward as _committee_purged_walk_forward
 from src.mhs.diagnostic_run import run_mhs_horizon_diagnostic
-from src.mhs.contracts import MhsDiagnosticRequest
 from src.mhs.params import COMMITTEE_OOS_START, MEASURED_EXECUTION_COST_TIERS_BPS
 
 from tests.unit.mhs.test_evaluation_appresearch import (  # noqa: F401
@@ -21,10 +21,10 @@ def test_committee_request_validation() -> None:
     # SCENARIO_MHS_REQUEST_COMMITTEE_VALIDATION: MhsDiagnosticRequest gains
     # committee_book (bool, default False). A non-bool value raises ValueError
     # (fail closed -- no silent no-op); the default construction leaves it False.
-    assert MhsDiagnosticRequest().committee_book is False
+    assert research_baseline().committee_book is False
     with pytest.raises(ValueError, match="committee_book"):
-        MhsDiagnosticRequest(committee_book="yes")
-    on = MhsDiagnosticRequest(committee_book=True)
+        research_baseline(committee_book="yes")
+    on = research_baseline(committee_book=True)
     assert on.committee_book is True
 
 @pytest.mark.slow
@@ -42,9 +42,9 @@ def test_committee_default_off_bit_identical(mhs_market, monkeypatch) -> None:
         "execution_timeframe": "3m", "log_run": False,
         "execution_universe_size": 8,
     }
-    default_report = run_mhs_horizon_diagnostic(MhsDiagnosticRequest(**base))
+    default_report = run_mhs_horizon_diagnostic(research_baseline(**base))
     explicit_off = run_mhs_horizon_diagnostic(
-        MhsDiagnosticRequest(**base, committee_book=False),
+        research_baseline(**base, committee_book=False),
     )
     assert default_report.status == "COMPLETE"
     assert default_report.committee_diagnostic is None
@@ -66,7 +66,7 @@ def test_committee_diagnostic_reports_walk_forward_wealth(mhs_market_long, monke
     monkeypatch.setattr(concurrency_mod, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
     monkeypatch.setattr(concurrency_mod, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
-    request = MhsDiagnosticRequest(
+    request = research_baseline(
         start=str(_START), end=str(end), data_root=str(root),
         execution_timeframe="3m", log_run=False,
         execution_universe_size=8, committee_book=True,
@@ -126,7 +126,7 @@ def test_committee_diagnostic_per_tier_blocks_present(mhs_market_long, monkeypat
     monkeypatch.setattr(concurrency_mod, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
     monkeypatch.setattr(concurrency_mod, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
-    request = MhsDiagnosticRequest(
+    request = research_baseline(
         start=str(_START), end=str(end), data_root=str(root),
         execution_timeframe="3m", log_run=False,
         execution_universe_size=8, committee_book=True,
@@ -155,7 +155,7 @@ def test_committee_diagnostic_block_logret_share_reported(mhs_market_long, monke
     monkeypatch.setattr(concurrency_mod, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
     monkeypatch.setattr(concurrency_mod, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
-    request = MhsDiagnosticRequest(
+    request = research_baseline(
         start=str(_START), end=str(end), data_root=str(root),
         execution_timeframe="3m", log_run=False,
         execution_universe_size=8, committee_book=True,
@@ -189,7 +189,7 @@ def test_committee_diagnostic_block_return_autocorr_lag1_present(
     monkeypatch.setattr(concurrency_mod, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
     monkeypatch.setattr(concurrency_mod, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
-    request = MhsDiagnosticRequest(
+    request = research_baseline(
         start=str(_START), end=str(end), data_root=str(root),
         execution_timeframe="3m", log_run=False,
         execution_universe_size=8, committee_book=True,
@@ -229,7 +229,7 @@ def test_committee_diagnostic_block_return_autocorr_lag1_matches_manual_computat
         return result
 
     monkeypatch.setattr(committee_mod, "purged_walk_forward", _recording_wf)
-    request = MhsDiagnosticRequest(
+    request = research_baseline(
         start=str(_START), end=str(end), data_root=str(root),
         execution_timeframe="3m", log_run=False,
         execution_universe_size=8, committee_book=True,
@@ -265,7 +265,7 @@ def test_committee_diagnostic_block_existing_fields_unchanged(
     monkeypatch.setattr(concurrency_mod, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
     monkeypatch.setattr(concurrency_mod, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
-    request = MhsDiagnosticRequest(
+    request = research_baseline(
         start=str(_START), end=str(end), data_root=str(root),
         execution_timeframe="3m", log_run=False,
         execution_universe_size=8, committee_book=True,
@@ -295,7 +295,7 @@ def test_committee_diagnostic_off_by_default_unchanged(
     monkeypatch.setattr(concurrency_mod, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
     monkeypatch.setattr(concurrency_mod, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
-    request = MhsDiagnosticRequest(
+    request = research_baseline(
         start=str(_START), end=str(end), data_root=str(root),
         execution_timeframe="3m", log_run=False,
         execution_universe_size=8,
@@ -313,7 +313,7 @@ def test_committee_diagnostic_debug_logs_emitted(mhs_market_long, monkeypatch, c
     monkeypatch.setattr(concurrency_mod, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
     monkeypatch.setattr(concurrency_mod, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
-    request = MhsDiagnosticRequest(
+    request = research_baseline(
         start=str(_START), end=str(end), data_root=str(root),
         execution_timeframe="3m", log_run=False,
         execution_universe_size=8, committee_book=True,
@@ -340,7 +340,7 @@ def test_committee_diagnostic_telemetry_stages_recorded(mhs_market_long, monkeyp
     monkeypatch.setattr(concurrency_mod, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
     monkeypatch.setattr(concurrency_mod, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
-    request = MhsDiagnosticRequest(
+    request = research_baseline(
         start=str(_START), end=str(end), data_root=str(root),
         execution_timeframe="3m", log_run=False,
         execution_universe_size=8, committee_book=True,
@@ -364,7 +364,7 @@ def test_committee_diagnostic_uses_oos_start_not_raw_start(mhs_market_long, monk
     monkeypatch.setattr(concurrency_mod, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
     monkeypatch.setattr(concurrency_mod, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
-    request = MhsDiagnosticRequest(
+    request = research_baseline(
         start=str(_START), end=str(end), data_root=str(root),
         execution_timeframe="3m", log_run=False,
         execution_universe_size=8, committee_book=True,
@@ -413,7 +413,7 @@ def test_committee_source_coverage_gates_admission(mhs_market_long, monkeypatch)
     monkeypatch.setattr(concurrency_mod, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
     monkeypatch.setattr(concurrency_mod, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
-    request = MhsDiagnosticRequest(
+    request = research_baseline(
         start=str(_START), end=str(end), data_root=str(root),
         execution_timeframe="3m", log_run=False,
         execution_universe_size=8, committee_book=True,
@@ -456,7 +456,7 @@ def test_committee_diagnostic_reports_trials_and_warning(mhs_market_long, monkey
     monkeypatch.setattr(concurrency_mod, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
     monkeypatch.setattr(concurrency_mod, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
-    request = MhsDiagnosticRequest(
+    request = research_baseline(
         start=str(_START), end=str(end), data_root=str(root),
         execution_timeframe="3m", log_run=False,
         execution_universe_size=8, committee_book=True,
@@ -482,7 +482,7 @@ def test_evaluation_protocol_field_distinguishes_in_sample_from_oos(mhs_market_l
     monkeypatch.setattr(concurrency_mod, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
     monkeypatch.setattr(concurrency_mod, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
-    request = MhsDiagnosticRequest(
+    request = research_baseline(
         start=str(_START), end=str(end), data_root=str(root),
         execution_timeframe="3m", log_run=False,
         execution_universe_size=8, committee_book=True, multi_feature_book=True,
@@ -506,7 +506,7 @@ def test_committee_diagnostic_reports_skipped_blocks(mhs_market_long, monkeypatc
     monkeypatch.setattr(concurrency_mod, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
     monkeypatch.setattr(concurrency_mod, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
-    request = MhsDiagnosticRequest(
+    request = research_baseline(
         start=str(_START), end=str(end), data_root=str(root),
         execution_timeframe="3m", log_run=False,
         execution_universe_size=8, committee_book=True,
@@ -536,9 +536,9 @@ def test_committee_books_regression_unchanged_by_b1_b2(mhs_market_long, monkeypa
         "execution_timeframe": "3m", "log_run": False,
         "execution_universe_size": 8,
     }
-    off_report = run_mhs_horizon_diagnostic(MhsDiagnosticRequest(**base))
+    off_report = run_mhs_horizon_diagnostic(research_baseline(**base))
     on_report = run_mhs_horizon_diagnostic(
-        MhsDiagnosticRequest(**base, committee_book=True),
+        research_baseline(**base, committee_book=True),
     )
     assert off_report.status == "COMPLETE"
     assert on_report.status == "COMPLETE"

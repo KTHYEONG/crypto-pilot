@@ -8,6 +8,7 @@ Verifies the S7 stage reaches ``run_post_book_concurrently``/
 """
 
 from __future__ import annotations
+from src.mhs.contracts import MhsDiagnosticRequest
 import src.mhs.evaluation.committee as committee_mod
 import src.mhs.evaluation.diagnostics as diagnostics_mod
 import src.mhs.evaluation.evidence as evidence_mod
@@ -21,7 +22,6 @@ import pytest
 
 import src.mhs.pipeline.stages.fold as fold_stage
 from src.common.errors import DataIntegrityError
-from src.mhs.pipeline.config import MhsRunConfig
 from src.mhs.pipeline.context import PipelineContext
 from src.mhs.telemetry import StageTelemetry
 
@@ -48,7 +48,7 @@ def _bare_context(*, committee_book: bool = False) -> PipelineContext:
     frame = pd.DataFrame(1.0, index=_GRID, columns=_SYMS)
     ctx = PipelineContext(
         config=dataclasses.replace(
-            MhsRunConfig(), multi_feature_book=False, committee_book=committee_book,
+            MhsDiagnosticRequest(), multi_feature_book=False, committee_book=committee_book,
         ),
         resolved_end=None,
         start=_GRID[0],

@@ -1,12 +1,12 @@
 """MHS evaluation contract tests (split by behavioral domain; shared builders live in the original module)."""
 
 """Contract coverage for the MHS application evaluation resource telemetry."""
+from tests.fixtures.mhs_requests import research_baseline
 import dataclasses
 import numpy as np
 import pandas as pd
 import pytest
 import src.mhs.scaling as scaling
-from src.mhs.contracts import MhsDiagnosticRequest
 from src.mhs.evaluation.windows import _book_outcome
 from src.mhs.params import PNL_VOL_TARGET_BURN_IN_DAYS, PNL_VOL_TARGET_SCALE_FLOOR
 
@@ -129,9 +129,9 @@ def test_pnl_vol_target_flag_defaults_true_and_gates_only_pass_two(mhs_market, m
     # non-bool value is rejected, and with pnl_vol_target=False ONLY the
     # vol-target multiplication is skipped -- Pass 1/pre_vol_target_reference
     # stay structurally unchanged.
-    assert MhsDiagnosticRequest().pnl_vol_target is True
+    assert research_baseline().pnl_vol_target is True
     with pytest.raises(ValueError, match="pnl_vol_target"):
-        MhsDiagnosticRequest(pnl_vol_target="yes")
+        research_baseline(pnl_vol_target="yes")
 
     args = _build_book_outcome_args(mhs_market)
     default_report, _ = _book_outcome(**args)

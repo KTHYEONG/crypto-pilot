@@ -51,12 +51,6 @@ def _peg_chase_maker_share(report: StrategyExecutionReplayResult) -> float | Non
     return report.fill_count / denom
 
 
-# Sentinel distinguishing the registered default exposure from an explicit
-# committee_target_gross value: a bare MhsDiagnosticRequest() resolves to the
-# registered constant without triggering the committee_capital requirement,
-# while an explicit non-None value keeps requiring committee_capital=True.
-
-
 # Unrecoverable source gap exclusions (Binance REST API & Vision archives have >4h gaps):
 # SLPUSDT, CTKUSDT, LITUSDT, AERGOUSDT, PUMPUSDT, CVXUSDT, CVCUSDT
 # BNXUSDT re-evaluated 2026-08-23 (ADR_20260823_MHS_KELLY_TWO_SIDED_SIZING

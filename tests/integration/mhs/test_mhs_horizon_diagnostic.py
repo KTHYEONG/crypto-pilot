@@ -242,7 +242,7 @@ statistics._BOOTSTRAP_REPLICATES = 20
 statistics._BOOTSTRAP_MEAN_BLOCK = 24
 statistics._BOOTSTRAP_SEED = 20260807
 report = run_mhs_horizon_diagnostic(
-    MhsDiagnosticRequest(
+    research_baseline(
         start="2021-01-01", end=str(pd.Timestamp(sys.argv[4])),
         data_root=str(root),
         execution_timeframe="3m", log_run=False,

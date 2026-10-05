@@ -2,6 +2,7 @@
 
 """MHS evaluation core contract tests (everything not in a domain-specific split file)."""
 """Contract coverage for the MHS application evaluation resource telemetry."""
+from tests.fixtures.mhs_requests import research_baseline
 import dataclasses
 import math
 from concurrent.futures import Future
@@ -14,7 +15,7 @@ import src.mhs.evaluation.concurrency as concurrency_mod
 import src.mhs.evaluation.windows as windows_mod
 from src.mhs import research_go as research_go_mod
 from src.mhs.books import inverse_realized_vol_tilt, renormalize_within_mask
-from src.mhs.contracts import MhsDiagnosticRequest, MhsFoldReport
+from src.mhs.contracts import MhsFoldReport
 from src.mhs.diagnostic_run import run_mhs_horizon_diagnostic
 import src.mhs.resources as resources
 import src.mhs.scaling as scaling
@@ -71,7 +72,7 @@ class TestAnchoredFoldBounded:
             if symbol_partition(s) == "dev"
         ][:8]
         funding_by_symbol, _ = _load_funding_series(symbols)
-        request = MhsDiagnosticRequest(
+        request = research_baseline(
             start=str(_START), end=str(end), data_root=str(root),
             execution_timeframe="3m", log_run=False,
             max_rss_bytes=max_rss_bytes,
@@ -95,7 +96,7 @@ class TestAnchoredFoldBounded:
             if symbol_partition(s) == "dev"
         ][:8]
         funding_by_symbol, _ = _load_funding_series(symbols)
-        request = MhsDiagnosticRequest(
+        request = research_baseline(
             start=str(_START), end=str(end), data_root=str(root),
             execution_timeframe="3m", log_run=False,
         )
@@ -137,7 +138,7 @@ class TestAnchoredFoldBounded:
             if symbol_partition(s) == "dev"
         ][:8]
         funding_by_symbol, _ = _load_funding_series(symbols)
-        request = MhsDiagnosticRequest(
+        request = research_baseline(
             start=str(_START), end=str(end), data_root=str(root),
             execution_timeframe="3m", log_run=False,
         )
@@ -189,7 +190,7 @@ def test_anchored_fold_is_two_pass(mhs_market, monkeypatch) -> None:
         if symbol_partition(s) == "dev"
     ][:8]
     funding_by_symbol, _ = _load_funding_series(symbols)
-    request = MhsDiagnosticRequest(
+    request = research_baseline(
         start=str(_START), end=str(end), data_root=str(root),
         execution_timeframe="3m", log_run=False,
     )
@@ -232,7 +233,7 @@ def test_fold_execution_weights_are_renormalized(mhs_market, monkeypatch) -> Non
         if symbol_partition(s) == "dev"
     ]
     funding_by_symbol, _ = _load_funding_series(symbols)
-    request = MhsDiagnosticRequest(
+    request = research_baseline(
         start=str(_START), end=str(end), data_root=str(root),
         execution_timeframe="3m", log_run=False,
         execution_universe_size=8,
@@ -276,7 +277,7 @@ def test_fold_weights_are_vol_tilted_before_renormalization(mhs_market, monkeypa
         if symbol_partition(s) == "dev"
     ]
     funding_by_symbol, _ = _load_funding_series(symbols)
-    request = MhsDiagnosticRequest(
+    request = research_baseline(
         start=str(_START), end=str(end), data_root=str(root),
         execution_timeframe="3m", log_run=False,
         execution_universe_size=8,
@@ -366,7 +367,7 @@ def test_fold_vol_mean_masked_to_execution_roster(mhs_market, monkeypatch) -> No
         if symbol_partition(s) == "dev"
     ]
     funding_by_symbol, _ = _load_funding_series(symbols)
-    request = MhsDiagnosticRequest(
+    request = research_baseline(
         start=str(_START), end=str(end), data_root=str(root),
         execution_timeframe="3m", log_run=False,
         execution_universe_size=8,
@@ -408,7 +409,7 @@ def test_fold_decision_grid_matches_slow_cadence(mhs_market) -> None:
         if symbol_partition(s) == "dev"
     ]
     funding_by_symbol, _ = _load_funding_series(symbols)
-    request = MhsDiagnosticRequest(
+    request = research_baseline(
         start=str(_START), end=str(end), data_root=str(root),
         execution_timeframe="3m", log_run=False,
     )
@@ -433,7 +434,7 @@ def test_committee_capital_default_off_bit_identical(mhs_market_with_taker_buy_q
         if symbol_partition(s) == "dev"
     ]
     funding_by_symbol, _ = _load_funding_series(symbols)
-    request = MhsDiagnosticRequest(
+    request = research_baseline(
         start=str(_START), end=str(end), data_root=str(root),
         execution_timeframe="3m", log_run=False,
     )
@@ -468,7 +469,7 @@ def test_committee_capital_reaches_fold_targets(mhs_market_with_taker_buy_quote)
         if symbol_partition(s) == "dev"
     ]
     funding_by_symbol, _ = _load_funding_series(symbols)
-    request = MhsDiagnosticRequest(
+    request = research_baseline(
         start=str(_START), end=str(end), data_root=str(root),
         execution_timeframe="3m", log_run=False,
         rebalance_filter="portfolio_trigger",
@@ -496,7 +497,7 @@ def test_committee_capital_no_member_fails_closed(mhs_market_with_taker_buy_quot
         if symbol_partition(s) == "dev"
     ]
     funding_by_symbol, _ = _load_funding_series(symbols)
-    request = MhsDiagnosticRequest(
+    request = research_baseline(
         start=str(_START), end=str(end), data_root=str(root),
         execution_timeframe="3m", log_run=False,
         committee_capital=True,
@@ -625,7 +626,7 @@ def test_constant_risk_fold_uses_fold_local_reference(mhs_market, monkeypatch) -
         if symbol_partition(s) == "dev"
     ][:8]
     funding_by_symbol, _ = _load_funding_series(symbols)
-    request = MhsDiagnosticRequest(
+    request = research_baseline(
         start=str(_START), end=str(end), data_root=str(root),
         execution_timeframe="3m", log_run=False,
         pnl_vol_target_mode="growth_budget",
@@ -659,7 +660,7 @@ def test_constant_risk_fold_missing_local_reference_fails_closed(mhs_market, mon
         if symbol_partition(s) == "dev"
     ][:8]
     funding_by_symbol, _ = _load_funding_series(symbols)
-    request = MhsDiagnosticRequest(
+    request = research_baseline(
         start=str(_START), end=str(end), data_root=str(root),
         execution_timeframe="3m", log_run=False,
         pnl_vol_target_mode="constant_risk",
@@ -724,7 +725,7 @@ def test_post_book_concurrently_forwards_only_fold_local_policy(monkeypatch) -> 
     monkeypatch.setattr(concurrency_mod, "plan_worker_count", lambda *a, **k: 1)
     monkeypatch.setattr(parallel_mod, "assert_fork_admission", lambda *a, **k: None)
     monkeypatch.setattr(concurrency_mod, "assert_fork_admission", lambda *a, **k: None)
-    request = MhsDiagnosticRequest(log_run=False)
+    request = research_baseline(log_run=False)
 
     _CAPTURED_FOLD_SUBMISSIONS.clear()
     _run_post_book_concurrently(
@@ -800,7 +801,7 @@ def test_fold_worker_records_fast_horizon_override(mhs_market, monkeypatch) -> N
         if symbol_partition(s) == "dev"
     ][:8]
     funding_by_symbol, _ = _load_funding_series(symbols)
-    request = MhsDiagnosticRequest(
+    request = research_baseline(
         start=str(_START), end=str(end), data_root=str(root),
         execution_timeframe="3m", log_run=False,
         execution_universe_size=8,
@@ -845,7 +846,7 @@ def test_diagnostics_run_after_folds_and_evict_caches(mhs_market_long, monkeypat
     monkeypatch.setattr(concurrency_mod, "_run_post_book_concurrently", _spy_post)
     monkeypatch.setattr(committee_mod, "_committee_diagnostic", _spy_committee)
 
-    request = MhsDiagnosticRequest(
+    request = research_baseline(
         start=str(_START), end=str(end), data_root=str(root),
         execution_timeframe="3m", log_run=False,
         execution_universe_size=8, committee_book=True,
@@ -878,7 +879,7 @@ def test_fold_worker_records_funding_carry_override(mhs_market, monkeypatch) -> 
         if symbol_partition(s) == "dev"
     ][:8]
     funding_by_symbol, _ = _load_funding_series(symbols)
-    request = MhsDiagnosticRequest(
+    request = research_baseline(
         start=str(_START), end=str(end), data_root=str(root),
         execution_timeframe="3m", log_run=False,
         execution_universe_size=8,
@@ -917,7 +918,6 @@ def test_fold_builder_regime_hourly_min_history_and_deadband_toggle(mhs_market, 
     import pytest
     import src.mhs.evaluation.fold_weights as fold_weights_mod
     import src.mhs.scaling as scaling
-    from src.mhs.contracts import MhsDiagnosticRequest
     from src.mhs.params import PANEL_MIN_HISTORY_BARS
     from src.quant.universe.pit_universe import symbol_partition
     from tests.unit.mhs.test_evaluation_appresearch import _FOLD, _START
@@ -929,7 +929,7 @@ def test_fold_builder_regime_hourly_min_history_and_deadband_toggle(mhs_market, 
         if symbol_partition(s) == "dev"
     ]
     funding_by_symbol, _ = _load_funding_series(symbols)
-    request = MhsDiagnosticRequest(
+    request = research_baseline(
         start=str(_START), end=str(end), data_root=str(root),
         execution_timeframe="3m", log_run=False,
         execution_universe_size=8,
@@ -978,7 +978,6 @@ def test_run_anchored_fold_accepts_terminal_funding_gap_via_shared_helper(mhs_ma
     # failed just because it happens to fall inside a fold's validation window.
     import pandas as pd
     import src.mhs.evaluation.folds as folds_mod
-    from src.mhs.contracts import MhsDiagnosticRequest
     from src.mhs.resources import _StageRecorder  # noqa: F401
     from src.mhs.execution import ExecutionDataGap
     from src.mhs.execution.contracts import SimulatedInventoryLedgerResult, StrategyExecutionReplayResult
@@ -992,7 +991,7 @@ def test_run_anchored_fold_accepts_terminal_funding_gap_via_shared_helper(mhs_ma
         if symbol_partition(s) == "dev"
     ][:8]
     funding_by_symbol, _ = _load_funding_series(symbols)
-    request = MhsDiagnosticRequest(
+    request = research_baseline(
         start=str(_START), end=str(end), data_root=str(root),
         execution_timeframe="3m", log_run=False,
     )
@@ -1058,7 +1057,6 @@ def test_run_anchored_fold_certifies_valid_ledger_via_shared_helper(mhs_market, 
     import pandas as pd
 
     import src.mhs.evaluation.folds as folds_mod
-    from src.mhs.contracts import MhsDiagnosticRequest
     from src.mhs.execution.contracts import SimulatedInventoryLedgerResult, StrategyExecutionReplayResult
     from src.quant.universe.pit_universe import symbol_partition
     from tests.unit.mhs.test_evaluation_appresearch import _FOLD, _START
@@ -1070,7 +1068,7 @@ def test_run_anchored_fold_certifies_valid_ledger_via_shared_helper(mhs_market, 
         if symbol_partition(s) == "dev"
     ][:8]
     funding_by_symbol, _ = _load_funding_series(symbols)
-    request = MhsDiagnosticRequest(
+    request = research_baseline(
         start=str(_START), end=str(end), data_root=str(root),
         execution_timeframe="3m", log_run=False,
     )
@@ -1204,7 +1202,6 @@ def test_fold_weights_mark_independence(monkeypatch) -> None:
 
     import src.mhs.evaluation.fold_weights as fw
     import src.mhs.marks as marks_mod
-    from src.mhs.contracts import MhsDiagnosticRequest
     from src.mhs.params import PANEL_MIN_HISTORY_BARS
 
     idx, cols, base_panel, fold, funding = _synthetic_fold_panel()
@@ -1218,7 +1215,7 @@ def test_fold_weights_mark_independence(monkeypatch) -> None:
         return real_eligibility(frame, *args, **kwargs)
 
     monkeypatch.setattr(fw, "liquid_half_eligibility", _recording)
-    request = MhsDiagnosticRequest()
+    request = research_baseline()
     baseline, _, _, _ = fw._build_fold_target_weights("root", fold, request, funding,
         base_panel=base_panel, require_minute_roster=False, panel_warmup_hours=24)
     assert calls["n"] == 1
@@ -1241,7 +1238,6 @@ def test_top_level_fold_eligibility_parity(monkeypatch) -> None:
 
     import src.mhs.evaluation.fold_weights as fw
     import src.mhs.pipeline.stages.selection as sel
-    from src.mhs.contracts import MhsDiagnosticRequest
     from src.mhs.params import PANEL_MIN_HISTORY_BARS
     from src.mhs.pipeline.context import PipelineContext
     from src.mhs.telemetry import StageTelemetry
@@ -1261,7 +1257,7 @@ def test_top_level_fold_eligibility_parity(monkeypatch) -> None:
 
     monkeypatch.setattr(sel, "liquid_half_eligibility", _sel_recording)
     monkeypatch.setattr(fw, "liquid_half_eligibility", _fold_recording)
-    request = MhsDiagnosticRequest()
+    request = research_baseline()
     ctx = PipelineContext(config=request, resolved_end=None, start=idx[0], end=idx[-1],
         rss_budget_bytes=None, rss_reserve_bytes=None, root="root", grid_1h=idx,
         close=base_panel["close"], opens=base_panel["open"], quote_vol=quote_vol,
@@ -1283,10 +1279,9 @@ def test_fold_weights_funding_gap_preservation() -> None:
 
     import src.mhs.evaluation.fold_weights as fw
     import src.mhs.data_policy as data_policy_mod
-    from src.mhs.contracts import MhsDiagnosticRequest
 
     idx, cols, base_panel, fold, _funding = _synthetic_fold_panel()
-    request = MhsDiagnosticRequest()
+    request = research_baseline()
     with pytest.raises(RuntimeError, match="no fold symbol has funding coverage"):
         fw._build_fold_target_weights("root", fold, request, {}, base_panel=base_panel,
             require_minute_roster=False, panel_warmup_hours=24)

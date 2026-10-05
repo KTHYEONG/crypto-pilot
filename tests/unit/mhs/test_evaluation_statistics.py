@@ -2,6 +2,7 @@
 
 """MHS evaluation core contract tests (everything not in a domain-specific split file)."""
 """Contract coverage for the MHS application evaluation resource telemetry."""
+from tests.fixtures.mhs_requests import research_baseline
 import time
 import types
 import dataclasses
@@ -13,7 +14,7 @@ import src.mhs.evaluation.participation as _participation_mod
 from src.mhs.diagnostic_run import run_mhs_horizon_diagnostic
 import src.mhs.statistics as statistics
 import src.mhs.research_go as _research_go
-from src.mhs.contracts import MhsBookReport, MhsDiagnosticRequest
+from src.mhs.contracts import MhsBookReport
 from src.mhs.params import PERIODS_PER_YEAR_1H
 from src.mhs.types import ExecutionSpec
 from src.mhs.execution import strategy_aware_execution_replay
@@ -215,7 +216,7 @@ def test_horizon_diagnostics_exposes_effective_breadth(mhs_market, monkeypatch) 
     monkeypatch.setattr(_concurrency_mod, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
     monkeypatch.setattr(_concurrency_mod, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
-    request_on = MhsDiagnosticRequest(
+    request_on = research_baseline(
         start=str(_START), end=str(end), data_root=str(root),
         execution_timeframe="3m", log_run=False,
         execution_universe_size=8, discovery_gate=True,
@@ -231,7 +232,7 @@ def test_horizon_diagnostics_exposes_effective_breadth(mhs_market, monkeypatch) 
     assert 1.0 <= slow_n_eff <= 19
     assert 1.0 <= fast_n_eff <= 7
 
-    request_off = MhsDiagnosticRequest(
+    request_off = research_baseline(
         start=str(_START), end=str(end), data_root=str(root),
         execution_timeframe="3m", log_run=False,
         execution_universe_size=8,

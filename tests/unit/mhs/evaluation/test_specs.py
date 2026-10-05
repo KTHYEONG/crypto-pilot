@@ -6,6 +6,7 @@ Behavioral coverage lives in the moved suite
 
 from __future__ import annotations
 
+from tests.fixtures.mhs_requests import research_baseline
 import src.mhs.evaluation.specs as specs
 
 
@@ -16,14 +17,13 @@ def test_specs_module_present() -> None:
 def test_resolved_base_execution_spec_threads_name_drift_trim() -> None:
     import dataclasses
 
-    from src.mhs.contracts import MhsDiagnosticRequest
     from src.mhs.evaluation.specs import _resolved_base_execution_spec, _stress_cost_execution_spec
     from src.mhs.params import NAME_DRIFT_TRIM_INTERVAL_HOURS, NAME_DRIFT_TRIM_MAX_WEIGHT
 
-    default_spec = _resolved_base_execution_spec(MhsDiagnosticRequest())
+    default_spec = _resolved_base_execution_spec(research_baseline())
     assert default_spec.name_drift_trim_max_weight is None
 
-    request = dataclasses.replace(MhsDiagnosticRequest(), name_drift_trim=True)
+    request = dataclasses.replace(research_baseline(), name_drift_trim=True)
     base = _resolved_base_execution_spec(request)
     assert base.name_drift_trim_max_weight == NAME_DRIFT_TRIM_MAX_WEIGHT
     assert base.name_drift_trim_interval_hours == NAME_DRIFT_TRIM_INTERVAL_HOURS

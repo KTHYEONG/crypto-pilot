@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from tests.fixtures.mhs_requests import research_baseline
 import json
 import sqlite3
 from pathlib import Path
@@ -78,12 +79,11 @@ class TestFillMarkParityRunHistoryRecord:
     def test_scenario_mhs_exposure_ceiling_07_census_persisted_in_record(self) -> None:
         """SCENARIO_MHS_FILL_MARK_PARITY_06 / SCENARIO_MHS_EXPOSURE_CEILING_07:
         the run-history flags payload carries exposure_scale_two_sided and its
-        value matches the fixture request (MhsDiagnosticRequest() default stays
+        value matches the fixture request (research_baseline() default stays
         False at the contract layer, I5)."""
         from src.mhs.evidence import DeploymentReadinessResult
 
         from src.mhs.contracts import (
-            MhsDiagnosticRequest,
             MhsOutputTier,
             MhsResearchGoResult,
         )
@@ -136,7 +136,7 @@ class TestFillMarkParityRunHistoryRecord:
             execution_symbols=(),
             run_elapsed_seconds=1.0,
         )
-        request = MhsDiagnosticRequest()
+        request = research_baseline()
         record = build_mhs_run_history_record(report, request, MhsOutputTier.COMPACT, None)
         assert record["flags"]["exposure_scale_two_sided"] is False
 

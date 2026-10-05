@@ -1,6 +1,7 @@
 # ruff: noqa
 from __future__ import annotations
 
+from tests.fixtures.mhs_requests import research_baseline
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -34,11 +35,11 @@ def _folds(start: str, n: int, mu: float, seed: int) -> list[pd.Series]:
 def _request(**overrides):
     import dataclasses
     from src.mhs.contracts import MhsDiagnosticRequest
-    from src.mhs.pipeline.config import MhsRunConfig
+    from src.mhs.pipeline.config import request_from_namespace
 
-    base = dataclasses.asdict(MhsRunConfig())
+    base = dataclasses.asdict(MhsDiagnosticRequest())
     base.update(overrides)
-    return MhsDiagnosticRequest(**base)
+    return research_baseline(**base)
 
 
 def _write_history(history_dir: Path, ends: list[str]) -> None:
@@ -213,12 +214,12 @@ def test_forward_registration_request_validation_accepts_quarter_end() -> None:
 def test_cli_forward_registration_threads_to_config() -> None:
     import dataclasses
     from src.cli.main import build_root_parser
-    from src.mhs.pipeline.config import MhsRunConfig
+    from src.mhs.pipeline.config import request_from_namespace
 
     base = ["research", "run", "portfolio", "mhs-horizon-diagnostic"]
-    assert MhsRunConfig.from_namespace(build_root_parser().parse_args(base)).forward_registration_digest is None
+    assert request_from_namespace(build_root_parser().parse_args(base)).forward_registration_digest is None
     args = build_root_parser().parse_args([*base, "--end", "2026-12-31", "--forward-registration", "a" * 32])
-    assert MhsRunConfig.from_namespace(args).forward_registration_digest == "a" * 32
+    assert request_from_namespace(args).forward_registration_digest == "a" * 32
     assert args.register_procedure is False
     assert build_root_parser().parse_args([*base, "--register-procedure"]).register_procedure is True
 
@@ -463,7 +464,6 @@ def test_deploy_gate_from_report_evaluates_registered_forward_folds(tmp_path, mo
 
 def test_orchestrator_forward_branch_verifies_digest_and_records_look_before_running(monkeypatch) -> None:
     import src.mhs.pipeline.orchestrator as orch
-    from src.mhs.pipeline.config import MhsRunConfig
     from src.mhs.preregistration import ProcedureRegistration
 
     registration = ProcedureRegistration("d" * 32, _utc("2026-01-15"), _utc("2025-12-31 23:59:59"), {})
@@ -475,7 +475,9 @@ def test_orchestrator_forward_branch_verifies_digest_and_records_look_before_run
         lambda reg, end, *, now: recorded.update(end=end, digest=reg.procedure_digest, now_tz=str(now.tzinfo)),
     )
     # partition=holdout은 기록 직후 파이프라인 진입 전에 실패하므로 무거운 리플레이 없이 분기를 검증한다.
-    config = MhsRunConfig(start="2021-01-01", end="2026-06-30", forward_registration_digest="d" * 32, partition="holdout")
+    from src.mhs.contracts import MhsDiagnosticRequest
+
+    config = MhsDiagnosticRequest(start="2021-01-01", end="2026-06-30", forward_registration_digest="d" * 32, partition="holdout")
 
     with pytest.raises(RuntimeError, match="dev-only"):
         orch.run_mhs_diagnostic(config)
@@ -559,10 +561,10 @@ def test_one_decision_path_one_digest() -> None:
     from src.mhs.contracts import MhsDiagnosticRequest
     from src.mhs.preregistration import procedure_identity_digest, procedure_payload
 
-    assert procedure_identity_digest(MhsDiagnosticRequest()) == procedure_identity_digest(
-        MhsDiagnosticRequest(committee_target_gross=None)
+    assert procedure_identity_digest(research_baseline()) == procedure_identity_digest(
+        research_baseline(committee_target_gross=None)
     )
-    assert procedure_payload(MhsDiagnosticRequest())["committee_target_gross"] is None
+    assert procedure_payload(research_baseline())["committee_target_gross"] is None
 
 
 def test_active_payload_unchanged() -> None:
@@ -570,11 +572,10 @@ def test_active_payload_unchanged() -> None:
 
     from src.mhs.contracts import MhsDiagnosticRequest
     from src.mhs.params import COMMITTEE_TARGET_GROSS
-    from src.mhs.pipeline.config import MhsRunConfig
     from src.mhs.preregistration import procedure_payload
     from src.mhs.validation import inert_dependent_overrides
 
-    request = MhsDiagnosticRequest(**dataclasses.asdict(MhsRunConfig()))
+    request = MhsDiagnosticRequest()
     assert inert_dependent_overrides(request) == {"trend_sleeve_gross": 0.0}
     assert procedure_payload(request)["committee_target_gross"] == COMMITTEE_TARGET_GROSS
 
@@ -584,18 +585,19 @@ def test_cli_opt_out_and_research_request_share_identity() -> None:
 
     from src.cli.main import build_root_parser
     from src.mhs.contracts import MhsDiagnosticRequest
-    from src.mhs.pipeline.config import MhsRunConfig
     from src.mhs.preregistration import procedure_identity_digest
     from src.mhs.run_history import trial_identity_key
 
+    from src.mhs.pipeline.config import request_from_namespace
+
     base = ["research", "run", "portfolio", "mhs-horizon-diagnostic"]
-    cfg = MhsRunConfig.from_namespace(
+    cfg = request_from_namespace(
         build_root_parser().parse_args(
             [*base, "--no-committee-capital", "--execution-universe-size", "30",
              "--pnl-vol-target-mode", "median_relative", "--growth-envelope", "conservative"]
         )
     )
-    req = MhsDiagnosticRequest()
+    req = research_baseline()
     snapshot = {"K": 1}
     assert trial_identity_key({"flags": dataclasses.asdict(cfg), "params_snapshot": snapshot}) == trial_identity_key(
         {"flags": dataclasses.asdict(req), "params_snapshot": snapshot}

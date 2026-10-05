@@ -266,18 +266,14 @@ def test_persist_isolates_history_append_failure(tmp_path, monkeypatch) -> None:
 
 
 def test_run_history_record_discloses_live_parity_blockers() -> None:
-    import dataclasses
 
     from src.mhs.contracts import MhsDiagnosticRequest
-    from src.mhs.pipeline.config import MhsRunConfig
     from src.mhs.report.persist import build_mhs_run_history_record
 
     # Given
     report = _build_compact_report()
-    trim_request = MhsDiagnosticRequest(
-        **dataclasses.asdict(MhsRunConfig(name_drift_trim=True))
-    )
-    plain_request = MhsDiagnosticRequest(**dataclasses.asdict(MhsRunConfig()))
+    trim_request = MhsDiagnosticRequest(name_drift_trim=True)
+    plain_request = MhsDiagnosticRequest()
 
     # When
     trim_record = build_mhs_run_history_record(
@@ -297,16 +293,14 @@ def test_run_history_record_discloses_live_parity_blockers() -> None:
     assert trim_record["flags"]["name_drift_trim"] is True
 
 def test_run_history_record_carries_deploy_gate_verdict() -> None:
-    import dataclasses
     import json
 
     from src.mhs.contracts import MhsDiagnosticRequest
-    from src.mhs.pipeline.config import MhsRunConfig
     from src.mhs.report.persist import build_mhs_run_history_record
 
     # Given
     report = _build_compact_report()
-    trim_request = MhsDiagnosticRequest(**dataclasses.asdict(MhsRunConfig(name_drift_trim=True)))
+    trim_request = MhsDiagnosticRequest(name_drift_trim=True)
 
     # When
     record = build_mhs_run_history_record(report, trim_request, MhsOutputTier.COMPACT, None)

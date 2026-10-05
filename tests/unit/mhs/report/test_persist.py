@@ -8,6 +8,7 @@ other test targets directly.
 
 from __future__ import annotations
 
+from src.mhs.contracts import MhsDiagnosticRequest
 import inspect
 from pathlib import Path
 
@@ -106,7 +107,6 @@ def test_persist_mhs_report_signature_unchanged_without_flag() -> None:
 
 from src.mhs.contracts import MhsResearchGoResult
 from src.mhs.resources import _StageRecorder
-from src.mhs.pipeline.config import MhsRunConfig
 from src.mhs.pipeline.context import PipelineContext
 from src.mhs.pipeline.stages.assemble import assemble_report
 from src.mhs.report.persist import build_mhs_run_history_record
@@ -118,7 +118,7 @@ def test_SCENARIO_MHS_TRIAL_POOL_DISCLOSURE_IN_REPORT_AND_HISTORY() -> None:
     record (same unconditional wiring as holdout_tail/parameter_oos_split)."""
     grid = pd.DatetimeIndex([])
     ctx = PipelineContext(
-        config=MhsRunConfig(),
+        config=MhsDiagnosticRequest(),
         resolved_end="2025-12-31 23:59:59+00:00",
         start=pd.Timestamp("2021-01-01", tz="UTC"),
         end=pd.Timestamp("2025-12-31 23:59:59+00:00"),

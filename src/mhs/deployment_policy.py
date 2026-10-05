@@ -4,25 +4,18 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal
+from typing import Literal
 
 import pandas as pd
 
+from src.mhs.contracts import MhsDiagnosticRequest
 from src.mhs.params import COMMITTEE_TRANCHE_COUNT
-
-if TYPE_CHECKING:
-    from src.mhs.contracts import MhsDiagnosticRequest
 
 LIVE_UNSUPPORTED_REQUEST_FLAGS: dict[str, str] = {"name_drift_trim": "live daemon has no intraday trim loop"}
 
 
-def live_parity_blockers(config: Any) -> tuple[str, ...]:
-    """Return sorted live-parity blocker flag names set on ``config``.
-
-    ``config`` is typed as ``Any`` because both ``MhsDiagnosticRequest`` and
-    ``MhsRunConfig`` are accepted via duck-typed ``getattr`` (no isinstance
-    check), so a union annotation would couple this seam to both types.
-    """
+def live_parity_blockers(config: MhsDiagnosticRequest | None) -> tuple[str, ...]:
+    """Return sorted live-parity blocker flag names set on ``config``."""
     if config is None:
         return ()
     return tuple(sorted(k for k in LIVE_UNSUPPORTED_REQUEST_FLAGS if bool(getattr(config, k, False))))
@@ -49,35 +42,6 @@ class TargetWeightPolicy:
     funding_carry_sleeve: bool
     funding_carry_weight: float
     committee_tranche_count: int = COMMITTEE_TRANCHE_COUNT
-
-    def to_request(self) -> MhsDiagnosticRequest:
-        from src.mhs.contracts import MhsDiagnosticRequest
-
-        if self.execution_timeframe != "3m":
-            raise ValueError(f"unknown execution_timeframe '{self.execution_timeframe}'")
-        capital = bool(self.committee_capital)
-        request = MhsDiagnosticRequest(
-            execution_timeframe=self.execution_timeframe,
-            execution_universe_size=int(self.execution_universe_size),
-            fast_book_mode=self.fast_book_mode,  # type: ignore[arg-type]
-            slow_book_mode=self.slow_book_mode,  # type: ignore[arg-type]
-            rebalance_filter=self.rebalance_filter,  # type: ignore[arg-type]
-            beta_neutralize=bool(self.beta_neutralize),
-            ensemble_signal=self.ensemble_signal,  # type: ignore[arg-type]
-            trend_efficiency_overlay=bool(self.trend_efficiency_overlay),
-            trend_sleeve=bool(self.trend_sleeve),
-            trend_sleeve_gross=float(self.trend_sleeve_gross),
-            crash_regime_tilt_alpha=None if self.crash_regime_tilt_alpha is None else float(self.crash_regime_tilt_alpha),
-            committee_capital=capital,
-            committee_member_set=self.committee_member_set,  # type: ignore[arg-type]
-            committee_tranche_smoothing=bool(self.committee_tranche_smoothing),
-            committee_regime_adaptive_tranche=bool(self.committee_regime_adaptive_tranche),
-            committee_tranche_count=int(self.committee_tranche_count),
-            committee_target_gross=None if not capital else (None if self.committee_target_gross is None else float(self.committee_target_gross)),
-            funding_carry_sleeve=bool(self.funding_carry_sleeve) and capital,
-            funding_carry_weight=float(self.funding_carry_weight) if (bool(self.funding_carry_sleeve) and capital) else 0.0,
-        )
-        return request
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,7 +146,6 @@ def build_deployment_policy(
         SIGNAL_PANEL_WINDOW_DAYS,
         SIGNAL_RETURN_TAIL_DAYS,
     )
-    from src.mhs.research_go import _resolved_committee_target_gross
 
     target = TargetWeightPolicy(
         execution_timeframe=request.execution_timeframe,
@@ -201,7 +164,7 @@ def build_deployment_policy(
         committee_tranche_smoothing=bool(request.committee_tranche_smoothing),
         committee_regime_adaptive_tranche=bool(request.committee_regime_adaptive_tranche),
         committee_tranche_count=int(request.committee_tranche_count),
-        committee_target_gross=_resolved_committee_target_gross(request),
+        committee_target_gross=request.committee_target_gross,
         funding_carry_sleeve=bool(request.funding_carry_sleeve),
         funding_carry_weight=float(request.funding_carry_weight),
     )

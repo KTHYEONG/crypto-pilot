@@ -8,7 +8,6 @@ evidence fails closed instead of degrading into "no evidence".
 
 from __future__ import annotations
 
-import dataclasses
 import itertools
 import json
 from pathlib import Path
@@ -53,9 +52,8 @@ def _utc(value: str) -> pd.Timestamp:
 
 def _request() -> Any:
     from src.mhs.contracts import MhsDiagnosticRequest
-    from src.mhs.pipeline.config import MhsRunConfig
 
-    return MhsDiagnosticRequest(**dataclasses.asdict(MhsRunConfig()))
+    return MhsDiagnosticRequest()
 
 
 def _registry(home: Path) -> Path:

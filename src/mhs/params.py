@@ -375,12 +375,6 @@ SIGNAL_REPLAY_WARMUP_DAYS: int = 30
 SIGNAL_RETURN_TAIL_DAYS: int = 400
 SIGNAL_OVERLAP_TOLERANCE: float = 1e-9
 
-# Sentinel distinguishing the registered default exposure from an explicit
-# committee_target_gross value: a bare MhsDiagnosticRequest() resolves to the
-# registered constant without triggering the committee_capital requirement,
-# while an explicit non-None value keeps requiring committee_capital=True.
-COMMITTEE_TARGET_GROSS_UNSET: object = object()
-
 # --- canonical run retention -------------------------------------------------------
 # Default detail-retention quotas for canonical 3-minute runs; None keeps every
 # managed bundle for the byte budget, while the run-count budget defaults to

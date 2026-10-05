@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
+from tests.fixtures.mhs_requests import research_baseline
 import numpy as np
 import pandas as pd
 import pytest
 
 import src.market_data.services.futures_collection as fc
 import src.mhs.marks as marks
-from src.mhs.contracts import MhsDiagnosticRequest
 from src.mhs.evaluation import committee as committee_evaluation
 from src.mhs.evaluation import fold_weights
 from src.mhs.evaluation.committee import _committee_execution_book
@@ -121,7 +121,7 @@ def test_fold_path_wires_helper_byte_identical(mhs_market_with_taker_buy_quote, 
         if symbol_partition(s) == "dev"
     ]
     funding_by_symbol, _ = marks._load_funding_series(symbols)
-    request = MhsDiagnosticRequest(
+    request = research_baseline(
         start=str(_START), end=str(end), data_root=str(root),
         execution_timeframe="3m", log_run=False,
         committee_capital=True,

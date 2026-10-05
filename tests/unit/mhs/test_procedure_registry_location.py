@@ -7,7 +7,6 @@ state must fail closed before any read or append.
 
 from __future__ import annotations
 
-import dataclasses
 import hashlib
 import json
 import logging
@@ -53,9 +52,8 @@ def _evaluation_event(digest: str, resolved_end: str) -> dict[str, object]:
 
 def _request() -> Any:
     from src.mhs.contracts import MhsDiagnosticRequest
-    from src.mhs.pipeline.config import MhsRunConfig
 
-    return MhsDiagnosticRequest(**dataclasses.asdict(MhsRunConfig()))
+    return MhsDiagnosticRequest()
 
 
 @pytest.fixture(autouse=True)

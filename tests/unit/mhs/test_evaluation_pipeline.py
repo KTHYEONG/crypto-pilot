@@ -2,6 +2,7 @@
 
 """MHS evaluation core contract tests (everything not in a domain-specific split file)."""
 """Contract coverage for the MHS application evaluation resource telemetry."""
+from tests.fixtures.mhs_requests import research_baseline
 import dataclasses
 import numpy as np
 import pandas as pd
@@ -13,7 +14,7 @@ import src.mhs.pipeline.stages.book as book_stage
 import src.mhs.resources as resources
 import src.mhs.scaling as scaling
 import src.mhs.research_go as _research_go
-from src.mhs.contracts import MhsBookFailure, MhsDiagnosticRequest
+from src.mhs.contracts import MhsBookFailure
 from src.mhs.evaluation.books import _active_blend_book_and_grid
 from src.mhs.evaluation.concurrency import _run_books_concurrent
 from src.mhs.evaluation.folds import _run_anchored_fold
@@ -165,9 +166,9 @@ def test_request_validation_adjusted_without_gate() -> None:
     raises ValueError from ``__post_init__`` (fail-closed -- no silent no-op),
     and the flag defaults to False / composes with ``discovery_gate=True``."""
     with pytest.raises(ValueError, match="discovery_gate_adjusted_net_t"):
-        MhsDiagnosticRequest(discovery_gate=False, discovery_gate_adjusted_net_t=True)
-    assert MhsDiagnosticRequest().discovery_gate_adjusted_net_t is False
-    assert MhsDiagnosticRequest(
+        research_baseline(discovery_gate=False, discovery_gate_adjusted_net_t=True)
+    assert research_baseline().discovery_gate_adjusted_net_t is False
+    assert research_baseline(
         discovery_gate=True, discovery_gate_adjusted_net_t=True,
     ).discovery_gate_adjusted_net_t is True
 
@@ -179,9 +180,9 @@ def test_request_validation_regime_without_gate() -> None:
     validation, and the flag defaults to False / composes with
     ``discovery_gate=True``."""
     with pytest.raises(ValueError, match="discovery_gate_regime_scaled_net_t"):
-        MhsDiagnosticRequest(discovery_gate=False, discovery_gate_regime_scaled_net_t=True)
-    assert MhsDiagnosticRequest().discovery_gate_regime_scaled_net_t is False
-    assert MhsDiagnosticRequest(
+        research_baseline(discovery_gate=False, discovery_gate_regime_scaled_net_t=True)
+    assert research_baseline().discovery_gate_regime_scaled_net_t is False
+    assert research_baseline(
         discovery_gate=True, discovery_gate_regime_scaled_net_t=True,
     ).discovery_gate_regime_scaled_net_t is True
 
@@ -221,7 +222,7 @@ class TestReplayExposureScaleGrowthBudget:
         rng = np.random.default_rng(42)
         idx = pd.date_range("2021-01-01", periods=500, freq="D", tz="UTC")
         r = pd.Series(rng.normal(0.0001, 0.01, 500), index=idx)
-        request = MhsDiagnosticRequest(
+        request = research_baseline(
             pnl_vol_target_mode="growth_budget",
             committee_capital=True,
         )
@@ -235,15 +236,15 @@ class TestCommitteeMemberSetValidation:
     """SCENARIO_MHS_COMPOUNDING_ALPHA_AXES_06: committee_member_set validation."""
 
     def test_valid_member_set_accepted(self) -> None:
-        req = MhsDiagnosticRequest(committee_capital=True, committee_member_set="risk_premia")
+        req = research_baseline(committee_capital=True, committee_member_set="risk_premia")
         assert req.committee_member_set == "risk_premia"
 
     def test_invalid_member_set_raises(self) -> None:
         with pytest.raises(ValueError, match="committee_member_set"):
-            MhsDiagnosticRequest(committee_capital=True, committee_member_set="unregistered")
+            research_baseline(committee_capital=True, committee_member_set="unregistered")
 
     def test_growth_budget_mode_in_pnl_vol_target_mode(self) -> None:
-        req = MhsDiagnosticRequest(pnl_vol_target_mode="growth_budget")
+        req = research_baseline(pnl_vol_target_mode="growth_budget")
         assert req.pnl_vol_target_mode == "growth_budget"
 
 @pytest.mark.slow
@@ -272,7 +273,7 @@ def test_toplevel_vol_mean_masked_to_execution_roster(mhs_market, monkeypatch) -
 
     monkeypatch.setattr(folds_mod, "phase_1_anchored_purged_folds", lambda: ())
     monkeypatch.setattr(evidence_mod, "phase_1_anchored_purged_folds", lambda: ())
-    request = MhsDiagnosticRequest(
+    request = research_baseline(
         start=str(_START), end=str(end), data_root=str(root),
         execution_timeframe="3m", log_run=False,
         execution_universe_size=8,
@@ -329,7 +330,7 @@ class TestBookOutcomePaired:
 
     def test_book_strict_resource_breach_is_typed_failure(self, mhs_market, monkeypatch) -> None:
         args = _build_book_outcome_args(mhs_market)
-        args["request"] = MhsDiagnosticRequest(
+        args["request"] = research_baseline(
             start=str(_START), end=str(args["end"]), data_root=args["root"],
             execution_timeframe="3m", log_run=False,
             max_rss_bytes=1_000,
@@ -362,7 +363,7 @@ def test_realized_execution_roster_size_exposed(mhs_market, monkeypatch) -> None
 
     monkeypatch.setattr(folds_mod, "phase_1_anchored_purged_folds", lambda: ())
     monkeypatch.setattr(evidence_mod, "phase_1_anchored_purged_folds", lambda: ())
-    request = MhsDiagnosticRequest(
+    request = research_baseline(
         start=str(_START), end=str(end), data_root=str(root),
         execution_timeframe="3m", log_run=False,
         execution_universe_size=universe_size,
@@ -618,7 +619,7 @@ def test_committee_streaming_regression(mhs_market_long, monkeypatch) -> None:
     monkeypatch.setattr(concurrency_mod, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
     monkeypatch.setattr(concurrency_mod, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
-    request = MhsDiagnosticRequest(
+    request = research_baseline(
         start=str(_START), end=str(end), data_root=str(root),
         execution_timeframe="3m", log_run=False,
         execution_universe_size=8, committee_book=True,
@@ -652,7 +653,7 @@ def test_fold_primary_annual_return_floor_enforcement(mhs_market, monkeypatch) -
         if symbol_partition(s) == "dev"
     ][:8]
     funding_by_symbol, _ = _load_funding_series(symbols)
-    request = MhsDiagnosticRequest(
+    request = research_baseline(
         start=str(_START), end=str(end), data_root=str(root),
         execution_timeframe="3m", log_run=False,
         execution_universe_size=8,
@@ -706,25 +707,21 @@ def test_fold_primary_annual_return_floor_enforcement(mhs_market, monkeypatch) -
 
 def test_target_gross_request_validation() -> None:
     # SCENARIO_MHS_TARGET_GROSS_REQUEST_VALIDATION
-    default = MhsDiagnosticRequest()
-    # Registered default exposure applies to a bare request without forcing
-    # committee_capital=True. The unresolved sentinel is never mutated into
-    # the frozen field (that would break dataclasses.replace()); resolution
-    # happens lazily via _resolved_committee_target_gross.
-    assert _research_go._resolved_committee_target_gross(default) == COMMITTEE_TARGET_GROSS
+    assert research_baseline().committee_target_gross is None
+    assert research_baseline(committee_capital=True).committee_target_gross == COMMITTEE_TARGET_GROSS
 
-    valid = MhsDiagnosticRequest(committee_target_gross=0.795, committee_capital=True)
+    valid = research_baseline(committee_target_gross=0.795, committee_capital=True)
     assert valid.committee_target_gross == 0.795
 
     with pytest.raises(ValueError, match="committee_capital"):
-        MhsDiagnosticRequest(committee_target_gross=0.795, committee_capital=False)
+        research_baseline(committee_target_gross=0.795, committee_capital=False)
 
     with pytest.raises(ValueError, match="committee_target_gross"):
-        MhsDiagnosticRequest(committee_target_gross=0.0, committee_capital=True)
+        research_baseline(committee_target_gross=0.0, committee_capital=True)
     with pytest.raises(ValueError, match="committee_target_gross"):
-        MhsDiagnosticRequest(committee_target_gross=-1.0, committee_capital=True)
+        research_baseline(committee_target_gross=-1.0, committee_capital=True)
     with pytest.raises(ValueError, match="committee_target_gross"):
-        MhsDiagnosticRequest(committee_target_gross=2.5, committee_capital=True)
+        research_baseline(committee_target_gross=2.5, committee_capital=True)
 
 @pytest.mark.slow
 def test_reference_bound_degraded_preserves_primary(mhs_market, monkeypatch) -> None:
@@ -823,7 +820,7 @@ def test_committee_member_attribution_observational_only(mhs_market_with_taker_b
     # the taker_buy_quote column, hence mhs_market_with_taker_buy_quote rather
     # than the taker_buy_quote-less mhs_market_long.
     root, end = mhs_market_with_taker_buy_quote
-    base = MhsDiagnosticRequest(
+    base = research_baseline(
         start=str(_START), end=str(end), data_root=str(root),
         execution_timeframe="3m", log_run=False,
         execution_universe_size=8, committee_capital=True,

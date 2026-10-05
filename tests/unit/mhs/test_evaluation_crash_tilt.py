@@ -1,11 +1,11 @@
 """MHS evaluation contract tests (split by behavioral domain; shared builders live in the original module)."""
 
 """Contract coverage for the MHS application evaluation resource telemetry."""
+from tests.fixtures.mhs_requests import research_baseline
 import dataclasses
 import numpy as np
 import pandas as pd
 import pytest
-from src.mhs.contracts import MhsDiagnosticRequest
 from src.mhs.evaluation.fold_weights import _build_fold_target_weights
 from src.mhs.marks import _load_funding_series
 from src.quant.universe.pit_universe import symbol_partition
@@ -20,11 +20,11 @@ def test_crash_tilt_request_validation() -> None:
     # narrows the pure function's [0.0, 1.0] to (0.0, 1.0] -- an explicitly
     # set-but-no-op 0.0 is a footgun, and >1.0 breaks the unit-gross budget.
     with pytest.raises(ValueError, match="crash_regime_tilt_alpha"):
-        MhsDiagnosticRequest(crash_regime_tilt_alpha=0.0)
+        research_baseline(crash_regime_tilt_alpha=0.0)
     with pytest.raises(ValueError, match="crash_regime_tilt_alpha"):
-        MhsDiagnosticRequest(crash_regime_tilt_alpha=1.5)
-    assert MhsDiagnosticRequest().crash_regime_tilt_alpha is None
-    assert MhsDiagnosticRequest(crash_regime_tilt_alpha=0.2).crash_regime_tilt_alpha == 0.2
+        research_baseline(crash_regime_tilt_alpha=1.5)
+    assert research_baseline().crash_regime_tilt_alpha is None
+    assert research_baseline(crash_regime_tilt_alpha=0.2).crash_regime_tilt_alpha == 0.2
 
 def test_crash_tilt_disabled_fold_is_byte_identical(mhs_market, monkeypatch) -> None:
     # SCENARIO_MHS_CRASH_TILT_FOLD_BYTE_IDENTICAL_06: with the opt-in disabled
@@ -39,7 +39,7 @@ def test_crash_tilt_disabled_fold_is_byte_identical(mhs_market, monkeypatch) -> 
         if symbol_partition(s) == "dev"
     ]
     funding_by_symbol, _ = _load_funding_series(symbols)
-    request = MhsDiagnosticRequest(
+    request = research_baseline(
         start=str(_START), end=str(end), data_root=str(root),
         execution_timeframe="3m", log_run=False,
     )
@@ -56,7 +56,7 @@ def test_crash_tilt_disabled_fold_is_byte_identical(mhs_market, monkeypatch) -> 
     import src.mhs.evaluation.fold_weights as fold_weights_mod
 
     monkeypatch.setattr(fold_weights_mod, "crash_regime_tilt_weights", _identity_tilt)
-    request_on = MhsDiagnosticRequest(
+    request_on = research_baseline(
         start=str(_START), end=str(end), data_root=str(root),
         execution_timeframe="3m", log_run=False,
         crash_regime_tilt_alpha=0.3,
@@ -84,7 +84,7 @@ def test_crash_tilt_active_fold_reaches_replay(mhs_market_with_btc) -> None:
     ]
     funding_by_symbol, _ = _load_funding_series(symbols)
     assert "BTCUSDT" in funding_by_symbol
-    request = MhsDiagnosticRequest(
+    request = research_baseline(
         start=str(_START), end=str(end), data_root=str(root),
         execution_timeframe="3m", log_run=False,
     )

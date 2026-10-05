@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from tests.fixtures.mhs_requests import research_baseline
 import dataclasses
 
 import pandas as pd
@@ -354,23 +355,18 @@ class TestFrozenLiteralsCommitteeTiming:
         from src.mhs.contracts import (
             MhsDiagnosticRequest,
         )
-        from src.mhs.research_go import (
-            _resolved_committee_target_gross,
-        )
 
-        default_request = MhsDiagnosticRequest(committee_capital=True)
-        assert _resolved_committee_target_gross(default_request) == COMMITTEE_TARGET_GROSS
-        assert MhsDiagnosticRequest(committee_capital=True, committee_target_gross=None).committee_target_gross is None
+        assert research_baseline().committee_target_gross is None
+        assert research_baseline(committee_capital=True).committee_target_gross == COMMITTEE_TARGET_GROSS
+        assert MhsDiagnosticRequest().committee_target_gross == COMMITTEE_TARGET_GROSS
         with pytest.raises(ValueError, match="committee_target_gross"):
-            MhsDiagnosticRequest(committee_capital=True, committee_target_gross=0.0)
+            research_baseline(committee_capital=True, committee_target_gross=0.0)
 
-        # Regression: dataclasses.replace() on an unset (implicit-default)
-        # request must not resolve the sentinel into the field, or a copy
-        # dropping committee_capital would wrongly see an "explicit" gross and
-        # raise -- even though no caller ever set committee_target_gross.
-        copied = dataclasses.replace(default_request, committee_capital=False)
-        assert copied.committee_capital is False
-        assert _resolved_committee_target_gross(copied) == COMMITTEE_TARGET_GROSS
+        # Dependents must be explicit: dropping committee_capital while the
+        # production dependents are set raises instead of silently adopting
+        # an inert configuration.
+        with pytest.raises(ValueError, match="committee_capital"):
+            dataclasses.replace(MhsDiagnosticRequest(), committee_capital=False)
 
 
 class TestCompoundingGrowthContractConstants:
@@ -439,16 +435,15 @@ class TestCompoundingAlphaAxesContract:
 
     def test_resolved_committee_members(self) -> None:
         from src.mhs.research_go import _resolved_committee_members
-        from src.mhs.contracts import MhsDiagnosticRequest
         from src.mhs.params import COMMITTEE_MEMBER_SETS
 
-        req_v2 = MhsDiagnosticRequest(committee_capital=True, committee_member_set="risk_premia")
+        req_v2 = research_baseline(committee_capital=True, committee_member_set="risk_premia")
         assert _resolved_committee_members(req_v2) == COMMITTEE_MEMBER_SETS["risk_premia"]
 
-        req_v1 = MhsDiagnosticRequest(committee_capital=True, committee_member_set="flow_momentum")
+        req_v1 = research_baseline(committee_capital=True, committee_member_set="flow_momentum")
         assert _resolved_committee_members(req_v1) == COMMITTEE_MEMBER_SETS["flow_momentum"]
 
-        req_bad = MhsDiagnosticRequest(committee_capital=True, committee_member_set="risk_premia")
+        req_bad = research_baseline(committee_capital=True, committee_member_set="risk_premia")
         # Simulate an unregistered key by replacing the field (bypassing validation)
         object.__setattr__(req_bad, "committee_member_set", "unregistered")
         with pytest.raises(ValueError, match="unknown committee_member_set"):
@@ -474,45 +469,42 @@ def test_mhs_book_report_exposure_scale_defaults_to_none() -> None:
 
 # SCENARIO_MHS_DSR_PASSAGE_PASSIVE_TIMEOUT_DIVISIBILITY_06
 def test_SCENARIO_MHS_DSR_PASSAGE_PASSIVE_TIMEOUT_DIVISIBILITY_06() -> None:
-    from src.mhs.contracts import MhsDiagnosticRequest
 
     # A 5-minute timeout can never land on the 3m execution grid, so the
     # request fails closed at construction (validate_request runs from
     # __post_init__, before any panel load or replay).
     with pytest.raises(ValueError, match="passive_timeout_minutes") as excinfo:
-        MhsDiagnosticRequest(execution_timeframe="3m", passive_timeout_minutes=5)
+        research_baseline(execution_timeframe="3m", passive_timeout_minutes=5)
     message = str(excinfo.value)
     assert "passive_timeout_minutes" in message
     assert "3" in message
 
     # Grid-aligned windows and the frozen default construct successfully.
-    assert MhsDiagnosticRequest(
+    assert research_baseline(
         execution_timeframe="3m", passive_timeout_minutes=6
     ).passive_timeout_minutes == 6
-    assert MhsDiagnosticRequest(
+    assert research_baseline(
         execution_timeframe="3m", passive_timeout_minutes=15
     ).passive_timeout_minutes == 15
-    assert MhsDiagnosticRequest().passive_timeout_minutes == 30
+    assert research_baseline().passive_timeout_minutes == 30
 
     # Legacy execution intervals are explicitly incompatible: no coercion,
     # no fallback mapping -- a historical 1m/5m policy fails closed here.
     with pytest.raises(ValueError, match="execution_timeframe"):
-        MhsDiagnosticRequest(execution_timeframe="5m", passive_timeout_minutes=10)  # type: ignore[arg-type]
+        research_baseline(execution_timeframe="5m", passive_timeout_minutes=10)  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="execution_timeframe"):
-        MhsDiagnosticRequest(execution_timeframe="1m", passive_timeout_minutes=30)  # type: ignore[arg-type]
+        research_baseline(execution_timeframe="1m", passive_timeout_minutes=30)  # type: ignore[arg-type]
 
 
 # SCENARIO_MHS_SELECTION_EXEC_REQUEST_FIELD_PARITY_05
 def test_SCENARIO_MHS_SELECTION_EXEC_REQUEST_FIELD_PARITY_05() -> None:
-    """Field-set parity: MhsDiagnosticRequest accepts every MhsRunConfig
-    asdict key (the CLI handler's **dataclasses.asdict(config) contract), and
-    final_oos_2026h1 defaults to False on both sides."""
+    """Field-set parity: the single request type round-trips through asdict,
+    and final_oos_2026h1 defaults to False."""
     from src.mhs.contracts import MhsDiagnosticRequest
-    from src.mhs.pipeline.config import MhsRunConfig
 
-    request = MhsDiagnosticRequest(**dataclasses.asdict(MhsRunConfig()))
+    request = MhsDiagnosticRequest()
     assert request.final_oos_2026h1 is False
-    assert MhsDiagnosticRequest().final_oos_2026h1 is False
+    assert research_baseline().final_oos_2026h1 is False
 
 
 def test_diagnostic_request_has_single_price_source() -> None:
@@ -522,7 +514,7 @@ def test_diagnostic_request_has_single_price_source() -> None:
     from src.cli.commands.research.mhs import add_mhs_commands
     from src.mhs.contracts import MhsDiagnosticRequest
 
-    request = MhsDiagnosticRequest()
+    request = research_baseline()
     assert not hasattr(request, "mark_mode")
     assert "mark_mode" not in MhsDiagnosticRequest.__dataclass_fields__
     assert request.execution_timeframe == "3m"
@@ -556,9 +548,8 @@ def test_retired_mark_mode_cli_argument_rejected() -> None:
 
 def test_diagnostic_request_economic_controls_survive() -> None:
     """Non-default cost and capacity settings are preserved without a mark regime."""
-    from src.mhs.contracts import MhsDiagnosticRequest
 
-    request = MhsDiagnosticRequest(
+    request = research_baseline(
         trend_sleeve=True,
         trend_sleeve_gross=0.3,
         funding_carry_weight=0.3,

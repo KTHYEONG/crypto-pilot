@@ -1,13 +1,13 @@
 """MHS evaluation contract tests (split by behavioral domain; shared builders live in the original module)."""
 
 """Contract coverage for the MHS application evaluation resource telemetry."""
+from tests.fixtures.mhs_requests import research_baseline
 import numpy as np
 import pandas as pd
 import pytest
 import src.mhs.evaluation.concurrency as concurrency_mod
 from src.mhs.diagnostic_run import run_mhs_horizon_diagnostic
 import src.mhs.statistics as statistics
-from src.mhs.contracts import MhsDiagnosticRequest
 from src.mhs.evaluation.diagnostics import _multi_feature_diagnostic
 from src.mhs.evidence import effective_breadth
 from src.mhs.params import MEASURED_EXECUTION_COST_TIERS_BPS
@@ -21,10 +21,10 @@ def test_multi_feature_request_validation() -> None:
     # multi_feature_book (bool, default False). A non-bool value raises
     # ValueError (fail closed -- no silent no-op); the default construction
     # leaves it False and the report's multi_feature_diagnostic is None.
-    assert MhsDiagnosticRequest().multi_feature_book is False
+    assert research_baseline().multi_feature_book is False
     with pytest.raises(ValueError, match="multi_feature_book"):
-        MhsDiagnosticRequest(multi_feature_book="yes")
-    on = MhsDiagnosticRequest(multi_feature_book=True)
+        research_baseline(multi_feature_book="yes")
+    on = research_baseline(multi_feature_book=True)
     assert on.multi_feature_book is True
 
 @pytest.mark.slow
@@ -42,9 +42,9 @@ def test_multi_feature_default_off_bit_identical(mhs_market, monkeypatch) -> Non
         "execution_timeframe": "3m", "log_run": False,
         "execution_universe_size": 8,
     }
-    default_report = run_mhs_horizon_diagnostic(MhsDiagnosticRequest(**base))
+    default_report = run_mhs_horizon_diagnostic(research_baseline(**base))
     explicit_off = run_mhs_horizon_diagnostic(
-        MhsDiagnosticRequest(**base, multi_feature_book=False),
+        research_baseline(**base, multi_feature_book=False),
     )
     assert default_report.status == "COMPLETE"
     assert default_report.multi_feature_diagnostic is None
@@ -65,7 +65,7 @@ def test_multi_feature_diagnostic_reports_coverage_and_stability(mhs_market, mon
     monkeypatch.setattr(concurrency_mod, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
     monkeypatch.setattr(concurrency_mod, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
-    request = MhsDiagnosticRequest(
+    request = research_baseline(
         start=str(_START), end=str(end), data_root=str(root),
         execution_timeframe="3m", log_run=False,
         execution_universe_size=8, multi_feature_book=True,
@@ -117,7 +117,7 @@ def test_multi_feature_diagnostic_telemetry_stages_recorded(mhs_market_long, mon
     monkeypatch.setattr(concurrency_mod, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
     monkeypatch.setattr(concurrency_mod, "_run_post_book_concurrently", lambda *a, **k: (None, None, {}, {}, (), None),
     )
-    request = MhsDiagnosticRequest(
+    request = research_baseline(
         start=str(_START), end=str(end), data_root=str(root),
         execution_timeframe="3m", log_run=False,
         execution_universe_size=8, multi_feature_book=True,
