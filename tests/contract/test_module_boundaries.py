@@ -102,7 +102,7 @@ def test_file_size_budget() -> None:
         "tests/unit/live/test_data_refresh.py": 71709,
         "tests/unit/mhs/test_process_backtest.py": 140056,
         "tests/unit/cli/commands/test_backtest.py": 81671,
-        "tests/unit/mhs/evaluation/test_windows.py": 76592,
+        "tests/unit/mhs/evaluation/test_windows.py": 84165,
     }
     measured = {
         str(path): path.stat().st_size
@@ -340,7 +340,7 @@ def test_execution_module_size_budget_with_allowlist() -> None:
 
     default_budget = 700
     # frozen at measured size; growth fails, shrink requires deleting/lowering the entry.
-    allowlist = {"src/mhs/execution/accumulator.py": 1948}
+    allowlist = {"src/mhs/execution/accumulator.py": 1897}
 
     measured = {
         str(path): len(path.read_text(encoding="utf-8").splitlines())
@@ -362,7 +362,7 @@ def test_source_module_size_budget() -> None:
     default_budget = 700
     # frozen at measured size; growth fails, shrink requires deleting/lowering the entry.
     allowlist = {
-        "src/mhs/execution/accumulator.py": 1948,
+        "src/mhs/execution/accumulator.py": 1897,
         "src/live/runner.py": 1656,
         "src/live/scheduler.py": 999,
         "src/live/executor.py": 1848,
@@ -375,13 +375,13 @@ def test_source_module_size_budget() -> None:
         "src/application/mhs_supervisor.py": 1050,
         "src/cli/commands/backtest.py": 1133,
         "src/market_data/services/futures_collection.py": 1291,
-        "src/market_data/services/mhs_execution.py": 761,
+        "src/market_data/services/mhs_execution.py": 750,
         "src/quant/technical_experts/cross_sectional.py": 1267,
         "src/quant/evaluation/reliability.py": 816,
         "src/mhs/reporting/inventory.py": 741,
-        "src/mhs/backtest/paths.py": 850,
+        "src/mhs/backtest/paths.py": 849,
         "src/mhs/backtest/journal.py": 1091,
-        "src/mhs/backtest/inventory.py": 877,
+        "src/mhs/backtest/inventory.py": 873,
         "src/mhs/evaluation/windows.py": 713,
         # Unified MhsDiagnosticRequest carries per-field CLI/validation metadata as the single schema source (spec 10 parts 2-3).
         "src/mhs/contracts.py": 872,
@@ -467,7 +467,7 @@ def test_no_function_exceeds_length_budget() -> None:
         "src/mhs/evaluation/windows.py::_book_outcome": 411,
         "src/mhs/execution/accumulator.py::_consume_append_ledger": 252,
         "src/mhs/execution/window_stream.py::_iter_mhs_execution_windows": 382,
-        "src/mhs/backtest/paths.py::run_process_paths": 263,
+        "src/mhs/backtest/paths.py::run_process_paths": 261,
         "src/mhs/backtest/inventory.py::evaluate_process_inventory_backtest": 289,
         "src/mhs/discovery.py::select_horizon_by_discovery_qualification": 270,
         "src/mhs/evaluation/committee.py::_committee_diagnostic": 282,

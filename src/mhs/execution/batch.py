@@ -20,6 +20,7 @@ from .contracts import (
     IsolatedBoundFailure,
     StrategyExecutionReplayResult,
 )
+from .window_staging import WindowStaging
 
 _BoundAccumulators = list[_BoundExecutionReplayAccumulator | None]
 _LiveAccumulatorSets = list[_BoundAccumulators]
@@ -106,12 +107,12 @@ def replay_execution_window_batch_isolated(
         windows_consumed: list[int] = [0] * len(bound_list)
         failures: list[IsolatedBoundFailure] = []
 
-        def _try_consume(idx: int, w: ExecutionReplayWindow) -> None:
+        def _try_consume(idx: int, w: ExecutionReplayWindow, staging: WindowStaging) -> None:
             if not active[idx]:
                 return
             try:
                 assert accumulators[idx] is not None
-                accumulators[idx].consume(w)  # type: ignore[union-attr]
+                accumulators[idx].consume(w, staging)  # type: ignore[union-attr]
                 windows_consumed[idx] += 1
             except DataIntegrityError as exc:
                 if idx in isolated_bound_indices:
@@ -129,13 +130,15 @@ def replay_execution_window_batch_isolated(
                 else:
                     raise
 
+        staging = WindowStaging(first)
         for idx in range(len(bound_list)):
-            _try_consume(idx, first)
-        del first
+            _try_consume(idx, first, staging)
+        del staging, first
         for w in it:
+            staging = WindowStaging(w)
             for idx in range(len(bound_list)):
-                _try_consume(idx, w)
-            del w
+                _try_consume(idx, w, staging)
+            del staging, w
         results: list[StrategyExecutionReplayResult | None] = []
         for idx in range(len(bound_list)):
             if not active[idx]:
@@ -267,12 +270,12 @@ def replay_execution_windows_coupled(
         active: list[bool] = [True] * len(bound_list)
         windows_consumed: list[int] = [0] * len(bound_list)
 
-        def _try_consume_scaled(idx: int, w: ExecutionReplayWindow) -> None:
+        def _try_consume_scaled(idx: int, w: ExecutionReplayWindow, staging: WindowStaging) -> None:
             if not active[idx]:
                 return
             try:
                 assert scaled_accumulators[idx] is not None
-                scaled_accumulators[idx].consume(w)  # type: ignore[union-attr]
+                scaled_accumulators[idx].consume(w, staging)  # type: ignore[union-attr]
                 windows_consumed[idx] += 1
             except DataIntegrityError as exc:
                 if idx in isolated_bound_indices:
@@ -335,8 +338,10 @@ def replay_execution_windows_coupled(
             # 4) Rescale W in place (exact two-pass formula) and fan it to the
             #    already-constructed scaled bounds.
             rescaled = _rescale_window_weights(w, scale)
+            staging = WindowStaging(rescaled)
             for idx in range(len(bound_list)):
-                _try_consume_scaled(idx, rescaled)
+                _try_consume_scaled(idx, rescaled, staging)
+            del staging
 
         coverage_ns = -1
         _couple_window(first)
