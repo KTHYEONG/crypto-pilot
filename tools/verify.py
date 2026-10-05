@@ -1,15 +1,21 @@
 #!/usr/bin/env python3
+# ruff: noqa: T201, S607
 """Fast, token-efficient local verification gate: Lint, Type, Tests & 100% Diff-Coverage."""
 
 from __future__ import annotations
 
 import argparse
+import ast
 import contextlib
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
+import tempfile
+import time
+from pathlib import Path
 from typing import Any
 
 JsonDiag = dict[str, Any]
@@ -45,24 +51,31 @@ def _exit_with_diags(phase: str, header: str, diags: list[JsonDiag], exit_code: 
     sys.exit(exit_code)
 
 
-def run_cmd(cmd: list[str], timeout: int = 120) -> subprocess.CompletedProcess[str]:
+def run_cmd(
+    cmd: list[str], timeout: int = 120, *, env_overrides: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
     # Strip unnecessary 'uv run' prefix when already running inside virtualenv
     if len(cmd) >= 3 and cmd[0] == "uv" and cmd[1] == "run" and os.environ.get("VIRTUAL_ENV"):
         cmd = cmd[2:]
     env = os.environ.copy()
-    env["COVERAGE_NO_CTRACE"] = "1"
     env["PYTHONDONTWRITEBYTECODE"] = "1"
-    try:
-        return subprocess.run(  # noqa: S603
-            cmd, capture_output=True, text=True, shell=False, timeout=timeout, env=env
-        )
-    except subprocess.TimeoutExpired:
-        return subprocess.CompletedProcess(
-            args=cmd,
-            returncode=124,
-            stdout="",
-            stderr=f"Error: timed out after {timeout}s.",
-        )
+    env.update(env_overrides or {})
+    with subprocess.Popen(  # noqa: S603
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        env=env, start_new_session=True,
+    ) as process:
+        try:
+            stdout, stderr = process.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            # Forked replay workers inherit the pipes and must terminate with the runner.
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGKILL)
+            stdout, stderr = process.communicate()
+            return subprocess.CompletedProcess(
+                args=cmd, returncode=124, stdout=stdout,
+                stderr=f"{stderr}\nError: timed out after {timeout}s.",
+            )
+        return subprocess.CompletedProcess(cmd, process.returncode, stdout, stderr)
 
 
 def _available_memory_gb() -> float:
@@ -145,13 +158,13 @@ def _find_test_files(py_files: list[str]) -> tuple[list[str], list[str]]:
     Source modules without a mapped test are reported as ``unmapped``.
     """
     test_files = [f for f in py_files if f.startswith("tests/") or "test_" in f]
-    source_files = [f for f in py_files if f.startswith("src/") and not f.endswith("__init__.py")]
+    source_files = [f for f in py_files if f.startswith(("src/", "tools/")) and not f.endswith("__init__.py")]
     unmapped: list[str] = []
 
     # 1. Direct path convention: src/path/module.py -> tests/unit/path/test_module.py
     #    then tests/unit/path/module/ when that nested package exists.
     for sf in source_files:
-        rel = sf[4:]  # strip 'src/'
+        rel = sf[4:] if sf.startswith("src/") else sf
         parts = rel.split("/")
         mod_name = parts[-1]
         test_name = f"test_{mod_name}"
@@ -185,6 +198,58 @@ def _find_test_files(py_files: list[str]) -> tuple[list[str], list[str]]:
 
 
     return sorted(dict.fromkeys(test_files)), sorted(dict.fromkeys(unmapped))
+
+
+def _test_node_targets(file: str, changed_lines: set[int] | None) -> list[str]:
+    """Narrow body-only integration edits; shared or uncertain changes retain the whole file."""
+    if not changed_lines:
+        return [file]
+    try:
+        text = Path(file).read_text(encoding="utf-8")
+        tree = ast.parse(text)
+    except (OSError, SyntaxError):
+        return [file]
+    spans: list[tuple[int, int, str]] = []
+    for node in tree.body:
+        candidates = [(node, node.name)] if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) else []
+        if isinstance(node, ast.ClassDef) and node.name.startswith("Test"):
+            candidates = [
+                (method, f"{node.name}::{method.name}")
+                for method in node.body
+                if isinstance(method, (ast.FunctionDef, ast.AsyncFunctionDef))
+            ]
+        for test, name in candidates:
+            if test.name.startswith("test_"):
+                start = min([test.lineno, *(d.lineno for d in test.decorator_list)])
+                spans.append((start, test.end_lineno or test.lineno, name))
+    targets: set[str] = set()
+    for line in changed_lines:
+        enclosing = [name for start, end, name in spans if start <= line <= end]
+        if not enclosing:
+            return [file]
+        targets.update(f"{file}::{name}" for name in enclosing)
+    return sorted(targets) or [file]
+
+
+def _integration_targets(test_files: list[str]) -> list[str]:
+    """Select edited integration tests without narrowing explicitly requested files."""
+    targets: list[str] = []
+    for file in test_files:
+        if not file.startswith("tests/integration/"):
+            targets.append(file)
+            continue
+        diff = run_cmd(["git", "diff", "--unified=0", "HEAD", "--", file])
+        if diff.returncode != 0:
+            targets.append(file)
+            continue
+        lines: set[int] = set()
+        for match in re.finditer(r"^@@.*?\+(\d+)(?:,(\d+))? @@", diff.stdout, re.MULTILINE):
+            start = int(match[1])
+            count = int(match[2]) if match[2] is not None else 1
+            # Deletions can affect either adjacent scope; uncertainty expands coverage.
+            lines.update(range(start, start + count) if count else (max(1, start), start + 1))
+        targets.extend(_test_node_targets(file, lines))
+    return targets
 
 
 # ---------------------------------------------------------------------------
@@ -282,6 +347,7 @@ def _check_diff_coverage(
 
 
 def main() -> None:
+    started = time.monotonic()
     parser = argparse.ArgumentParser(description="Fast, token-efficient local verification gate.")
     parser.add_argument("--files", nargs="*", default=[], help="Explicit files to check")
     parser.add_argument("--fast", action="store_true", help="Run static checks only (scaffolding, ruff, mypy)")
@@ -304,7 +370,8 @@ def main() -> None:
 
 
     # 1. File discovery from git if not explicitly passed
-    if not args.files:
+    auto_discovered = not args.files
+    if auto_discovered:
         try:
             diff_res = subprocess.run(
                 ["git", "status", "--porcelain", "-uall"],
@@ -317,7 +384,6 @@ def main() -> None:
                 for line in diff_res.stdout.splitlines()
                 if "D" not in line[:2]
                 and line[3:].strip().endswith(".py")
-                and not line[3:].strip().startswith("tools/")
                 and not line[3:].strip().endswith("conftest.py")
                 and os.path.exists(line[3:].strip())
             ]
@@ -352,7 +418,7 @@ def main() -> None:
     def check_mypy() -> tuple[str, int, list[JsonDiag], str]:
         if args.skip_mypy or not py_files:
             return "mypy", 0, [], ""
-        target_mypy = [f for f in py_files if f.startswith("src/")] or py_files
+        target_mypy = [f for f in py_files if f.startswith(("src/", "tools/"))] or py_files
         res = run_cmd(["uv", "run", "mypy", *target_mypy, "--ignore-missing-imports"])
         if res.returncode != 0:
             out = "\n".join((res.stdout or res.stderr).strip().splitlines()[:10])
@@ -372,6 +438,8 @@ def main() -> None:
 
     # 4. Direct Test Discovery
     test_files, unmapped = _find_test_files(py_files)
+    if auto_discovered:
+        test_files = _integration_targets(test_files)
     if not test_files:
         if unmapped:
             diags = [
@@ -406,16 +474,14 @@ def main() -> None:
         xdist_args = ["-p", "no:cacheprovider", "-n", str(worker_count)]
 
     src_files = [f for f in py_files if f.startswith("src/")]
-    cov_json_path = "tmp/verify_coverage.json"
+    Path("scratch").mkdir(exist_ok=True)
+    workspace = tempfile.TemporaryDirectory(prefix="verify_", dir="scratch")
+    cov_json_path = str(Path(workspace.name) / "coverage.json")
     cov_args: list[str] = []
 
     if src_files and not args.no_cov:
-        os.makedirs("tmp", exist_ok=True)
-        with contextlib.suppress(OSError):
-            os.remove(cov_json_path)
-        pkgs = {f.split("/")[1] for f in src_files if len(f.split("/")) >= 2}
-        cov_pkgs = [f"--cov=src/{p}" for p in sorted(pkgs)] if pkgs else ["--cov=src"]
-        cov_args = [*cov_pkgs, f"--cov-report=json:{cov_json_path}"]
+        cov_modules = sorted({f.removesuffix(".py").replace("/", ".") for f in src_files})
+        cov_args = [*(f"--cov={module}" for module in cov_modules), f"--cov-report=json:{cov_json_path}"]
 
     pytest_cmd = [
         sys.executable,
@@ -426,26 +492,35 @@ def main() -> None:
         *test_files,
         *xdist_args,
         *cov_args,
-        "-q",
+        "-vv",
         "--tb=line",
     ]
     pytest_timeout = args.timeout or max(60, min(240, 20 * len(test_files)))
-    pt_res = run_cmd(pytest_cmd, timeout=pytest_timeout)
+    with workspace:
+        pt_res = run_cmd(
+            pytest_cmd, timeout=pytest_timeout,
+            env_overrides={"COVERAGE_FILE": str(Path(workspace.name) / ".coverage")},
+        )
+        cov_diags, cov_pct = (
+            _check_diff_coverage(src_files, cov_json_path, unmapped)
+            if pt_res.returncode == 0 and cov_args else ([], None)
+        )
 
     if pt_res.returncode == 124:
+        active_tests = [line.strip() for line in pt_res.stdout.splitlines() if line.startswith("tests/")]
+        active_test = active_tests[-1] if active_tests else "unknown test"
         _exit_with_diags(
             "pytest-timeout",
             f"FAIL | Pytest Timed Out ({pytest_timeout}s)",
             [{
                 "file": "",
                 "line": 0,
-                "error": f"pytest timed out after {pytest_timeout}s across {len(test_files)} file(s).",
+                "error": f"pytest timed out after {pytest_timeout}s across {len(test_files)} target(s); last: {active_test}",
                 "fix_hint": "Use --files to scope checks, investigate slow tests, or pass --timeout with a larger value.",
             }],
         )
 
     if pt_res.returncode == 0:
-        cov_diags, cov_pct = _check_diff_coverage(src_files, cov_json_path, unmapped) if cov_args else ([], None)
         if cov_diags:
             _exit_with_diags(
                 "coverage",
@@ -458,7 +533,10 @@ def main() -> None:
         ]
         cov_suffix = f", Diff-Coverage {cov_pct}%" if cov_pct is not None else ""
         unmapped_suffix = f", {len(unmapped_diags)} unmapped" if unmapped_diags else ""
-        print(f"PASS | All checks passed (Scaffolding-Clean, Lint, Type, Tests{cov_suffix}{unmapped_suffix})")
+        passed = re.search(r"\b(\d+) passed\b", pt_res.stdout)
+        test_summary = f"Tests {passed[1]} passed" if passed else "Tests"
+        elapsed = time.monotonic() - started
+        print(f"PASS | All checks passed (Scaffolding-Clean, Lint, Type, {test_summary}{cov_suffix}{unmapped_suffix}) in {elapsed:.2f}s")
         print(_emit_json("PASS", "all", unmapped_diags, cov_pct), file=sys.stderr)
     else:
         last_err = [
