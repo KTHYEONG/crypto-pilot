@@ -13,7 +13,13 @@ def test_research_command_registry_loads_mhs_leaf() -> None:
         "research", "run", "portfolio", "mhs-horizon-diagnostic", "--no-log-run",
     ])
     assert args.portfolio_command == "mhs-horizon-diagnostic"
-    assert args.execution_timeframe == "3m"
+    from src.cli.dataclass_args import explicit_field_values
+    from src.mhs.contracts import MhsDiagnosticRequest
+    from src.mhs.pipeline.config import resolve_cli_request
+
+    explicit = explicit_field_values(MhsDiagnosticRequest, args)
+    assert explicit == {"log_run": False}
+    assert resolve_cli_request(explicit).execution_timeframe == "3m"
 
 
 def test_research_command_registry_has_no_single_tier() -> None:

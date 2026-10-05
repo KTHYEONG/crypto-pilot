@@ -206,8 +206,10 @@ def test_run_mhs_diagnostic_entry_point_matches_golden(name, matrix_market, matr
     """
     import dataclasses
 
+    from src.cli.dataclass_args import explicit_field_values
     from src.cli.main import build_root_parser
-    from src.mhs.pipeline.config import request_from_namespace
+    from src.mhs.contracts import MhsDiagnosticRequest
+    from src.mhs.pipeline.config import resolve_cli_request
     from src.mhs.pipeline.orchestrator import run_mhs_diagnostic
 
     root, end, start = matrix_market
@@ -219,7 +221,9 @@ def test_run_mhs_diagnostic_entry_point_matches_golden(name, matrix_market, matr
         "--pnl-vol-target-mode", "median_relative",
         "--growth-envelope", "conservative",
     ])
-    request = dataclasses.replace(request_from_namespace(args), data_root=str(root))
+    request = dataclasses.replace(
+        resolve_cli_request(explicit_field_values(MhsDiagnosticRequest, args)), data_root=str(root)
+    )
     assert request == research_baseline(
         start=str(start), end=str(end), data_root=str(root), log_run=False,
     )
