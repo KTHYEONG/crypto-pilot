@@ -102,7 +102,7 @@ def test_file_size_budget() -> None:
         "tests/unit/live/test_data_refresh.py": 71709,
         "tests/unit/mhs/test_process_backtest.py": 140056,
         "tests/unit/cli/commands/test_backtest.py": 81671,
-        "tests/unit/mhs/evaluation/test_windows.py": 84165,
+        "tests/unit/mhs/evaluation/test_windows.py": 84336,
     }
     measured = {
         str(path): path.stat().st_size
@@ -368,11 +368,11 @@ def test_source_module_size_budget() -> None:
         "src/live/executor.py": 1848,
         "src/live/tax_ledger.py": 1209,
         "src/live/rest.py": 815,
-        "src/mhs/resources.py": 923,
+        "src/mhs/resources.py": 917,
         "src/mhs/evidence.py": 1267,
         "src/mhs/deploy_gate.py": 723,
         "src/mhs/scaling.py": 892,
-        "src/application/mhs_supervisor.py": 1226,
+        "src/application/mhs_supervisor.py": 1224,
         "src/cli/commands/backtest.py": 1133,
         "src/market_data/services/futures_collection.py": 1291,
         "src/market_data/services/mhs_execution.py": 750,

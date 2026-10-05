@@ -682,47 +682,46 @@ def _run_retention(registry_path: Path, run_id: str, evidence_root: Path, policy
         )
 
 
-def _workload_pss_uss(pid: int) -> tuple[int, int]:
-    """Sampled child-tree PSS/USS sums excluding the supervisor."""
+def _workload_memory(pid: int) -> tuple[int, int, int | None]:
+    """Sample the supervised process tree once: PSS, USS and optional swap from one read per process.
+
+    Each ``memory_full_info`` call parses the process's smaps and briefly holds
+    its memory-map lock, so the safety sample and the swap observation share one
+    sweep instead of walking the worker tree twice per poll.
+
+    Args:
+        pid: Launched worker process (group leader); the supervisor is excluded.
+    Returns:
+        ``(pss_bytes, uss_bytes, swap_bytes)`` summed over readable processes;
+        vanished or access-denied processes are skipped; ``swap_bytes`` is None
+        when any read process lacks a usable swap field or no process was read.
+    Raises:
+        OSError: A read process lacks PSS or USS
+            (``"process PSS/USS telemetry unavailable"``).
+        Exception: Root enumeration failures and any other read error propagate
+            unchanged; callers treat them as missing safety telemetry.
+    """
     import psutil
 
     root = psutil.Process(pid)
-    procs = [root, *root.children(recursive=True)]
-    pss = 0
-    uss = 0
-    for proc in procs:
+    pss = uss = swap = read = 0
+    swap_usable = True
+    for proc in [root, *root.children(recursive=True)]:
         try:
             info = proc.memory_full_info()
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue
-        pss_value = getattr(info, "pss", None)
-        uss_value = getattr(info, "uss", None)
+        pss_value, uss_value = getattr(info, "pss", None), getattr(info, "uss", None)
         if pss_value is None or uss_value is None:
             raise OSError("process PSS/USS telemetry unavailable")
         pss += int(pss_value)
         uss += int(uss_value)
-    return pss, uss
-
-
-def _workload_swap_bytes(pid: int) -> int | None:
-    """Return swap bytes for the supervised process tree, or null if unavailable."""
-    import psutil
-
-    root = psutil.Process(pid)
-    procs = [root, *root.children(recursive=True)]
-    total = 0
-    observed = False
-    for proc in procs:
+        read += 1
         try:
-            info = proc.memory_full_info()
-            value = getattr(info, "swap", None)
-            if value is None:
-                raise OSError("process swap telemetry unavailable")
-            total += int(value)
-            observed = True
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
-            continue
-    return total if observed else None
+            swap += int(info.swap)
+        except Exception:  # noqa: BLE001 - optional swap never raises
+            swap_usable = False
+    return (pss, uss, swap if swap_usable else None) if read else (0, 0, None)
 
 
 def _gnu_time_prefix() -> list[str]:
@@ -842,7 +841,7 @@ class _SupervisionState:
 def _optional_swap_bytes(pid: int) -> int | None:
     """Best-effort process-tree swap bytes; any telemetry failure is unobserved (None)."""
     try:
-        return _workload_swap_bytes(pid)
+        return _workload_memory(pid)[2]
     except Exception:  # noqa: BLE001 - optional measurement
         return None
 
@@ -865,7 +864,7 @@ def _sample_once(state: _SupervisionState, budget: MhsMemoryBudget) -> str | Non
         ``"headroom <headroom> below <floor>"`` or ``"swap growth <bytes> bytes observed"``.
     """
     try:
-        pss, uss = _workload_pss_uss(state.pid)
+        pss, uss, swap_current = _workload_memory(state.pid)
         headroom = current_mhs_headroom_bytes()
     except Exception as tel_exc:  # noqa: BLE001
         return f"missing safety telemetry: {tel_exc}"
@@ -873,7 +872,6 @@ def _sample_once(state: _SupervisionState, budget: MhsMemoryBudget) -> str | Non
     state.pss_peak = pss if state.pss_peak is None else max(state.pss_peak, pss)
     state.uss_peak = uss if state.uss_peak is None else max(state.uss_peak, uss)
     state.min_available = headroom if state.min_available is None else min(state.min_available, headroom)
-    swap_current = _optional_swap_bytes(state.pid)
     if state.swap_baseline is not None and swap_current is not None:
         growth = swap_current - state.swap_baseline
         if growth > 0:

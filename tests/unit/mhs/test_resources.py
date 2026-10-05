@@ -12,6 +12,7 @@ import pytest
 
 from src.mhs import resources
 from src.common.errors import DataIntegrityError
+from src.mhs.tree_memory import TreeMemoryObservation
 
 
 def _isolate_cgroup(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -23,6 +24,7 @@ def _admit_all(monkeypatch: pytest.MonkeyPatch, *, available: int = 10**12) -> N
     monkeypatch.setattr(resources, "_current_tree_pss_bytes", lambda: 0)
     monkeypatch.setattr(resources, "_current_available_bytes", lambda: available)
     monkeypatch.setattr(resources, "_current_tree_swap_bytes", lambda: 0)
+    monkeypatch.setattr(resources, "observe_tree_memory", lambda: TreeMemoryObservation(pss_bytes=0, swap_bytes=0))
 
 
 def test_resolve_ram_budget_guard_disabled_returns_none_pair() -> None:
@@ -375,6 +377,7 @@ def test_allocation_budget_aborts_on_swap_growth(monkeypatch) -> None:
     monkeypatch.setattr(resources, "_current_tree_pss_bytes", lambda: 0)
     monkeypatch.setattr(resources, "_current_available_bytes", lambda: 10**12)
     monkeypatch.setattr(resources, "_current_tree_swap_bytes", lambda: 4096)
+    monkeypatch.setattr(resources, "observe_tree_memory", lambda: TreeMemoryObservation(pss_bytes=0, swap_bytes=4096))
 
     with pytest.raises(DataIntegrityError, match="swap growth"):
         resources.assert_mhs_allocation_budget(
@@ -784,6 +787,7 @@ def _admit_setup(monkeypatch, *, pss: int = 100, available: int = 10**12, swap: 
     monkeypatch.setattr(resources, "_current_available_bytes", lambda: available)
     monkeypatch.setattr(resources, "_read_cgroup_remaining_bytes", lambda: None)
     monkeypatch.setattr(resources, "_current_tree_swap_bytes", lambda: swap)
+    monkeypatch.setattr(resources, "observe_tree_memory", lambda: TreeMemoryObservation(pss_bytes=pss, swap_bytes=swap))
 
 
 def test_memory_budget_defaults_and_validation() -> None:
@@ -882,6 +886,10 @@ def test_stage_admission_rejects_unreadable_live_child(monkeypatch) -> None:
     monkeypatch.setattr(resources, "_current_available_bytes", lambda: 10**12)
     monkeypatch.setattr(resources, "_read_cgroup_remaining_bytes", lambda: None)
     monkeypatch.setattr(resources, "_current_tree_swap_bytes", lambda: 0)
+    monkeypatch.setattr(
+        resources, "observe_tree_memory",
+        lambda: TreeMemoryObservation(pss_bytes=0, swap_bytes=0),
+    )
     with pytest.raises(resources.MhsResourceAdmissionError) as exc:
         resources.assert_mhs_stage_allocation(
             stage="named", estimated_bytes=10**12, budget=_stage_budget(),
@@ -897,6 +905,7 @@ def test_stage_admission_rejects_tighter_headroom(monkeypatch) -> None:
     monkeypatch.setattr(resources, "_current_available_bytes", lambda: 500)
     monkeypatch.setattr(resources, "_read_cgroup_remaining_bytes", lambda: None)
     monkeypatch.setattr(resources, "_current_tree_swap_bytes", lambda: 0)
+    monkeypatch.setattr(resources, "observe_tree_memory", lambda: TreeMemoryObservation(pss_bytes=0, swap_bytes=0))
     with pytest.raises(resources.MhsResourceAdmissionError) as exc:
         resources.assert_mhs_stage_allocation(
             stage="host", estimated_bytes=0, budget=budget, replay=False, initial_swap_bytes=0,
@@ -919,16 +928,19 @@ def test_stage_admission_swap_baseline_behaviour(monkeypatch) -> None:
     monkeypatch.setattr(resources, "_current_available_bytes", lambda: 10**12)
     monkeypatch.setattr(resources, "_read_cgroup_remaining_bytes", lambda: None)
     monkeypatch.setattr(resources, "_current_tree_swap_bytes", lambda: 100)
+    monkeypatch.setattr(resources, "observe_tree_memory", lambda: TreeMemoryObservation(pss_bytes=0, swap_bytes=100))
     resources.assert_mhs_stage_allocation(
         stage="s", estimated_bytes=0, budget=budget, replay=False, initial_swap_bytes=100,
     )
     monkeypatch.setattr(resources, "_current_tree_swap_bytes", lambda: 200)
+    monkeypatch.setattr(resources, "observe_tree_memory", lambda: TreeMemoryObservation(pss_bytes=0, swap_bytes=200))
     with pytest.raises(resources.MhsResourceAdmissionError) as exc:
         resources.assert_mhs_stage_allocation(
             stage="s", estimated_bytes=0, budget=budget, replay=False, initial_swap_bytes=100,
         )
     assert exc.value.error_code == "SWAP_GROWTH"
     monkeypatch.setattr(resources, "_current_tree_swap_bytes", lambda: None)
+    monkeypatch.setattr(resources, "observe_tree_memory", lambda: TreeMemoryObservation(pss_bytes=0, swap_bytes=None))
     resources.assert_mhs_stage_allocation(
         stage="s", estimated_bytes=0, budget=budget, replay=False, initial_swap_bytes=100,
     )
@@ -944,13 +956,18 @@ def test_stage_admission_telemetry_and_parameter_errors(monkeypatch) -> None:
     def _boom() -> int:
         raise DataIntegrityError("cannot enumerate")
 
+    def _boom_observe() -> object:
+        raise DataIntegrityError("cannot enumerate")
+
     monkeypatch.setattr(resources, "_current_tree_pss_bytes", _boom)
+    monkeypatch.setattr(resources, "observe_tree_memory", _boom_observe)
     with pytest.raises(resources.MhsResourceAdmissionError) as exc:
         resources.assert_mhs_stage_allocation(
             stage="s", estimated_bytes=0, budget=budget, replay=False, initial_swap_bytes=0,
         )
     assert exc.value.error_code == "RESOURCE_TELEMETRY"
     monkeypatch.setattr(resources, "_current_tree_pss_bytes", lambda: 0)
+    monkeypatch.setattr(resources, "observe_tree_memory", lambda: TreeMemoryObservation(pss_bytes=0, swap_bytes=0))
 
     def _boom_host() -> int:
         raise DataIntegrityError("cannot read available")
@@ -1178,6 +1195,7 @@ def test_admission_preserves_swap_and_telemetry_provenance(monkeypatch) -> None:
     monkeypatch.setattr(resources, "_current_available_bytes", lambda: 16 * 2**30)
     monkeypatch.setattr(resources, "_read_cgroup_remaining_bytes", lambda: None)
     monkeypatch.setattr(resources, "_current_tree_swap_bytes", lambda: 512)
+    monkeypatch.setattr(resources, "observe_tree_memory", lambda: TreeMemoryObservation(pss_bytes=0, swap_bytes=512))
     with pytest.raises(resources.MhsResourceAdmissionError) as excinfo:
         resources.assert_mhs_stage_allocation(
             stage="process_candidate_books", estimated_bytes=0, budget=budget,
@@ -1207,9 +1225,155 @@ def test_explicit_low_ceiling_rejected_before_allocation(monkeypatch) -> None:
     monkeypatch.setattr(resources, "_current_available_bytes", lambda: 16 * 2**30)
     monkeypatch.setattr(resources, "_read_cgroup_remaining_bytes", lambda: None)
     monkeypatch.setattr(resources, "_current_tree_swap_bytes", lambda: 0)
+    monkeypatch.setattr(resources, "observe_tree_memory", lambda: TreeMemoryObservation(pss_bytes=2**30, swap_bytes=0))
     with pytest.raises(resources.MhsResourceAdmissionError) as excinfo:
         resources.assert_mhs_stage_allocation(
             stage="process_prepare_panel", estimated_bytes=1, budget=resolved,
             replay=False, initial_swap_bytes=0,
         )
     assert excinfo.value.error_code == "MEMORY_BUDGET"
+
+
+def _two_proc_tree(monkeypatch) -> dict[int, int]:
+    from types import SimpleNamespace
+
+    calls: dict[int, int] = {}
+
+    class _Proc:
+        def __init__(self, index: int, info: object) -> None:
+            self._index = index
+            self._info = info
+
+        def memory_full_info(self) -> object:
+            calls[self._index] = calls.get(self._index, 0) + 1
+            return self._info
+
+        def children(self, recursive: bool = True) -> list[object]:
+            return []
+
+    root_info = SimpleNamespace(pss=100, uss=100, swap=0, rss=100)
+    child_info = SimpleNamespace(pss=200, uss=200, swap=0, rss=200)
+    root = _Proc(0, root_info)
+    child = _Proc(1, child_info)
+
+    class _Root(_Proc):
+        def children(self, recursive: bool = True) -> list[object]:
+            return [child]
+
+    monkeypatch.setattr(resources.psutil, "Process", lambda *args, **kwargs: _Root(0, root_info))
+    return calls
+
+
+def test_baselined_stage_admission_reads_tree_once(monkeypatch) -> None:
+    """A baselined stage admission observes PSS and swap in a single sweep."""
+    calls = _two_proc_tree(monkeypatch)
+    monkeypatch.setattr(resources, "_current_available_bytes", lambda: 10**12)
+    monkeypatch.setattr(resources, "_read_cgroup_remaining_bytes", lambda: None)
+    budget = _stage_budget(total=10**12, replay=10**12, floor=100)
+    resources.assert_mhs_stage_allocation(
+        stage="s", estimated_bytes=0, budget=budget, replay=False, initial_swap_bytes=0,
+    )
+    assert sum(calls.values()) == 2
+
+
+def test_baselined_allocation_admission_reads_tree_once(monkeypatch) -> None:
+    """A baselined allocation admission observes PSS and swap in a single sweep."""
+    calls = _two_proc_tree(monkeypatch)
+    monkeypatch.setattr(resources, "_current_available_bytes", lambda: 10**12)
+    monkeypatch.setattr(resources, "_read_cgroup_remaining_bytes", lambda: None)
+    resources.assert_mhs_allocation_budget(
+        estimated_bytes=0, budget_bytes=10**12, reserve_bytes=100, initial_swap_bytes=0,
+    )
+    assert sum(calls.values()) == 2
+
+
+def test_unbaselined_admission_keeps_pss_seam(monkeypatch) -> None:
+    """Without a baseline the combined seam is never consulted."""
+    def _never() -> object:
+        raise AssertionError("combined seam must not run")
+
+    monkeypatch.setattr(resources, "_current_tree_pss_bytes", lambda: 900)
+    monkeypatch.setattr(resources, "observe_tree_memory", _never)
+    with pytest.raises(resources.MhsResourceAdmissionError) as exc:
+        resources.assert_mhs_allocation_budget(estimated_bytes=200, budget_bytes=1000, reserve_bytes=None)
+    assert exc.value.error_code == "MEMORY_BUDGET"
+
+
+def test_swap_only_admission_keeps_optional_seam(monkeypatch) -> None:
+    """Without a PSS budget only the optional swap seam runs."""
+    def _never() -> object:
+        raise AssertionError("combined seam must not run")
+
+    monkeypatch.setattr(resources, "_current_available_bytes", lambda: 10**12)
+    monkeypatch.setattr(resources, "_read_cgroup_remaining_bytes", lambda: None)
+    monkeypatch.setattr(resources, "_current_tree_swap_bytes", lambda: 200)
+    monkeypatch.setattr(resources, "observe_tree_memory", _never)
+    with pytest.raises(resources.MhsResourceAdmissionError) as exc:
+        resources.assert_mhs_allocation_budget(
+            estimated_bytes=0, budget_bytes=None, reserve_bytes=100,
+            stage="s", initial_swap_bytes=100,
+        )
+    assert exc.value.error_code == "SWAP_GROWTH"
+
+
+def test_combined_admission_precedence(monkeypatch) -> None:
+    """Combined observation preserves budget, reserve then swap precedence."""
+    monkeypatch.setattr(resources, "_current_available_bytes", lambda: 50)
+    monkeypatch.setattr(resources, "_read_cgroup_remaining_bytes", lambda: None)
+    monkeypatch.setattr(
+        resources, "observe_tree_memory",
+        lambda: TreeMemoryObservation(pss_bytes=10**12, swap_bytes=200),
+    )
+    with pytest.raises(resources.MhsResourceAdmissionError) as exc:
+        resources.assert_mhs_allocation_budget(
+            estimated_bytes=0, budget_bytes=100, reserve_bytes=10,
+            stage="s", initial_swap_bytes=100,
+        )
+    assert exc.value.error_code == "MEMORY_BUDGET"
+    monkeypatch.setattr(
+        resources, "observe_tree_memory",
+        lambda: TreeMemoryObservation(pss_bytes=10, swap_bytes=200),
+    )
+    with pytest.raises(resources.MhsResourceAdmissionError) as exc2:
+        resources.assert_mhs_allocation_budget(
+            estimated_bytes=0, budget_bytes=10**12, reserve_bytes=10**12,
+            stage="s", initial_swap_bytes=100,
+        )
+    assert exc2.value.error_code == "MEMORY_RESERVE"
+    monkeypatch.setattr(resources, "_current_available_bytes", lambda: 10**12)
+    with pytest.raises(resources.MhsResourceAdmissionError) as exc3:
+        resources.assert_mhs_allocation_budget(
+            estimated_bytes=0, budget_bytes=10**12, reserve_bytes=100,
+            stage="s", initial_swap_bytes=100,
+        )
+    assert exc3.value.error_code == "SWAP_GROWTH"
+    resources.assert_mhs_allocation_budget(
+        estimated_bytes=0, budget_bytes=10**12, reserve_bytes=100,
+        stage="s", initial_swap_bytes=200,
+    )
+    monkeypatch.setattr(
+        resources, "observe_tree_memory",
+        lambda: TreeMemoryObservation(pss_bytes=10, swap_bytes=None),
+    )
+    resources.assert_mhs_allocation_budget(
+        estimated_bytes=0, budget_bytes=10**12, reserve_bytes=100,
+        stage="s", initial_swap_bytes=200,
+    )
+
+
+def test_combined_telemetry_failure_wraps_as_resource_telemetry(monkeypatch) -> None:
+    """A combined observation failure wraps with stage context and cause."""
+    from src.common.errors import DataIntegrityError as _DataIntegrityError
+
+    def _boom() -> object:
+        raise _DataIntegrityError("cannot measure")
+
+    monkeypatch.setattr(resources, "observe_tree_memory", _boom)
+    with pytest.raises(resources.MhsResourceAdmissionError) as exc:
+        resources.assert_mhs_stage_allocation(
+            stage="s", estimated_bytes=0, budget=_stage_budget(),
+            replay=False, initial_swap_bytes=0,
+        )
+    assert exc.value.error_code == "RESOURCE_TELEMETRY"
+    assert str(exc.value) == "resource telemetry unavailable at stage 's': cannot measure"
+    assert isinstance(exc.value.__cause__, _DataIntegrityError)

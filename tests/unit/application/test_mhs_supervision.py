@@ -79,9 +79,8 @@ def _install_scripted(monkeypatch, proc: _ScriptedProc):
     monkeypatch.setattr(subprocess, "Popen", lambda *args, **kwargs: proc)
     monkeypatch.setattr(sup, "_gnu_time_prefix", lambda: [])
     monkeypatch.setattr(sup, "_parse_gnu_metrics", lambda *a, **k: (None, None))
-    monkeypatch.setattr(sup, "_workload_pss_uss", lambda pid: (100, 50))
+    monkeypatch.setattr(sup, "_workload_memory", lambda pid: (100, 50, 0))
     monkeypatch.setattr(sup, "current_mhs_headroom_bytes", lambda: 8 * 2**30)
-    monkeypatch.setattr(sup, "_workload_swap_bytes", lambda pid: 0)
     monkeypatch.setattr(sup, "_terminate_group", lambda p, timeout=5.0: setattr(p, "terminated", True))
 
 
@@ -137,9 +136,8 @@ def test_sample_once_counts_and_rejects_in_order(monkeypatch) -> None:
 
     budget = MhsMemoryBudget()
     state = sup._SupervisionState(pid=1234, swap_baseline=0, last_heartbeat=0.0)
-    monkeypatch.setattr(sup, "_workload_pss_uss", lambda pid: (budget.total_tree_pss_bytes + 1, 7))
+    monkeypatch.setattr(sup, "_workload_memory", lambda pid: (budget.total_tree_pss_bytes + 1, 7, 0))
     monkeypatch.setattr(sup, "current_mhs_headroom_bytes", lambda: 0)
-    monkeypatch.setattr(sup, "_workload_swap_bytes", lambda pid: 0)
     reason = sup._sample_once(state, budget)
     assert reason == f"sampled tree PSS {budget.total_tree_pss_bytes + 1} exceeds {budget.total_tree_pss_bytes}"
     assert state.samples == 1
@@ -157,7 +155,7 @@ def test_sample_once_telemetry_loss_is_uncounted_rejection(monkeypatch) -> None:
     def _gone(pid):
         raise OSError("gone")
 
-    monkeypatch.setattr(sup, "_workload_pss_uss", _gone)
+    monkeypatch.setattr(sup, "_workload_memory", _gone)
     assert sup._sample_once(state, budget) == "missing safety telemetry: gone"
     assert state.samples == 0
     assert state.pss_peak is None
@@ -168,9 +166,8 @@ def test_sample_once_boundary_equality_is_within_budget(monkeypatch) -> None:
 
     budget = MhsMemoryBudget()
     state = sup._SupervisionState(pid=1, swap_baseline=100, last_heartbeat=0.0)
-    monkeypatch.setattr(sup, "_workload_pss_uss", lambda pid: (budget.total_tree_pss_bytes, 9))
+    monkeypatch.setattr(sup, "_workload_memory", lambda pid: (budget.total_tree_pss_bytes, 9, 100))
     monkeypatch.setattr(sup, "current_mhs_headroom_bytes", lambda: budget.min_available_bytes)
-    monkeypatch.setattr(sup, "_workload_swap_bytes", lambda pid: 100)
     assert sup._sample_once(state, budget) is None
     assert state.swap_growth is None
 
@@ -181,9 +178,8 @@ def test_sample_once_swap_growth_only_above_baseline(monkeypatch) -> None:
     budget = MhsMemoryBudget()
     state = sup._SupervisionState(pid=1, swap_baseline=100, last_heartbeat=0.0)
     current = {"bytes": 100}
-    monkeypatch.setattr(sup, "_workload_pss_uss", lambda pid: (100, 50))
+    monkeypatch.setattr(sup, "_workload_memory", lambda pid: (100, 50, current["bytes"]))
     monkeypatch.setattr(sup, "current_mhs_headroom_bytes", lambda: 8 * 2**30)
-    monkeypatch.setattr(sup, "_workload_swap_bytes", lambda pid: current["bytes"])
     assert sup._sample_once(state, budget) is None
     assert state.swap_growth is None
     current["bytes"] = 150
@@ -195,13 +191,8 @@ def test_sample_once_unavailable_swap_keeps_run_monitored(monkeypatch) -> None:
 
     budget = MhsMemoryBudget()
     state = sup._SupervisionState(pid=1, swap_baseline=100, last_heartbeat=0.0)
-    monkeypatch.setattr(sup, "_workload_pss_uss", lambda pid: (100, 50))
+    monkeypatch.setattr(sup, "_workload_memory", lambda pid: (100, 50, None))
     monkeypatch.setattr(sup, "current_mhs_headroom_bytes", lambda: 8 * 2**30)
-
-    def _lost(pid):
-        raise OSError("swap gone")
-
-    monkeypatch.setattr(sup, "_workload_swap_bytes", _lost)
     assert sup._sample_once(state, budget) is None
     assert state.samples == 1
     assert state.swap_growth is None
@@ -323,7 +314,7 @@ def test_resource_stop_outranks_interrupt_during_termination(tmp_path, monkeypat
     run_id = "a1" * 16
     proc = _ScriptedProc()
     _install_scripted(monkeypatch, proc)
-    monkeypatch.setattr(sup, "_workload_pss_uss", lambda pid: (10**12, 0))
+    monkeypatch.setattr(sup, "_workload_memory", lambda pid: (10**12, 0, 0))
     calls: list = []
     _install_raise_once_terminate(monkeypatch, calls)
     run = sup.run_mhs_process_backtest(

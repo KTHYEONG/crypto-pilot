@@ -20,6 +20,7 @@ import psutil
 
 from src.common.errors import DataIntegrityError
 from src.mhs.contracts import MhsResourceMeasurement
+from src.mhs.tree_memory import observe_tree_memory
 from src.mhs.types import (
     RAM_BUDGET_FRACTION,
     RAM_RESERVE_FLOOR_BYTES,
@@ -184,33 +185,28 @@ def _current_available_bytes() -> int:
 
 
 def _current_tree_pss_bytes() -> int:
-    try:
-        me = psutil.Process(os.getpid())
-        procs = [me, *me.children(recursive=True)]
-    except Exception as exc:  # noqa: BLE001
-        raise DataIntegrityError(f"physical-memory telemetry unavailable: cannot enumerate process tree: {exc}") from exc
-    total = 0
-    observed = 0
-    for proc in procs:
-        try:
-            info = proc.memory_full_info()
-        except psutil.NoSuchProcess:
-            continue
-        except psutil.AccessDenied as exc:
-            raise DataIntegrityError(f"physical-memory telemetry unavailable: unreadable live process: {exc}") from exc
-        except Exception as exc:  # noqa: BLE001
-            raise DataIntegrityError(f"physical-memory telemetry unavailable: cannot read process memory: {exc}") from exc
-        pss = getattr(info, "pss", None)
-        if pss is None:
-            raise DataIntegrityError("physical-memory telemetry unavailable: process-tree PSS observation missing")
-        try:
-            total += int(pss)
-        except (TypeError, ValueError) as exc:
-            raise DataIntegrityError(f"physical-memory telemetry unavailable: invalid PSS observation: {exc}") from exc
-        observed += 1
-    if observed == 0:
-        raise DataIntegrityError("physical-memory telemetry unavailable: no process-tree PSS observation")
-    return total
+    return observe_tree_memory().pss_bytes
+
+
+def _budgeted_tree_memory(initial_swap_bytes: int | None) -> tuple[int, int | None]:
+    """Read budgeted PSS with the swap baseline from one sweep when both apply."""
+    if initial_swap_bytes is not None:
+        observation = observe_tree_memory()
+        return observation.pss_bytes, observation.swap_bytes
+    return _current_tree_pss_bytes(), None
+
+
+def _raise_for_swap_growth(*, stage: str, scope: str, initial_swap_bytes: int | None, current_swap: int | None) -> None:
+    """Reject measured swap growth above the run-entry baseline, if both known."""
+    if (
+        initial_swap_bytes is not None
+        and current_swap is not None
+        and current_swap > initial_swap_bytes
+    ):
+        raise MhsResourceAdmissionError(
+            stage=stage, error_code="SWAP_GROWTH",
+            message=f"mhs {scope} swap growth at '{stage}': initial_swap={initial_swap_bytes} current_swap={current_swap}",
+        )
 
 
 def _current_tree_swap_bytes() -> int | None:
@@ -301,7 +297,7 @@ def assert_mhs_allocation_budget(*, estimated_bytes: int, budget_bytes: int | No
         raise ValueError(f"initial_swap_bytes must be a non-negative integer or None, got {initial_swap_bytes!r}")
     if budget_bytes is not None:
         try:
-            current = _current_tree_pss_bytes()
+            current, current_swap = _budgeted_tree_memory(initial_swap_bytes)
         except DataIntegrityError as exc:
             raise MhsResourceAdmissionError(
                 stage=stage, error_code="RESOURCE_TELEMETRY",
@@ -312,6 +308,8 @@ def assert_mhs_allocation_budget(*, estimated_bytes: int, budget_bytes: int | No
                 stage=stage, error_code="MEMORY_BUDGET",
                 message=f"mhs allocation budget exceeded at '{stage}': tree_pss={current} estimated={estimated_bytes} budget={budget_bytes}; no decoder or plane allocation begins",
             )
+    else:
+        current_swap = None
     if reserve_bytes is not None:
         try:
             headroom = _tree_headroom_bytes()
@@ -325,13 +323,12 @@ def assert_mhs_allocation_budget(*, estimated_bytes: int, budget_bytes: int | No
                 stage=stage, error_code="MEMORY_RESERVE",
                 message=f"mhs allocation reserve breached at '{stage}': headroom={headroom} estimated={estimated_bytes} reserve={reserve_bytes}",
             )
-    if initial_swap_bytes is not None:
+    if initial_swap_bytes is not None and budget_bytes is None:
         current_swap = _current_tree_swap_bytes()
-        if current_swap is not None and current_swap > initial_swap_bytes:
-            raise MhsResourceAdmissionError(
-                stage=stage, error_code="SWAP_GROWTH",
-                message=f"mhs allocation swap growth at '{stage}': initial_swap={initial_swap_bytes} current_swap={current_swap}",
-            )
+    _raise_for_swap_growth(
+        stage=stage, scope="allocation",
+        initial_swap_bytes=initial_swap_bytes, current_swap=current_swap,
+    )
 
 
 def _tree_headroom_bytes() -> int:
@@ -387,7 +384,7 @@ def assert_mhs_stage_allocation(
         raise ValueError(f"initial_swap_bytes must be a non-negative integer or None, got {initial_swap_bytes!r}")
     limit = resolved.replay_tree_pss_bytes if replay else resolved.total_tree_pss_bytes
     try:
-        current = _current_tree_pss_bytes()
+        current, current_swap = _budgeted_tree_memory(initial_swap_bytes)
     except DataIntegrityError as exc:
         raise MhsResourceAdmissionError(stage=stage, error_code="RESOURCE_TELEMETRY", message=f"resource telemetry unavailable at stage '{stage}': {exc}") from exc
     if current + estimated_bytes > limit:
@@ -404,13 +401,10 @@ def assert_mhs_stage_allocation(
             stage=stage, error_code="MEMORY_RESERVE",
             message=f"mhs stage reserve breached at '{stage}': headroom={headroom} estimated={estimated_bytes} reserve={resolved.min_available_bytes}",
         )
-    if initial_swap_bytes is not None:
-        current_swap = _current_tree_swap_bytes()
-        if current_swap is not None and current_swap > initial_swap_bytes:
-            raise MhsResourceAdmissionError(
-                stage=stage, error_code="SWAP_GROWTH",
-                message=f"mhs stage swap growth at '{stage}': initial_swap={initial_swap_bytes} current_swap={current_swap}",
-            )
+    _raise_for_swap_growth(
+        stage=stage, scope="stage",
+        initial_swap_bytes=initial_swap_bytes, current_swap=current_swap,
+    )
 
 
 def _assert_stage_rss_budget(
