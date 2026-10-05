@@ -13,8 +13,6 @@ from typing import Final
 _REPO_ROOT: Final[Path] = Path(__file__).resolve().parents[2]
 
 COMPLEXITY_CEILINGS: Final[dict[str, int]] = {
-    "src/application/mhs_backtest.py::validate_mhs_backtest_request": 20,
-    "src/application/mhs_supervisor.py::run_mhs_process_backtest": 41,
     "src/application/ops/gdrive_cleanup.py::build_cleanup_plan": 30,
     "src/backtests/migration.py::_migrate_history_source": 16,
     "src/backtests/migration.py::_migrate_run_source": 16,
