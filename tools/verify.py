@@ -289,21 +289,65 @@ def _git_diff_added_lines(file: str) -> set[int] | None:
     return added
 
 
+def _coverage_args(src_files: list[str], cov_json_path: str) -> list[str]:
+    """Build pytest-cov arguments that measure changed sources without importing them.
+
+    Coverage resolves any ``--cov`` value that is not an existing directory as an
+    importable package via ``importlib.util.find_spec``; for a dotted submodule that
+    imports and then evicts its parent packages, which re-initializes numpy's C
+    extension ("cannot load module more than once per process") and executes
+    ``src`` import-time side effects before ``tests/conftest.py`` redirects storage
+    roots. A file path is likewise treated as a package name and measures nothing.
+    Directory sources are matched by path only, so each changed file is measured
+    through its parent directory.
+
+    Args:
+        src_files: Repo-relative POSIX paths of changed ``src/`` Python files.
+        cov_json_path: Destination of the JSON coverage report.
+    Returns:
+        ``["--cov=<dir>", ..., "--cov-report=json:<cov_json_path>"]`` with one
+        entry per distinct parent directory in ascending order, or ``[]`` when
+        ``src_files`` is empty.
+    """
+    if not src_files:
+        return []
+    dirs = sorted({sf.rpartition("/")[0] for sf in src_files if "/" in sf})
+    if not dirs:
+        return []
+    return [f"--cov={d}" for d in dirs] + [f"--cov-report=json:{cov_json_path}"]
+
+
 def _check_diff_coverage(
     src_files: list[str], cov_json_path: str, unmapped: list[str] | None = None
 ) -> tuple[list[JsonDiag], int | None]:
     """Verify that every line added to touched src/ files is executed by tests.
 
-    Modules without a mapped test are reported as ``unmapped`` diagnostics by
-    the caller instead: the mapped-test run cannot be expected to cover them.
+    The report is keyed by cwd-relative POSIX paths because coverage sources are
+    directories under the repository root, so each ``src_files`` entry is looked
+    up verbatim. A missing or unreadable report, or a mapped file absent from it,
+    means the gate measured nothing and fails closed instead of passing.
+    Modules without a mapped test are reported as ``unmapped`` diagnostics by the
+    caller instead: the mapped-test run cannot be expected to cover them.
+
+    Returns:
+        ``(diagnostics, percent)``; ``percent`` is None when no added line was
+        measurable.
     """
-    if not os.path.exists(cov_json_path):
-        return [], None
     try:
         with open(cov_json_path, encoding="utf-8") as f:
             cov_data = json.load(f)
-    except Exception:
-        return [], None
+    except (OSError, ValueError):
+        return (
+            [
+                {
+                    "file": "",
+                    "line": 0,
+                    "error": f"coverage report missing or unreadable: {cov_json_path}",
+                    "fix_hint": "Re-run verification with coverage enabled and ensure the report is written",
+                }
+            ],
+            None,
+        )
 
     skipped = set(unmapped or [])
     files_data = cov_data.get("files", {})
@@ -313,8 +357,16 @@ def _check_diff_coverage(
     for sf in src_files:
         if sf in skipped:
             continue
-        entry = files_data.get(sf) or files_data.get(sf.replace("/", os.sep))
+        entry = files_data.get(sf)
         if not entry:
+            diags.append(
+                {
+                    "file": sf,
+                    "line": 0,
+                    "error": f"no coverage data for {sf}",
+                    "fix_hint": "Add or update tests exercising these lines",
+                }
+            )
             continue
         missing = set(entry.get("missing_lines", []))
         executed = set(entry.get("executed_lines", []))
@@ -480,8 +532,7 @@ def main() -> None:
     cov_args: list[str] = []
 
     if src_files and not args.no_cov:
-        cov_modules = sorted({f.removesuffix(".py").replace("/", ".") for f in src_files})
-        cov_args = [*(f"--cov={module}" for module in cov_modules), f"--cov-report=json:{cov_json_path}"]
+        cov_args = _coverage_args(src_files, cov_json_path)
 
     pytest_cmd = [
         sys.executable,
