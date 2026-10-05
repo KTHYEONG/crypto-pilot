@@ -24,6 +24,7 @@ from .contracts import (
     StrategyExecutionReplayResult,
     TerminalPositionEvidence,
 )
+from .window_staging import WindowStaging
 
 # 마지막 유동 봉 이후 24h(zombie_mask_v1 K=24 1h와 동일 기간) — 실측 거래소 전체 중단 최장 69분이라 중단을 상폐로 오판하지 않는다.
 DELIST_SETTLEMENT_IDLE_NS: int = 24 * 3600 * 1_000_000_000
@@ -35,10 +36,12 @@ _BOOKED_FILL_REASONS: frozenset[str] = frozenset({"passive_fill", "timeout_taker
 class _WindowFrame:
     """Read-only view of one execution window staged for the replay phases.
 
-    Every field references an array or index built once by ``_consume_validate_window``; the frame
-    never owns copies, so passing it costs one pointer and the window's working set is unchanged.
-    It exists so phase methods receive the window as one named bundle instead of 16-24 positional
-    arrays whose order differed per method. Arrays are shared with the caller and must be treated
+    Every field references an array staged once per window by
+    ``stage_window_arrays`` and shared read-only across bound accumulators;
+    the frame never owns copies, so passing it costs one pointer and the
+    window's working set is unchanged. It exists so phase methods receive the
+    window as one named bundle instead of 16-24 positional arrays whose order
+    differed per method. Arrays are shared with the caller and must be treated
     as immutable for the frame's lifetime (one ``consume`` call).
 
     Attributes:
@@ -333,9 +336,20 @@ class _BoundExecutionReplayAccumulator:
         if dollar < self.min_notional_probe_usdt:
             self.min_notional_dropped_notional += dollar
 
-    def consume(self, w: ExecutionReplayWindow) -> None:
-        """Consume one window through the ordered replay phases. Physical IO boundaries do not reset inventory, liquidity or the logical spread clock. Overlap observations and settlements are applied once."""
-        frame = self._consume_validate_window(w)
+    def consume(self, w: ExecutionReplayWindow, staging: WindowStaging | None = None) -> None:
+        """Consume one window through the ordered replay phases. Physical IO boundaries do not reset inventory, liquidity or the logical spread clock. Overlap observations and settlements are applied once.
+
+        Args:
+            w: Window to consume.
+            staging: Shared staging built for exactly ``w`` by the batch driver;
+                None stages privately (single-bound replay and direct callers).
+        Raises:
+            ValueError: ``staging`` was built for a different window object
+                (``"staging was built for a different window"``); raised before
+                any state mutation.
+            DataIntegrityError: Window validation or replay integrity fails.
+        """
+        frame = self._consume_validate_window(w, staging)
         for gap in w.funding_coverage_gaps:
             self.funding_coverage_gaps[(gap.symbol, gap.start, gap.end, gap.reason)] = gap
         self._admit_settlement_events(w)
@@ -349,7 +363,7 @@ class _BoundExecutionReplayAccumulator:
         self._advance_liquidity_carry(frame)
         self._observe_spread_partition(frame, w.logical_partition)
 
-    def _consume_validate_window(self, w: ExecutionReplayWindow) -> _WindowFrame:
+    def _consume_validate_window(self, w: ExecutionReplayWindow, staging: WindowStaging | None = None) -> _WindowFrame:
         """Validate one window and stage its grids, marks, and funding."""
         columns = self.columns
         n_cols = self.n_cols
@@ -357,7 +371,6 @@ class _BoundExecutionReplayAccumulator:
         if w.columns != columns:
             raise DataIntegrityError("all execution windows must share an identical column order")
         local_cols = list(w.symbols)
-        n_local = len(local_cols)
         gpos = np.asarray([gpos_of[s] for s in local_cols], dtype=np.intp)
         in_window = np.zeros(n_cols, dtype=bool)
         in_window[gpos] = True
@@ -365,90 +378,26 @@ class _BoundExecutionReplayAccumulator:
         if outside.size:
             j = int(outside[0])
             raise DataIntegrityError(f"held position outside execution window roster (symbol={columns[j]!r} units={float(self.units_arr[j])!r})")
-        grid = w.minute_grid
-        grid_ns = np.asarray(grid, dtype="datetime64[ns]").astype("int64")
-        n_grid = len(grid_ns)
-        if n_grid < 2:
-            raise DataIntegrityError("an execution window must span at least two grid bars")
-        if not w.bar_funding.index.equals(grid):
-            raise DataIntegrityError("bar_funding must align exactly to the window minute grid")
-        bar_ns = int(grid_ns[1] - grid_ns[0])
-        self.full_grid_end = grid[-1]
-        marks = w.marks if w.marks is not None else w.closes
-        marks_values = marks[local_cols].to_numpy(dtype="float64")
-        highs_values = w.highs[local_cols].to_numpy(dtype="float64")
-        lows_values = w.lows[local_cols].to_numpy(dtype="float64")
-        closes_values = w.closes[local_cols].to_numpy(dtype="float64")
-        close_finite = np.isfinite(closes_values)
-        sym_finite = np.isfinite(marks_values)
-        mark_valid = sym_finite & (marks_values > 0.0)
-        if n_local:
-            funding_matrix = np.stack(
-                [w.bar_funding[s].to_numpy(dtype="float64") for s in local_cols], axis=1,
-            )
-        else:
-            funding_matrix = np.zeros((n_grid, 0), dtype="float64")
-        if not np.isfinite(funding_matrix).all():
-            raise DataIntegrityError("bar_funding must be finite")
-        finite_marks = marks_values[sym_finite]
-        if (finite_marks <= 0).any():
-            raise DataIntegrityError("finite marks must be strictly positive")
-
-        # Window context for the causal replay: quote volumes (ones when the
-        # window carries none, preserving legacy direct construction),
-        # funding knowledge (all-known when absent), and per-bar availability
-        # (the grid itself when absent, so effective time equals the label).
-        n_grid_int = int(n_grid)
-        if w.quote_volumes is not None:
-            qv = np.full((n_grid_int, n_local), 1.0, dtype="float64")
-            for j, sym in enumerate(local_cols):
-                if sym in w.quote_volumes.columns:
-                    qv[:, j] = w.quote_volumes[sym].to_numpy(dtype="float64")
-        else:
-            qv = np.ones((n_grid_int, n_local), dtype="float64")
-        self._w_qv = qv
-        self._w_last_liquid_idx = np.maximum.accumulate(np.where(qv > 0.0, np.arange(n_grid_int)[:, None], -1), axis=0)
-        if w.funding_known is not None:
-            fknown = np.zeros((n_grid_int, n_local), dtype=bool)
-            for j, sym in enumerate(local_cols):
-                if sym in w.funding_known.columns:
-                    fknown[:, j] = w.funding_known[sym].to_numpy(dtype=bool)
-        else:
-            fknown = np.ones((n_grid_int, n_local), dtype=bool)
-        self._w_fknown = fknown
-        if w.bar_available_at is not None and len(w.bar_available_at) == n_grid_int:
-            avail_ns = np.asarray(w.bar_available_at, dtype="datetime64[ns]").astype("int64")
-            self._w_avail_explicit = True
-        else:
-            avail_ns = grid_ns.copy()
-            self._w_avail_explicit = False
-        self._w_avail_ns = avail_ns
-        # Mark availability trails bar availability by one bar: the mark read
-        # at a decision is sourced from the previous bar's close (hourly-carry
-        # semantics), so the decision bar's own close tolerance from F8 stays
-        # usable while strictly later bars fail the PIT check downstream.
-        bar_step = int(avail_ns[1] - avail_ns[0]) if len(avail_ns) > 1 else 0
-        self._w_mark_avail = np.repeat((avail_ns - bar_step)[:, None], n_local, axis=1)
-        close_row = np.where(close_finite, np.arange(n_grid)[:, None], -1)
-        last_close_idx = np.maximum.accumulate(close_row, axis=0)
-        decision_ns_all = np.asarray(w.target_weights.index, dtype="datetime64[ns]").astype("int64")
-        signal_ns_all = np.asarray(w.signal_available_at, dtype="datetime64[ns]").astype("int64")
-        spos_all = np.searchsorted(grid_ns, signal_ns_all, side="right")
-        dpos_all = np.searchsorted(grid_ns, decision_ns_all, side="left")
-        dpos_clipped = np.minimum(dpos_all, n_grid - 1)
-        on_grid_all = np.where(dpos_all < n_grid, grid_ns[dpos_clipped] == decision_ns_all, False)
-        target_values = w.target_weights[local_cols].to_numpy(dtype="float64")
-        # submit_bar anchor: the reference is the mark at bar spos-1 -- the bar
-        # that closes exactly at the submission bar's open, hence observable at
-        # submit time (no look-ahead). decision_bar keeps the frozen default.
+        if staging is None:
+            staging = WindowStaging(w)
+        if staging.window is not w:
+            raise ValueError("staging was built for a different window")
+        staged = staging.arrays()
+        self.full_grid_end = staged.grid[-1]
+        self._w_qv = staged.quote_volumes
+        self._w_last_liquid_idx = staged.last_liquid_idx
+        self._w_fknown = staged.funding_known
+        self._w_avail_ns = staged.avail_ns
+        self._w_avail_explicit = staged.avail_explicit
+        self._w_mark_avail = staged.mark_avail
         submit_anchored = self.spec.decision_anchor == "submit_bar"
         fill_start = len(self.fill_ts)
         return _WindowFrame(
-            local_cols=local_cols, gpos=gpos, grid=grid, grid_ns=grid_ns, bar_ns=bar_ns,
-            marks_values=marks_values, highs_values=highs_values, lows_values=lows_values,
-            closes_values=closes_values, mark_valid=mark_valid, funding_matrix=funding_matrix,
-            last_close_idx=last_close_idx, decision_ns_all=decision_ns_all, spos_all=spos_all,
-            dpos_all=dpos_all, on_grid_all=on_grid_all, target_values=target_values,
+            local_cols=list(staged.local_cols), gpos=gpos, grid=staged.grid, grid_ns=staged.grid_ns, bar_ns=staged.bar_ns,
+            marks_values=staged.marks_values, highs_values=staged.highs_values, lows_values=staged.lows_values,
+            closes_values=staged.closes_values, mark_valid=staged.mark_valid, funding_matrix=staged.funding_matrix,
+            last_close_idx=staged.last_close_idx, decision_ns_all=staged.decision_ns_all, spos_all=staged.spos_all,
+            dpos_all=staged.dpos_all, on_grid_all=staged.on_grid_all, target_values=staged.target_values,
             submit_anchored=submit_anchored, fill_start=fill_start,
             tw_index=w.target_weights.index, sig_index=w.signal_available_at,
         )

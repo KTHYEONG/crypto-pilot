@@ -17,6 +17,7 @@ import src.market_data.services.futures_collection as _futures_collection
 from src.common.errors import DataIntegrityError
 from src.common.paths import FUTURES_DATA_DIR, funding_path
 from src.market_data.services.futures_collection import DataCollector
+from src.market_data.services.label_arrays import decode_ms_labels_ns, sorted_unique_labels
 from src.mhs.books import phase_tranche_book, rank_weight_book
 from src.mhs.data_provenance import resolve_required_mhs_input_paths, seal_mhs_input_manifest
 from src.mhs.horizons import horizon_log_return
@@ -435,14 +436,10 @@ def _read_ohlcv_labels(
                 del table
             except Exception as exc:
                 raise DataIntegrityError(f"execution source unreadable symbol={symbol!r} path={path}") from exc
-            idx = pd.to_datetime(raw, unit="ms", utc=True, errors="coerce")
+            values = decode_ms_labels_ns(raw)
             del raw
-            valid = pd.DatetimeIndex(idx).dropna()
-            del idx
-            if len(valid) == 0:
+            if len(values) == 0:
                 continue
-            values = np.asarray(valid.as_unit("ns").asi8, dtype="int64")
-            del valid
             if observed_through_ns is not None:
                 values = values[values <= int(observed_through_ns)]
                 if len(values) == 0:
@@ -452,11 +449,7 @@ def _read_ohlcv_labels(
         raise
     except Exception as exc:
         raise DataIntegrityError(f"execution source unreadable symbol={symbol!r} path={path}") from exc
-    if not chunks:
-        return np.zeros(0, dtype="int64")
-    combined = np.concatenate(chunks)
-    del chunks
-    return np.unique(combined).astype("int64", copy=False)
+    return sorted_unique_labels(chunks)
 
 
 def _read_mark_labels(
@@ -536,11 +529,7 @@ def _read_mark_labels(
         raise
     except Exception as exc:
         raise DataIntegrityError(f"mark source unreadable symbol={symbol!r} path={path}") from exc
-    if not chunks:
-        return np.zeros(0, dtype="int64")
-    combined = np.concatenate(chunks)
-    del chunks
-    return np.unique(combined).astype("int64", copy=False)
+    return sorted_unique_labels(chunks)
 
 
 def _causal_gap_excluded(

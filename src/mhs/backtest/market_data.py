@@ -301,6 +301,30 @@ def load_process_market_data(
     )
 
 
+def validate_process_execution_availability(target_weights: pd.DataFrame, execution_mask: pd.DataFrame) -> None:
+    """Fail closed when a causal execution mask cannot gate a decision book.
+
+    Shared by availability application and by callers that need the alignment
+    guarantee without materializing the masked book.
+
+    Args:
+        target_weights: Decision book whose labels and symbol columns the mask must cover.
+        execution_mask: Causal execution eligibility.
+    Returns:
+        None when labels and columns match exactly and the mask is complete boolean.
+    Raises:
+        DataIntegrityError: Labels, symbols or mask values are inconsistent.
+    """
+    if not target_weights.index.equals(execution_mask.index):
+        raise DataIntegrityError("execution_mask must share target_weights decision labels exactly")
+    if list(target_weights.columns) != list(execution_mask.columns):
+        raise DataIntegrityError("execution_mask must share target_weights symbol columns exactly")
+    if bool((execution_mask.dtypes.apply(lambda dt: dt.kind != "b")).any()):
+        raise DataIntegrityError("execution_mask must be boolean")
+    if bool(execution_mask.isna().to_numpy().any()):
+        raise DataIntegrityError("execution_mask must not be missing")
+
+
 def apply_process_execution_availability(target_weights: pd.DataFrame, execution_mask: pd.DataFrame) -> pd.DataFrame:
     """Prevent unavailable targets from being revived by smoothing or adoption.
 
@@ -314,12 +338,5 @@ def apply_process_execution_availability(target_weights: pd.DataFrame, execution
     Raises:
         DataIntegrityError: Labels, symbols or mask values are inconsistent.
     """
-    if not target_weights.index.equals(execution_mask.index):
-        raise DataIntegrityError("execution_mask must share target_weights decision labels exactly")
-    if list(target_weights.columns) != list(execution_mask.columns):
-        raise DataIntegrityError("execution_mask must share target_weights symbol columns exactly")
-    if bool((execution_mask.dtypes.apply(lambda dt: dt.kind != "b")).any()):
-        raise DataIntegrityError("execution_mask must be boolean")
-    if bool(execution_mask.isna().to_numpy().any()):
-        raise DataIntegrityError("execution_mask must not be missing")
+    validate_process_execution_availability(target_weights, execution_mask)
     return target_weights.where(execution_mask, other=0.0)

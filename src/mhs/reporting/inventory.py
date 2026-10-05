@@ -60,27 +60,27 @@ _LEDGER_SERIES_FIELDS: tuple[str, ...] = (
 
 
 def _utc_index(values: Sequence[Any]) -> pd.DatetimeIndex:
+    if isinstance(values, pd.DatetimeIndex) and len(values) > 0:
+        return values.tz_convert("UTC") if values.tz is not None else values.tz_localize("UTC")
     stamps = pd.to_datetime(list(values), utc=True)
     return pd.DatetimeIndex(stamps)
 
 
 def _daily_table(daily: pd.Series) -> pa.Table:
-    values = daily.to_numpy(dtype="float64")
     return pa.table(
         {
             "timestamp": pa.array(_utc_index(daily.index), type=pa.timestamp("ns", tz="UTC")),
-            "daily_return": pa.array(values, type=pa.float64()),
+            "daily_return": pa.array(daily.to_numpy(dtype="float64"), type=pa.float64()),
         }
     )
 
 
 def _ledger_table(series: pd.Series, field: str) -> pa.Table:
     name = series.name if isinstance(series.name, str) else field
-    values = series.to_numpy()
     return pa.table(
         {
             "timestamp": pa.array(_utc_index(series.index), type=pa.timestamp("ns", tz="UTC")),
-            name: pa.array(values, type=pa.from_numpy_dtype(values.dtype)),
+            name: pa.array(series.to_numpy(), type=pa.from_numpy_dtype(series.to_numpy().dtype)),
         }
     )
 

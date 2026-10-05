@@ -215,21 +215,17 @@ def _validate_replay_window(
     signal_at = _require_utc_index(window.signal_available_at, "signal_available_at")
     if len(signal_at) != n or not signal_at.is_monotonic_increasing:
         raise DataIntegrityError("signal_available_at must align one-to-one and be non-decreasing")
-    for decision_label, signal_label in zip(decisions, signal_at, strict=True):
-        if signal_label < decision_label:
-            raise DataIntegrityError("signal_available_at must be no earlier than its decision label")
+    if bool((signal_at < decisions).any()):
+        raise DataIntegrityError("signal_available_at must be no earlier than its decision label")
     bar_at = _require_utc_index(window.bar_available_at, "bar_available_at")
-    if len(bar_at) != len(minute_grid) or not bar_at.equals(bar_at.sort_values()) or bar_at.has_duplicates:
+    if len(bar_at) != len(minute_grid) or not bar_at.is_monotonic_increasing or bar_at.has_duplicates:
         raise DataIntegrityError("bar_available_at must be increasing and aligned to minute_grid")
-    for bar_label, avail_label in zip(minute_grid, bar_at, strict=True):
-        if avail_label < bar_label:
-            raise DataIntegrityError("bar_available_at must be no earlier than its bar label")
-    for label in list(minute_grid) + list(signal_at):
-        if label >= fence:
-            raise DataIntegrityError("execution bar labels and signals must be before the fence")
-    for avail_label in bar_at:
-        if avail_label > fence:
-            raise DataIntegrityError("completed bar availability must not be beyond the fence")
+    if bool((bar_at < minute_grid).any()):
+        raise DataIntegrityError("bar_available_at must be no earlier than its bar label")
+    if bool((minute_grid >= fence).any()) or bool((signal_at >= fence).any()):
+        raise DataIntegrityError("execution bar labels and signals must be before the fence")
+    if bool((bar_at > fence).any()):
+        raise DataIntegrityError("completed bar availability must not be beyond the fence")
     return cursor + n
 
 
