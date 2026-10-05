@@ -23,6 +23,10 @@ from src.mhs.types import BOOK_SPECS
 from src.cli.commands.research.mhs import add_mhs_commands
 from src.quant.evaluation.policy import HOLDOUT_CUTOFF
 
+from tests.integration.mhs._report_cache import (
+    MHS_LATE_MARKET_GROUP,
+    MHS_SYNTHETIC_DEFAULT_GROUP,
+)
 from tests.integration.mhs.test_mhs_horizon_diagnostic import (  # noqa: F401
     DEV_SYMBOLS,
     LATE_START,
@@ -31,6 +35,7 @@ from tests.integration.mhs.test_mhs_horizon_diagnostic import (  # noqa: F401
     _write_mhs_market,
 )
 
+@pytest.mark.xdist_group(MHS_SYNTHETIC_DEFAULT_GROUP)
 class TestQualityCalibrationWiring:
     """Quality calibration wiring contract: top-level books apply matching signal calibration."""
 
@@ -81,28 +86,12 @@ class TestQualityCalibrationWiring:
         assert report.date_clustered_regression == statistics._date_clustered_ols(opens, signal_48h, forward_bars=48)
 
     def test_run_mhs_horizon_diagnostic_log_close_released_before_book_replay(
-        self, synthetic_market, monkeypatch
+        self, canonical_report_run
     ) -> None:
         """The committee stage releases log_close before the book replays run,
         while the shared 48h signal is already populated."""
-        import src.mhs.pipeline.stages.replay as replay_stage
-
-        root, end = synthetic_market
-        real_run_replays = replay_stage.run_replays
-        seen: dict[str, object] = {}
-
-        def _spy(ctx, telemetry):
-            seen["log_close_released"] = "log_close" not in vars(ctx)
-            seen["signal_empty"] = bool(ctx.signal_48h.empty)
-            return real_run_replays(ctx, telemetry)
-
-        monkeypatch.setattr(replay_stage, "run_replays", _spy)
-        report = run_mhs_horizon_diagnostic(
-            research_baseline(
-                start=str(START), end=str(end), data_root=str(root),
-                execution_timeframe="3m", log_run=False,
-            ),
-        )
+        report = canonical_report_run.report
+        seen = canonical_report_run.observations.replay_entry
         assert report is not None
         assert seen["log_close_released"] is True
         assert seen["signal_empty"] is False
@@ -110,6 +99,7 @@ class TestQualityCalibrationWiring:
 class TestMhsHorizonDiagnostic:
     """MHS-10-DIAGNOSTIC-HOLDOUT-SEALED: dev-only diagnostic on a synthetic panel."""
 
+    @pytest.mark.xdist_group(MHS_SYNTHETIC_DEFAULT_GROUP)
     def test_produces_frozen_books_and_separate_evidence_paths(self, report) -> None:
         assert report.status == "COMPLETE"
         assert set(report.books) == {"fast_reversal", "slow_momentum"}
@@ -124,6 +114,7 @@ class TestMhsHorizonDiagnostic:
 
         assert research_baseline().execution_timeframe == "3m"
 
+    @pytest.mark.xdist_group(MHS_SYNTHETIC_DEFAULT_GROUP)
     def test_diagnostic_ensemble_separate_from_executable_tranche(self, report) -> None:
         fast = report.books["fast_reversal"]
         assert fast.phase.n_phases > 0
@@ -155,6 +146,7 @@ class TestMhsHorizonDiagnostic:
                 ),
             )
 
+@pytest.mark.xdist_group(MHS_SYNTHETIC_DEFAULT_GROUP)
 class TestResourceTelemetry:
     """MHS-31-RESOURCE-TELEMETRY-ORDER: the report carries ordered non-negative
     stage elapsed/RSS records without changing its GO decision."""
@@ -204,6 +196,7 @@ class TestResourceTelemetry:
             }
         assert report.research_go.eligible is False
 
+@pytest.mark.xdist_group(MHS_SYNTHETIC_DEFAULT_GROUP)
 class TestWindowExecutionTelemetry:
     """MHS-31-RESOURCE-TELEMETRY-ORDER: per-window telemetry is ordered and
     carries non-negative elapsed time, positive RSS, and window provenance
@@ -238,6 +231,7 @@ class TestWindowExecutionTelemetry:
         assert report.research_go.eligible is False
         assert "INCOMPLETE_ANCHORED_FOLD" in report.research_go.reason_codes
 
+@pytest.mark.xdist_group(MHS_SYNTHETIC_DEFAULT_GROUP)
 class TestStrictSimulatedPrimary:
     """MHS-19-STRICT-SIMULATED-PRIMARY: the realistic immediate-taker bound is
     the primary evidence, with a cost-stressed x3 stress bound."""
@@ -267,6 +261,7 @@ class TestTouchDiagnostic:
     adds an opt-in ``OHLCV_TOUCH_PROXY`` replay leg alongside the strict/stress
     pair; the default path stays touch-free."""
 
+    @pytest.mark.xdist_group(MHS_SYNTHETIC_DEFAULT_GROUP)
     def test_touch_default_off(self, report) -> None:
         """SCENARIO_MHS_TOUCH_DEFAULT_OFF: every book report on the default
         path carries ``touch=None``/``touch_naive_sharpe=None``."""
@@ -318,11 +313,13 @@ class TestFreezeBeforeFinalOos:
         with pytest.raises(Exception, match="cannot assign"):
             obs.filled_quantity = 0.1
 
+    @pytest.mark.xdist_group(MHS_SYNTHETIC_DEFAULT_GROUP)
     def test_mhs_5m_03_signal_preservation(self, report) -> None:
         """MHS-5M-03-SIGNAL-PRESERVATION: signal and replay universes are reported separately."""
         assert isinstance(report.execution_symbols, tuple)
         assert report.execution_symbols
 
+@pytest.mark.xdist_group(MHS_SYNTHETIC_DEFAULT_GROUP)
 class TestOhlcvValuationSource:
     """Every replay uses the fixed three-minute OHLCV valuation source."""
 
@@ -374,6 +371,7 @@ class TestMarkModeCli:
         with pytest.raises(SystemExit):
             parser.parse_args(["mhs-horizon-diagnostic", "--mark-mode", "bogus"])
 
+@pytest.mark.xdist_group(MHS_LATE_MARKET_GROUP)
 class TestPitExecutionGrid:
     """MHS-25-FULL-PERIOD-PIT-GRID: a late-listed symbol never clips the replay
     start; pre-listing NaNs are retained and no order is emitted before the
@@ -453,6 +451,7 @@ class TestAnchoredFoldGoGate:
     incomplete fold, negative strict Sharpe, non-positive stress Sharpe, or
     relevant termination produces Research GO false and reason codes."""
 
+    @pytest.mark.xdist_group(MHS_SYNTHETIC_DEFAULT_GROUP)
     def test_three_folds_reported_and_go_false(self, report) -> None:
         expected = phase_1_anchored_purged_folds()
         assert len(report.folds) == len(expected)
@@ -470,6 +469,7 @@ class TestAnchoredFoldGoGate:
         # The gate boolean routes to deployment readiness, never primary_valid alone.
         assert report.deployment_readiness.research_go_eligible is False
 
+    @pytest.mark.xdist_group(MHS_SYNTHETIC_DEFAULT_GROUP)
     def test_fold_metrics_exposed(self, report) -> None:
         fold_report = report.folds[0]
         assert isinstance(fold_report.failures, tuple)

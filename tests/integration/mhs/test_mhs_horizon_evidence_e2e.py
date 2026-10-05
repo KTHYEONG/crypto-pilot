@@ -21,6 +21,7 @@ from src.mhs.params import PERIODS_PER_YEAR_1H as _PERIODS_PER_YEAR_1H
 from src.mhs.report.schema import MhsHorizonDiagnosticReport
 from src.mhs.resources import _StageRecorder
 
+from tests.integration.mhs._report_cache import MHS_SYNTHETIC_DEFAULT_GROUP
 from tests.integration.mhs.test_mhs_horizon_diagnostic import (  # noqa: F401
     DEV_SYMBOLS,
     FOLD_WINDOW_FOLD,
@@ -35,6 +36,7 @@ class TestTypedArtifactRoundtrip:
     retain an explicit UTC timestamp and round-trip without strings or
     NaN-equity concealment."""
 
+    @pytest.mark.xdist_group(MHS_SYNTHETIC_DEFAULT_GROUP)
     def test_ledger_and_times_round_trip_as_utc(self, report, tmp_path) -> None:
         from src.mhs.contracts import MhsOutputTier
         from src.mhs.report.artifacts import load_mhs_replay_artifact
@@ -67,6 +69,7 @@ class TestTypedArtifactRoundtrip:
         assert pd.api.types.is_datetime64_any_dtype(times["fill_time"])
         assert times["submit_time"].dt.tz is not None
 
+    @pytest.mark.xdist_group(MHS_SYNTHETIC_DEFAULT_GROUP)
     def test_json_reference_carries_schema_and_checksum(self, report, tmp_path) -> None:
         import json
 
@@ -122,6 +125,7 @@ class TestTypedArtifactRoundtrip:
         assert "timestamp" in ledger.columns
         assert len(units) == 0
 
+    @pytest.mark.xdist_group(MHS_SYNTHETIC_DEFAULT_GROUP)
     def test_completed_fold_artifacts_persisted(self, report, tmp_path) -> None:
         from dataclasses import replace
 
@@ -172,6 +176,7 @@ class TestTypedArtifactRoundtrip:
         strict_ledger = load_mhs_replay_artifact(artifact_dir, "fold0_strict", "ledger")
         assert "timestamp" in strict_ledger.columns
 
+@pytest.mark.xdist_group(MHS_SYNTHETIC_DEFAULT_GROUP)
 class TestFullModeBackwardCompat:
     """MHS-OUTPUT-TIERING: FULL tier reproduces the pre-tiering 5-category
     unified Parquet tables and row counts with no per-fill data loss."""
@@ -404,6 +409,7 @@ class TestFoldWindowTelemetryOracle:
         assert dict(oracle.termination_counts) == dict(windowed.termination_counts)
         assert oracle.fill_count == windowed.fill_count
 
+@pytest.mark.xdist_group(MHS_SYNTHETIC_DEFAULT_GROUP)
 class TestMhsExecutionAnnualization:
     """SCENARIO_MHS_ANNUALIZATION_04: the real-execution-ledger headline
     metrics must be annualized on the native execution-timeframe grid via the

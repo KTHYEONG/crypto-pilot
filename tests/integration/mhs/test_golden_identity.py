@@ -33,6 +33,12 @@ from tests.fixtures.golden.compare import (
     assert_report_identical,
 )
 from tests.fixtures.golden.digest import build_report_summary
+from tests.integration.mhs._report_cache import (
+    GOLDEN_PROFILE,
+    GOLDEN_SHARED_NAMES,
+    MHS_GOLDEN_BASELINE_GROUP,
+    DiagnosticRunSpec,
+)
 
 GOLDEN_DIR = Path(__file__).resolve().parent.parent.parent / "fixtures" / "golden"
 
@@ -149,26 +155,47 @@ MATRIX_OVERRIDES: dict[str, dict[str, object]] = {
 }
 
 
+@pytest.fixture
+def golden_report_lease(mhs_report_cache, request):
+    """Report for a named golden: names in ``GOLDEN_SHARED_NAMES`` lease the shared
+    ``GOLDEN_PROFILE`` run; every other name runs ``run_mhs_horizon_diagnostic(request)``
+    directly under the ``matrix_market`` module patches, exactly as at HEAD."""
+    from collections.abc import Iterator as _Iterator
+    from contextlib import contextmanager
+    from typing import Any as _Any
+
+    @contextmanager
+    def _lease(name: str, req: _Any) -> _Iterator[_Any]:
+        if name in GOLDEN_SHARED_NAMES:
+            spec = DiagnosticRunSpec(req, GOLDEN_PROFILE)
+            with mhs_report_cache.lease(spec, consumer=request.node.nodeid) as entry:
+                yield entry.report
+        else:
+            from src.mhs.diagnostic_run import run_mhs_horizon_diagnostic
+
+            yield run_mhs_horizon_diagnostic(req)
+
+    return _lease
+
+
 @pytest.mark.parametrize(
     ("name", "matrix_market", "matrix_golden"),
-    [(n, n, n) for n in GOLDEN_MATRIX_NAMES],
+    [pytest.param(n, n, n, id=n, marks=(pytest.mark.xdist_group(MHS_GOLDEN_BASELINE_GROUP),) if n in GOLDEN_SHARED_NAMES else ()) for n in GOLDEN_MATRIX_NAMES],
     ids=GOLDEN_MATRIX_NAMES,
     indirect=["matrix_market", "matrix_golden"],
 )
-def test_golden_identity_matrix(name, matrix_market, matrix_golden):
+def test_golden_identity_matrix(name, matrix_market, matrix_golden, golden_report_lease):
     """SCENARIO_MHS_PERF_P0_01_GOLDEN_GATE_LIVE: each named golden matches the
     decomposed pipeline bit-exactly under the sha256 digest gate."""
-    from src.mhs.diagnostic_run import run_mhs_horizon_diagnostic
-
     root, end, start = matrix_market
     request = research_baseline(
         start=str(start), end=str(end), data_root=str(root),
         execution_timeframe="3m", log_run=False,
         **MATRIX_OVERRIDES[name],
     )
-    report = run_mhs_horizon_diagnostic(request)
-    golden_digest, golden_summary = matrix_golden
-    _assert_matches_golden(golden_digest, golden_summary, report)
+    with golden_report_lease(name, request) as report:
+        golden_digest, golden_summary = matrix_golden
+        _assert_matches_golden(golden_digest, golden_summary, report)
 
 
 @pytest.mark.parametrize(
@@ -177,20 +204,19 @@ def test_golden_identity_matrix(name, matrix_market, matrix_golden):
     ids=["baseline"],
     indirect=["matrix_market", "matrix_golden"],
 )
-def test_golden_identity(name, matrix_market, matrix_golden):
+@pytest.mark.xdist_group(MHS_GOLDEN_BASELINE_GROUP)
+def test_golden_identity(name, matrix_market, matrix_golden, golden_report_lease):
     """SCENARIO_ANALYSIS_ARCHITECTURE_04: full pipeline on the synthetic market
     yields the baseline golden bit-exactly (digest + row-count summary)."""
-    from src.mhs.diagnostic_run import run_mhs_horizon_diagnostic
-
     root, end, start = matrix_market
     request = research_baseline(
         start=str(start), end=str(end), data_root=str(root),
         execution_timeframe="3m", log_run=False,
         **MATRIX_OVERRIDES[name],
     )
-    report = run_mhs_horizon_diagnostic(request)
-    golden_digest, golden_summary = matrix_golden
-    _assert_matches_golden(golden_digest, golden_summary, report)
+    with golden_report_lease(name, request) as report:
+        golden_digest, golden_summary = matrix_golden
+        _assert_matches_golden(golden_digest, golden_summary, report)
 
 
 @pytest.mark.parametrize(
@@ -199,7 +225,8 @@ def test_golden_identity(name, matrix_market, matrix_golden):
     ids=["entry_point"],
     indirect=["matrix_market", "matrix_golden"],
 )
-def test_run_mhs_diagnostic_entry_point_matches_golden(name, matrix_market, matrix_golden):
+@pytest.mark.xdist_group(MHS_GOLDEN_BASELINE_GROUP)
+def test_run_mhs_diagnostic_entry_point_matches_golden(name, matrix_market, matrix_golden, golden_report_lease):
     """The CLI entry point reproduces the baseline golden bit-identically
     (I-ENTRY-EQUIV): the no-arg CLI request with the research opt-outs equals
     ``research_baseline`` and ``run_mhs_diagnostic`` matches the golden.
@@ -210,7 +237,6 @@ def test_run_mhs_diagnostic_entry_point_matches_golden(name, matrix_market, matr
     from src.cli.main import build_root_parser
     from src.mhs.contracts import MhsDiagnosticRequest
     from src.mhs.pipeline.config import resolve_cli_request
-    from src.mhs.pipeline.orchestrator import run_mhs_diagnostic
 
     root, end, start = matrix_market
     base = ["research", "run", "portfolio", "mhs-horizon-diagnostic"]
@@ -227,9 +253,9 @@ def test_run_mhs_diagnostic_entry_point_matches_golden(name, matrix_market, matr
     assert request == research_baseline(
         start=str(start), end=str(end), data_root=str(root), log_run=False,
     )
-    report = run_mhs_diagnostic(request)
-    golden_digest, golden_summary = matrix_golden
-    _assert_matches_golden(golden_digest, golden_summary, report)
+    with golden_report_lease(name, request) as report:
+        golden_digest, golden_summary = matrix_golden
+        _assert_matches_golden(golden_digest, golden_summary, report)
 
 
 def test_golden_identity_survives_legacy_removal() -> None:
