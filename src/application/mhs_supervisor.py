@@ -38,7 +38,7 @@ from src.backtests.contracts import (
 )
 from src.backtests.registry import finalize_run, initialize_registry, register_run
 from src.backtests.retention import apply_retention, plan_retention
-from src.common.paths import BACKTESTS_DIR, FUTURES_DATA_DIR
+from src.common.paths import FUTURES_DATA_DIR
 from src.mhs.process import ProcessExecutionPolicy
 from src.mhs.reporting.inventory import PROCESS_INVENTORY_CERTIFICATION_LEVEL
 from src.mhs.resources import (
@@ -750,16 +750,16 @@ def run_mhs_process_backtest(
     tracking_error_threshold: float | None = None,
     timeout_seconds: float | None = None, poll_seconds: float = 0.25,
     memory_budget: MhsMemoryBudget | None = None,
-    registry_path: Path | None = None, run_id: str | None = None,
+    registry_path: Path, run_id: str | None = None,
     retention_policy: RetentionPolicy | None = None,
 ) -> MhsSupervisedRun:
     """Execute one 3-minute MHS evaluation and atomically publish its complete outcome.
 
-    Bind the supervised worker to the exact MHS source identity used in run
-    registration so its typed baseline procedure and the lifecycle fingerprint
-    describe the same executable strategy.
-    The envelope keeps process completion distinct from financial validity so a
-    successful subprocess can never be mistaken for deployable evidence.
+    The worker is bound to the source identity used at registration, so procedure
+    and lifecycle fingerprint describe one executable strategy; the envelope keeps
+    process completion distinct from financial validity. ``registry_path`` has no
+    default: only the CLI resolves the operator registry, so library callers
+    (tests, scripts) can never append to it or its evidence root implicitly.
     """
     if not isinstance(start, pd.Timestamp) or start.tzinfo is None:
         raise ValueError("start must be a timezone-aware Timestamp")
@@ -783,7 +783,7 @@ def run_mhs_process_backtest(
     ProcessExecutionPolicy(tracking_error_threshold=tracking_error_threshold)
     if retention_policy is not None and not isinstance(retention_policy, RetentionPolicy):
         raise ValueError(f"retention_policy must be a RetentionPolicy or None, got {retention_policy!r}")
-    resolved_registry = Path(registry_path) if registry_path is not None else BACKTESTS_DIR / "registry.sqlite3"
+    resolved_registry = Path(registry_path)
     resolved_run_id = _resolve_run_id(run_id)
     evidence_root = resolved_registry.resolve().parent / "evidence"
     log_path = result_output.parent / f"{result_output.stem}.log"

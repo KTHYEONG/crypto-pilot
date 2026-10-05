@@ -22,6 +22,10 @@ def _result(tmp_path: Path, name: str = "run") -> Path:
     return tmp_path / name / "result.json"
 
 
+def _registry(tmp_path: Path) -> Path:
+    return tmp_path / "registry.sqlite3"
+
+
 class _FakeProc:
     def __init__(self, returncode: int, delay: float = 0.0, on_start=None) -> None:
         self.pid = 987654
@@ -87,7 +91,7 @@ def test_completed_envelope_combines_domains(tmp_path, monkeypatch) -> None:
         staging.write_text(json.dumps(_completed_domain()))
 
     _install_fake(monkeypatch, 0, 0.0, _on_start)
-    run = sup.run_mhs_process_backtest(start=start, end=end, data_root=None, result_output=result, poll_seconds=0.05)
+    run = sup.run_mhs_process_backtest(start=start, end=end, data_root=None, result_output=result, poll_seconds=0.05, registry_path=_registry(tmp_path))
     assert run.status == "completed"
     envelope = json.loads(result.read_text(encoding="utf-8"))
     assert envelope["schema_version"] == 1
@@ -106,7 +110,7 @@ def test_failure_envelope_is_single_path(tmp_path, monkeypatch) -> None:
         staging.write_text(json.dumps(_failed_domain()))
 
     _install_fake(monkeypatch, 1, 0.0, _on_start)
-    run = sup.run_mhs_process_backtest(start=start, end=end, data_root=None, result_output=result, poll_seconds=0.05)
+    run = sup.run_mhs_process_backtest(start=start, end=end, data_root=None, result_output=result, poll_seconds=0.05, registry_path=_registry(tmp_path))
     assert run.status == "failed"
     assert result.is_file()
     assert not (result.parent / "failure.json").exists()
@@ -126,11 +130,10 @@ def test_successful_log_is_transient(tmp_path, monkeypatch) -> None:
         staging.write_text(json.dumps(_completed_domain()))
 
     _install_fake(monkeypatch, 0, 0.0, _on_start)
-    run = sup.run_mhs_process_backtest(start=start, end=end, data_root=None, result_output=result, poll_seconds=0.05)
+    run = sup.run_mhs_process_backtest(start=start, end=end, data_root=None, result_output=result, poll_seconds=0.05, registry_path=_registry(tmp_path))
     assert run.status == "completed"
     log = result.parent / "result.log"
     assert not log.exists()
-    registry = Path("data/backtests/registry.sqlite3")
     assert result.is_file()
 
 
@@ -145,7 +148,7 @@ def test_failed_log_is_diagnostic(tmp_path, monkeypatch) -> None:
         (result.parent / "bad.log").write_text("boom\n" * 10)
 
     _install_fake(monkeypatch, 1, 0.0, _on_start)
-    run = sup.run_mhs_process_backtest(start=start, end=end, data_root=None, result_output=result, poll_seconds=0.05)
+    run = sup.run_mhs_process_backtest(start=start, end=end, data_root=None, result_output=result, poll_seconds=0.05, registry_path=_registry(tmp_path))
     assert run.status == "failed"
     log = result.parent / "result.log"
     assert log.is_file()
@@ -220,7 +223,7 @@ def test_atomic_publication_rejects_occupied_output(tmp_path, monkeypatch) -> No
 
     monkeypatch.setattr(subprocess, "Popen", _boom)
     with pytest.raises(ValueError, match="fresh"):
-        sup.run_mhs_process_backtest(start=start, end=end, data_root=None, result_output=result, poll_seconds=0.05)
+        sup.run_mhs_process_backtest(start=start, end=end, data_root=None, result_output=result, poll_seconds=0.05, registry_path=_registry(tmp_path))
     assert json.loads(result.read_text(encoding="utf-8")) == {}
     link = tmp_path / "link" / "result.json"
     link.parent.mkdir(parents=True, exist_ok=True)
@@ -228,20 +231,21 @@ def test_atomic_publication_rejects_occupied_output(tmp_path, monkeypatch) -> No
 
     os.symlink(tmp_path / "missing.json", link)
     with pytest.raises(ValueError, match="fresh"):
-        sup.run_mhs_process_backtest(start=start, end=end, data_root=None, result_output=link, poll_seconds=0.05)
+        sup.run_mhs_process_backtest(start=start, end=end, data_root=None, result_output=link, poll_seconds=0.05, registry_path=_registry(tmp_path))
 
 
 def test_supervised_signal_and_timeout_stay_distinct(tmp_path, monkeypatch) -> None:
     start, end = _stamps()
     result = _result(tmp_path, "sig")
     _install_fake(monkeypatch, -15, 0.0)
-    run = sup.run_mhs_process_backtest(start=start, end=end, data_root=None, result_output=result, poll_seconds=0.05)
+    run = sup.run_mhs_process_backtest(start=start, end=end, data_root=None, result_output=result, poll_seconds=0.05, registry_path=_registry(tmp_path))
     assert run.status == "signaled"
     assert run.signal_number == 15
     result2 = _result(tmp_path, "timeout")
     _install_fake(monkeypatch, 0, 30.0)
     run2 = sup.run_mhs_process_backtest(
         start=start, end=end, data_root=None, result_output=result2, poll_seconds=0.05, timeout_seconds=0.2,
+        registry_path=_registry(tmp_path),
     )
     assert run2.status == "timed_out"
 
@@ -263,7 +267,7 @@ def test_supervised_resource_stop_without_success_claim(tmp_path, monkeypatch) -
                 return 0 if _calls["n"] < 2 else 10**9
 
             monkeypatch.setattr(sup, "_workload_swap_bytes", lambda pid: _swap())
-        run = sup.run_mhs_process_backtest(start=start, end=end, data_root=None, result_output=result, poll_seconds=0.05)
+        run = sup.run_mhs_process_backtest(start=start, end=end, data_root=None, result_output=result, poll_seconds=0.05, registry_path=_registry(tmp_path))
         assert run.status == "resource_rejected"
 
 
@@ -286,17 +290,18 @@ def test_invalid_run_identity_rejected_before_launch(tmp_path, monkeypatch) -> N
     with pytest.raises(ValueError, match="UUID"):
         sup.run_mhs_process_backtest(
             start=start, end=end, data_root=None, result_output=_result(tmp_path),
-            poll_seconds=0.05, run_id="bogus",
+            poll_seconds=0.05, run_id="bogus", registry_path=_registry(tmp_path),
         )
     with pytest.raises(ValueError, match="result_output"):
         sup.run_mhs_process_backtest(
             start=start, end=end, data_root=None, result_output=tmp_path / "bad.csv",  # type: ignore[arg-type]
-            poll_seconds=0.05,
+            poll_seconds=0.05, registry_path=_registry(tmp_path),
         )
     with pytest.raises(ValueError, match="retention_policy"):
         sup.run_mhs_process_backtest(
             start=start, end=end, data_root=None, result_output=_result(tmp_path),
             poll_seconds=0.05, retention_policy="policy",  # type: ignore[arg-type]
+            registry_path=_registry(tmp_path),
         )
 
 
@@ -317,7 +322,7 @@ def test_code_identity_null_when_worker_unreadable(tmp_path, monkeypatch) -> Non
 
     monkeypatch.setattr(Path, "read_bytes", _read_boom)
     with pytest.raises(ValueError, match="source identity"):
-        sup.run_mhs_process_backtest(start=start, end=end, data_root=None, result_output=result, poll_seconds=0.05)
+        sup.run_mhs_process_backtest(start=start, end=end, data_root=None, result_output=result, poll_seconds=0.05, registry_path=_registry(tmp_path))
     assert sup._code_identity() is None
     assert not result.exists()
 
@@ -393,7 +398,7 @@ def test_corrupt_and_non_mapping_domain_stay_null(tmp_path, monkeypatch) -> None
             staging.write_text(_payload)
 
         _install_fake(monkeypatch, 0, 0.0, _on_start)
-        run = sup.run_mhs_process_backtest(start=start, end=end, data_root=None, result_output=result, poll_seconds=0.05)
+        run = sup.run_mhs_process_backtest(start=start, end=end, data_root=None, result_output=result, poll_seconds=0.05, registry_path=_registry(tmp_path))
         assert run.status == "failed"
         envelope = json.loads(result.read_text(encoding="utf-8"))
         assert envelope["financial"] is None
@@ -418,6 +423,7 @@ def test_mixed_validity_and_missing_bundle_finalize(tmp_path, monkeypatch) -> No
     run = sup.run_mhs_process_backtest(
         start=start, end=end, data_root=None, result_output=result,
         targets_output=result.parent / "targets.parquet", poll_seconds=0.05,
+        registry_path=_registry(tmp_path),
     )
     assert run.status == "completed"
     envelope = json.loads(result.read_text(encoding="utf-8"))
@@ -1005,9 +1011,61 @@ def test_supervised_run_reports_wall_time_and_tree_pss(tmp_path, monkeypatch) ->
 
     _install_fake(monkeypatch, 0, 0.3, _on_start)
     run = sup.run_mhs_process_backtest(
-        start=start, end=end, data_root=None, result_output=result, poll_seconds=0.05
+        start=start, end=end, data_root=None, result_output=result, poll_seconds=0.05,
+        registry_path=_registry(tmp_path),
     )
     assert run.status == "completed"
     assert run.wall_seconds >= 0.0
     assert run.sampled_tree_pss_peak_bytes == 100
     assert "PSS" in run.memory_scope
+
+
+def test_registry_path_is_mandatory(tmp_path, monkeypatch) -> None:
+    start, end = _stamps()
+    result = _result(tmp_path)
+    calls: list = []
+
+    def _recording_factory(*args, **kwargs):
+        calls.append(args)
+        return _FakeProc(0, 0.0)
+
+    _install_fake(monkeypatch)
+    monkeypatch.setattr(subprocess, "Popen", _recording_factory)
+    with pytest.raises(TypeError, match="registry_path"):
+        sup.run_mhs_process_backtest(start=start, end=end, data_root=None, result_output=result, poll_seconds=0.05)  # type: ignore[call-arg]
+    assert calls == []
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_explicit_registry_receives_run_and_nothing_else(tmp_path, monkeypatch) -> None:
+    from src.common.paths import BACKTESTS_DIR
+
+    start, end = _stamps()
+    result = _result(tmp_path, "explicit")
+    registry = tmp_path / "reg" / "registry.sqlite3"
+    operator_registry = BACKTESTS_DIR / "registry.sqlite3"
+    before_exists = operator_registry.exists()
+    before_stat = operator_registry.stat() if before_exists else None
+    before_key = (before_stat.st_size, before_stat.st_mtime_ns) if before_stat is not None else None
+
+    def _on_start(proc):
+        staging = result.parent / ".staging_domain.json"
+        staging.parent.mkdir(parents=True, exist_ok=True)
+        staging.write_text(json.dumps(_completed_domain()))
+
+    _install_fake(monkeypatch, 0, 0.0, _on_start)
+    run = sup.run_mhs_process_backtest(
+        start=start, end=end, data_root=None, result_output=result, poll_seconds=0.05,
+        registry_path=registry,
+    )
+    assert run.status == "completed"
+    conn = sqlite3.connect(str(registry))
+    try:
+        rows = conn.execute("SELECT run_id FROM runs").fetchall()
+    finally:
+        conn.close()
+    assert [row[0] for row in rows] == [run.run_id]
+    assert operator_registry.exists() == before_exists
+    if before_stat is not None:
+        after_stat = operator_registry.stat()
+        assert (after_stat.st_size, after_stat.st_mtime_ns) == before_key
