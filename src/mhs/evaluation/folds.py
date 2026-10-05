@@ -27,6 +27,7 @@ from src.mhs.parallel import (
     FORK_CONTEXT,
     assert_fork_admission,
     fork_shared_payload,
+    frozen_gc_heap,
     plan_worker_count,
     resolve_fork_shared,
 )
@@ -335,6 +336,7 @@ def _run_fold_safe_discovery_parallel(
             "opens": opens, "bar_funding": bar_funding, "grid_1h": grid_1h,
             "precomputed": precomputed,
         }) as token,
+        frozen_gc_heap(),
         ProcessPoolExecutor(max_workers=max_workers, mp_context=FORK_CONTEXT) as pool,
     ):
         futures = {
@@ -727,7 +729,7 @@ def _run_folds_parallel(
         reserve_bytes=_folds_reserve,
     )
     assert_fork_admission("anchored_folds", max_workers, WORKER_PEAK_RSS_BYTES, _folds_reserve)
-    with ProcessPoolExecutor(max_workers=max_workers, mp_context=FORK_CONTEXT) as pool:
+    with frozen_gc_heap(), ProcessPoolExecutor(max_workers=max_workers, mp_context=FORK_CONTEXT) as pool:
         futures = {
             pool.submit(
                 _run_anchored_fold,

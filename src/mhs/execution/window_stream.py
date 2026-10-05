@@ -12,6 +12,7 @@ import pandas as pd
 from src.common.errors import DataIntegrityError
 from src.mhs.execution.contracts import ExecutionReplayWindow, align_funding_with_knowledge, funding_coverage_gaps
 from src.mhs.marks import _build_window_frames, _load_window_minute_frames
+from src.mhs.parallel import collect_window_garbage
 from src.mhs.resources import (
     MhsExecutionAllocation,
     assert_mhs_allocation_budget,
@@ -383,7 +384,7 @@ def _iter_mhs_execution_windows(
             )
             yield window
             del window
-            gc.collect()
+            collect_window_garbage()
             continue
         full_grid = minute_grid
         full_ns = np.asarray(full_grid, dtype="datetime64[ns]").astype("int64")
@@ -461,7 +462,7 @@ def _iter_mhs_execution_windows(
             )
             yield window
             del window
-            gc.collect()
+            collect_window_garbage()
             continue
         g0 = 0
         d = 0
@@ -513,7 +514,7 @@ def _iter_mhs_execution_windows(
                 )
                 yield window
                 del window
-                gc.collect()
+                collect_window_garbage()
                 g0 = g1
                 continue
             piece_weights = target_weights.iloc[i0 + d : i0 + d1]
@@ -550,7 +551,7 @@ def _iter_mhs_execution_windows(
             )
             yield window
             del window
-            gc.collect()
+            collect_window_garbage()
             d = d1
             if g1 == n_full - 1:
                 break
@@ -591,7 +592,7 @@ def _iter_mhs_execution_windows(
                 )
                 yield window
                 del window
-                gc.collect()
+                collect_window_garbage()
                 if tail_end == n_full - 1:
                     break
                 tail_start = tail_end

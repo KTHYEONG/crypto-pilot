@@ -8,6 +8,7 @@ from dataclasses import replace as dataclass_replace
 import pandas as pd
 
 from src.common.errors import DataIntegrityError
+from src.mhs.parallel import frozen_gc_heap
 from src.mhs.types import ExecutionSpec
 
 from . import _ExecutionBound
@@ -54,21 +55,22 @@ def replay_execution_windows(
     equivalence tests) must explicitly opt in with ``True``; the ledger, fills,
     gaps, termination data, and numerical results are identical either way.
     """
-    it = iter(windows)
-    first = next(it, None)
-    if first is None:
-        raise DataIntegrityError("at least one execution window is required")
-    accumulator = _accumulator._BoundExecutionReplayAccumulator(
-        first, initial_equity, execution_bound, spec, retain_event_snapshots, min_equity_fraction,
-    )
-    if live_accumulators is not None:
-        live_accumulators.append([accumulator])
-    accumulator.consume(first)
-    del first
-    for w in it:
-        accumulator.consume(w)
-        del w
-    return accumulator.finalize()
+    with frozen_gc_heap():
+        it = iter(windows)
+        first = next(it, None)
+        if first is None:
+            raise DataIntegrityError("at least one execution window is required")
+        accumulator = _accumulator._BoundExecutionReplayAccumulator(
+            first, initial_equity, execution_bound, spec, retain_event_snapshots, min_equity_fraction,
+        )
+        if live_accumulators is not None:
+            live_accumulators.append([accumulator])
+        accumulator.consume(first)
+        del first
+        for w in it:
+            accumulator.consume(w)
+            del w
+        return accumulator.finalize()
 
 
 def replay_execution_window_batch_isolated(
@@ -87,77 +89,78 @@ def replay_execution_window_batch_isolated(
     for idx in isolated_bound_indices:
         if idx < 0 or idx >= len(bound_list):
             raise ValueError(f"isolated index {idx} out of range for {len(bound_list)} bounds")
-    it = iter(windows)
-    first = next(it, None)
-    if first is None:
-        raise DataIntegrityError("at least one execution window is required")
-    accumulators: list[_BoundExecutionReplayAccumulator | None] = [
-        _accumulator._BoundExecutionReplayAccumulator(
-            first, initial_equity, bound, spec, retain_event_snapshots, min_equity_fraction,
-        )
-        for (bound, spec) in bound_list
-    ]
-    if live_accumulators is not None:
-        live_accumulators.append(accumulators)
-    active: list[bool] = [True] * len(bound_list)
-    windows_consumed: list[int] = [0] * len(bound_list)
-    failures: list[IsolatedBoundFailure] = []
+    with frozen_gc_heap():
+        it = iter(windows)
+        first = next(it, None)
+        if first is None:
+            raise DataIntegrityError("at least one execution window is required")
+        accumulators: list[_BoundExecutionReplayAccumulator | None] = [
+            _accumulator._BoundExecutionReplayAccumulator(
+                first, initial_equity, bound, spec, retain_event_snapshots, min_equity_fraction,
+            )
+            for (bound, spec) in bound_list
+        ]
+        if live_accumulators is not None:
+            live_accumulators.append(accumulators)
+        active: list[bool] = [True] * len(bound_list)
+        windows_consumed: list[int] = [0] * len(bound_list)
+        failures: list[IsolatedBoundFailure] = []
 
-    def _try_consume(idx: int, w: ExecutionReplayWindow) -> None:
-        if not active[idx]:
-            return
-        try:
-            assert accumulators[idx] is not None
-            accumulators[idx].consume(w)  # type: ignore[union-attr]
-            windows_consumed[idx] += 1
-        except DataIntegrityError as exc:
-            if idx in isolated_bound_indices:
-                failures.append(
-                    IsolatedBoundFailure(
-                        bound_index=idx,
-                        execution_bound=str(bound_list[idx][0]),
-                        error_class=type(exc).__name__,
-                        message=str(exc),
-                        windows_consumed=windows_consumed[idx],
+        def _try_consume(idx: int, w: ExecutionReplayWindow) -> None:
+            if not active[idx]:
+                return
+            try:
+                assert accumulators[idx] is not None
+                accumulators[idx].consume(w)  # type: ignore[union-attr]
+                windows_consumed[idx] += 1
+            except DataIntegrityError as exc:
+                if idx in isolated_bound_indices:
+                    failures.append(
+                        IsolatedBoundFailure(
+                            bound_index=idx,
+                            execution_bound=str(bound_list[idx][0]),
+                            error_class=type(exc).__name__,
+                            message=str(exc),
+                            windows_consumed=windows_consumed[idx],
+                        )
                     )
-                )
-                active[idx] = False
-                accumulators[idx] = None
-            else:
-                raise
+                    active[idx] = False
+                    accumulators[idx] = None
+                else:
+                    raise
 
-    for idx in range(len(bound_list)):
-        _try_consume(idx, first)
-    del first
-    for w in it:
         for idx in range(len(bound_list)):
-            _try_consume(idx, w)
-        del w
-    results: list[StrategyExecutionReplayResult | None] = []
-    for idx in range(len(bound_list)):
-        if not active[idx]:
-            results.append(None)
-            continue
-        try:
-            assert accumulators[idx] is not None
-            results.append(accumulators[idx].finalize())  # type: ignore[union-attr]
-        except DataIntegrityError as exc:
-            if idx in isolated_bound_indices:
-                failures.append(
-                    IsolatedBoundFailure(
-                        bound_index=idx,
-                        execution_bound=str(bound_list[idx][0]),
-                        error_class=type(exc).__name__,
-                        message=str(exc),
-                        windows_consumed=windows_consumed[idx],
-                    )
-                )
+            _try_consume(idx, first)
+        del first
+        for w in it:
+            for idx in range(len(bound_list)):
+                _try_consume(idx, w)
+            del w
+        results: list[StrategyExecutionReplayResult | None] = []
+        for idx in range(len(bound_list)):
+            if not active[idx]:
                 results.append(None)
-                active[idx] = False
-                accumulators[idx] = None
-            else:
-                raise
-    return BatchReplayOutcome(results=tuple(results), isolated_failures=tuple(failures))
+                continue
+            try:
+                assert accumulators[idx] is not None
+                results.append(accumulators[idx].finalize())  # type: ignore[union-attr]
+            except DataIntegrityError as exc:
+                if idx in isolated_bound_indices:
+                    failures.append(
+                        IsolatedBoundFailure(
+                            bound_index=idx,
+                            execution_bound=str(bound_list[idx][0]),
+                            error_class=type(exc).__name__,
+                            message=str(exc),
+                            windows_consumed=windows_consumed[idx],
+                        )
+                    )
+                    results.append(None)
+                    active[idx] = False
+                    accumulators[idx] = None
+                else:
+                    raise
+        return BatchReplayOutcome(results=tuple(results), isolated_failures=tuple(failures))
 
 
 def _rescale_window_weights(
@@ -243,132 +246,133 @@ def replay_execution_windows_coupled(
     for idx in isolated_bound_indices:
         if idx < 0 or idx >= len(bound_list):
             raise ValueError(f"isolated index {idx} out of range for {len(bound_list)} bounds")
-    it = iter(windows)
-    first = next(it, None)
-    if first is None:
-        raise DataIntegrityError("at least one execution window is required")
+    with frozen_gc_heap():
+        it = iter(windows)
+        first = next(it, None)
+        if first is None:
+            raise DataIntegrityError("at least one execution window is required")
 
-    reference = _accumulator._BoundExecutionReplayAccumulator(
-        first, initial_equity, reference_bound[0], reference_bound[1],
-        retain_event_snapshots, min_equity_fraction,
-    )
-    scaled_accumulators: list[_BoundExecutionReplayAccumulator | None] = [
-        _accumulator._BoundExecutionReplayAccumulator(
-            first, initial_equity, bound, spec, retain_event_snapshots, min_equity_fraction,
+        reference = _accumulator._BoundExecutionReplayAccumulator(
+            first, initial_equity, reference_bound[0], reference_bound[1],
+            retain_event_snapshots, min_equity_fraction,
         )
-        for bound, spec in bound_list
-    ]
-    if live_accumulators is not None:
-        live_accumulators.append([reference, *scaled_accumulators])
-    active: list[bool] = [True] * len(bound_list)
-    windows_consumed: list[int] = [0] * len(bound_list)
+        scaled_accumulators: list[_BoundExecutionReplayAccumulator | None] = [
+            _accumulator._BoundExecutionReplayAccumulator(
+                first, initial_equity, bound, spec, retain_event_snapshots, min_equity_fraction,
+            )
+            for bound, spec in bound_list
+        ]
+        if live_accumulators is not None:
+            live_accumulators.append([reference, *scaled_accumulators])
+        active: list[bool] = [True] * len(bound_list)
+        windows_consumed: list[int] = [0] * len(bound_list)
 
-    def _try_consume_scaled(idx: int, w: ExecutionReplayWindow) -> None:
-        if not active[idx]:
-            return
-        try:
-            assert scaled_accumulators[idx] is not None
-            scaled_accumulators[idx].consume(w)  # type: ignore[union-attr]
-            windows_consumed[idx] += 1
-        except DataIntegrityError as exc:
-            if idx in isolated_bound_indices:
-                active[idx] = False
-                scaled_accumulators[idx] = None
-                _isolated_failures.append(
-                    IsolatedBoundFailure(
-                        bound_index=idx,
-                        execution_bound=str(bound_list[idx][0]),
-                        error_class=type(exc).__name__,
-                        message=str(exc),
-                        windows_consumed=windows_consumed[idx],
+        def _try_consume_scaled(idx: int, w: ExecutionReplayWindow) -> None:
+            if not active[idx]:
+                return
+            try:
+                assert scaled_accumulators[idx] is not None
+                scaled_accumulators[idx].consume(w)  # type: ignore[union-attr]
+                windows_consumed[idx] += 1
+            except DataIntegrityError as exc:
+                if idx in isolated_bound_indices:
+                    active[idx] = False
+                    scaled_accumulators[idx] = None
+                    _isolated_failures.append(
+                        IsolatedBoundFailure(
+                            bound_index=idx,
+                            execution_bound=str(bound_list[idx][0]),
+                            error_class=type(exc).__name__,
+                            message=str(exc),
+                            windows_consumed=windows_consumed[idx],
+                        )
                     )
+                else:
+                    raise
+
+        _isolated_failures: list[IsolatedBoundFailure] = []
+        coverage_ns = -1
+
+        def _couple_window(w: ExecutionReplayWindow) -> None:
+            nonlocal coverage_ns
+            # 1) Fail-closed completeness gate: a window is internally contiguous
+            #    (a single date_range), so its own span always finishes any day it
+            #    starts inside -- the only place a gap can hide is the BOUNDARY
+            #    with the prior window. If W starts strictly after everything
+            #    consumed so far, the reference prefix (and therefore any day's
+            #    resampled return spanning that boundary) has a hole; checking
+            #    decision days against coverage already widened by W's own
+            #    consumption would make the guard vacuous, since a window's own
+            #    decisions always lie inside its own span.
+            prior_coverage_ns = coverage_ns
+            window_start_ns = int(w.minute_grid[0].value)
+            if prior_coverage_ns >= 0 and window_start_ns > prior_coverage_ns:
+                raise DataIntegrityError(
+                    "coupled replay: window starting "
+                    f"{w.window_start.isoformat()} begins after the last consumed "
+                    f"bar (coverage={prior_coverage_ns}); the reference prefix has "
+                    "a gap -- fall back to the exact two-pass path"
                 )
-            else:
-                raise
-
-    _isolated_failures: list[IsolatedBoundFailure] = []
-    coverage_ns = -1
-
-    def _couple_window(w: ExecutionReplayWindow) -> None:
-        nonlocal coverage_ns
-        # 1) Fail-closed completeness gate: a window is internally contiguous
-        #    (a single date_range), so its own span always finishes any day it
-        #    starts inside -- the only place a gap can hide is the BOUNDARY
-        #    with the prior window. If W starts strictly after everything
-        #    consumed so far, the reference prefix (and therefore any day's
-        #    resampled return spanning that boundary) has a hole; checking
-        #    decision days against coverage already widened by W's own
-        #    consumption would make the guard vacuous, since a window's own
-        #    decisions always lie inside its own span.
-        prior_coverage_ns = coverage_ns
-        window_start_ns = int(w.minute_grid[0].value)
-        if prior_coverage_ns >= 0 and window_start_ns > prior_coverage_ns:
-            raise DataIntegrityError(
-                "coupled replay: window starting "
-                f"{w.window_start.isoformat()} begins after the last consumed "
-                f"bar (coverage={prior_coverage_ns}); the reference prefix has "
-                "a gap -- fall back to the exact two-pass path"
+            # 2) The unscaled reference consumes W now that the gate has cleared.
+            reference.consume(w)
+            window_end_ns = int(w.minute_grid[-1].value)
+            coverage_ns = max(coverage_ns, window_end_ns)
+            # 3) Recompute the full-prefix scale from the reference equity chunks.
+            equity_prefix = (
+                pd.concat(
+                    [
+                        pd.Series(chunk, index=times)
+                        for chunk, times in zip(
+                            reference.equity_chunks, reference.equity_times, strict=True,
+                        )
+                    ],
+                )
+                if reference.equity_chunks
+                else pd.Series(dtype="float64")
             )
-        # 2) The unscaled reference consumes W now that the gate has cleared.
-        reference.consume(w)
-        window_end_ns = int(w.minute_grid[-1].value)
-        coverage_ns = max(coverage_ns, window_end_ns)
-        # 3) Recompute the full-prefix scale from the reference equity chunks.
-        equity_prefix = (
-            pd.concat(
-                [
-                    pd.Series(chunk, index=times)
-                    for chunk, times in zip(
-                        reference.equity_chunks, reference.equity_times, strict=True,
-                    )
-                ],
-            )
-            if reference.equity_chunks
-            else pd.Series(dtype="float64")
-        )
-        daily_returns = equity_prefix.resample("1D").last().pct_change()
-        scale = scale_fn(daily_returns)
-        # 4) Rescale W in place (exact two-pass formula) and fan it to the
-        #    already-constructed scaled bounds.
-        rescaled = _rescale_window_weights(w, scale)
+            daily_returns = equity_prefix.resample("1D").last().pct_change()
+            scale = scale_fn(daily_returns)
+            # 4) Rescale W in place (exact two-pass formula) and fan it to the
+            #    already-constructed scaled bounds.
+            rescaled = _rescale_window_weights(w, scale)
+            for idx in range(len(bound_list)):
+                _try_consume_scaled(idx, rescaled)
+
+        coverage_ns = -1
+        _couple_window(first)
+        del first
+        for w in it:
+            _couple_window(w)
+            del w
+
+        reference_result = reference.finalize()
+        results: list[StrategyExecutionReplayResult | None] = []
         for idx in range(len(bound_list)):
-            _try_consume_scaled(idx, rescaled)
-
-    coverage_ns = -1
-    _couple_window(first)
-    del first
-    for w in it:
-        _couple_window(w)
-        del w
-
-    reference_result = reference.finalize()
-    results: list[StrategyExecutionReplayResult | None] = []
-    for idx in range(len(bound_list)):
-        if not active[idx]:
-            results.append(None)
-            continue
-        try:
-            assert scaled_accumulators[idx] is not None
-            results.append(scaled_accumulators[idx].finalize())  # type: ignore[union-attr]
-        except DataIntegrityError as exc:
-            if idx in isolated_bound_indices:
-                _isolated_failures.append(
-                    IsolatedBoundFailure(
-                        bound_index=idx,
-                        execution_bound=str(bound_list[idx][0]),
-                        error_class=type(exc).__name__,
-                        message=str(exc),
-                        windows_consumed=windows_consumed[idx],
-                    )
-                )
+            if not active[idx]:
                 results.append(None)
-                active[idx] = False
-                scaled_accumulators[idx] = None
-            else:
-                raise
-    return reference_result, BatchReplayOutcome(
-        results=tuple(results), isolated_failures=tuple(_isolated_failures),
-    )
+                continue
+            try:
+                assert scaled_accumulators[idx] is not None
+                results.append(scaled_accumulators[idx].finalize())  # type: ignore[union-attr]
+            except DataIntegrityError as exc:
+                if idx in isolated_bound_indices:
+                    _isolated_failures.append(
+                        IsolatedBoundFailure(
+                            bound_index=idx,
+                            execution_bound=str(bound_list[idx][0]),
+                            error_class=type(exc).__name__,
+                            message=str(exc),
+                            windows_consumed=windows_consumed[idx],
+                        )
+                    )
+                    results.append(None)
+                    active[idx] = False
+                    scaled_accumulators[idx] = None
+                else:
+                    raise
+        return reference_result, BatchReplayOutcome(
+            results=tuple(results), isolated_failures=tuple(_isolated_failures),
+        )
 
 
 def replay_execution_window_batch(
