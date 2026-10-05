@@ -567,3 +567,178 @@ def test_replay_ledger_certified_fails_closed_on_missing_evidence() -> None:
     assert replay_ledger_certified(no_ledger) is False
     assert replay_ledger_certified(no_gaps) is False
     assert replay_ledger_certified(no_fills) is False
+
+
+def test_train_reference_ledger_certified_passes() -> None:
+    from types import SimpleNamespace
+
+    from src.mhs.evaluation.integrity import _assert_train_reference_ledger_certified
+
+    replay = SimpleNamespace(
+        ledger=SimpleNamespace(primary_valid=True, invalid_reasons=(), data_gaps=()),
+        terminal_positions=(SimpleNamespace(status="open_marked", funding_complete=True),),
+    )
+
+    assert _assert_train_reference_ledger_certified(replay, 3) is None
+
+
+def test_train_reference_ledger_unknown_held_funding_fails_closed() -> None:
+    from types import SimpleNamespace
+
+    import pandas as pd
+    import pytest
+
+    from src.common.errors import DataIntegrityError
+    from src.mhs.evaluation.integrity import _assert_train_reference_ledger_certified
+    from src.mhs.execution import ExecutionDataGap
+
+    gaps = (
+        ExecutionDataGap(code="MISSING_HELD_MARK", symbol="AAAUSDT", timestamp=pd.Timestamp("2025-12-11 13:00", tz="UTC")),
+        ExecutionDataGap(code="MISSING_HELD_FUNDING", symbol="AAAUSDT", timestamp=pd.Timestamp("2025-12-11 12:00", tz="UTC")),
+        ExecutionDataGap(code="MISSING_HELD_FUNDING", symbol="BBBUSDT", timestamp=pd.Timestamp("2025-12-11 12:00", tz="UTC")),
+        ExecutionDataGap(code="MISSING_HELD_FUNDING", symbol="AAAUSDT", timestamp=pd.Timestamp("2025-12-11 14:00", tz="UTC")),
+    )
+    replay = SimpleNamespace(
+        ledger=SimpleNamespace(primary_valid=False, invalid_reasons=("MISSING_DATA",), data_gaps=gaps),
+        terminal_positions=(SimpleNamespace(status="unresolved", funding_complete=False),),
+    )
+
+    with pytest.raises(DataIntegrityError) as excinfo:
+        _assert_train_reference_ledger_certified(replay, 3)
+    message = str(excinfo.value)
+    assert message.startswith("fold 3: train reference ledger not certified:")
+    assert "invalid_reasons=MISSING_DATA" in message
+    assert "gap_codes=MISSING_HELD_FUNDING:3,MISSING_HELD_MARK:1" in message
+    assert "unresolved_terminal=1" in message
+    assert "funding_incomplete_terminal=1" in message
+    assert "AAAUSDT" not in message
+    assert "BBBUSDT" not in message
+
+
+def test_train_reference_ledger_terminal_only_never_certifies() -> None:
+    from types import SimpleNamespace
+
+    import pandas as pd
+    import pytest
+
+    from src.common.errors import DataIntegrityError
+    from src.mhs.evaluation.integrity import _assert_train_reference_ledger_certified
+    from src.mhs.execution import ExecutionDataGap
+
+    gaps = (
+        ExecutionDataGap(code="UNKNOWN_TERMINATION", symbol="AAAUSDT", timestamp=pd.Timestamp("2025-12-31", tz="UTC")),
+    )
+    replay = SimpleNamespace(
+        ledger=SimpleNamespace(primary_valid=False, invalid_reasons=("MISSING_DATA",), data_gaps=gaps),
+        simulated_fills=pd.DataFrame(),
+        terminal_positions=(),
+    )
+
+    with pytest.raises(DataIntegrityError):
+        _assert_train_reference_ledger_certified(replay, 0)
+
+
+def test_train_reference_ledger_unresolved_terminal_without_gaps_fails() -> None:
+    from types import SimpleNamespace
+
+    import pytest
+
+    from src.common.errors import DataIntegrityError
+    from src.mhs.evaluation.integrity import _assert_train_reference_ledger_certified
+
+    replay = SimpleNamespace(
+        ledger=SimpleNamespace(primary_valid=True, invalid_reasons=(), data_gaps=()),
+        terminal_positions=(SimpleNamespace(status="unresolved", funding_complete=True),),
+    )
+
+    with pytest.raises(DataIntegrityError) as excinfo:
+        _assert_train_reference_ledger_certified(replay, 0)
+    message = str(excinfo.value)
+    assert "gap_codes=none" in message
+    assert "unresolved_terminal=1" in message
+
+
+def test_train_reference_ledger_failure_maps_to_execution_gap() -> None:
+    from types import SimpleNamespace
+
+    import pandas as pd
+    import pytest
+
+    from src.common.errors import DataIntegrityError
+    from src.mhs.evaluation.integrity import (
+        _assert_train_reference_ledger_certified,
+        _classify_execution_failure,
+    )
+    from src.mhs.execution import ExecutionDataGap
+    from src.mhs.research_go import GO_REASON_EXECUTION_GAP
+
+    def _replay(**kwargs):
+        base = {
+            "ledger": SimpleNamespace(primary_valid=False, invalid_reasons=("MISSING_DATA",), data_gaps=()),
+            "terminal_positions": (),
+        }
+        base.update(kwargs)
+        return SimpleNamespace(**base)
+
+    fund_gap = ExecutionDataGap(code="MISSING_HELD_FUNDING", symbol="AAAUSDT", timestamp=pd.Timestamp("2025-12-11 12:00", tz="UTC"))
+    cases = [
+        _replay(
+            ledger=SimpleNamespace(primary_valid=False, invalid_reasons=("MISSING_DATA",), data_gaps=(fund_gap,)),
+            terminal_positions=(SimpleNamespace(status="unresolved", funding_complete=False),),
+        ),
+        _replay(
+            ledger=SimpleNamespace(
+                primary_valid=False,
+                invalid_reasons=("MISSING_DATA",),
+                data_gaps=(ExecutionDataGap(code="UNKNOWN_TERMINATION", symbol="AAAUSDT", timestamp=pd.Timestamp("2025-12-31", tz="UTC")),),
+            ),
+        ),
+        _replay(
+            ledger=SimpleNamespace(primary_valid=True, invalid_reasons=(), data_gaps=()),
+            terminal_positions=(SimpleNamespace(status="unresolved", funding_complete=True),),
+        ),
+        _replay(
+            ledger=SimpleNamespace(primary_valid=True, invalid_reasons=(), data_gaps=()),
+            terminal_positions=(SimpleNamespace(status="open_marked", funding_complete=False),),
+        ),
+        _replay(),
+    ]
+    for replay in cases:
+        with pytest.raises(DataIntegrityError) as excinfo:
+            _assert_train_reference_ledger_certified(replay, 1)
+        assert _classify_execution_failure(excinfo.value) == GO_REASON_EXECUTION_GAP
+
+
+def test_train_reference_missing_terminal_evidence_reports_zero_counts() -> None:
+    from types import SimpleNamespace
+
+    import pytest
+
+    from src.common.errors import DataIntegrityError
+
+    replay = SimpleNamespace(
+        ledger=SimpleNamespace(primary_valid=True, invalid_reasons=(), data_gaps=()),
+    )
+    with pytest.raises(DataIntegrityError) as excinfo:
+        integrity._assert_train_reference_ledger_certified(replay, 3)
+    assert str(excinfo.value) == (
+        "fold 3: train reference ledger not certified: primary_valid=True "
+        "invalid_reasons=none gap_codes=none unresolved_terminal=0 "
+        "funding_incomplete_terminal=0"
+    )
+    assert integrity._classify_execution_failure(excinfo.value) == integrity.GO_REASON_EXECUTION_GAP
+
+
+def test_train_reference_missing_funding_evidence_is_counted() -> None:
+    from types import SimpleNamespace
+
+    import pytest
+
+    from src.common.errors import DataIntegrityError
+
+    replay = SimpleNamespace(
+        ledger=SimpleNamespace(primary_valid=False, invalid_reasons=(), data_gaps=()),
+        terminal_positions=(SimpleNamespace(status="unresolved"),),
+    )
+    with pytest.raises(DataIntegrityError, match="funding_incomplete_terminal=1"):
+        integrity._assert_train_reference_ledger_certified(replay, 3)

@@ -393,6 +393,7 @@ def _fold_train_reference_returns(
     _ref_iter = _ref_windows(target_replay, signal_available_at)
     base_spec = specs._resolved_base_execution_spec(request)
     ref_replay = replay_execution_windows(_ref_iter, initial_equity, "OHLCV_IMMEDIATE_TAKER", base_spec, retain_event_snapshots=False)
+    integrity._assert_train_reference_ledger_certified(ref_replay, fold_index)
     daily = ref_replay.ledger.equity.resample("1D").last().dropna().pct_change().dropna().astype("float64")
     daily = pd.Series(daily.to_numpy(dtype="float64"), index=daily.index, dtype="float64")
     daily = daily.loc[daily.index < fold.train_end]
