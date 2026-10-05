@@ -19,6 +19,7 @@ from src.mhs.parallel import (
     FORK_CONTEXT,
     assert_fork_admission,
     fork_shared_payload,
+    frozen_gc_heap,
     plan_worker_count,
 )
 from src.mhs.params import PERIODS_PER_YEAR_1H as _PERIODS_PER_YEAR_1H
@@ -128,6 +129,7 @@ def _run_books_concurrent(
             "funding_by_symbol": funding_by_symbol,
             "books": books_dict,
         }) as token,
+        frozen_gc_heap(),
         ProcessPoolExecutor(max_workers=_books_workers, mp_context=FORK_CONTEXT) as pool,
     ):
         f_fast = pool.submit(
@@ -294,7 +296,11 @@ def _run_post_book_concurrently(
         reserve_bytes=_post_book_reserve,
     )
     assert_fork_admission("post_book_folds", max_workers, WORKER_PEAK_RSS_BYTES, _post_book_reserve)
-    with fork_shared_payload({"base_panel": base_panel}), ProcessPoolExecutor(max_workers=max_workers, mp_context=FORK_CONTEXT) as pool:
+    with (
+        fork_shared_payload({"base_panel": base_panel}),
+        frozen_gc_heap(),
+        ProcessPoolExecutor(max_workers=max_workers, mp_context=FORK_CONTEXT) as pool,
+    ):
         futures = {
             pool.submit(
                 folds._run_anchored_fold,
