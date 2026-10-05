@@ -35,7 +35,6 @@ def _folds(start: str, n: int, mu: float, seed: int) -> list[pd.Series]:
 def _request(**overrides):
     import dataclasses
     from src.mhs.contracts import MhsDiagnosticRequest
-    from src.mhs.pipeline.config import request_from_namespace
 
     base = dataclasses.asdict(MhsDiagnosticRequest())
     base.update(overrides)
@@ -213,13 +212,22 @@ def test_forward_registration_request_validation_accepts_quarter_end() -> None:
 
 def test_cli_forward_registration_threads_to_config() -> None:
     import dataclasses
+    from src.cli.dataclass_args import explicit_field_values
     from src.cli.main import build_root_parser
-    from src.mhs.pipeline.config import request_from_namespace
+    from src.mhs.contracts import MhsDiagnosticRequest
+    from src.mhs.pipeline.config import resolve_cli_request
+
+    def _cli_request(argv):
+        return resolve_cli_request(
+            explicit_field_values(
+                MhsDiagnosticRequest, build_root_parser().parse_args(argv)
+            )
+        )
 
     base = ["research", "run", "portfolio", "mhs-horizon-diagnostic"]
-    assert request_from_namespace(build_root_parser().parse_args(base)).forward_registration_digest is None
+    assert _cli_request(base).forward_registration_digest is None
     args = build_root_parser().parse_args([*base, "--end", "2026-12-31", "--forward-registration", "a" * 32])
-    assert request_from_namespace(args).forward_registration_digest == "a" * 32
+    assert resolve_cli_request(explicit_field_values(MhsDiagnosticRequest, args)).forward_registration_digest == "a" * 32
     assert args.register_procedure is False
     assert build_root_parser().parse_args([*base, "--register-procedure"]).register_procedure is True
 
@@ -583,18 +591,21 @@ def test_active_payload_unchanged() -> None:
 def test_cli_opt_out_and_research_request_share_identity() -> None:
     import dataclasses
 
+    from src.cli.dataclass_args import explicit_field_values
     from src.cli.main import build_root_parser
     from src.mhs.contracts import MhsDiagnosticRequest
+    from src.mhs.pipeline.config import resolve_cli_request
     from src.mhs.preregistration import procedure_identity_digest
     from src.mhs.run_history import trial_identity_key
 
-    from src.mhs.pipeline.config import request_from_namespace
-
     base = ["research", "run", "portfolio", "mhs-horizon-diagnostic"]
-    cfg = request_from_namespace(
-        build_root_parser().parse_args(
-            [*base, "--no-committee-capital", "--execution-universe-size", "30",
-             "--pnl-vol-target-mode", "median_relative", "--growth-envelope", "conservative"]
+    cfg = resolve_cli_request(
+        explicit_field_values(
+            MhsDiagnosticRequest,
+            build_root_parser().parse_args(
+                [*base, "--no-committee-capital", "--execution-universe-size", "30",
+                 "--pnl-vol-target-mode", "median_relative", "--growth-envelope", "conservative"]
+            ),
         )
     )
     req = research_baseline()

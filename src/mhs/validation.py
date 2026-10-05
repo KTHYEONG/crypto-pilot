@@ -1,9 +1,7 @@
-"""Metadata-driven request validator for ``MhsDiagnosticRequest`` (I3).
+"""Metadata-driven request validator for ``MhsDiagnosticRequest``.
 
-Validation rules derive from each field's ``cli_param`` metadata (``choices``,
-``bounds``, ``requires``, ``excludes``) plus the field-specific predicates that
-carry the exact historical ``ValueError`` message strings so the 56
-``pytest.raises(ValueError, match=...)`` assertions keep passing verbatim.
+Validation rules = metadata ``choices`` + hand-written predicates with verbatim
+messages + ``INERT_DEPENDENT_RULES``.
 """
 
 from __future__ import annotations
@@ -100,22 +98,14 @@ def inert_dependent_overrides(request: Any) -> dict[str, object]:
 
 
 def _choice_error(field: str, value: Any, choices: tuple[str, ...]) -> str:
-    return f"unknown {field} '{value}'"
+    """``unknown <field> '<value>'; registered: [<choices>]`` -- the prefix is the stable match target."""
+    return f"unknown {field} '{value}'; registered: {list(choices)}"
 
 
 def _validate_field_choices(request: MhsDiagnosticRequest, field: str, choices: tuple[str, ...]) -> None:
     value = getattr(request, field)
     if value not in choices:
         raise ValueError(_choice_error(field, value, choices))
-
-
-def _validate_field_bounds(request: MhsDiagnosticRequest, field: str, bounds: tuple[float, float]) -> None:
-    value = getattr(request, field)
-    if value is None:
-        return
-    lo, hi = bounds
-    if not (lo <= value <= hi):
-        raise ValueError(f"{field} must be in [{lo}, {hi}]")
 
 
 def _validate_committee_tranche_count(request: MhsDiagnosticRequest) -> None:
@@ -159,14 +149,17 @@ def validate_request(request: MhsDiagnosticRequest) -> None:
     """
     # Choice membership (closed sets).
     _validate_field_choices(request, "partition", ("dev", "holdout", "all"))
+    import dataclasses as _dataclasses
+
+    from src.mhs.contracts import MhsDiagnosticRequest as _Request
+
+    for _f in _dataclasses.fields(_Request):
+        _choices = _f.metadata.get("choices")
+        if _choices is not None:
+            _validate_field_choices(request, _f.name, _choices)
     # Terminal-decision censoring needs an exact grid hit, so the passive
     # window must be a positive multiple of the execution timeframe's minutes;
     # rejected at request validation, before any panel load or replay.
-    _validate_field_choices(request, "execution_timeframe", ("3m",))
-    from src.mhs.panel import DATA_POLICIES
-
-    _validate_field_choices(request, "data_policy", tuple(sorted(DATA_POLICIES)))
-    _validate_field_choices(request, "liquidity_cost_model", ("flat", "corwin_schultz"))
     _timeframe_minutes = 3
     if request.passive_timeout_minutes < 1 or request.passive_timeout_minutes % _timeframe_minutes:
         raise ValueError(
@@ -185,18 +178,12 @@ def validate_request(request: MhsDiagnosticRequest) -> None:
             f"crash_regime_tilt_alpha must be in (0.0, 1.0] when set, "
             f"got {request.crash_regime_tilt_alpha}"
         )
-    _validate_field_choices(request, "slow_book_mode", ("single_horizon", "horizon_ensemble"))
-    _validate_field_choices(request, "fast_book_mode", ("single_horizon", "horizon_ensemble"))
-    _validate_field_choices(
-        request, "rebalance_filter", ("per_symbol_deadband", "portfolio_trigger"),
-    )
     if request.discovery_gate_adjusted_net_t and not request.discovery_gate:
         raise ValueError("discovery_gate_adjusted_net_t requires discovery_gate=True")
     if request.discovery_gate_regime_scaled_net_t and not request.discovery_gate:
         raise ValueError("discovery_gate_regime_scaled_net_t requires discovery_gate=True")
     if not isinstance(request.beta_neutralize, bool):
         raise ValueError("beta_neutralize must be a bool")
-    _validate_field_choices(request, "ensemble_signal", ("raw", "vol_normalized"))
     if not isinstance(request.trend_efficiency_overlay, bool):
         raise ValueError("trend_efficiency_overlay must be a bool")
     if not isinstance(request.pnl_vol_target, bool):
@@ -271,24 +258,12 @@ def validate_request(request: MhsDiagnosticRequest) -> None:
             raise ValueError("exposure_drawdown_brake requires pnl_vol_target=True")
     if not isinstance(request.ram_guard, bool):
         raise ValueError("ram_guard must be a bool")
-    from src.mhs.params import GROWTH_RISK_ENVELOPES
-
-    _validate_field_choices(
-        request, "growth_envelope", tuple(sorted(GROWTH_RISK_ENVELOPES)),
-    )
     if not isinstance(request.committee_member_attribution, bool):
         raise ValueError("committee_member_attribution must be a bool")
     if not (0.0 <= request.trend_sleeve_gross <= 1.0):
         raise ValueError("trend_sleeve_gross must be in [0.0, 1.0]")
     if request.trend_sleeve_gross > 0.0 and not request.trend_sleeve:
         raise ValueError("trend_sleeve_gross requires trend_sleeve=True")
-    _validate_field_choices(
-        request, "pnl_vol_target_mode",
-        ("median_relative", "exante_target", "growth_budget", "constant_risk"),
-    )
-    _validate_field_choices(
-        request, "committee_member_set", ("risk_premia", "flow_momentum"),
-    )
     if not request.committee_capital and request.committee_member_set != COMMITTEE_MEMBER_SET_INERT:
         raise ValueError("committee_member_set requires committee_capital=True")
     if not isinstance(request.funding_carry_sleeve, bool):

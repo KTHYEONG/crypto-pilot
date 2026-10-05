@@ -688,13 +688,16 @@ class TestSingleSourceDiagnosticControls:
         """Default CLI and direct config describe identical OHLCV/funding sources."""
         import dataclasses
 
+        from src.cli.dataclass_args import explicit_field_values
         from src.cli.main import build_root_parser
-        from src.mhs.pipeline.config import request_from_namespace
+        from src.mhs.pipeline.config import resolve_cli_request
 
         args = build_root_parser().parse_args(
             ["research", "run", "portfolio", "mhs-horizon-diagnostic"],
         )
-        from_cli = dataclasses.asdict(request_from_namespace(args))
+        from_cli = dataclasses.asdict(
+            resolve_cli_request(explicit_field_values(MhsDiagnosticRequest, args))
+        )
         bare = dataclasses.asdict(MhsDiagnosticRequest())
         assert from_cli == bare
         assert "mark_mode" not in bare

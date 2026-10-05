@@ -6,9 +6,10 @@ import dataclasses
 import json
 import pickle
 
+from src.cli.dataclass_args import explicit_field_values
 from src.cli.main import build_root_parser
 from src.mhs.contracts import MhsDiagnosticRequest
-from src.mhs.pipeline.config import request_from_namespace
+from src.mhs.pipeline.config import resolve_cli_request
 from tests.fixtures.mhs_requests import research_baseline
 
 BASE = ["research", "run", "portfolio", "mhs-horizon-diagnostic"]
@@ -29,7 +30,7 @@ def test_single_configuration_type() -> None:
 
 def test_production_defaults_equal_no_arg_cli() -> None:
     args = build_root_parser().parse_args(BASE)
-    assert request_from_namespace(args) == MhsDiagnosticRequest()
+    assert resolve_cli_request(explicit_field_values(MhsDiagnosticRequest, args)) == MhsDiagnosticRequest()
 
 
 def test_defaults_are_json_native() -> None:
@@ -66,7 +67,7 @@ def test_programmatic_and_cli_identity_coincide() -> None:
     from src.mhs.preregistration import procedure_identity_digest
     from src.mhs.run_history import trial_identity_key
 
-    cli_request = request_from_namespace(build_root_parser().parse_args(BASE))
+    cli_request = resolve_cli_request(explicit_field_values(MhsDiagnosticRequest, build_root_parser().parse_args(BASE)))
     programmatic = MhsDiagnosticRequest()
     assert cli_request == programmatic
     assert (
