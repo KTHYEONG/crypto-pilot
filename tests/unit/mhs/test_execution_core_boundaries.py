@@ -366,3 +366,136 @@ def test_core_imports_avoid_research_facade() -> None:
             if isinstance(node, (ast.Import, ast.ImportFrom))
         ]
         assert not any(name.startswith(bad) for name in top_imports for bad in forbidden), module
+
+
+def _gc_scoped_workload(*, n_windows: int = 3):
+    """Probe-like workload partitioned into execution windows for GC-policy tests."""
+    from tests.unit.mhs.execution.test_accumulator import _probe_like_workload
+    from tests.unit.mhs.test_execution import _partition_windows
+
+    wl = _probe_like_workload()
+    spec = ExecutionSpec()
+    wins = _partition_windows(
+        wl["grid"], wl["weights"], wl["signals"], wl["highs"], wl["lows"],
+        wl["closes"], wl["marks"], wl["funding"], spec, n_windows=n_windows,
+    )
+    return wl, spec, wins
+
+
+def test_replay_consumer_holds_freeze_while_consuming() -> None:
+    """SCENARIO_PERF_03B: every yielded window is consumed inside the freeze; 0 after return."""
+    import gc
+
+    from src.mhs.execution import replay_execution_window_pair, replay_execution_windows
+
+    _, spec, wins = _gc_scoped_workload()
+    assert gc.get_freeze_count() == 0
+    seen: list[int] = []
+
+    def _recording():
+        for w in wins:
+            seen.append(gc.get_freeze_count())
+            yield w
+
+    replay_execution_windows(_recording(), 1000.0, "OHLCV_IMMEDIATE_TAKER", spec)
+    assert len(seen) == len(wins) == 3
+    assert all(count > 0 for count in seen)
+    assert gc.get_freeze_count() == 0
+
+    seen.clear()
+    replay_execution_window_pair(_recording(), 1000.0, spec)
+    assert len(seen) == len(wins) == 3
+    assert all(count > 0 for count in seen)
+    assert gc.get_freeze_count() == 0
+    gc.unfreeze()
+
+
+def test_replay_consumer_releases_freeze_on_fatal_window_error() -> None:
+    """SCENARIO_PERF_03B: a column-order violation on window 2 releases the freeze."""
+    import dataclasses
+    import gc
+
+    import pytest
+
+    from src.common.errors import DataIntegrityError
+    from src.mhs.execution import replay_execution_windows
+
+    _, spec, wins = _gc_scoped_workload()
+    tampered = dataclasses.replace(wins[1], columns=tuple(reversed(wins[1].columns)))
+
+    def _bad():
+        yield wins[0]
+        yield tampered
+
+    with pytest.raises(DataIntegrityError, match="identical column order"):
+        replay_execution_windows(_bad(), 1000.0, "OHLCV_IMMEDIATE_TAKER", spec)
+    assert gc.get_freeze_count() == 0
+    gc.unfreeze()
+
+
+def test_coupled_fallback_releases_freeze() -> None:
+    """SCENARIO_PERF_03B: a coupled window starting past coverage releases the freeze."""
+    import dataclasses
+    import gc
+
+    import pandas as pd
+    import pytest
+
+    from src.common.errors import DataIntegrityError
+    from src.mhs.execution import replay_execution_windows_coupled
+
+    wl, spec, wins = _gc_scoped_workload(n_windows=2)
+    shift = pd.Timedelta(days=30)
+    gapped = dataclasses.replace(
+        wins[1],
+        window_start=wins[1].window_start + shift,
+        minute_grid=wins[1].minute_grid + shift,
+    )
+
+    def _gapped():
+        yield wins[0]
+        yield gapped
+
+    scale = pd.Series(1.0, index=wl["weights"].index)
+    with pytest.raises(DataIntegrityError, match="coupled replay"):
+        replay_execution_windows_coupled(
+            _gapped(), 1000.0,
+            ("OHLCV_IMMEDIATE_TAKER", spec),
+            [("OHLCV_IMMEDIATE_TAKER", spec)],
+            lambda _daily: scale,
+        )
+    assert gc.get_freeze_count() == 0
+    gc.unfreeze()
+
+
+def test_gc_policy_leaves_replay_output_bit_identical() -> None:
+    """SCENARIO_PERF_03B: list replay and scoped-generator replay agree bit-for-bit."""
+    import gc
+
+    import numpy as np
+
+    from src.mhs.execution import replay_execution_windows
+    from tests.unit.mhs.execution.test_accumulator import _probe_like_workload
+    from tests.unit.mhs.test_execution import _partition_windows
+
+    def _replay(windows):
+        wl = _probe_like_workload()
+        spec = ExecutionSpec()
+        wins = _partition_windows(
+            wl["grid"], wl["weights"], wl["signals"], wl["highs"], wl["lows"],
+            wl["closes"], wl["marks"], wl["funding"], spec, n_windows=3,
+        )
+        return replay_execution_windows(windows(wins), 1000.0, "OHLCV_IMMEDIATE_TAKER", spec)
+
+    try:
+        as_list = _replay(list)
+        as_gen = _replay(iter)
+    finally:
+        gc.unfreeze()
+    for field in ("equity", "net_returns", "mark_to_market_pnl", "funding_charge", "fee_charge", "fill_turnover"):
+        expected = getattr(as_list.ledger, field)
+        actual = getattr(as_gen.ledger, field)
+        assert np.array_equal(expected.to_numpy(), actual.to_numpy())
+        assert np.array_equal(expected.index.asi8, actual.index.asi8)
+    assert as_gen.simulated_fills.equals(as_list.simulated_fills)
+    assert list(as_gen.ledger.data_gaps) == list(as_list.ledger.data_gaps)

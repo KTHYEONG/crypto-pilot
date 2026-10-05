@@ -13,7 +13,11 @@
 
 from __future__ import annotations
 
+import gc
 import multiprocessing as mp
+import threading
+import weakref
+from collections.abc import Iterator
 from types import SimpleNamespace
 
 import psutil
@@ -23,12 +27,24 @@ from src.common.errors import DataIntegrityError
 from src.mhs.parallel import (
     FORK_CONTEXT,
     assert_fork_admission,
+    collect_window_garbage,
     fork_shared_payload,
+    frozen_gc_heap,
     plan_worker_count,
     resolve_fork_shared,
 )
 
 _GB = 2**30
+
+
+@pytest.fixture
+def _gc_freeze_guard() -> Iterator[None]:
+    """Pin the process-global GC freeze state: 0 on entry, restored on exit."""
+    assert gc.get_freeze_count() == 0
+    try:
+        yield
+    finally:
+        gc.unfreeze()
 
 
 def _fake_virtual_memory(total_gb: float, available_gb: float) -> SimpleNamespace:
@@ -213,3 +229,156 @@ class TestWorkerPlanObserver:
         )
         monkeypatch.setattr(psutil, "cpu_count", lambda: 8)
         assert plan_worker_count(3, int(3.0 * _GB), True) == expected
+
+
+class TestFrozenGcHeap:
+    """SCENARIO_PERF_03B: window-stream GC scoped heap freeze."""
+
+    pytestmark = pytest.mark.usefixtures("_gc_freeze_guard")
+
+    def test_freezes_and_releases(self) -> None:
+        """Entering freezes the setup heap; exit releases it."""
+        with frozen_gc_heap():
+            assert gc.get_freeze_count() > 0
+        assert gc.get_freeze_count() == 0
+
+    def test_releases_on_exception(self) -> None:
+        """A fatal body error propagates and still releases the freeze."""
+        with pytest.raises(DataIntegrityError, match="fatal window"), frozen_gc_heap():
+            raise DataIntegrityError("fatal window")
+        assert gc.get_freeze_count() == 0
+
+    def test_overlapping_scopes_share_one_freeze(self) -> None:
+        """A exits while B is inside: still frozen; 0 only after B exits."""
+        entered = threading.Event()
+        release = threading.Event()
+        done = threading.Event()
+        state: dict[str, object] = {}
+
+        def _other() -> None:
+            with frozen_gc_heap():
+                entered.set()
+                assert release.wait(60)
+                state["still_frozen"] = gc.get_freeze_count() > 0
+            state["after"] = gc.get_freeze_count()
+            done.set()
+
+        worker = threading.Thread(target=_other)
+        worker.start()
+        try:
+            with frozen_gc_heap():
+                assert entered.wait(60)
+            release.set()
+            assert done.wait(60)
+            assert state["still_frozen"] is True
+            assert state["after"] == 0
+            assert gc.get_freeze_count() == 0
+        finally:
+            release.set()
+            worker.join(60)
+
+    def test_collect_freezes_survivors_only_inside_scope(self) -> None:
+        """Survivors freeze inside a scope; outside the count stays put."""
+        with frozen_gc_heap():
+            base = gc.get_freeze_count()
+            survivor = {"window": list(range(100))}
+            collect_window_garbage()
+            assert gc.get_freeze_count() >= base + 1
+            del survivor
+        before = gc.get_freeze_count()
+        transient = {"window": list(range(100))}
+        collect_window_garbage()
+        assert gc.get_freeze_count() == before
+        del transient
+
+    def test_collect_reclaims_consumed_window_cycle(self) -> None:
+        """A dropped self-referencing window cycle is reclaimed with count ≥ 1."""
+        class _Node:
+            def __init__(self) -> None:
+                self.peer: _Node | None = None
+
+        with frozen_gc_heap():
+            node = _Node()
+            node.peer = node
+            ref = weakref.ref(node)
+            del node
+            found = collect_window_garbage()
+            assert ref() is None
+            assert found >= 1
+
+    def test_fork_child_never_unfreezes_inherited_heap(self) -> None:
+        """A child forked under a scope keeps the inherited heap frozen on exit."""
+        def _child_entry(queue) -> None:
+            import gc as _gc
+
+            from src.mhs.parallel import frozen_gc_heap as _scope
+
+            with _scope():
+                pass
+            queue.put(_gc.get_freeze_count())
+
+        with frozen_gc_heap():
+            parent_count = gc.get_freeze_count()
+            assert parent_count > 0
+            queue = FORK_CONTEXT.Queue()
+            proc = FORK_CONTEXT.Process(target=_child_entry, args=(queue,))
+            proc.start()
+            proc.join(60)
+            assert proc.exitcode == 0
+            child_after = queue.get(timeout=30)
+        assert child_after >= parent_count
+        assert gc.get_freeze_count() == 0
+
+    def test_fork_child_without_inherited_heap_unfreezes(self) -> None:
+        """A child forked outside any scope exits its own scope at 0."""
+        def _child_entry(queue) -> None:
+            import gc as _gc
+
+            from src.mhs.parallel import frozen_gc_heap as _scope
+
+            with _scope():
+                assert _gc.get_freeze_count() > 0
+            queue.put(_gc.get_freeze_count())
+
+        queue = FORK_CONTEXT.Queue()
+        proc = FORK_CONTEXT.Process(target=_child_entry, args=(queue,))
+        proc.start()
+        proc.join(60)
+        assert proc.exitcode == 0
+        assert queue.get(timeout=30) == 0
+
+    def test_fork_child_gets_fresh_scope_lock(self) -> None:
+        """A child forked while a helper holds the scope lock still scopes freely."""
+        import src.mhs.parallel as _parallel
+
+        held = threading.Event()
+        release = threading.Event()
+
+        def _holder() -> None:
+            with _parallel._SCOPE_LOCK:
+                held.set()
+                assert release.wait(60)
+
+        helper = threading.Thread(target=_holder)
+        helper.start()
+        try:
+            assert held.wait(60)
+
+            def _child_entry(queue) -> None:
+                import gc as _gc
+
+                from src.mhs.parallel import frozen_gc_heap as _scope
+
+                with _scope():
+                    pass
+                queue.put(_gc.get_freeze_count())
+
+            queue = FORK_CONTEXT.Queue()
+            proc = FORK_CONTEXT.Process(target=_child_entry, args=(queue,))
+            proc.start()
+            proc.join(60)
+            assert proc.exitcode == 0
+            assert queue.get(timeout=30) == 0
+        finally:
+            release.set()
+            helper.join(60)

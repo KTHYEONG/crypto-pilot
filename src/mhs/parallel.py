@@ -9,12 +9,21 @@ the ``submit`` boundary, and the payload is resolved child-side with
 system RAM rather than a hardcoded constant, and ``assert_fork_admission`` is a
 pre-fork barrier that fails closed before the projected fork demand can breach
 the system reserve (closing the guard blind spot between staged RSS checks).
+
+``frozen_gc_heap`` and ``collect_window_garbage`` bound the cost of the replay's
+per-window ``gc.collect()``: a full collection traverses every tracked object,
+so the long-lived setup heap and each window's survivors are moved to the
+permanent generation and every collection scans only the latest window's
+allocations. Entered around a fork pool, the same scope keeps fork children from
+writing GC headers of inherited objects, so those pages stay shared copy-on-write.
 """
 
 from __future__ import annotations
 
 import gc
 import multiprocessing
+import os
+import threading
 import uuid
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager, suppress
@@ -29,7 +38,9 @@ from src.mhs.types import RAM_RESERVE_FLOOR_BYTES, RAM_RESERVE_FRACTION
 __all__ = [
     "FORK_CONTEXT",
     "assert_fork_admission",
+    "collect_window_garbage",
     "fork_shared_payload",
+    "frozen_gc_heap",
     "plan_worker_count",
     "resolve_fork_shared",
 ]
@@ -43,6 +54,93 @@ FORK_CONTEXT: BaseContext = multiprocessing.get_context("fork")
 #: Module-global read-only payload registry inherited copy-on-write by fork
 #: children.  Keys are uuid4 hex tokens; values are arbitrary mappings.
 _FORK_SHARED: dict[str, Mapping[str, Any]] = {}
+
+#: Reference count of active ``frozen_gc_heap`` scopes in this process, guarded
+#: by ``_SCOPE_LOCK``.  Overlapping scopes from several threads or nested calls
+#: share one freeze.
+_SCOPE_DEPTH = 0
+
+#: True when this process was forked while its parent held a ``frozen_gc_heap``
+#: scope, i.e. the inherited heap is already frozen.  A child never unfreezes
+#: inherited objects: returning them to the collected generations would make
+#: the next collection write their GC headers and copy the shared pages.
+_INHERITED_FROZEN = False
+
+_SCOPE_LOCK = threading.Lock()
+
+
+def _note_fork_child() -> None:
+    """Reset GC-scope state for a freshly forked child.
+
+    A parent thread may have held ``_SCOPE_LOCK`` at fork, which would deadlock
+    the child on first use, so the child gets a new lock.  Depth restarts at 0
+    while the inherited frozen heap is recorded, so child scopes still collect
+    and freeze their own allocations but never unfreeze the inherited heap.
+    """
+    global _SCOPE_LOCK, _SCOPE_DEPTH, _INHERITED_FROZEN
+    _SCOPE_LOCK = threading.Lock()
+    _SCOPE_DEPTH = 0
+    _INHERITED_FROZEN = gc.get_freeze_count() > 0
+
+
+os.register_at_fork(after_in_child=_note_fork_child)
+
+
+@contextmanager
+def frozen_gc_heap() -> Iterator[None]:
+    """Freeze the current GC heap for the duration of a replay or fork-pool scope.
+
+    Process-wide, reentrant and thread-safe: scopes are reference-counted, so
+    overlapping scopes from several threads or nested calls share one freeze.
+    The outermost entry runs ``gc.collect()`` and then ``gc.freeze()``; the
+    outermost exit runs ``gc.unfreeze()`` so frozen objects that died meanwhile
+    become collectable again. Exit runs on normal return and on any exception.
+
+    A process forked while its parent held a scope inherits a frozen heap; in
+    that child the outermost exit never unfreezes, because returning inherited
+    objects to the collected generations would make the next collection write
+    their GC headers and copy the shared pages. Child scopes still collect and
+    freeze their own allocations.
+
+    Freezing never frees or retains acyclic objects (reference counting is
+    unaffected); only cyclic garbage formed among frozen objects is reclaimed
+    late, at the outermost exit (or, in a fork child with an inherited heap, at
+    process exit).
+
+    Yields:
+        None.
+    """
+    global _SCOPE_DEPTH
+    with _SCOPE_LOCK:
+        if _SCOPE_DEPTH == 0:
+            gc.collect()
+            gc.freeze()
+        _SCOPE_DEPTH += 1
+    try:
+        yield
+    finally:
+        with _SCOPE_LOCK:
+            _SCOPE_DEPTH -= 1
+            if _SCOPE_DEPTH == 0 and not _INHERITED_FROZEN:
+                gc.unfreeze()
+
+
+def collect_window_garbage() -> int:
+    """Collect a consumed window's garbage and freeze the survivors when a scope is active.
+
+    Called after a replay window has been consumed and released. Inside an
+    active ``frozen_gc_heap`` scope the surviving objects (accumulator state that
+    outlives the window) are frozen, so the next call scans only objects
+    allocated after this one. Outside any scope this is exactly ``gc.collect()``.
+
+    Returns:
+        The number of unreachable objects found, as returned by ``gc.collect()``.
+    """
+    found = gc.collect()
+    with _SCOPE_LOCK:
+        if _SCOPE_DEPTH > 0:
+            gc.freeze()
+    return found
 
 
 def _system_reserve_bytes() -> int:
