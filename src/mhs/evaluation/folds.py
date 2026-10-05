@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Iterator
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
@@ -400,6 +401,77 @@ def _fold_train_reference_returns(
     return daily
 
 
+@dataclass(frozen=True, slots=True)
+class _FoldValidationPlan:
+    """Validation-window decision inputs of one anchored fold, built once and replayed as-is.
+
+    Built before the train-reference replay so a fold whose validation window cannot be
+    evaluated exits without paying for that replay, and consumed unchanged by the
+    validation replays so the targets are never rebuilt. Picklable (module-level, pandas
+    fields only) so a later phase may transport it across a fork-pool boundary.
+
+    Attributes:
+        target_weights: Decision-grid targets exactly as returned by
+            ``fold_weights._build_fold_target_weights`` for the validation window (all
+            aligned columns); feeds ``books._book_structure_trace``.
+        target_replay: ``target_weights[minute_roster]`` after terminal censoring on the
+            validation 3m execution grid; the replayed decision path.
+        signal_available_at: Signal times aligned row-for-row with ``target_replay``.
+        terminal_censored: Decisions censored by ``_truncate_replayable_decisions``.
+        decision_intents: Count of finite cells in ``target_replay``.
+    """
+
+    target_weights: pd.DataFrame
+    target_replay: pd.DataFrame
+    signal_available_at: pd.DatetimeIndex
+    terminal_censored: int
+    decision_intents: int
+
+
+def _build_fold_validation_plan(
+    root: str,
+    fold: AnchoredPurgedFold,
+    request: MhsDiagnosticRequest,
+    funding_by_symbol: dict[str, pd.Series],
+    slow_horizon_override: int | None,
+    committee_member_weights: dict[str, float] | None,
+) -> _FoldValidationPlan:
+    """Build one fold's validation decision path and prove it is replayable.
+
+    Uses only data the validation window itself reads (panel from
+    ``max(train_start, validation_start - FOLD_PANEL_WARMUP_HOURS)`` to
+    ``validation_end``); never touches the train reference. The execution grid is the
+    3-minute grid ``[validation_start, validation_end]`` with the request's resolved base
+    execution spec, identical to the grid the validation replays use.
+
+    Raises:
+        ValueError, RuntimeError: Validation window unusable (no panel survivor, no
+            funded/aligned symbol, empty decision grid, no minute roster), propagated
+            unchanged from ``fold_weights._build_fold_target_weights``.
+        DataIntegrityError: Propagated unchanged from the target build or the
+            terminal-censoring helper.
+    """
+    target_weights, signal_available_at, minute_roster, _grid_1h = fold_weights._build_fold_target_weights(
+        root, fold, request, funding_by_symbol, slow_horizon_override, committee_member_weights,
+    )
+    execution_grid = pd.date_range(
+        fold.validation_start, fold.validation_end,
+        freq="3min",
+        tz="UTC",
+    )
+    target_replay, signal_available_at, terminal_censored = integrity._truncate_replayable_decisions(
+        target_weights[minute_roster], signal_available_at, execution_grid,
+        specs._resolved_base_execution_spec(request),
+    )
+    return _FoldValidationPlan(
+        target_weights=target_weights,
+        target_replay=target_replay,
+        signal_available_at=signal_available_at,
+        terminal_censored=terminal_censored,
+        decision_intents=int(np.isfinite(target_replay.to_numpy()).sum()),
+    )
+
+
 def _run_anchored_fold(
     root: str,
     fold: AnchoredPurgedFold,
@@ -413,10 +485,22 @@ def _run_anchored_fold(
     funding_carry_override: tuple[int | None, int | None, str, float | None] | None = None,
     committee_member_weights: dict[str, float] | None = None,
 ) -> MhsFoldReport:
-    """Keep train, validation and replay slices chronological while forwarding the same 3m OHLCV economics into each fold."""
+    """Replay one anchored fold: validation plan first, then the train-only sizing reference.
+
+    The validation decision path is built before the train-reference replay so a fold whose
+    validation window is provably unusable fails closed immediately with the incomplete-fold
+    report (``INCOMPLETE_ANCHORED_FOLD`` for ``RuntimeError``/``ValueError``, the classified
+    code for ``DataIntegrityError``) without spending the reference replay. When both the
+    validation build and the reference would fail, the validation failure is reported. The
+    plan is built exactly once and replayed unchanged; train, validation and replay slices
+    stay chronological, and the same 3m OHLCV economics drive every replay.
+    """
     try:
         vs = fold.validation_start
         ve = fold.validation_end
+        plan = _build_fold_validation_plan(
+            root, fold, request, funding_by_symbol, slow_horizon_override, committee_member_weights,
+        )
         train_reference = _fold_train_reference_returns(root, fold, request, funding_by_symbol, initial_equity, fold_index, slow_horizon_override, committee_member_weights)
         if telemetry is not None:
             telemetry.record(f"anchored_fold_{fold_index}_sizing_reference", grid_bars=len(train_reference), window_start=str(train_reference.index[0]), window_end=str(train_reference.index[-1]))
@@ -426,19 +510,6 @@ def _run_anchored_fold(
             _local_target_vol: float | None = _scaling._growth_budget_target_vol_by_boundary(train_reference, _envelope, {f"fold_{fold_index}": fold.train_end})[f"fold_{fold_index}"]
         else:
             _local_target_vol = None
-        target_weights, signal_available_at, minute_roster, _grid_1h = fold_weights._build_fold_target_weights(
-            root, fold, request, funding_by_symbol, slow_horizon_override, committee_member_weights,
-        )
-        target_replay = target_weights[minute_roster]
-        execution_grid = pd.date_range(
-            vs, ve,
-            freq="3min",
-            tz="UTC",
-        )
-        target_replay, signal_available_at, terminal_censored = integrity._truncate_replayable_decisions(
-            target_replay, signal_available_at, execution_grid, specs._resolved_base_execution_spec(request),
-        )
-        decision_intents = int(np.isfinite(target_replay.to_numpy()).sum())
 
         # Fork workers get the SYSTEM reserve check (not the auto 85% budget,
         # whose fork-child RSS would double-count COW-shared parent pages).
@@ -446,7 +517,7 @@ def _run_anchored_fold(
 
         def _windows() -> Iterator[MhsExecutionWindow]:
             return windows._iter_mhs_execution_windows(
-                target_replay, signal_available_at, root, request.execution_timeframe,
+                plan.target_replay, plan.signal_available_at, root, request.execution_timeframe,
                 vs, ve, funding_by_symbol, specs._resolved_base_execution_spec(request),
             )
 
@@ -557,12 +628,12 @@ def _run_anchored_fold(
             primary_geometric_cagr=_statistics._geometric_cagr(equity_1h),
             primary_max_drawdown=_statistics._mdd(equity),
             stress_naive_sharpe=stress_sharpe,
-            decision_intents=decision_intents,
+            decision_intents=plan.decision_intents,
             termination_counts=dict(primary.termination_counts),
             failures=tuple(sorted(set(failures))),
             strict_elapsed_seconds=primary.elapsed_seconds,
             stress_elapsed_seconds=stress.elapsed_seconds,
-            terminal_censored_decisions=terminal_censored,
+            terminal_censored_decisions=plan.terminal_censored,
             slow_horizon_hours=(
                 slow_horizon_override
                 if slow_horizon_override is not None
@@ -594,7 +665,7 @@ def _run_anchored_fold(
                 funding_carry_override[3] if funding_carry_override is not None else None
             ),
             book_structure={
-                **books._book_structure_trace(target_weights),
+                **books._book_structure_trace(plan.target_weights),
                 # Deployed-gross observability: the parity guard must see the
                 # exposure scale actually applied to this fold, not just the
                 # pre-scale decision book.
