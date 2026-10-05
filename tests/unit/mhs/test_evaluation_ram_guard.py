@@ -9,6 +9,7 @@ import pytest
 import src.mhs.resources as resources
 from src.mhs.diagnostic_run import run_mhs_horizon_diagnostic
 from src.common.errors import DataIntegrityError as _DataIntegrityError
+from src.mhs.tree_memory import TreeMemoryObservation
 from src.mhs.research_go import GO_REASON_RESOURCE_BREACH as _GO_REASON_RESOURCE_BREACH
 from src.mhs.resources import _StageRecorder, _assert_execution_rss_budget
 import types as _types
@@ -363,11 +364,19 @@ def test_assert_mhs_allocation_budget_compares_swap_against_baseline(monkeypatch
     monkeypatch.setattr(resources, "_current_tree_pss_bytes", lambda: _GIB)
     monkeypatch.setattr(resources, "_tree_headroom_bytes", lambda: 8 * _GIB)
     monkeypatch.setattr(resources, "_current_tree_swap_bytes", lambda: 4096)
+    monkeypatch.setattr(
+        resources, "observe_tree_memory",
+        lambda: TreeMemoryObservation(pss_bytes=_GIB, swap_bytes=4096),
+    )
     assert_mhs_allocation_budget(
         estimated_bytes=0, budget_bytes=8 * _GIB, reserve_bytes=_GIB,
         stage="execution_allocation", initial_swap_bytes=4096,
     )
     monkeypatch.setattr(resources, "_current_tree_swap_bytes", lambda: 8192)
+    monkeypatch.setattr(
+        resources, "observe_tree_memory",
+        lambda: TreeMemoryObservation(pss_bytes=_GIB, swap_bytes=8192),
+    )
     with pytest.raises(MhsResourceAdmissionError) as excinfo:
         assert_mhs_allocation_budget(
             estimated_bytes=0, budget_bytes=8 * _GIB, reserve_bytes=_GIB,
@@ -375,6 +384,10 @@ def test_assert_mhs_allocation_budget_compares_swap_against_baseline(monkeypatch
         )
     assert excinfo.value.error_code == "SWAP_GROWTH"
     monkeypatch.setattr(resources, "_current_tree_swap_bytes", lambda: None)
+    monkeypatch.setattr(
+        resources, "observe_tree_memory",
+        lambda: TreeMemoryObservation(pss_bytes=_GIB, swap_bytes=None),
+    )
     assert_mhs_allocation_budget(
         estimated_bytes=0, budget_bytes=8 * _GIB, reserve_bytes=_GIB,
         stage="execution_allocation", initial_swap_bytes=4096,

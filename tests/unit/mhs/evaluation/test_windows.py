@@ -1227,11 +1227,13 @@ def test_generator_empty_targets_emit_completed_grid(tmp_path) -> None:
 
 def _tight_telemetry(monkeypatch, *, pss: int = 0, available: int = 10**12) -> None:
     from src.mhs import resources as _res
+    from src.mhs.tree_memory import TreeMemoryObservation
 
     monkeypatch.setattr(_res, "_current_tree_pss_bytes", lambda: pss)
     monkeypatch.setattr(_res, "_current_available_bytes", lambda: available)
     monkeypatch.setattr(_res, "_read_cgroup_remaining_bytes", lambda: None)
     monkeypatch.setattr(_res, "_current_tree_swap_bytes", lambda: 0)
+    monkeypatch.setattr(_res, "observe_tree_memory", lambda: TreeMemoryObservation(pss_bytes=pss, swap_bytes=0))
 
 
 def _adaptive_fixture(tmp_path, *, days: int = 3):
