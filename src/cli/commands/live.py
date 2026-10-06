@@ -255,30 +255,38 @@ def _run_preflight(args: argparse.Namespace) -> None:
 def _run_tax_collect(args: argparse.Namespace) -> None:
     import pandas as pd
 
+    from src.common.errors import DataIntegrityError
+    from src.live.account import assert_venue_configuration, fetch_account_snapshot
     from src.live.audit import AuditLog, default_audit_log_path
+    from src.live.errors import LiveTradingError
     from src.live.rest import BinanceFuturesRestClient
-    from src.live.settings import LiveSettings
-    from src.live.tax_ledger import default_tax_ledger_dir
+    from src.live.tax_ledger import VenuePositionSnapshot, collect_and_persist_live_tax, resolve_tax_ledger_dir
 
-    settings = LiveSettings()
-    audit = AuditLog(default_audit_log_path("tax_collect", for_date=pd.Timestamp.now(tz="UTC")))
+    settings = _settings_with_mode(args)
+    if settings.mode.suppresses_mutations:
+        logger.error("[DATA] tax_collect status=REFUSED mode=%s reason=venue collection requires a live mode", settings.mode.value)
+        raise SystemExit(1)
+    now = pd.Timestamp.now(tz="UTC")
+    audit = AuditLog(default_audit_log_path("tax_collect", for_date=now))
     client = BinanceFuturesRestClient(
-        settings.order_base_url,
-        settings.api_key,
-        settings.api_secret,
-        settings.mode,
-        audit,
+        settings.order_base_url, settings.api_key, settings.api_secret, settings.mode, audit,
         recv_window_ms=settings.recv_window_ms,
     )
-    ledger_dir = settings.resolved_tax_ledger_dir(default_tax_ledger_dir)
-    from src.live.tax_ledger import collect_and_persist_live_tax
-
-    symbols: list[str] = []
-    now = pd.Timestamp.now(tz="UTC")
-    written, issues = collect_and_persist_live_tax(client, symbols, ledger_dir, settings.mode.value, now=now, settings=settings)
+    ledger_dir = resolve_tax_ledger_dir(settings)
+    try:
+        client.sync_server_time()
+        snapshot = fetch_account_snapshot(client, now=now)
+        assert_venue_configuration(snapshot)
+        written, issues = collect_and_persist_live_tax(
+            client, (), ledger_dir, settings.mode.value, now=now, settings=settings,
+            venue_snapshot=VenuePositionSnapshot(taken_at=snapshot.taken_at, positions=dict(snapshot.positions)),
+        )
+    except (DataIntegrityError, LiveTradingError) as exc:
+        logger.error("[DATA] tax_collect status=FAILED ledger_dir=%s reason=%s", ledger_dir, exc)
+        raise SystemExit(1) from exc
     for issue in issues:
         audit.record("tax_collect_issue", stream=issue.stream, stage=issue.stage, detail=issue.detail)
-    logger.info("[EVAL] tax_collect records=%d", written)
+    logger.info("[DATA] tax_collect records=%d issues=%d ledger_dir=%s", written, len(issues), ledger_dir)
 
 
 def _load_boundary_marks(path: Path) -> dict[str, Any]:
@@ -306,7 +314,7 @@ def _run_tax_summary(args: argparse.Namespace) -> None:
 
     from src.common.errors import DataIntegrityError
     from src.live.tax_boundary_marks import derive_ohlcv_boundary_marks
-    from src.live.tax_ledger import default_tax_ledger_dir
+    from src.live.tax_ledger import load_tax_watermark, resolve_tax_ledger_dir
     from src.live.tax_summary import (
         TaxSummaryConfig,
         summarize_tax_year,
@@ -315,13 +323,14 @@ def _run_tax_summary(args: argparse.Namespace) -> None:
     )
 
     settings = _settings_with_mode(args)
-    ledger_dir = _Path(args.ledger_dir) if args.ledger_dir else settings.resolved_tax_ledger_dir(default_tax_ledger_dir)
+    ledger_dir = _Path(args.ledger_dir) if args.ledger_dir else resolve_tax_ledger_dir(settings)
     source = args.source or tax_source_for_mode(settings.mode)
     try:
         marks = _load_boundary_marks(_Path(args.boundary_marks)) if args.boundary_marks else None
+        coverage = load_tax_watermark(ledger_dir / "watermark.json").coverage() if source == "venue" else None
         summary = summarize_tax_year(
             args.year, ledger_dir, source=source, config=TaxSummaryConfig.from_settings(settings),
-            coverage=None, boundary_marks=marks,
+            coverage=coverage, boundary_marks=marks,
             derive_boundary_marks=None if marks is not None else derive_ohlcv_boundary_marks,
         )
         output = _Path(args.output) if args.output else ledger_dir / "summaries" / f"tax_summary_{args.year}_{source}.json"
@@ -468,7 +477,8 @@ def add_live_commands(live_parser: argparse.ArgumentParser) -> None:
     resync.add_argument("--mode", choices=["live_testnet", "live_mainnet"], default=None, help="Override LIVE_MODE for this run")
     resync.set_defaults(handler=_run_ledger_resync)
 
-    tax_collect = subparsers.add_parser("tax-collect", help="Collect tax ledger from venue")
+    tax_collect = subparsers.add_parser("tax-collect", help="Collect venue trades and income into the tax ledger (live modes only)")
+    tax_collect.add_argument("--mode", choices=["live_testnet", "live_mainnet"], default=None, help="Override LIVE_MODE for this run")
     tax_collect.set_defaults(handler=_run_tax_collect)
 
     tax_summary = subparsers.add_parser("tax-summary", help="Summarize one tax year (local calendar year of LIVE_TAX_TIMEZONE)")

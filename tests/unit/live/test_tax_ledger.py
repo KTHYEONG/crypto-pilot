@@ -129,7 +129,8 @@ def _collect(client, symbols, watermark, *, now=NOW, issues=None, **over):
     kw.update(over)
     found = issues if issues is not None else []
     records, new_wm = collect_tax_records(
-        client, symbols, watermark, "live_testnet", now=now, issues=found, **kw
+        client, symbols, watermark, "live_testnet", now=now, settlement_asset="USDT",
+        issues=found, **kw
     )
     return records, new_wm, found
 
@@ -408,14 +409,12 @@ def test_persist_writes_records_before_watermark(tmp_path: Path, monkeypatch: py
 
     monkeypatch.setattr(tax_mod, "save_tax_watermark", _boom)
     with pytest.raises(RuntimeError, match="crash before watermark save"):
-        collect_and_persist_live_tax(client, ["BTCUSDT"], tax_dir, "live_testnet", now=NOW,
-                                     settings=_default_settings())
+        collect_and_persist_live_tax(client, ["BTCUSDT"], tax_dir, "live_testnet", now=NOW, settings=_default_settings(), venue_snapshot=None)
     assert len(read_tax_ledger(tax_dir)) == 3
     assert not (tax_dir / "watermark.json").exists()
     monkeypatch.undo()
 
-    new_rows, issues = collect_and_persist_live_tax(client, ["BTCUSDT"], tax_dir, "live_testnet", now=NOW,
-                                                    settings=_default_settings())
+    new_rows, issues = collect_and_persist_live_tax(client, ["BTCUSDT"], tax_dir, "live_testnet", now=NOW, settings=_default_settings(), venue_snapshot=None)
     assert new_rows == 0
     assert issues == ()
     assert len(read_tax_ledger(tax_dir)) == 3
@@ -441,8 +440,7 @@ def test_persist_append_failure_keeps_old_watermark(tmp_path: Path, monkeypatch:
 
     monkeypatch.setattr(tax_mod, "append_tax_records", _boom)
     with pytest.raises(RuntimeError, match="shard unavailable"):
-        collect_and_persist_live_tax(client, ["BTCUSDT"], tax_dir, "live_testnet", now=NOW,
-                                     settings=_default_settings())
+        collect_and_persist_live_tax(client, ["BTCUSDT"], tax_dir, "live_testnet", now=NOW, settings=_default_settings(), venue_snapshot=None)
     assert (tax_dir / "watermark.json").read_bytes() == before
 
 
@@ -505,8 +503,7 @@ def test_persist_corrupt_watermark_fails_closed(tmp_path: Path) -> None:
     (tax_dir / "watermark.json").write_text("{not json", encoding="utf-8")
     client = WindowedFakeClient({"BTCUSDT": [_venue_trade(1)]})
     with pytest.raises(DataIntegrityError):
-        collect_and_persist_live_tax(client, ["BTCUSDT"], tax_dir, "live_testnet", now=NOW,
-                                     settings=_default_settings())
+        collect_and_persist_live_tax(client, ["BTCUSDT"], tax_dir, "live_testnet", now=NOW, settings=_default_settings(), venue_snapshot=None)
     assert client.trades_calls == []
     assert client.income_calls == []
     assert list(tax_dir.glob("tax_ledger_*.jsonl")) == []
@@ -516,8 +513,7 @@ def test_persist_absent_watermark_starts_empty(tmp_path: Path) -> None:
     """No watermark file: collection runs against an empty watermark and saves progress."""
     client = WindowedFakeClient({"BTCUSDT": [_venue_trade(1)]})
     tax_dir = tmp_path / "tax"
-    new_rows, issues = collect_and_persist_live_tax(client, ["BTCUSDT"], tax_dir, "live_testnet", now=NOW,
-                                                    settings=_default_settings())
+    new_rows, issues = collect_and_persist_live_tax(client, ["BTCUSDT"], tax_dir, "live_testnet", now=NOW, settings=_default_settings(), venue_snapshot=None)
     assert new_rows == 1
     assert issues == ()
     assert len(read_tax_ledger(tax_dir)) == 1
@@ -534,8 +530,7 @@ def test_persist_honors_settings_page_limits(tmp_path: Path) -> None:
     client = WindowedFakeClient({}, incomes=incomes)
     tax_dir = tmp_path / "tax"
     settings = LiveSettings(tax_income_page_limit=2, tax_trades_page_limit=2)
-    new_rows, issues = collect_and_persist_live_tax(client, [], tax_dir, "live_testnet", now=NOW,
-                                                    settings=settings)
+    new_rows, issues = collect_and_persist_live_tax(client, [], tax_dir, "live_testnet", now=NOW, settings=settings, venue_snapshot=None)
     assert new_rows == 3
     assert issues == ()
     assert len(read_tax_ledger(tax_dir)) == 3
@@ -557,11 +552,9 @@ def test_persist_refetched_records_are_deduplicated(tmp_path: Path) -> None:
     """Same venue records on two runs: the second run writes 0 rows."""
     client = WindowedFakeClient({"BTCUSDT": [_venue_trade(1), _venue_trade(2)]})
     tax_dir = tmp_path / "tax"
-    first_rows, _ = collect_and_persist_live_tax(client, ["BTCUSDT"], tax_dir, "live_testnet", now=NOW,
-                                                 settings=_default_settings())
+    first_rows, _ = collect_and_persist_live_tax(client, ["BTCUSDT"], tax_dir, "live_testnet", now=NOW, settings=_default_settings(), venue_snapshot=None)
     assert first_rows == 2
-    second_rows, _ = collect_and_persist_live_tax(client, ["BTCUSDT"], tax_dir, "live_testnet", now=NOW,
-                                                  settings=_default_settings())
+    second_rows, _ = collect_and_persist_live_tax(client, ["BTCUSDT"], tax_dir, "live_testnet", now=NOW, settings=_default_settings(), venue_snapshot=None)
     assert second_rows == 0
     assert len(read_tax_ledger(tax_dir)) == 2
 

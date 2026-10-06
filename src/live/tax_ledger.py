@@ -5,12 +5,13 @@ from __future__ import annotations
 import contextlib
 import json
 import os
-from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass, field
 from dataclasses import replace as _replace
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Any, Final
 
 import pandas as pd
 
@@ -18,10 +19,12 @@ from src.common.durable_io import durable_write_text
 from src.common.errors import DataIntegrityError
 from src.common.paths import DATA_DIR
 from src.live.order_journal import truncate_durably
+from src.live.settings import ExecutionMode
 
 # Re-exported so `from src.live.tax_ledger import TaxRecord` keeps working.
 from src.live.tax_schema import (
     ONE_WAY_POSITION_SIDE,
+    TaxCoverage,
     parse_tax_decimal,
     tax_event_sort_key,
     tax_record_from_row,
@@ -37,6 +40,34 @@ from src.live.tax_schema import (
 
 if TYPE_CHECKING:
     from src.live.fills import FillEvent
+    from src.live.settings import LiveSettings
+
+
+VENUE_TAX_LEDGER_ENVIRONMENTS: Final[Mapping[ExecutionMode, str]] = MappingProxyType({
+    ExecutionMode.LIVE_TESTNET: "testnet",
+    ExecutionMode.LIVE_MAINNET: "mainnet",
+})
+
+
+def default_venue_tax_ledger_root() -> Path:
+    """Root of account-scoped venue tax ledgers: ``DATA_DIR/state/tax_ledger``."""
+    return DATA_DIR / "state" / "tax_ledger"
+
+
+def resolve_tax_ledger_dir(settings: LiveSettings) -> Path:
+    """Tax ledger directory for the process's mode: the only resolver venue collection, the tax CLI and preflight use.
+
+    An explicit ``tax_ledger_dir`` wins in every mode. Otherwise suppressed modes keep the
+    run-scoped (or legacy default) simulated ledger, and live modes use the account-scoped
+    ``default_venue_tax_ledger_root() / <testnet|mainnet>``: venue facts belong to the exchange
+    account, and ``LIVE_RECORD_RUN_ID`` rotates, so a run-scoped venue ledger would restart its
+    genesis on every rotation and never be provably complete.
+    """
+    if settings.tax_ledger_dir:
+        return Path(settings.tax_ledger_dir)
+    if settings.mode.suppresses_mutations:
+        return settings.resolved_tax_ledger_dir(default_tax_ledger_dir)
+    return default_venue_tax_ledger_root() / VENUE_TAX_LEDGER_ENVIRONMENTS[settings.mode]
 
 INCOME_TYPE_KIND: Mapping[str, str] = {
     "REALIZED_PNL": "REALIZED_PNL",
@@ -89,10 +120,52 @@ class TaxLedgerCorruptError(DataIntegrityError):
 
 
 @dataclass(frozen=True, slots=True)
+class VenuePositionSnapshot:
+    """Venue positions observed at ``taken_at`` (tz-aware UTC), keyed by symbol, signed quantities.
+
+    Recorded once as the ledger genesis: only a flat genesis anchors the moving-average fold,
+    because positions opened before collection have no entry fills in the ledger. Zero entries are
+    ignored.
+    """
+
+    taken_at: pd.Timestamp
+    positions: Mapping[str, Decimal]
+
+
+@dataclass(frozen=True, slots=True)
 class TaxWatermark:
+    """Collection progress and coverage facts of one ledger directory (persisted as watermark.json).
+
+    last_trade_id: last collected venue trade id per symbol (userTrades fromId cursor).
+    last_collected_at: income is known complete for event times <= this instant (UTC).
+    known_trade_symbols: every symbol ever placed in the trade collection universe or seen on a
+        venue income row; it stays in the universe forever so a symbol that leaves the strategy
+        is still collected until its last fill is in the ledger.
+    income_covered_from: start of the first completed income window (None when the watermark
+        predates coverage tracking; such a ledger can never be proven complete).
+    income_gaps: merged, sorted, disjoint UTC intervals of income history lost to venue
+        retention between collections.
+    genesis_at / genesis_positions: venue position snapshot recorded with the first collection
+        that supplied one; set once, never overwritten.
+    """
+
     last_trade_id: dict[str, int]
     last_collected_at: pd.Timestamp | None
-    """Income is known complete for event times <= this instant (UTC)."""
+    known_trade_symbols: frozenset[str] = frozenset()
+    income_covered_from: pd.Timestamp | None = None
+    income_gaps: tuple[tuple[pd.Timestamp, pd.Timestamp], ...] = ()
+    genesis_at: pd.Timestamp | None = None
+    genesis_positions: Mapping[str, Decimal] = field(default_factory=dict)
+
+    def coverage(self) -> TaxCoverage:
+        """Coverage facts for the yearly summary: genesis, income_covered_from, income_gaps, and collected_through = last_collected_at."""
+        return TaxCoverage(
+            genesis_at=self.genesis_at,
+            genesis_positions=dict(self.genesis_positions),
+            income_covered_from=self.income_covered_from,
+            collected_through=self.last_collected_at,
+            income_gaps=self.income_gaps,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -161,7 +234,54 @@ def _venue_decimal(entry: dict[str, Any], key: str, what: str) -> Decimal:
         raise DataIntegrityError(f"{what} entry has unparseable {key}: {entry!r}") from exc
 
 
-def _parse_trade_row(entry: Any, sym: str) -> tuple[TaxRecord, int, str]:
+def tax_collection_symbols(
+    requested: Iterable[str],
+    watermark: TaxWatermark,
+    venue_positions: Mapping[str, Decimal],
+) -> tuple[str, ...]:
+    """Trade collection universe: requested symbols, every symbol already known to the ledger (``known_trade_symbols`` and ``last_trade_id`` keys) and every symbol with a nonzero venue position. Sorted and de-duplicated.
+
+    The universe only grows: dropping a symbol would silently stop collecting fills that exist
+    (an exit fill whose collection failed, a manual trade, a funding-carrying position).
+    """
+    universe: set[str] = set()
+    for sym in list(requested):
+        if not isinstance(sym, str) or not sym:
+            raise ValueError(f"tax collection symbol must be a non-empty string: {sym!r}")
+        universe.add(sym)
+    for sym in list(watermark.known_trade_symbols) + list(watermark.last_trade_id.keys()):
+        if not isinstance(sym, str) or not sym:
+            raise ValueError(f"tax collection symbol must be a non-empty string: {sym!r}")
+        universe.add(sym)
+    for sym, qty in dict(venue_positions).items():
+        if not isinstance(sym, str) or not sym:
+            raise ValueError(f"tax collection symbol must be a non-empty string: {sym!r}")
+        if qty != 0:
+            universe.add(sym)
+    return tuple(sorted(universe))
+
+
+def _merge_income_gaps(
+    existing: tuple[tuple[pd.Timestamp, pd.Timestamp], ...],
+    new: tuple[pd.Timestamp, pd.Timestamp] | None,
+) -> tuple[tuple[pd.Timestamp, pd.Timestamp], ...]:
+    intervals = list(existing)
+    if new is not None:
+        intervals.append(new)
+    if not intervals:
+        return ()
+    intervals.sort(key=lambda iv: (iv[0], iv[1]))
+    merged: list[list[pd.Timestamp]] = [[intervals[0][0], intervals[0][1]]]
+    for start, end in intervals[1:]:
+        if start <= merged[-1][1]:
+            if end > merged[-1][1]:
+                merged[-1][1] = end
+        else:
+            merged.append([start, end])
+    return tuple((s, e) for s, e in merged)
+
+
+def _parse_trade_row(entry: Any, sym: str, settlement_asset: str) -> tuple[TaxRecord, int, str]:
     """Convert one ``/fapi/v1/userTrades`` entry; every field the tax record needs is required.
 
     Missing or unparseable venue fields raise instead of defaulting: a trade priced at 0 or stamped
@@ -191,7 +311,7 @@ def _parse_trade_row(entry: Any, sym: str) -> tuple[TaxRecord, int, str]:
         )
     symbol = str(entry.get("symbol") or sym)
     is_maker = bool(entry.get("maker", False))
-    income_asset = fee_asset or "USDT"
+    income_asset = settlement_asset
     return (
         TaxRecord(
             record_id=f"venue:TRADE:{venue_id}",
@@ -272,6 +392,7 @@ def _collect_trades(
     mode: str,
     *,
     now_ts: pd.Timestamp,
+    settlement_asset: str,
     trades_page_limit: int,
     max_pages: int,
     pages_used: list[int],
@@ -304,7 +425,7 @@ def _collect_trades(
             page_failed = False
             for entry in page:
                 try:
-                    rec, venue_id, _ = _parse_trade_row(entry, sym)
+                    rec, venue_id, _ = _parse_trade_row(entry, sym, settlement_asset)
                 except DataIntegrityError as exc:
                     page_failed = True
                     # id 를 알 수 있으면 그 직전까지만 워터마크를 전진시켜 다음 주기에 재수집한다.
@@ -340,16 +461,19 @@ def _collect_income(
     max_pages: int,
     pages_used: list[int],
     issues: list[TaxCollectionIssue] | None,
-) -> tuple[list[TaxRecord], pd.Timestamp | None, pd.Timestamp | None]:
+) -> tuple[list[TaxRecord], pd.Timestamp | None, pd.Timestamp | None, pd.Timestamp, tuple[pd.Timestamp, pd.Timestamp] | None, bool]:
     """Read income in bounded [startTime, endTime] windows with overlap and paging.
 
-    Returns (records, complete_through, conflict_cap). complete_through is the last instant known
+    Returns (records, complete_through, conflict_cap, first_start, retention_gap, window_completed). complete_through is the last instant known
     complete; None when nothing completed. conflict_cap bounds the watermark on id conflicts.
+    first_start is the first window start; retention_gap is the unrecoverable interval or None.
+    window_completed is True when at least one full window completed.
     """
     records: list[TaxRecord] = []
     # 창 겹침 재조회에서 같은 record_id 가 다시 오므로 내용 서명으로 중복/충돌을 가른다.
     seen_ids: dict[str, tuple[str, Decimal, str, str]] = {}
     retention_floor = now_ts - income_retention
+    retention_gap: tuple[pd.Timestamp, pd.Timestamp] | None = None
     if watermark.last_collected_at is not None:
         start0 = _as_utc(watermark.last_collected_at) - income_overlap
         if _as_utc(watermark.last_collected_at) < retention_floor:
@@ -357,6 +481,7 @@ def _collect_income(
                 issues, "income", "retention_gap",
                 f"uncovered [{_as_utc(watermark.last_collected_at).isoformat()}..{retention_floor.isoformat()}]",
             )
+            retention_gap = (_as_utc(watermark.last_collected_at), retention_floor)
             start0 = retention_floor
     else:
         start0 = retention_floor
@@ -364,6 +489,7 @@ def _collect_income(
         start0 = now_ts
     complete_through: pd.Timestamp | None = None
     conflict_cap: pd.Timestamp | None = None
+    window_completed = False
     window_start = start0
     while window_start < now_ts:
         window_end = min(window_start + income_window, now_ts)
@@ -377,7 +503,7 @@ def _collect_income(
                 capped = page_start - pd.Timedelta(milliseconds=1)
                 if complete_through is None or capped > complete_through:
                     complete_through = capped
-                return records, complete_through, conflict_cap
+                return records, complete_through, conflict_cap, start0, retention_gap, window_completed
             try:
                 page = client.income(
                     start_time_ms=int(page_start.timestamp() * 1000),
@@ -429,11 +555,12 @@ def _collect_income(
         if window_failed:
             break
         complete_through = window_end
+        window_completed = True
         window_start = window_end
     else:
         # 모든 창을 소진(창이 0개인 미래 워터마크 포함) = now 까지 완결.
         complete_through = now_ts
-    return records, complete_through, conflict_cap
+    return records, complete_through, conflict_cap, start0, retention_gap, window_completed
 
 
 def collect_tax_records(
@@ -443,6 +570,7 @@ def collect_tax_records(
     mode: str,
     *,
     now: pd.Timestamp,
+    settlement_asset: str,
     income_page_limit: int,
     trades_page_limit: int,
     income_window: pd.Timedelta,
@@ -461,8 +589,17 @@ def collect_tax_records(
     fetched and parsed: a fetch failure, parse failure, page cap or stalled page leaves
     ``last_collected_at`` at the last instant known complete.
 
+    The returned watermark also carries coverage facts: ``known_trade_symbols`` grows by
+    ``symbols`` and by every symbol on a collected income row; ``income_covered_from`` is set to the
+    first window start when this is the ledger's first collection (no prior ``last_collected_at``)
+    and at least one income window completed, and is never changed afterwards; a retention gap is
+    merged into ``income_gaps`` as [previous last_collected_at, retention floor]. Genesis fields are
+    carried through unchanged.
+
     Args:
         now: Wall-clock UTC upper bound of this collection (never the decision time).
+        settlement_asset: Asset every venue trade's realizedPnl is denominated in (USDT-M: USDT).
+            Recorded as the trade's ``income_asset`` regardless of the commission asset.
         income_page_limit / trades_page_limit: Venue page sizes.
         income_window: Width of one bounded income request window.
         income_overlap: Re-read margin behind the watermark.
@@ -478,10 +615,11 @@ def collect_tax_records(
     pages_used = [0]
     trade_records, new_last_trade = _collect_trades(
         client, symbols, watermark, mode, now_ts=now_ts,
+        settlement_asset=settlement_asset,
         trades_page_limit=trades_page_limit, max_pages=max_pages,
         pages_used=pages_used, issues=collected,
     )
-    income_records, complete_through, conflict_cap = _collect_income(
+    income_records, complete_through, conflict_cap, first_start, retention_gap, window_completed = _collect_income(
         client, watermark, mode, now_ts=now_ts,
         income_page_limit=income_page_limit, income_window=income_window,
         income_overlap=income_overlap, income_retention=income_retention,
@@ -499,9 +637,25 @@ def collect_tax_records(
         new_collected_at = now_ts
     if conflict_cap is not None and new_collected_at is not None and new_collected_at > conflict_cap:
         new_collected_at = conflict_cap
+    known: set[str] = set(watermark.known_trade_symbols)
+    for sym in list(symbols):
+        if isinstance(sym, str) and sym:
+            known.add(sym)
+    for rec in income_records:
+        if rec.symbol:
+            known.add(rec.symbol)
+    covered_from = watermark.income_covered_from
+    if watermark.last_collected_at is None and covered_from is None and window_completed:
+        covered_from = first_start
+    gaps = _merge_income_gaps(watermark.income_gaps, retention_gap)
     new_watermark = TaxWatermark(
         last_trade_id=new_last_trade,
         last_collected_at=new_collected_at,
+        known_trade_symbols=frozenset(known),
+        income_covered_from=covered_from,
+        income_gaps=gaps,
+        genesis_at=watermark.genesis_at,
+        genesis_positions=dict(watermark.genesis_positions),
     )
     records_sorted = sorted(trade_records + income_records, key=lambda r: r.event_time)
     return tuple(records_sorted), new_watermark
@@ -818,6 +972,22 @@ def read_tax_ledger(ledger_dir: Path | str) -> tuple[TaxRecord, ...]:
     return tuple(sorted(seen.values(), key=tax_event_sort_key))
 
 
+def _load_watermark_timestamp(raw: Any, watermark_path: Path, *, strict: bool) -> pd.Timestamp | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, str):
+        raise DataIntegrityError(f"tax watermark malformed: {watermark_path}")
+    try:
+        ts = pd.Timestamp(raw)
+    except (ValueError, TypeError) as exc:
+        raise DataIntegrityError(f"tax watermark malformed: {watermark_path}") from exc
+    if ts.tzinfo is None:
+        if strict:
+            raise DataIntegrityError(f"tax watermark malformed: {watermark_path}")
+        return ts.tz_localize("UTC")
+    return ts.tz_convert("UTC")
+
+
 def load_tax_watermark(path: Path) -> TaxWatermark:
     """Read watermark.json; an absent file means an empty watermark.
 
@@ -837,20 +1007,57 @@ def load_tax_watermark(path: Path) -> TaxWatermark:
         raise DataIntegrityError(f"tax watermark must be a JSON object: {watermark_path}")
     try:
         last_trade_id = {str(k): int(v) for k, v in dict(raw.get("last_trade_id", {})).items()}
-        collected_raw = raw.get("last_collected_at")
-        if collected_raw is None:
-            last_collected_at = None
-        else:
-            last_collected_at = pd.Timestamp(collected_raw)
-            if last_collected_at.tzinfo is None:
-                last_collected_at = last_collected_at.tz_localize("UTC")
-            else:
-                last_collected_at = last_collected_at.tz_convert("UTC")
+        last_collected_at = _load_watermark_timestamp(raw.get("last_collected_at"), watermark_path, strict=False)
+        known_raw = raw.get("known_trade_symbols", [])
+        if not isinstance(known_raw, list):
+            raise DataIntegrityError(f"tax watermark malformed: {watermark_path}")
+        known_trade_symbols: frozenset[str] = frozenset()
+        for sym in known_raw:
+            if not isinstance(sym, str) or not sym:
+                raise DataIntegrityError(f"tax watermark malformed: {watermark_path}")
+            known_trade_symbols = known_trade_symbols | frozenset({sym})
+        income_covered_from = _load_watermark_timestamp(raw.get("income_covered_from"), watermark_path, strict=True)
+        gaps_raw = raw.get("income_gaps", [])
+        if not isinstance(gaps_raw, list):
+            raise DataIntegrityError(f"tax watermark malformed: {watermark_path}")
+        income_gaps: list[tuple[pd.Timestamp, pd.Timestamp]] = []
+        for interval in gaps_raw:
+            if not isinstance(interval, list) or len(interval) != 2:
+                raise DataIntegrityError(f"tax watermark malformed: {watermark_path}")
+            start = _load_watermark_timestamp(interval[0], watermark_path, strict=True)
+            end = _load_watermark_timestamp(interval[1], watermark_path, strict=True)
+            assert start is not None
+            assert end is not None
+            if start >= end:
+                raise DataIntegrityError(f"tax watermark malformed: {watermark_path}")
+            income_gaps.append((start, end))
+        genesis_at = _load_watermark_timestamp(raw.get("genesis_at"), watermark_path, strict=True)
+        genesis_raw = raw.get("genesis_positions", {})
+        if not isinstance(genesis_raw, dict):
+            raise DataIntegrityError(f"tax watermark malformed: {watermark_path}")
+        genesis_positions: dict[str, Decimal] = {}
+        for sym, value in genesis_raw.items():
+            if not isinstance(sym, str) or not sym:
+                raise DataIntegrityError(f"tax watermark malformed: {watermark_path}")
+            try:
+                amount = parse_tax_decimal(value, field=f"genesis_positions.{sym}")
+            except DataIntegrityError as exc:
+                raise DataIntegrityError(f"tax watermark malformed: {watermark_path}") from exc
+            if amount == 0:
+                raise DataIntegrityError(f"tax watermark malformed: {watermark_path}")
+            genesis_positions[sym] = amount
+    except DataIntegrityError:
+        raise
     except (ValueError, TypeError, AttributeError) as exc:
         raise DataIntegrityError(f"tax watermark malformed: {watermark_path}") from exc
     return TaxWatermark(
         last_trade_id=last_trade_id,
         last_collected_at=last_collected_at,
+        known_trade_symbols=known_trade_symbols,
+        income_covered_from=income_covered_from,
+        income_gaps=tuple(income_gaps),
+        genesis_at=genesis_at,
+        genesis_positions=genesis_positions,
     )
 
 
@@ -865,6 +1072,17 @@ def save_tax_watermark(path: Path, watermark: TaxWatermark) -> None:
         "last_collected_at": watermark.last_collected_at.isoformat()
         if watermark.last_collected_at is not None
         else None,
+        "known_trade_symbols": sorted(watermark.known_trade_symbols),
+        "income_covered_from": watermark.income_covered_from.isoformat()
+        if watermark.income_covered_from is not None
+        else None,
+        "income_gaps": [
+            [start.isoformat(), end.isoformat()] for start, end in watermark.income_gaps
+        ],
+        "genesis_at": watermark.genesis_at.isoformat() if watermark.genesis_at is not None else None,
+        "genesis_positions": {
+            sym: format(amount, "f") for sym, amount in sorted(watermark.genesis_positions.items())
+        },
     }
     durable_write_text(watermark_path, json.dumps(payload, sort_keys=True))
 
@@ -877,8 +1095,21 @@ def collect_and_persist_live_tax(
     *,
     now: pd.Timestamp,
     settings: Any,
+    venue_snapshot: VenuePositionSnapshot | None,
 ) -> tuple[int, tuple[TaxCollectionIssue, ...]]:
     """Load watermark, collect, append (durably), then save the watermark.
+
+    The trade universe is ``tax_collection_symbols(symbols, watermark, venue positions)``. When the
+    watermark has no genesis and ``venue_snapshot`` is given, the snapshot becomes the genesis
+    (``genesis_at = taken_at``, nonzero positions) and is saved with the watermark after the
+    append, so a failed append never records a genesis. A non-flat genesis is reported as a
+    ``TaxCollectionIssue(stream="genesis", stage="genesis_not_flat")``: that ledger can never be
+    proven complete and the operator must be told at once.
+
+    Args:
+        symbols: Caller's symbols of interest (runner: strategy weights plus held positions; CLI: none).
+        venue_snapshot: Venue positions observed at the start of the cycle (before this cycle's
+            fills); required keyword so every caller states whether it has one.
 
     Raises:
         DataIntegrityError: watermark unreadable.
@@ -888,13 +1119,16 @@ def collect_and_persist_live_tax(
     directory = Path(tax_dir)
     directory.mkdir(parents=True, exist_ok=True)
     watermark = load_tax_watermark(directory / "watermark.json")
+    snapshot_positions: dict[str, Decimal] = dict(venue_snapshot.positions) if venue_snapshot is not None else {}
+    universe = tax_collection_symbols(symbols, watermark, snapshot_positions)
     found: list[TaxCollectionIssue] = []
     records, new_watermark = collect_tax_records(
         client,
-        symbols,
+        universe,
         watermark,
         mode,
         now=now,
+        settlement_asset=str(settings.tax_settlement_asset),
         income_page_limit=int(settings.tax_income_page_limit),
         trades_page_limit=int(settings.tax_trades_page_limit),
         income_window=pd.Timedelta(days=int(settings.tax_income_window_days)),
@@ -903,6 +1137,16 @@ def collect_and_persist_live_tax(
         max_pages=int(settings.tax_max_pages_per_cycle),
         issues=found,
     )
+    if watermark.genesis_at is None and venue_snapshot is not None:
+        genesis_positions = {s: q for s, q in snapshot_positions.items() if q != 0}
+        new_watermark = _replace(
+            new_watermark,
+            genesis_at=_as_utc(venue_snapshot.taken_at),
+            genesis_positions=genesis_positions,
+        )
+        if genesis_positions:
+            detail = ",".join(f"{s}={q}" for s, q in sorted(genesis_positions.items()))
+            found.append(TaxCollectionIssue(stream="genesis", stage="genesis_not_flat", detail=detail))
     new_rows = sum(len(rows) for rows in _partition_fresh_tax_records(records, directory).values())
     append_tax_records(records, directory)
     save_tax_watermark(directory / "watermark.json", new_watermark)

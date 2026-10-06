@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -9,6 +10,8 @@ from typing import Any
 import pandas as pd
 
 from src.common.errors import DataIntegrityError
+
+logger = logging.getLogger("LivePreflight")
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,6 +45,38 @@ def _load_artifact_frame(artifact_path: Path, artifact_key: Any | None) -> pd.Da
     except (FileNotFoundError, OSError) as exc:
         raise DataIntegrityError(f"target weights artifact missing: {artifact_path}") from exc
     return frame
+
+
+def tax_collection_check(settings: Any, tax_dir: Path) -> PreflightCheck:
+    """Whether venue tax collection is configured safely for this mode (no I/O, no logging).
+
+    A live account traded without collection loses venue history the yearly tax summary needs
+    (income retention ~3 months, trades ~6 months), and the loss is only discovered at filing
+    time. Mainnet therefore fails closed; testnet only warns because its history has no tax
+    consequence; suppressed modes write simulated records and are not applicable.
+    """
+    if settings.mode.suppresses_mutations:
+        return PreflightCheck(name="tax_collection_ready", passed=True, detail="suppressed mode: simulated tax records")
+    if settings.tax_collection_enabled:
+        return PreflightCheck(name="tax_collection_ready", passed=True, detail=f"enabled=True tax_dir={tax_dir}")
+    if str(settings.mode.value) == "live_mainnet":
+        return PreflightCheck(
+            name="tax_collection_ready", passed=False,
+            detail=f"[RISK] live_mainnet requires LIVE_TAX_COLLECTION_ENABLED=true tax_dir={tax_dir}",
+        )
+    return PreflightCheck(
+        name="tax_collection_ready", passed=True,
+        detail=f"WARNING: venue tax collection disabled on live_testnet tax_dir={tax_dir}",
+    )
+
+
+def _append_tax_collection_check(settings: Any, checks: list[PreflightCheck]) -> None:
+    from src.live.tax_ledger import resolve_tax_ledger_dir
+
+    tax_check = tax_collection_check(settings, resolve_tax_ledger_dir(settings))
+    if tax_check.detail.startswith("WARNING:"):
+        logger.warning("[RISK] preflight %s", tax_check.detail)
+    checks.append(tax_check)
 
 
 def run_preflight(
@@ -231,4 +266,5 @@ def run_preflight(
     except Exception as exc:
         checks.append(PreflightCheck(name="venue_leverage_plan", passed=False, detail=str(exc)))
 
+    _append_tax_collection_check(settings, checks)
     return PreflightReport(checks=tuple(checks))

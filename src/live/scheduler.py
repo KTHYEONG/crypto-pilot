@@ -26,7 +26,7 @@ from src.common.daemon_stages import BUSY_STAGES
 from src.common.durable_io import durable_write_text
 from src.common.errors import DataIntegrityError
 from src.common.paths import DATA_DIR, FUTURES_DATA_DIR, VENUE_RULES_DIR
-from src.live.errors import CausalityViolation
+from src.live.errors import CausalityViolation, LiveTradingError
 
 if TYPE_CHECKING:
     from src.live.data_refresh import RefreshReport
@@ -669,6 +669,15 @@ def run_daemon(
     ``refresh_fn`` / ``signal_step_fn`` / ``venue_fn`` / ``prefetch_fn`` default to the live
     wiring and are injected only by tests -- there is no path-sniffing test detection.
     """
+    from src.live.preflight import tax_collection_check
+    from src.live.tax_ledger import resolve_tax_ledger_dir
+
+    tax_check = tax_collection_check(settings, resolve_tax_ledger_dir(settings))
+    if not tax_check.passed:
+        logger.critical("[RISK] daemon_refused reason=tax_collection_disabled mode=%s detail=%s", settings.mode.value, tax_check.detail)
+        raise LiveTradingError(f"daemon refused to start: {tax_check.detail}")
+    if tax_check.detail.startswith("WARNING:"):
+        logger.warning("[RISK] %s", tax_check.detail)
     defaults = default_step_fns(settings, weights_path)
     if signal_step_fn is None:
         signal_step_fn = defaults["signal"]

@@ -1,4 +1,4 @@
-"""SCENARIO_LIVE_38/39: preflight 게이트는 GET-only이며 6개 점검을 모두 수행하고
+"""SCENARIO_LIVE_38/39: preflight 게이트는 GET-only이며 8개 점검을 모두 수행하고
 어떤 개별 실패에도 예외를 던지지 않는다(I-PREFLIGHT-TOTAL)."""
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ _EXPECTED_CHECK_NAMES = (
     "account_configuration",
     "position_reconciliation",
     "venue_leverage_plan",
+    "tax_collection_ready",
 )
 
 
@@ -135,7 +136,7 @@ def test_SCENARIO_LIVE_39_PREFLIGHT_AGGREGATES_ALL_CHECKS_WITHOUT_RAISING(tmp_pa
     )
 
     assert report.passed is False
-    assert len(report.checks) == 7
+    assert len(report.checks) == 8
     assert tuple(c.name for c in report.checks) == (
         "artifact_readable",
         "artifact_covers_decision_time",
@@ -144,8 +145,12 @@ def test_SCENARIO_LIVE_39_PREFLIGHT_AGGREGATES_ALL_CHECKS_WITHOUT_RAISING(tmp_pa
         "account_configuration",
         "position_reconciliation",
         "venue_leverage_plan",
+        "tax_collection_ready",
     )
-    assert all(c.passed is False for c in report.checks)
+    assert all(c.passed is False for c in report.checks if c.name != "tax_collection_ready")
+    assert {c.name: c for c in report.checks}["tax_collection_ready"].detail == (
+        "suppressed mode: simulated tax records"
+    )
     assert mutation_calls == []
     assert not ledger_path.exists()
 
@@ -218,4 +223,89 @@ def test_preflight_venue_leverage_plan_fails_without_artifact_in_live_mode(tmp_p
     assert by_name["account_configuration"].passed is True
     assert by_name["venue_leverage_plan"].passed is False
     assert "missing artifact" in by_name["venue_leverage_plan"].detail
+
+
+def _live_settings_for_tax_gate(tmp_path, mode, *, enabled=True):
+    kwargs = {"mode": mode, "ledger_path": str(tmp_path / "ledger.json"), "tax_collection_enabled": enabled}
+    if mode in ("live_testnet", "live_mainnet"):
+        kwargs.update(order_api_key="k", order_api_secret="s")  # noqa: S106 - hermetic test credential
+    if mode == "live_mainnet":
+        from src.live.settings import MAINNET_TRADING_ACK
+
+        kwargs["mainnet_trading_ack"] = MAINNET_TRADING_ACK
+    return LiveSettings(**kwargs)
+
+
+def test_tax_collection_check_mainnet_fails_without_collection(tmp_path) -> None:
+    from src.live.preflight import run_preflight, tax_collection_check
+
+    settings = _live_settings_for_tax_gate(tmp_path, "live_mainnet", enabled=False)
+    check = tax_collection_check(settings, tmp_path / "tax")
+    assert check.name == "tax_collection_ready"
+    assert check.passed is False
+    assert check.detail.startswith("[RISK] live_mainnet requires LIVE_TAX_COLLECTION_ENABLED=true")
+
+    now = pd.Timestamp("2026-08-27 00:00Z")
+    artifact = tmp_path / "weights.parquet"
+    _write_artifact(artifact, pd.DatetimeIndex([now.normalize()]))
+    report = run_preflight(
+        settings, artifact, now=now,
+        market_client=StubMarketClient(), order_client=StubOrderClient(),
+    )
+    assert report.passed is False
+    assert any(c.name == "tax_collection_ready" and not c.passed for c in report.checks)
+
+
+def test_tax_collection_check_testnet_warns_only(tmp_path, caplog) -> None:
+    import logging
+    from src.live.preflight import run_preflight, tax_collection_check
+
+    settings = _live_settings_for_tax_gate(tmp_path, "live_testnet", enabled=False)
+    check = tax_collection_check(settings, tmp_path / "tax")
+    assert check.passed is True
+    assert check.detail.startswith("WARNING:")
+
+    now = pd.Timestamp("2026-08-27 00:00Z")
+    artifact = tmp_path / "weights.parquet"
+    _write_artifact(artifact, pd.DatetimeIndex([now.normalize()]))
+    with caplog.at_level(logging.WARNING, logger="LivePreflight"):
+        report = run_preflight(
+            settings, artifact, now=now,
+            market_client=StubMarketClient(), order_client=StubOrderClient(),
+        )
+    by_name = {c.name: c for c in report.checks}
+    assert by_name["tax_collection_ready"].passed is True
+    assert by_name["tax_collection_ready"].detail.startswith("WARNING:")
+    assert "[RISK]" in caplog.text
+
+
+def test_tax_collection_check_enabled_and_suppressed_pass(tmp_path) -> None:
+    from src.live.preflight import tax_collection_check
+
+    live = _live_settings_for_tax_gate(tmp_path, "live_mainnet", enabled=True)
+    assert tax_collection_check(live, tmp_path / "tax").passed is True
+    paper = _live_settings_for_tax_gate(tmp_path, "paper", enabled=False)
+    check = tax_collection_check(paper, tmp_path / "tax")
+    assert check.passed is True
+    assert check.detail == "suppressed mode: simulated tax records"
+
+
+def test_preflight_reports_account_scoped_dir(tmp_path, monkeypatch) -> None:
+    import src.live.tax_ledger as tax_mod
+    from src.live.preflight import run_preflight
+
+    venue_root = tmp_path / "venue"
+    monkeypatch.setattr(tax_mod, "default_venue_tax_ledger_root", lambda: venue_root)
+    settings = _live_settings_for_tax_gate(tmp_path, "live_testnet", enabled=True)
+    settings.record_run_id = "run_a_12345678"
+    now = pd.Timestamp("2026-08-27 00:00Z")
+    artifact = tmp_path / "weights.parquet"
+    _write_artifact(artifact, pd.DatetimeIndex([now.normalize()]))
+    report = run_preflight(
+        settings, artifact, now=now,
+        market_client=StubMarketClient(), order_client=StubOrderClient(),
+    )
+    check = {c.name: c for c in report.checks}["tax_collection_ready"]
+    assert check.detail.endswith(f"tax_dir={venue_root / 'testnet'}")
+    assert "runs" not in check.detail
 

@@ -4013,3 +4013,59 @@ def test_stage_pulse_receives_deadman_pinger(tmp_path, monkeypatch) -> None:
     stages = {stage for stage, _ in seen}
     assert "execute" in stages
     assert all(isinstance(p, _Pinger) for _, p in seen)
+
+
+def test_mainnet_daemon_refuses_without_tax_collection(tmp_path, monkeypatch, caplog) -> None:
+    import logging
+
+    import pytest
+
+    import src.live.scheduler as sched
+    from src.live.errors import LiveTradingError
+    from src.live.settings import MAINNET_TRADING_ACK, LiveSettings
+
+    settings = LiveSettings(
+        mode="live_mainnet", mainnet_trading_ack=MAINNET_TRADING_ACK,
+        order_api_key="k", order_api_secret="s", tax_collection_enabled=False,  # noqa: S106
+    )
+    calls: list = []
+    with caplog.at_level(logging.CRITICAL, logger="LiveScheduler"):
+        with pytest.raises(LiveTradingError, match="LIVE_TAX_COLLECTION_ENABLED=true"):
+            sched.run_daemon(
+                settings, tmp_path / "w.parquet", tmp_path / "state.json",
+                sleep_fn=lambda s: None, max_iterations=1,
+                refresh_fn=lambda *a, **k: calls.append("refresh"),
+                signal_step_fn=lambda t: calls.append("signal"),
+                venue_fn=lambda t: calls.append("venue"),
+                prefetch_fn=lambda t: calls.append("prefetch"),
+                prune_fn=lambda: calls.append("prune"),
+            )
+    assert calls == []
+    assert any("daemon_refused" in r.message and "[RISK]" in r.message for r in caplog.records)
+
+
+def test_testnet_daemon_warns_without_collection(tmp_path, monkeypatch, caplog) -> None:
+    import logging
+
+    import pandas as pd
+
+    import src.live.scheduler as sched
+    from src.live.runner import CycleReport
+    from src.live.settings import LiveSettings
+
+    settings = LiveSettings(
+        mode="live_testnet", order_api_key="k", order_api_secret="s",  # noqa: S106
+        tax_collection_enabled=False, heartbeat_path=str(tmp_path / "hb.json"),
+    )
+    monkeypatch.setattr(
+        sched, "run_shadow_cycle",
+        lambda s, t, w, now=None: CycleReport(status="COMPLETE", reason=None, decision_time=pd.Timestamp(t), intent_count=0),
+    )
+    with caplog.at_level(logging.WARNING, logger="LiveScheduler"):
+        sched.run_daemon(
+            settings, tmp_path / "w.parquet", tmp_path / "state.json",
+            sleep_fn=lambda s: None, now_fn=lambda: pd.Timestamp("2026-08-25 23:20:00", tz="UTC"),
+            max_iterations=1, signal_step_fn=lambda t: None,
+            refresh_fn=lambda *a, **k: None, prune_fn=lambda: None,
+        )
+    assert any("[RISK]" in r.message and "tax collection disabled" in r.message for r in caplog.records)
