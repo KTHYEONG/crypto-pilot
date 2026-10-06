@@ -5,7 +5,9 @@ import pandas as pd
 import src.market_data.services.futures_collection as collector_module
 from src.market_data.services.futures_collection import (
     DataCollector,
+    _fetch_months_parallel,
     _normalize_funding_frame,
+    _vision_months_to_fetch,
 )
 
 _EPOCH = pd.Timestamp("1970-01-01", tz="UTC")
@@ -719,3 +721,212 @@ def test_ensure_ohlcv_data_refetches_vision_month_hidden_by_internal_gap(tmp_pat
     assert len(may_rows) == len(may)
 
 
+class TestVisionMonthsToFetch:
+    _NOW = pd.Timestamp("2026-09-14T00:00:00Z")
+
+    def test_empty_cache_plans_every_month_before_cutoff(self) -> None:
+        def _probe(_: int) -> int | None:
+            raise AssertionError("probe must not be called for empty cache")
+
+        out = _vision_months_to_fetch(
+            pd.Timestamp("2026-04-15T00:00:00Z"),
+            pd.Timestamp("2026-09-01T00:00:00Z"),
+            self._NOW,
+            None,
+            _probe,
+        )
+        assert out == [(2026, 4), (2026, 5), (2026, 6), (2026, 7)]
+
+    def test_contiguous_covered_months_are_skipped(self) -> None:
+        out = _vision_months_to_fetch(
+            pd.Timestamp("2026-04-01T00:00:00Z"),
+            pd.Timestamp("2026-08-01T00:00:00Z"),
+            self._NOW,
+            (pd.Timestamp("2026-04-01T00:00:00Z"), pd.Timestamp("2026-08-01T00:00:00Z")),
+            lambda _: None,
+        )
+        assert out == []
+
+    def test_interior_gap_replans_touched_months(self) -> None:
+        import numpy as np
+
+        from src.market_data.services.futures_collection import ohlcv_gap_start_ms
+
+        april = pd.date_range("2026-04-01", "2026-04-30 23:00", freq="1h", tz="UTC")
+        june = pd.date_range("2026-06-01", "2026-07-01", freq="1h", tz="UTC")
+        epoch = pd.Timestamp("1970-01-01", tz="UTC")
+        idx = pd.DatetimeIndex(list(april) + list(june))
+        ts = np.unique(((idx - epoch) // pd.Timedelta("1ms")).to_numpy(dtype="int64"))
+        out = _vision_months_to_fetch(
+            pd.Timestamp("2026-04-01T00:00:00Z"),
+            pd.Timestamp("2026-07-01T00:00:00Z"),
+            self._NOW,
+            (pd.Timestamp("2026-04-01T00:00:00Z"), pd.Timestamp("2026-07-01T00:00:00Z")),
+            lambda s: ohlcv_gap_start_ms(ts, s, 3_600_000),
+        )
+        assert out == [(2026, 4), (2026, 5)]
+
+
+class TestFetchMonthsParallel:
+    def test_no_months_means_no_fetch(self) -> None:
+        def _fetch(_y: int, _m: int) -> pd.DataFrame:
+            raise AssertionError("must not be called")
+
+        assert _fetch_months_parallel([], _fetch, lambda *_: None) == []
+
+    def test_failing_month_is_isolated_and_reported(self) -> None:
+        frames = {
+            (2026, 4): pd.DataFrame({"timestamp": [1]}),
+            (2026, 6): pd.DataFrame({"timestamp": [3]}),
+        }
+
+        def _fetch(year: int, month: int) -> pd.DataFrame:
+            if (year, month) == (2026, 5):
+                raise RuntimeError("boom")
+            if (year, month) == (2026, 7):
+                return pd.DataFrame()
+            return frames[(year, month)]
+
+        errors: list[tuple[int, int, Exception]] = []
+        out = _fetch_months_parallel(
+            [(2026, 4), (2026, 5), (2026, 6), (2026, 7)],
+            _fetch,
+            lambda y, m, exc: errors.append((y, m, exc)),
+        )
+        assert [f["timestamp"].iloc[0] for f in out] == [1, 3]
+        assert len(errors) == 1
+        assert errors[0][:2] == (2026, 5)
+        assert isinstance(errors[0][2], RuntimeError)
+
+    def test_base_exception_propagates(self) -> None:
+        import pytest
+
+        def _fetch(_y: int, _m: int) -> pd.DataFrame:
+            raise KeyboardInterrupt
+
+        with pytest.raises(KeyboardInterrupt):
+            _fetch_months_parallel([(2026, 4)], _fetch, lambda *_: None)
+
+
+class TestVisionMonthsToFetchBoundaries:
+    _NOW = pd.Timestamp("2026-09-14T00:00:00Z")
+
+    def test_request_end_bounds_plan_before_cutoff(self) -> None:
+        out = _vision_months_to_fetch(
+            pd.Timestamp("2026-04-15T00:00:00Z"), pd.Timestamp("2026-06-01T00:00:00Z"),
+            self._NOW, None, lambda _: None,
+        )
+        assert out == [(2026, 4), (2026, 5)]
+
+    def test_window_younger_than_cutoff_plans_nothing(self) -> None:
+        out = _vision_months_to_fetch(
+            pd.Timestamp("2026-08-01T00:00:00Z"), pd.Timestamp("2026-09-14T00:00:00Z"),
+            self._NOW, None, lambda _: None,
+        )
+        assert out == []
+
+    def test_span_edges_replan_boundary_months(self) -> None:
+        out = _vision_months_to_fetch(
+            pd.Timestamp("2026-04-01T00:00:00Z"), pd.Timestamp("2026-07-01T00:00:00Z"),
+            self._NOW,
+            (pd.Timestamp("2026-04-02T00:00:00Z"), pd.Timestamp("2026-06-30T22:00:00Z")),
+            lambda _: None,
+        )
+        assert out == [(2026, 4), (2026, 6)]
+
+    def test_gap_opening_before_month_replans_it(self) -> None:
+        start = pd.Timestamp("2026-05-01T00:00:00Z")
+        out = _vision_months_to_fetch(
+            start, pd.Timestamp("2026-06-01T00:00:00Z"), self._NOW,
+            (pd.Timestamp("2026-04-01T00:00:00Z"), pd.Timestamp("2026-07-01T00:00:00Z")),
+            lambda s: s - 86_400_000,
+        )
+        assert out == [(2026, 5)]
+
+    def test_plan_is_deterministic_and_ascending(self) -> None:
+        args = (
+            pd.Timestamp("2026-01-10T00:00:00Z"), pd.Timestamp("2026-09-01T00:00:00Z"),
+            self._NOW, None, lambda _: None,
+        )
+        first = _vision_months_to_fetch(*args)
+        assert first == _vision_months_to_fetch(*args)
+        assert first == sorted(set(first))
+
+
+class TestFetchMonthsParallelConcurrency:
+    def test_results_follow_plan_order_not_completion_order(self) -> None:
+        import threading
+
+        later_done = threading.Event()
+        later_count: list[int] = []
+        lock = threading.Lock()
+
+        def _fetch(_y: int, month: int) -> pd.DataFrame:
+            if month == 4:
+                assert later_done.wait(timeout=5)
+            else:
+                with lock:
+                    later_count.append(month)
+                    if len(later_count) == 2:
+                        later_done.set()
+            return pd.DataFrame({"m": [month]})
+
+        out = _fetch_months_parallel([(2026, 4), (2026, 5), (2026, 6)], _fetch, lambda *_: None)
+        assert [int(f["m"].iloc[0]) for f in out] == [4, 5, 6]
+
+    def test_concurrency_never_exceeds_worker_bound(self) -> None:
+        import threading
+        import time
+
+        lock = threading.Lock()
+        state = {"now": 0, "peak": 0}
+
+        def _fetch(_y: int, m: int) -> pd.DataFrame:
+            with lock:
+                state["now"] += 1
+                state["peak"] = max(state["peak"], state["now"])
+            time.sleep(0.02)
+            with lock:
+                state["now"] -= 1
+            return pd.DataFrame({"m": [m]})
+
+        n = collector_module._VISION_FETCH_MAX_WORKERS + 2
+        out = _fetch_months_parallel([(2026, m) for m in range(1, n + 1)], _fetch, lambda *_: None)
+        assert len(out) == n
+        assert state["peak"] <= collector_module._VISION_FETCH_MAX_WORKERS
+
+
+def test_vision_downloader_not_constructed_for_recent_only_windows(tmp_path, monkeypatch) -> None:
+    class ForbiddenVision:
+        def __init__(self) -> None:
+            raise AssertionError("Vision downloader must not be constructed")
+
+    now = pd.Timestamp("2026-09-14T00:00:00Z")
+    monkeypatch.setattr(collector_module, "_utc_now", lambda: now)
+    monkeypatch.setattr(collector_module, "BinanceVisionDownloader", ForbiddenVision)
+    ohlcv_target = tmp_path / "futures" / "ohlcv" / "1h" / "BTCUSDT.parquet"
+    funding_target = tmp_path / "futures" / "funding" / "BTCUSDT.parquet"
+    funding_target.parent.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(DataCollector, "_cache_path", lambda self, symbol, tf: ohlcv_target)
+    monkeypatch.setattr(collector_module, "funding_path", lambda symbol: funding_target)
+    idx = pd.date_range("2026-09-01", periods=2, freq="1h", tz="UTC")
+    chunk = pd.DataFrame({
+        "timestamp": _ms(idx), "open": [1.0, 1.0], "high": [1.0, 1.0],
+        "low": [1.0, 1.0], "close": [1.0, 1.0], "volume": [1.0, 1.0],
+    })
+    collector = DataCollector()
+    fetched = {"ohlcv": 0, "funding": 0}
+
+    def _ohlcv(*_a, **_k):
+        fetched["ohlcv"] += 1
+        return chunk
+
+    def _funding(*_a, **_k):
+        fetched["funding"] += 1
+        return pd.DataFrame({"timestamp": [1788220800000], "funding_rate": [0.0001]})
+
+    collector.client.fetch_ohlcv_with_taker = _ohlcv
+    collector.client.fetch_funding_rate_history = _funding
+    collector.ensure_ohlcv_data("BTCUSDT", "1h", "2026-09-01", "2026-09-02")
+    collector.ensure_funding_data("BTCUSDT", "2026-09-01", "2026-09-02")
+    assert fetched == {"ohlcv": 1, "funding": 1}
