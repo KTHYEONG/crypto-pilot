@@ -25,6 +25,8 @@ from src.mhs.params import (
     FOLD_PANEL_WARMUP_HOURS,
     PANEL_MIN_HISTORY_BARS,
     REBALANCE_TRACKING_ERROR_THRESHOLD,
+    UNIVERSE_ELIGIBILITY_LOOKBACK_BARS,
+    UNIVERSE_ELIGIBILITY_MIN_HISTORY_BARS,
 )
 from src.mhs.regime import beta_neutralize_weights, causal_market_beta, crash_regime_tilt_weights
 from src.mhs.types import (
@@ -122,11 +124,11 @@ def _build_fold_target_weights(
         else ("close", "open", "quote_vol")
     )
     panel = (
-        slice_base_panel(base_panel, panel_start, ve, min_bars=PANEL_MIN_HISTORY_BARS)  # liquid_half_eligibility min_history_bars와 동일(720)
+        slice_base_panel(base_panel, panel_start, ve, min_bars=PANEL_MIN_HISTORY_BARS)
         if base_panel is not None
         else load_base_panel(
             root, "1h", _panel_columns, panel_start, ve,
-            partition="dev", min_bars=PANEL_MIN_HISTORY_BARS, data_policy=request.data_policy, quarantine=panel_quarantine,  # liquid_half_eligibility min_history_bars와 동일(720)
+            partition="dev", min_bars=PANEL_MIN_HISTORY_BARS, data_policy=request.data_policy, quarantine=panel_quarantine,
         )
     )
     close, opens, quote_vol = panel["close"], panel["open"], panel["quote_vol"]
@@ -165,7 +167,11 @@ def _build_fold_target_weights(
     if taker_buy_quote is not None:
         taker_buy_quote = taker_buy_quote[aligned_symbols]
 
-    eligible = liquid_half_eligibility(quote_vol, lookback_bars=720, min_history_bars=720)
+    eligible = liquid_half_eligibility(
+        quote_vol,
+        lookback_bars=UNIVERSE_ELIGIBILITY_LOOKBACK_BARS,
+        min_history_bars=UNIVERSE_ELIGIBILITY_MIN_HISTORY_BARS,
+    )
     clear_mhs_market_data_caches()
     log_close = np.log(close)
     if not request.committee_capital:
