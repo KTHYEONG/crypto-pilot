@@ -11,7 +11,7 @@ from src.mhs.execution import (
     mhs_ledger_pnl_multi_tier,
     simulated_inventory_ledger,
 )
-from src.quant.baseline.backtest import _align_funding_rates
+from src.mhs.execution.contracts import _align_funding_rates
 from src.quant.technical_experts.cross_sectional import XsCompositeSpec, run_xs_composite_ledger
 
 class TestBarFundingPanel:

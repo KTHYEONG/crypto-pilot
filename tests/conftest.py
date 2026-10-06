@@ -46,8 +46,6 @@ _PREIMPORTED_SRC_MODULES = tuple(sorted(name for name in sys.modules if name == 
 os.environ["CRYPTO_PILOT_LOG_DIR"] = str(_PROC_TEMP_ROOT / "logs")
 os.environ["CRYPTO_PILOT_BACKTESTS_DIR"] = str(_PROC_TEMP_ROOT / "backtests")
 
-from src.quant.contracts import CostModel, StrategySpec  # noqa: E402
-
 # Developer-tree paths that must be byte-identical before and after a test session. A test that
 # writes here pollutes real state, logs or the backtest registry, so the session fails loudly.
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -139,16 +137,5 @@ def _sanitize_host_environment() -> None:
 
 
 pytest_plugins = [
-    "tests.fixtures.bars",
     "tests.fixtures.market_data",
 ]
-
-
-@pytest.fixture
-def spec() -> StrategySpec:
-    return StrategySpec()
-
-
-@pytest.fixture
-def costs() -> CostModel:
-    return CostModel()

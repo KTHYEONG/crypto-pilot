@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass, fields
 
 import numpy as np
-import pandas as pd
 
 from src.quant.evaluation.reliability import derive_block_size
 
@@ -365,132 +364,6 @@ def diagnose_growth_headroom(
     )
 
 
-def apply_realised_risk_overlay(
-    net: pd.Series,
-    weights: pd.DataFrame,
-    selected_risk: float,
-    reference_risk: float,
-) -> tuple[pd.Series, pd.DataFrame]:
-    """Deterministic realised-risk overlay on net returns and realised weights.
-
-    Every bar is scaled by ``selected_risk / reference_risk`` and by the causal
-    drawdown multiplier ``drawdown_risk_multiplier(drawdown of the deployed
-    equity through the preceding bar)``; the first multiplier is exactly one.
-    The overlay is applied to BOTH the net return series and the realised
-    weights, so ``selected_risk`` changes the published equity and reported
-    weights by the defined scale.  The drawdown ladder only ever reduces
-    exposure; an invalid, non-finite, or non-shared-index input fails closed
-    with ``ValueError`` instead of silently mutating the ledger.
-    """
-    if not isinstance(net.index, pd.DatetimeIndex) or not isinstance(weights.index, pd.DatetimeIndex):
-        raise ValueError("net and weights must have a DatetimeIndex")
-    if not net.index.equals(weights.index):
-        raise ValueError("net and weights must share an identical index")
-    if not net.index.is_monotonic_increasing:
-        raise ValueError("net index must be monotonic increasing")
-    values = net.to_numpy(dtype=np.float64)
-    w_arr = weights.to_numpy(dtype=np.float64)
-    if not np.isfinite(values).all() or not np.isfinite(w_arr).all():
-        raise ValueError("net and weights must contain only finite values")
-    if selected_risk <= 0 or reference_risk <= 0:
-        raise ValueError("selected_risk and reference_risk must be > 0")
-
-    scale = selected_risk / reference_risk
-    n = len(values)
-    scaled_net = np.empty(n, dtype=np.float64)
-    scaled_w = np.empty_like(w_arr)
-    equity = 1.0
-    peak = 1.0
-    mdd = 0.0
-    for t in range(n):
-        multiplier = drawdown_risk_multiplier(np.asarray([mdd], dtype=np.float64))[0]
-        factor = scale * multiplier
-        scaled_net[t] = factor * values[t]
-        scaled_w[t] = factor * w_arr[t]
-        equity *= 1.0 + scaled_net[t]
-        peak = max(peak, equity)
-        mdd = max(mdd, 1.0 - equity / peak)
-    return (
-        pd.Series(scaled_net, index=net.index, dtype=np.float64),
-        pd.DataFrame(scaled_w, index=weights.index, columns=weights.columns, dtype=np.float64),
-    )
-
-
-def compute_discovery_target_vol(discovery_net: pd.Series, window: int) -> float:
-    """Frozen vol-target anchor: median causal trailing realised vol.
-
-    Returns ``discovery_net.rolling(window, min_periods=window).std().
-    shift(1).dropna().median()`` -- the median trailing vol over strictly
-    prior bars only, so the bar being scaled never enters its own estimate.
-    The return value is the single frozen constant callers must apply over
-    the full deployed history; it must never be re-fit on qualification or
-    holdout data.
-    """
-    if window < 2:
-        raise ValueError(f"window must be >= 2, got {window}")
-    values = discovery_net.to_numpy(dtype=np.float64)
-    if not np.isfinite(values).all():
-        raise ValueError("discovery_net must contain only finite values")
-    trailing = discovery_net.rolling(window, min_periods=window).std().shift(1).dropna()
-    if trailing.empty:
-        raise ValueError(
-            "discovery_net must have at least window + 1 finite bars "
-            "to compute a median trailing vol"
-        )
-    return float(trailing.median())
-
-
-def apply_vol_target_overlay(
-    net: pd.Series,
-    weights: pd.DataFrame,
-    window: int,
-    target_vol: float,
-    multiplier_bounds: tuple[float, float],
-) -> tuple[pd.Series, pd.DataFrame]:
-    """Proactive causal trailing-vol targeting overlay on net and weights.
-
-    Every bar ``t`` is scaled by ``clip(target_vol / trailing_vol_t,
-    multiplier_bounds)`` where ``trailing_vol_t`` is the rolling std over the
-    strictly-prior ``window`` bars (``net.rolling(window,
-    min_periods=window).std().shift(1)``). Where history is insufficient or
-    the trailing vol is zero/non-finite the multiplier falls back to ``1.0``
-    (never CASH, never NaN, never a divide-by-zero), the same
-    fail-closed-to-neutral convention used by
-    ``_causal_family_inverse_vol_weights`` in ``cross_sectional.py``. Both
-    ``net`` and ``weights`` are scaled by the identical per-bar multiplier.
-    """
-    if not isinstance(net.index, pd.DatetimeIndex) or not isinstance(weights.index, pd.DatetimeIndex):
-        raise ValueError("net and weights must have a DatetimeIndex")
-    if not net.index.equals(weights.index):
-        raise ValueError("net and weights must share an identical index")
-    if not net.index.is_monotonic_increasing:
-        raise ValueError("net index must be monotonic increasing")
-    values = net.to_numpy(dtype=np.float64)
-    w_arr = weights.to_numpy(dtype=np.float64)
-    if not np.isfinite(values).all() or not np.isfinite(w_arr).all():
-        raise ValueError("net and weights must contain only finite values")
-    if window < 2:
-        raise ValueError(f"window must be >= 2, got {window}")
-    if not np.isfinite(target_vol) or target_vol <= 0:
-        raise ValueError("target_vol must be finite and > 0")
-    lo, hi = multiplier_bounds
-    if not (0.0 < lo < hi and np.isfinite(lo) and np.isfinite(hi)):
-        raise ValueError("multiplier_bounds must be a strictly-ascending positive pair")
-
-    trailing = net.rolling(window, min_periods=window).std().shift(1)
-    trailing_arr = trailing.to_numpy(dtype=np.float64)
-    with np.errstate(divide="ignore", invalid="ignore"):
-        multiplier = target_vol / trailing_arr
-    invalid = ~np.isfinite(trailing_arr) | (trailing_arr <= 0.0)
-    multiplier = np.where(invalid, 1.0, np.clip(multiplier, lo, hi))
-    scaled_net = multiplier * values
-    scaled_weights = multiplier[:, None] * w_arr
-    return (
-        pd.Series(scaled_net, index=net.index, dtype=np.float64),
-        pd.DataFrame(scaled_weights, index=weights.index, columns=weights.columns, dtype=np.float64),
-    )
-
-
 def _check_contract() -> None:
     """Executable assertions locking the frozen growth-sizing contract surface."""
     config = GrowthSizingConfig(risk_grid=(0.0005, 0.001, 0.005))
@@ -513,7 +386,6 @@ def _check_contract() -> None:
     }
     dd = np.array([0.0, 0.05, 0.10, 0.15, 0.175, 0.20, 0.30])
     assert np.allclose(drawdown_risk_multiplier(dd), np.array([1.0, 1.0, 0.625, 0.25, 0.125, 0.0, 0.0]))
-    assert apply_realised_risk_overlay.__name__ == "apply_realised_risk_overlay"
 
 
 _check_contract()

@@ -71,3 +71,101 @@ def test_align_funding_with_knowledge_accepts_ms_unit_utc_index() -> None:
     assert early_out.known['A'].tolist() == [False, False, True, True]
 
 
+class TestAlignFundingRates:
+    """Invariant scenarios for _align_funding_rates (relocated from quant.baseline.backtest)."""
+
+    def test_sums_publications_within_one_bar(self) -> None:
+        import numpy as np
+        import pandas as pd
+        import pytest
+        from src.mhs.execution.contracts import _align_funding_rates
+        grid = pd.date_range("2024-01-01", periods=4, freq="1h", tz="UTC")
+        rates = pd.Series(
+            [0.0001, 0.0002],
+            index=[grid[1] + pd.Timedelta(minutes=10), grid[1] + pd.Timedelta(minutes=40)],
+        )
+        result = _align_funding_rates(rates, grid)
+        assert result.dtype == np.float64
+        assert len(result) == 4
+        assert result[1] == pytest.approx(0.0003, rel=0, abs=1e-15)
+        assert result[0] == 0.0
+        assert result[2] == 0.0
+        assert result[3] == 0.0
+
+    def test_keeps_last_duplicate_publication(self) -> None:
+        import pandas as pd
+        import pytest
+        from src.mhs.execution.contracts import _align_funding_rates
+        grid = pd.date_range("2024-01-01", periods=4, freq="1h", tz="UTC")
+        ts = grid[1] + pd.Timedelta(minutes=15)
+        rates = pd.Series([0.0001, 0.0002], index=[ts, ts])
+        result = _align_funding_rates(rates, grid)
+        assert result[1] == pytest.approx(0.0002, rel=0, abs=1e-15)
+
+    def test_rejects_publication_outside_bar_window(self) -> None:
+        import pandas as pd
+        import pytest
+        from src.common.errors import DataIntegrityError
+        from src.mhs.execution.contracts import _align_funding_rates
+        grid = pd.date_range("2024-01-01", periods=4, freq="1h", tz="UTC")
+        period = pd.Timedelta(hours=1)
+        late = pd.Series([0.0001], index=[grid[-1] + period])
+        with pytest.raises(DataIntegrityError, match="not aligned"):
+            _align_funding_rates(late, grid)
+        early = pd.Series([0.0001], index=[grid[0] - period])
+        with pytest.raises(DataIntegrityError, match="not aligned"):
+            _align_funding_rates(early, grid)
+
+    def test_rejects_non_finite_rate(self) -> None:
+        import numpy as np
+        import pandas as pd
+        import pytest
+        from src.common.errors import DataIntegrityError
+        from src.mhs.execution.contracts import _align_funding_rates
+        grid = pd.date_range("2024-01-01", periods=4, freq="1h", tz="UTC")
+        nan_rates = pd.Series([np.nan], index=[grid[1]])
+        with pytest.raises(DataIntegrityError, match="finite"):
+            _align_funding_rates(nan_rates, grid)
+        inf_rates = pd.Series([np.inf], index=[grid[1]])
+        with pytest.raises(DataIntegrityError, match="finite"):
+            _align_funding_rates(inf_rates, grid)
+
+    def test_rejects_non_monotonic_index(self) -> None:
+        import pandas as pd
+        import pytest
+        from src.common.errors import DataIntegrityError
+        from src.mhs.execution.contracts import _align_funding_rates
+        grid = pd.date_range("2024-01-01", periods=4, freq="1h", tz="UTC")
+        ts = [grid[1] + pd.Timedelta(minutes=30), grid[1] + pd.Timedelta(minutes=10)]
+        rates = pd.Series([0.0001, 0.0002], index=ts)
+        with pytest.raises(DataIntegrityError, match="monotonic"):
+            _align_funding_rates(rates, grid)
+
+    def test_rejects_short_or_non_datetime_bar_index(self) -> None:
+        import pandas as pd
+        import pytest
+        from src.common.errors import DataIntegrityError
+        from src.mhs.execution.contracts import _align_funding_rates
+        rates = pd.Series([0.0001], index=[pd.Timestamp("2024-01-01", tz="UTC")])
+        short = pd.DatetimeIndex([pd.Timestamp("2024-01-01", tz="UTC")])
+        with pytest.raises(DataIntegrityError, match="length >= 2"):
+            _align_funding_rates(rates, short)
+        range_index = pd.RangeIndex(4)
+        with pytest.raises(DataIntegrityError, match="length >= 2"):
+            _align_funding_rates(rates, range_index)
+
+    def test_rejects_unparseable_funding_index(self) -> None:
+        import pandas as pd
+        import pytest
+        from src.common.errors import DataIntegrityError
+        from src.mhs.execution.contracts import _align_funding_rates
+        grid = pd.date_range("2024-01-01", periods=4, freq="1h", tz="UTC")
+        rates = pd.Series([0.0001], index=["not-a-date"])
+        with pytest.raises(DataIntegrityError, match="datetimes"):
+            _align_funding_rates(rates, grid)
+
+    def test_owned_by_execution_contracts_module(self) -> None:
+        from src.mhs.execution.contracts import _align_funding_rates
+        assert _align_funding_rates.__module__ == "src.mhs.execution.contracts"
+
+

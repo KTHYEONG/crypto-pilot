@@ -76,7 +76,6 @@ COMPLEXITY_CEILINGS: Final[dict[str, int]] = {
     "src/mhs/growth_exposure.py::solve_log_growth_exposure": 18,
     "src/mhs/panel.py::load_base_panel": 21,
     "src/mhs/validation.py::validate_request": 45,
-    "src/quant/baseline/backtest.py::_run_directional_engine": 28,
 }
 """Frozen McCabe ceilings for pre-existing functions above the project threshold.
 

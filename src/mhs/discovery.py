@@ -4,8 +4,8 @@ The gate picks one horizon candidate on a worst-year-robust discovery score and
 re-confirms that single candidate on a disjoint qualification window, reusing
 the project's existing ``horizon_log_return`` / ``rank_weight_book`` /
 ``phase_tranche_book`` / ``cost_response_curve`` building blocks and the
-existing ``DISCOVERY_END`` / ``QUALIFICATION_START`` / ``QUALIFICATION_END``
-date convention (``src/research/technical_experts/trend_screen_catalog.py``).
+existing ``DISCOVERY_END`` /
+``HOLDOUT_CUTOFF`` date convention (``src/quant/evaluation/policy.py``).
 No new algorithm is introduced and no aggregation over the candidate grid
 happens on the qualification window (a re-scan there would be a one-step-later
 p-hack).

@@ -56,7 +56,7 @@ from src.mhs.params import PERIODS_PER_YEAR_1H as _PERIODS_PER_YEAR_1H
 from src.mhs.pipeline.context import PipelineContext
 from src.mhs.regime import causal_market_beta
 from src.mhs.telemetry import StageTelemetry
-from src.quant.technical_experts.trend_screen_catalog import DISCOVERY_END, QUALIFICATION_END
+from src.quant.evaluation.policy import DISCOVERY_END, HOLDOUT_CUTOFF
 
 
 def _fold_weights_from_boundaries(
@@ -268,7 +268,7 @@ def build_committee(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
                 log_close=ctx.log_close, eligible=ctx.eligible, opens=ctx.opens,
                 bar_funding=ctx.bar_funding, grid_1h=ctx.grid_1h,
                 discovery_start=DISCOVERY_START, discovery_end=DISCOVERY_END,
-                qualification_end=QUALIFICATION_END,
+                qualification_end=HOLDOUT_CUTOFF,
                 tranche_count=DISCOVERY_GATE_TRANCHE_COUNT,
                 precomputed_candidate_weights=_fast_candidate_weights,
                 compute_adjusted_net_t=ctx.config.discovery_gate_adjusted_net_t,
@@ -279,7 +279,7 @@ def build_committee(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
                 log_close=ctx.log_close, eligible=ctx.eligible, opens=ctx.opens,
                 bar_funding=ctx.bar_funding, grid_1h=ctx.grid_1h,
                 discovery_start=DISCOVERY_START, discovery_end=DISCOVERY_END,
-                qualification_end=QUALIFICATION_END,
+                qualification_end=HOLDOUT_CUTOFF,
                 tranche_count=DISCOVERY_GATE_TRANCHE_COUNT,
                 precomputed_candidate_weights=_slow_candidate_weights,
                 compute_adjusted_net_t=ctx.config.discovery_gate_adjusted_net_t,
@@ -290,7 +290,7 @@ def build_committee(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
                 log_close=ctx.log_close, eligible=ctx.eligible, opens=ctx.opens,
                 bar_funding=ctx.bar_funding, grid_1h=ctx.grid_1h,
                 discovery_start=DISCOVERY_START, discovery_end=DISCOVERY_END,
-                qualification_end=QUALIFICATION_END,
+                qualification_end=HOLDOUT_CUTOFF,
                 tranche_count=DISCOVERY_GATE_TRANCHE_COUNT,
                 precomputed_candidate_weights=_funding_carry_candidate_weights[1],
                 compute_adjusted_net_t=ctx.config.discovery_gate_adjusted_net_t,
@@ -301,7 +301,7 @@ def build_committee(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
                 log_close=ctx.log_close, eligible=ctx.eligible, opens=ctx.opens,
                 bar_funding=ctx.bar_funding, grid_1h=ctx.grid_1h,
                 discovery_start=DISCOVERY_START, discovery_end=DISCOVERY_END,
-                qualification_end=QUALIFICATION_END,
+                qualification_end=HOLDOUT_CUTOFF,
                 tranche_count=DISCOVERY_GATE_TRANCHE_COUNT,
                 precomputed_candidate_weights=_funding_carry_candidate_weights[-1],
                 compute_adjusted_net_t=ctx.config.discovery_gate_adjusted_net_t,
