@@ -1,0 +1,305 @@
+"""Standing dead-code contract: retired modules, symbols and private cross-package seams stay gone.
+
+Registries are append-only records of deliberate deletions. A deletion change
+appends its entries in the same commit; an entry is removed only if the
+retirement itself is reversed by an explicit decision. The private-import
+allowlist is shrink-only: every entry must still be observed, so fixing a seam
+forces its removal here.
+"""
+
+from __future__ import annotations
+
+import ast
+import importlib
+import importlib.util
+import os
+import subprocess
+import sys
+from collections.abc import Iterator
+from pathlib import Path
+from typing import Final
+
+import pytest
+
+REPO_ROOT: Final[Path] = Path(__file__).resolve().parents[2]
+SCANNED_ROOTS: Final[tuple[str, ...]] = ("src", "tools")
+DELETED_MODULES: Final[tuple[str, ...]] = (
+    "src.application.facades",
+    "src.application.ops.recorder_fingerprint",
+    "src.application.research",
+    "src.cli.adapters",
+    "src.core",
+    "src.market_data.streams.recorder",
+    "src.market_data.streams.recorder_main",
+    "src.mhs.deployed_weights_ledger",
+    "src.mhs.deployment_bundle",
+    "src.mhs.live_runtime",
+    "src.mhs.live_signal_step",
+    "src.mhs.process_backtest",
+    "src.mhs.signal_refresh",
+    "src.mhs.signal_runtime",
+    "src.mhs.signal_state",
+    "src.mhs.stage_services",
+    "src.research",
+)
+RETIRED_SYMBOLS: Final[tuple[tuple[str, str], ...]] = (
+    ("src.application.mhs_supervisor", "PROCESS_INVENTORY_REPORT_PATH"),
+    ("src.application.mhs_supervisor", "PROCESS_POLICY_REPORT_PATH"),
+    ("src.application.mhs_supervisor", "PROCESS_REPORT_PATH"),
+    ("src.live.runner", "apply_ruin_guard"),
+    ("src.live.scheduler", "_load_last_processed"),
+    ("src.live.scheduler", "_save_last_processed"),
+    ("src.market_data.streams.liquidations", "BinanceForceOrderFeed"),
+    ("src.market_data.streams.liquidations", "run_liquidation_stream"),
+    ("src.mhs.marks", "_cached_mark_panel"),
+    ("src.mhs.marks", "_compact_mark_series_for_path"),
+    ("src.mhs.marks", "_contemporaneous_mark_close_panel"),
+    ("src.mhs.marks", "_fill_mark_parity_eligibility"),
+    ("src.mhs.marks", "_get_symbol_mark_frame"),
+    ("src.mhs.params", "FOLD_GROWTH_CONCENTRATION_MAX_SHARE"),
+    ("src.mhs.report.persist", "mhs_horizon_diagnostic_report_path"),
+)
+CROSS_PACKAGE_PRIVATE_ALLOWLIST: Final[frozenset[tuple[str, str, str]]] = frozenset(
+    {
+        ("src/backtests/migration.py", "src.mhs.run_history", "_sparse_identity_key"),
+        ("src/cli/commands/backtest.py", "src.mhs.resources", "_current_tree_swap_bytes"),
+        ("src/cli/commands/live.py", "src.live.liveness", "_default_state_path"),
+        ("src/cli/commands/live.py", "src.live.scheduler", "_default_frozen_step"),
+        ("src/cli/commands/live.py", "src.live.scheduler", "_resolve_heartbeat_path"),
+        (
+            "src/market_data/services/source_gap_audit.py",
+            "src.mhs.source_gaps",
+            "_default_registry_path",
+        ),
+        (
+            "src/market_data/services/source_gap_audit.py",
+            "src.mhs.source_gaps",
+            "_parse_registry_bytes",
+        ),
+        ("src/mhs/execution/contracts.py", "src.quant.baseline.backtest", "_align_funding_rates"),
+    }
+)
+DAEMON_IMPORT_CHAIN: Final[tuple[str, ...]] = (
+    "src.cli.main",
+    "src.live.scheduler",
+    "src.mhs.execution.pnl",
+)
+DAEMON_IMPORT_TIMEOUT_S: Final[int] = 120
+
+
+def _iter_python_files(root: str) -> Iterator[Path]:
+    for path in sorted((REPO_ROOT / root).rglob("*.py")):
+        if "__pycache__" in path.parts:
+            continue
+        yield path
+
+
+def _resolve_import_module(path: Path, node: ast.ImportFrom) -> str:
+    if node.level == 0:
+        return node.module or ""
+    rel = path.relative_to(REPO_ROOT) if path.is_absolute() else path
+    parts = list(rel.with_suffix("").parts)
+    package = ".".join(parts[:-1])
+    return importlib.util.resolve_name(
+        "." * node.level + (node.module or ""), package
+    )
+
+
+def _top_level_package(module_or_relpath: str) -> str:
+    if "/" in module_or_relpath or module_or_relpath.endswith(".py"):
+        rel = module_or_relpath.removeprefix("./")
+        if rel.startswith("src/"):
+            rest = rel.removeprefix("src/")
+            if "/" not in rest:
+                return "<root>"
+            return rest.split("/", 1)[0]
+        return "<root>"
+    parts = module_or_relpath.split(".")
+    if len(parts) >= 2 and parts[0] == "src":
+        return parts[1]
+    return "<root>"
+
+
+def _is_private(name: str) -> bool:
+    return name.startswith("_") and not (name.startswith("__") and name.endswith("__"))
+
+
+def _is_deleted_match(reference: str, deleted_path: str) -> bool:
+    return reference == deleted_path or reference.startswith(deleted_path + ".")
+
+
+def _deleted_reference_hits(path: Path) -> list[tuple[str, int, str]]:
+    hits: list[tuple[str, int, str]] = []
+    rel = path.relative_to(REPO_ROOT).as_posix()
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        candidates: list[str] = []
+        if isinstance(node, ast.Import):
+            candidates.extend(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            resolved = _resolve_import_module(path, node)
+            if resolved:
+                candidates.append(resolved)
+                candidates.extend(
+                    f"{resolved}.{alias.name}"
+                    for alias in node.names
+                    if alias.name != "*"
+                )
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+            candidates.append(node.value)
+        for candidate in candidates:
+            for deleted in DELETED_MODULES:
+                if _is_deleted_match(candidate, deleted):
+                    hits.append((rel, node.lineno, deleted))
+                    break
+    return hits
+
+
+def _collect_cross_package_private_imports() -> dict[tuple[str, str, str], list[int]]:
+    observed: dict[tuple[str, str, str], list[int]] = {}
+    for path in _iter_python_files("src"):
+        rel = path.relative_to(REPO_ROOT).as_posix()
+        importer_top = _top_level_package(rel)
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                target = _resolve_import_module(path, node)
+                if not target.startswith("src."):
+                    continue
+                if _top_level_package(target) == importer_top:
+                    continue
+                module_private = any(
+                    _is_private(segment) for segment in target.split(".")[1:]
+                )
+                if module_private:
+                    observed.setdefault((rel, target, "*"), []).append(node.lineno)
+                for alias in node.names:
+                    if alias.name != "*" and _is_private(alias.name):
+                        observed.setdefault((rel, target, alias.name), []).append(
+                            node.lineno
+                        )
+            elif isinstance(node, ast.Import):
+                for alias in node.names:
+                    target = alias.name
+                    if not target.startswith("src."):
+                        continue
+                    if _top_level_package(target) == importer_top:
+                        continue
+                    if any(
+                        _is_private(segment) for segment in target.split(".")[1:]
+                    ):
+                        observed.setdefault((rel, target, "*"), []).append(node.lineno)
+    return observed
+
+
+@pytest.mark.parametrize("module", DELETED_MODULES, ids=DELETED_MODULES)
+def test_deleted_modules_absent_on_disk(module: str) -> None:
+    rel = module.replace(".", "/")
+    offenders = [
+        candidate
+        for candidate in (REPO_ROOT / f"{rel}.py", REPO_ROOT / rel)
+        if candidate.exists()
+    ]
+    assert offenders == [], f"deleted module reappeared: {module} -> {offenders}"
+
+
+def test_deleted_modules_unreferenced_from_src_and_tools() -> None:
+    offenders: list[str] = []
+    for root in SCANNED_ROOTS:
+        for path in _iter_python_files(root):
+            for rel, lineno, deleted in _deleted_reference_hits(path):
+                offenders.append(f"{rel}:{lineno} -> {deleted}")
+    assert sorted(offenders) == [], (
+        f"references to deleted modules from {SCANNED_ROOTS}: {sorted(offenders)}"
+    )
+
+
+def test_deleted_module_matcher_is_boundary_aware() -> None:
+    assert not _is_deleted_match("src.research_foo", "src.research")
+    assert _is_deleted_match("src.research.sub", "src.research")
+
+
+@pytest.mark.parametrize(
+    ("relpath", "statement", "expected"),
+    [
+        ("src/mhs/execution/__init__.py", "from .accumulator import x", "src.mhs.execution.accumulator"),
+        ("src/mhs/execution/pnl.py", "from ..marks import x", "src.mhs.marks"),
+        ("tools/checks/__init__.py", "from .helpers import x", "tools.checks.helpers"),
+    ],
+)
+def test_relative_imports_resolve_against_importer_package(
+    relpath: str, statement: str, expected: str
+) -> None:
+    node = ast.parse(statement).body[0]
+    assert isinstance(node, ast.ImportFrom)
+    assert _resolve_import_module(REPO_ROOT / relpath, node) == expected
+
+
+@pytest.mark.parametrize(
+    "owner_attr",
+    RETIRED_SYMBOLS,
+    ids=[f"{owner}:{attr}" for owner, attr in RETIRED_SYMBOLS],
+)
+def test_retired_symbols_stay_absent(owner_attr: tuple[str, str]) -> None:
+    owner, dotted = owner_attr
+    try:
+        module = importlib.import_module(owner)
+    except ModuleNotFoundError:
+        pytest.fail(
+            f"owner module {owner!r} no longer imports; "
+            "move the entry to DELETED_MODULES"
+        )
+    segments = dotted.split(".")
+    obj = module
+    for segment in segments[:-1]:
+        try:
+            obj = getattr(obj, segment)
+        except AttributeError:
+            return
+    assert not hasattr(obj, segments[-1]), (
+        f"retired symbol reappeared: {owner}:{dotted}"
+    )
+
+
+def test_no_new_cross_package_private_imports() -> None:
+    observed = _collect_cross_package_private_imports()
+    new = sorted(
+        f"{rel}:{sorted(lines)} -> {module} :: {name}"
+        for (rel, module, name), lines in observed.items()
+        if (rel, module, name) not in CROSS_PACKAGE_PRIVATE_ALLOWLIST
+    )
+    assert new == [], f"new cross-package private imports: {new}"
+
+
+def test_private_import_allowlist_is_shrink_only() -> None:
+    observed = _collect_cross_package_private_imports()
+    stale = sorted(
+        f"{rel} -> {module} :: {name}"
+        for (rel, module, name) in CROSS_PACKAGE_PRIVATE_ALLOWLIST
+        if (rel, module, name) not in observed
+    )
+    assert stale == [], f"stale allowlist entries (remove from allowlist): {stale}"
+
+
+def test_daemon_import_chain_imports_cleanly_in_fresh_interpreter() -> None:
+    statement = "import " + ", ".join(DAEMON_IMPORT_CHAIN)
+    env = {
+        "PATH": os.environ.get("PATH", ""),
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONHASHSEED": "0",
+        "PYTHONPATH": str(REPO_ROOT),
+    }
+    completed = subprocess.run(  # noqa: S603
+        [sys.executable, "-c", statement],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=DAEMON_IMPORT_TIMEOUT_S,
+    )
+    assert completed.returncode == 0, (
+        f"daemon import chain failed (rc={completed.returncode}): {completed.stderr}"
+    )
+    assert "Traceback" not in completed.stderr, (
+        f"daemon import chain raised: {completed.stderr}"
+    )
