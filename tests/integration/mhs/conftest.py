@@ -126,7 +126,8 @@ def canonical_report_run(mhs_report_cache, synthetic_market, request) -> Iterato
         research_baseline(start=str(start), end=str(end), data_root=str(root),
                           execution_timeframe="3m", log_run=False,
                           placebo_diagnostic=True, phase_diagnostic=True,
-                          signal_48h_diagnostic=True, bootstrap_ci_diagnostic=True),
+                          signal_48h_diagnostic=True, bootstrap_ci_diagnostic=True,
+                          reference_books_diagnostic=True),
         SYNTHETIC_DEFAULT_PROFILE,
     )
     with mhs_report_cache.lease(spec, consumer=request.node.nodeid) as entry:
@@ -147,6 +148,7 @@ def touch_report(synthetic_market):
         research_baseline(
             start=str(start), end=str(end), data_root=str(root),
             execution_timeframe="3m", log_run=False, touch_diagnostic=True,
+            reference_books_diagnostic=True, patient_reference_diagnostic=True,
         ),
     )
 

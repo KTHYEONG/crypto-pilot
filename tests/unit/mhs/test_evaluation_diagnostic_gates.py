@@ -420,7 +420,7 @@ def test_mhs_diagnostic_3m_replay_end_to_end(mhs_market, monkeypatch) -> None:
     monkeypatch.setattr(statistics, "_placebo_sharpe_percentile", lambda *a, **k: None)
     request = research_baseline(
         start=str(_START), end=str(end), data_root=str(root),
-        log_run=False, execution_universe_size=8,
+        log_run=False, execution_universe_size=8, reference_books_diagnostic=True,
     )
     assert request.execution_timeframe == "3m"
     report = run_mhs_horizon_diagnostic(request)

@@ -2033,3 +2033,72 @@ def test_p3_validate_window_check_order_preserved() -> None:
     both = dataclasses.replace(w, signal_available_at=sig, minute_grid=mg2, bar_available_at=mg2, **frames2)
     with pytest.raises(DataIntegrityError, match="signal_available_at must be no earlier than its decision label"):
         _validate_replay_window(both, expected_columns=cols, expected_targets=path.target_weights, cursor=0, fence=fence)
+
+
+def test_replay_batch_bounds_layout() -> None:
+    """SCENARIO_MHS_REPLAY_BATCH_BOUNDS_LAYOUT: indices 0-1 are always the two
+    OHLCV_IMMEDIATE_TAKER bounds (primary, cost-stress); every later bound is an
+    opt-in reference appended in declared order with an explicit result index."""
+    import itertools
+
+    import src.mhs.evaluation.specs as specs
+    from src.mhs.evaluation.windows import _replay_batch_bounds
+
+    flag_names = (
+        "patient_reference_diagnostic",
+        "touch_diagnostic",
+        "ladder_diagnostic",
+        "peg_chase_diagnostic",
+    )
+    bound_names = ("patient_reference", "touch", "ladder", "peg_chase")
+    expected_bounds = (
+        "OHLCV_STRICT_PROXY",
+        "OHLCV_TOUCH_PROXY",
+        "OHLCV_LADDERED_PROXY",
+        "OHLCV_PEG_CHASE_PROXY",
+    )
+    for bits in itertools.product((False, True), repeat=4):
+        request = research_baseline(**dict(zip(flag_names, bits, strict=True)))
+        bounds, mapping = _replay_batch_bounds(request, specs._resolved_base_execution_spec(request))
+        assert [bound for bound, _ in bounds[:2]] == ["OHLCV_IMMEDIATE_TAKER"] * 2
+        assert len(bounds) == 2 + sum(bits)
+        want_keys = [key for key, on in zip(bound_names, bits, strict=True) if on]
+        assert sorted(mapping, key=mapping.__getitem__) == want_keys
+        assert sorted(mapping.values()) == list(range(2, 2 + sum(bits)))
+        for key, bound in zip(want_keys, [bounds[i][0] for i in sorted(mapping.values())], strict=True):
+            assert bound == expected_bounds[bound_names.index(key)]
+
+
+def test_book_outcome_failure_path_records_telemetry(monkeypatch) -> None:
+    """A replay-stage ``DataIntegrityError`` becomes a typed book failure (never
+    a raise) and the failure telemetry record is emitted."""
+    import pandas as pd
+
+    import src.mhs.evaluation.windows as windows_mod
+    from src.common.errors import DataIntegrityError
+    from src.mhs.evaluation.windows import _book_outcome
+    from src.mhs.resources import _StageRecorder
+    from src.mhs.types import BOOK_SPECS
+
+    grid_1h = pd.date_range("2021-01-01", periods=800, freq="1h", tz="UTC")
+    step_grid = grid_1h[::24]
+    frame = pd.DataFrame(0.01, index=grid_1h, columns=["AAA", "BBB"])
+    weights_step = pd.DataFrame(0.01, index=step_grid, columns=["AAA", "BBB"])
+    slow = BOOK_SPECS["slow_momentum"]
+    request = research_baseline(pnl_vol_target=False)
+
+    def _raise_replay(*args: object, **kwargs: object):
+        raise DataIntegrityError("synthetic replay failure")
+
+    monkeypatch.setattr(windows_mod, "replay_execution_windows", _raise_replay)
+    recorder = _StageRecorder(log_run=False)
+    report, _ = _book_outcome(
+        "blend", slow, 2, step_grid, weights_step, grid_1h, frame, frame, None,
+        "/nonexistent", request, {}, grid_1h[0], grid_1h[-1], 48, 1.0,
+        telemetry=recorder,
+    )
+    assert report.primary is None
+    assert report.stress is None
+    assert report.failure is not None
+    assert report.failure.reason
+    assert [m.stage for m in recorder.records] == ["replay_blend_failed"]

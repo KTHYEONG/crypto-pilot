@@ -68,6 +68,8 @@ FROZEN_FLAGS = frozenset(
         "--placebo-diagnostic",
         "--signal-48h-diagnostic",
         "--bootstrap-ci-diagnostic",
+        "--reference-books-diagnostic",
+        "--patient-reference-diagnostic",
         "--pnl-vol-target-mode",
         "--rebalance-filter",
         "--register-procedure",
@@ -105,7 +107,7 @@ def _parse(extra: list[str]) -> argparse.Namespace:
 
 def test_exposed_option_set_frozen() -> None:
     assert _flag_set(_mhs_parser()) == set(FROZEN_FLAGS)
-    assert len(FROZEN_FLAGS) == 62
+    assert len(FROZEN_FLAGS) == 64
 
 
 def test_no_arg_parity() -> None:
@@ -120,6 +122,8 @@ def test_no_arg_parity() -> None:
     assert req.phase_diagnostic is False
     assert req.signal_48h_diagnostic is False
     assert req.bootstrap_ci_diagnostic is False
+    assert req.reference_books_diagnostic is False
+    assert req.patient_reference_diagnostic is False
 
 
 def _value_cases() -> list[tuple[str, list[str], str, object]]:

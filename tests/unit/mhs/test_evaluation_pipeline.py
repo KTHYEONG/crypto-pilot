@@ -512,6 +512,7 @@ def test_p10_concurrent_books_parity(mhs_market) -> None:
     # to None), so it also proves every existing _run_books_concurrent caller
     # stays byte-identical after the regime_scale parameter was added.
     args = _build_books_concurrent_args(mhs_market)
+    args = {**args, "request": dataclasses.replace(args["request"], reference_books_diagnostic=True)}
     sequential = _sequential_book_reports(args)
     concurrent_fast, concurrent_slow, concurrent_blend, _, _ = _run_books_concurrent(**args)
     concurrent = (concurrent_fast, concurrent_slow, concurrent_blend)
@@ -533,6 +534,7 @@ def test_p10_book_error_isolation(mhs_market, monkeypatch) -> None:
     # dropped, failure set) is delivered through the process pool without
     # blocking the other two books.
     args = _build_books_concurrent_args(mhs_market)
+    args = {**args, "request": dataclasses.replace(args["request"], reference_books_diagnostic=True)}
     import src.mhs.evaluation.windows as windows_mod
     real_windows = windows_mod._book_outcome
 
@@ -572,6 +574,7 @@ def test_p10_book_error_isolation(mhs_market, monkeypatch) -> None:
 def test_regime_scale_reaches_blend_replay_not_only_prescreen(mhs_market) -> None:
     # SCENARIO_MHS_REGIME_SCALE_REACHES_BLEND_REPLAY_01: blend replay reflects regime scale.
     args = _build_books_concurrent_args(mhs_market)
+    args = {**args, "request": dataclasses.replace(args["request"], reference_books_diagnostic=True)}
     active_grid = _active_blend_book_and_grid(
         args["fast"], args["slow"], args["fast_grid"], args["slow_grid"],
     )[1]

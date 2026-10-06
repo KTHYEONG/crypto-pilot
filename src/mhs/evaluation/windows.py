@@ -8,7 +8,7 @@ import tempfile
 import zipfile
 from collections.abc import Iterable, Iterator
 from dataclasses import replace as dataclass_replace
-from typing import Any, Literal
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -33,6 +33,7 @@ from src.mhs.evidence import (
 from src.mhs.execution import (
     ExecutionReplayWindow,
     StrategyExecutionReplayResult,
+    _ExecutionBound,
     replay_execution_window_batch_isolated,
     replay_execution_windows,
     replay_execution_windows_coupled,
@@ -264,6 +265,47 @@ def _iter_spilled_windows(spill_dir: str) -> Iterator[ExecutionReplayWindow]:
         yield _load_window_from_ipc(os.path.join(spill_dir, name))
 
 
+def _replay_batch_bounds(
+    request: MhsDiagnosticRequest, replay_base_spec: ExecutionSpec,
+) -> tuple[list[tuple[_ExecutionBound, ExecutionSpec]], dict[str, int]]:
+    """Ordered execution bounds of one top-level book replay and the result index of each optional bound.
+
+    Index 0 is the capital-carrying primary taker bound and index 1 its cost-stress twin; both
+    always run and keep fail-closed propagation. Every later bound is an opt-in,
+    failure-isolated reference (patient strict proxy, touch, ladder, peg-chase) appended after
+    them in that order, so its presence can never alter what bounds 0 and 1 consume. The mapping
+    names each present optional bound's explicit result index (keys ``"patient_reference"``,
+    ``"touch"``, ``"ladder"``, ``"peg_chase"``); a negative index would silently misbind once
+    another bound is appended.
+
+    Raises:
+        AssertionError: the ladder diagnostic is requested and its frozen schedule contract is
+            violated (``integrity._validate_ladder_schedule_contract``, unchanged from HEAD).
+    """
+    stress_spec = dataclass_replace(
+        specs._stress_cost_execution_spec(replay_base_spec), liquidity_cost_model=replay_base_spec.liquidity_cost_model,
+    )
+    bounds: list[tuple[_ExecutionBound, ExecutionSpec]] = [
+        ("OHLCV_IMMEDIATE_TAKER", replay_base_spec),
+        ("OHLCV_IMMEDIATE_TAKER", stress_spec),
+    ]
+    indices: dict[str, int] = {}
+    if request.patient_reference_diagnostic:
+        bounds.append(("OHLCV_STRICT_PROXY", replay_base_spec))
+        indices["patient_reference"] = len(bounds) - 1
+    if request.touch_diagnostic:
+        bounds.append(("OHLCV_TOUCH_PROXY", replay_base_spec))
+        indices["touch"] = len(bounds) - 1
+    if request.ladder_diagnostic:
+        integrity._validate_ladder_schedule_contract()
+        bounds.append(("OHLCV_LADDERED_PROXY", replay_base_spec))
+        indices["ladder"] = len(bounds) - 1
+    if request.peg_chase_diagnostic:
+        bounds.append(("OHLCV_PEG_CHASE_PROXY", dataclass_replace(replay_base_spec, decision_anchor="submit_bar")))
+        indices["peg_chase"] = len(bounds) - 1
+    return bounds, indices
+
+
 def _book_outcome(
     name: str,
     spec: BookSpec,
@@ -357,8 +399,7 @@ def _book_outcome(
         return _iter_mhs_execution_windows(
             target_replay, signal_replay, root, request.execution_timeframe,
             start, end, funding_by_symbol, specs._resolved_base_execution_spec(request),
-            execution_bound_count=execution_bound_count,
-            budget_bytes=_window_budget, reserve_bytes=_window_rss_reserve)
+            execution_bound_count=execution_bound_count, budget_bytes=_window_budget, reserve_bytes=_window_rss_reserve)
 
     def _window_telemetry(
         gen: Iterator[MhsExecutionWindow], prefix: str,
@@ -402,43 +443,7 @@ def _book_outcome(
             if request.liquidity_cost_model == "corwin_schultz"
             else specs._resolved_base_execution_spec(request)
         )
-        batch_bounds: list[
-            tuple[
-                Literal[
-                    "OHLCV_STRICT_PROXY",
-                    "OHLCV_TOUCH_PROXY",
-                    "OHLCV_IMMEDIATE_TAKER",
-                    "OHLCV_LADDERED_PROXY",
-                    "OHLCV_PEG_CHASE_PROXY",
-                ],
-                ExecutionSpec,
-            ]
-        ] = [
-            ("OHLCV_IMMEDIATE_TAKER", replay_base_spec),
-            (
-                "OHLCV_IMMEDIATE_TAKER",
-                dataclass_replace(
-                    specs._stress_cost_execution_spec(replay_base_spec),
-                    liquidity_cost_model=replay_base_spec.liquidity_cost_model,
-                ),
-            ),
-            ("OHLCV_STRICT_PROXY", replay_base_spec),
-        ]
-        # Explicit result indices for the optional diagnostic bounds: a negative
-        # index silently misbinds once another bound is appended.
-        optional_bound_indices: dict[str, int] = {}
-        if request.touch_diagnostic:
-            batch_bounds.append(("OHLCV_TOUCH_PROXY", replay_base_spec))
-            optional_bound_indices["touch"] = len(batch_bounds) - 1
-        if request.ladder_diagnostic:
-            integrity._validate_ladder_schedule_contract()
-            batch_bounds.append(("OHLCV_LADDERED_PROXY", replay_base_spec))
-            optional_bound_indices["ladder"] = len(batch_bounds) - 1
-        if request.peg_chase_diagnostic:
-            batch_bounds.append(
-                ("OHLCV_PEG_CHASE_PROXY", dataclass_replace(replay_base_spec, decision_anchor="submit_bar"))
-            )
-            optional_bound_indices["peg_chase"] = len(batch_bounds) - 1
+        batch_bounds, optional_bound_indices = _replay_batch_bounds(request, replay_base_spec)
         isolated_indices = frozenset(
             i for i, (bound, _spec) in enumerate(batch_bounds)
             if bound in specs.REFERENCE_ONLY_EXECUTION_BOUNDS
@@ -456,8 +461,7 @@ def _book_outcome(
                     _window_telemetry(_windows(), "execution_window"),
                     initial_equity,
                     ("OHLCV_IMMEDIATE_TAKER", specs._resolved_base_execution_spec(request)),
-                    batch_bounds,
-                    lambda daily_returns: _scaling._replay_exposure_scale(daily_returns, request),
+                    batch_bounds, lambda daily_returns: _scaling._replay_exposure_scale(daily_returns, request),
                     retain_event_snapshots=False,
                     min_equity_fraction=REFERENCE_PASS_EQUITY_FLOOR,
                     isolated_bound_indices=isolated_indices,
@@ -479,8 +483,7 @@ def _book_outcome(
             primary_two_pass = replay_execution_windows(
                 _window_telemetry(_spill_and_stream_windows(_windows(), spill_temp.name), "execution_window"),
                 initial_equity, "OHLCV_IMMEDIATE_TAKER", specs._resolved_base_execution_spec(request),
-                retain_event_snapshots=False,
-                min_equity_fraction=REFERENCE_PASS_EQUITY_FLOOR,
+                retain_event_snapshots=False, min_equity_fraction=REFERENCE_PASS_EQUITY_FLOOR,
             )
             reference_daily_returns = primary_two_pass.ledger.equity.resample("1D").last().pct_change()
             if name == "blend" and request.exposure_scale_two_sided:
@@ -526,8 +529,7 @@ def _book_outcome(
                         _rescaled_windows(_iter_spilled_windows(spill_temp.name), replay_scale),
                         "execution_window_rescaled",
                     ),
-                    initial_equity, batch_bounds,
-                    retain_event_snapshots=False,
+                    initial_equity, batch_bounds, retain_event_snapshots=False,
                     min_equity_fraction=REFERENCE_PASS_EQUITY_FLOOR,
                     isolated_bound_indices=isolated_indices,
                 )
@@ -536,7 +538,8 @@ def _book_outcome(
                 gc.collect()
         primary = batch.results[0]  # non-isolated index cannot be None
         stress = batch.results[1]
-        patient_reference = batch.results[2]
+        _patient_index = optional_bound_indices.get("patient_reference")
+        patient_reference = batch.results[_patient_index] if _patient_index is not None else None
         assert primary is not None
         assert stress is not None
         patient_reference_naive_sharpe = (
@@ -582,11 +585,7 @@ def _book_outcome(
             message=str(exc),
         )
         if telemetry is not None:
-            telemetry.record(
-                f"replay_{name}_failed",
-                n_symbols=len(replay_symbols),
-                fill_count=0,
-            )
+            telemetry.record(f"replay_{name}_failed", n_symbols=len(replay_symbols), fill_count=0)
         return MhsBookReport(
             name=name,
             band=spec.band.name,

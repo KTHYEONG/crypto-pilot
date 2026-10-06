@@ -268,6 +268,10 @@ def validate_request(request: MhsDiagnosticRequest) -> None:
         raise ValueError("signal_48h_diagnostic must be a bool")
     if not isinstance(request.bootstrap_ci_diagnostic, bool):
         raise ValueError("bootstrap_ci_diagnostic must be a bool")
+    if not isinstance(request.reference_books_diagnostic, bool):
+        raise ValueError("reference_books_diagnostic must be a bool")
+    if not isinstance(request.patient_reference_diagnostic, bool):
+        raise ValueError("patient_reference_diagnostic must be a bool")
     if not (0.0 <= request.trend_sleeve_gross <= 1.0):
         raise ValueError("trend_sleeve_gross must be in [0.0, 1.0]")
     if request.trend_sleeve_gross > 0.0 and not request.trend_sleeve:

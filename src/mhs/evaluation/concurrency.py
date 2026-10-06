@@ -61,27 +61,34 @@ def _run_books_concurrent(
     regime_scale: pd.Series | None = None,
     committee_execution_book: pd.DataFrame | None = None,
     committee_member_books: dict[str, pd.DataFrame] | None = None,
-) -> tuple[MhsBookReport, MhsBookReport, MhsBookReport, dict[int, dict[str, float]], dict[str, MhsBookReport] | None]:
-    """Run the three top-level books concurrently in fork children.
+) -> tuple[
+    MhsBookReport | None,
+    MhsBookReport | None,
+    MhsBookReport,
+    dict[int, dict[str, float]],
+    dict[str, MhsBookReport] | None,
+]:
+    """Run the top-level book replays concurrently in fork children.
 
-    The books share zero mutable state and only read the immutable 1h panels and
-    the O6 minute-frame cache, so they are embarrassingly parallel.
-    ``ProcessPoolExecutor`` (fork) is used instead of threads: the replay loops
-    are a CPU-bound Python/numpy mix, so the GIL would serialize threads at
-    ~1.6x rather than the ~3x fork workers achieve, and fork lets the workers
-    share the read-only panels and preloaded cache via copy-on-write (no 3x RSS
-    blow-up), matching the existing ``folds._run_folds_parallel`` pattern.  Per-book
-    telemetry is merged into the parent recorder in declared book order.
+    The blend book always runs; the standalone fast_reversal / slow_momentum reference books run
+    only when ``request.reference_books_diagnostic`` is set and are otherwise returned as
+    ``None``. Member-attribution books run when ``committee_member_books`` is given. The books
+    share zero mutable state and only read the immutable 1h panels and the minute-frame cache,
+    so they are embarrassingly parallel: ``ProcessPoolExecutor`` (fork) is used instead of
+    threads because the replay loops are a CPU-bound Python/numpy mix and fork shares the
+    read-only panels copy-on-write. Per-book telemetry is merged into the parent recorder in
+    declared book order (members, then fast, slow, blend).
 
-    ``blend_replay`` (the blend book's actual execution-replay weights) is
-    built independently from ``blend_1h``/``blend_step`` because it must stay
-    restricted to the execution-roster (``w_*_execution``) symbols actually
-    tradable at minute granularity -- ``blend_1h`` covers the full eligible
-    universe and is prescreen/tail-diagnostic only (never itself replayed).
-    ``regime_scale`` (the R1 volatility-regime cash scale, optionally composed
-    with the opt-in trend-efficiency overlay) is applied to ``blend_1h`` by the
-    caller already; it must also be applied here so the blend book's actual
-    ``primary``/``stress`` replay reflects it.
+    ``blend_replay`` (the blend book's actual execution-replay weights) is built independently
+    from ``blend_1h``: it must stay restricted to the execution-roster symbols tradable at
+    minute granularity, while ``blend_1h`` covers the full eligible universe and is
+    prescreen/tail-diagnostic only. ``regime_scale`` is applied to ``blend_replay`` here so the
+    blend's primary/stress replay reflects it.
+
+    Returns:
+        ``(fast_report, slow_report, blend_report, blend_traces, member_reports)``; the first two
+        are ``None`` unless the reference books were requested, ``member_reports`` is ``None``
+        when no member book ran.
     """
     active_spec, active_grid = books._active_blend_book_and_grid(fast, slow, fast_grid, slow_grid)
     blend_step = blend_1h.reindex(active_grid)
@@ -100,11 +107,11 @@ def _run_books_concurrent(
     # through ``fork_shared_payload`` (inherited copy-on-write by the fork
     # children), so only a short token crosses the submit boundary -- the
     # pickled-argument copies measured at ~1 GB per book are eliminated.
-    books_dict: dict[str, tuple[Any, ...]] = {
-        "fast_reversal": (fast, fast_grid, w_fast, phase_fast, fast.horizon_hours, w_fast_execution),
-        "slow_momentum": (slow, slow_grid, w_slow, phase_slow, slow.horizon_hours, w_slow_execution),
-        "blend": (active_spec, active_grid, blend_step, phase_blend, 168, blend_replay),
-    }
+    books_dict: dict[str, tuple[Any, ...]] = {}
+    if request.reference_books_diagnostic:
+        books_dict["fast_reversal"] = (fast, fast_grid, w_fast, phase_fast, fast.horizon_hours, w_fast_execution)
+        books_dict["slow_momentum"] = (slow, slow_grid, w_slow, phase_slow, slow.horizon_hours, w_slow_execution)
+    books_dict["blend"] = (active_spec, active_grid, blend_step, phase_blend, 168, blend_replay)
     member_names: list[str] = []
     if committee_member_books:
         for m_name, m_book in committee_member_books.items():
@@ -113,7 +120,7 @@ def _run_books_concurrent(
             books_dict[f"member_{m_name}"] = (
                 slow, slow_grid, m_step, phase_slow, slow.horizon_hours, m_step,
             )
-    n_total_workers = 3 + len(member_names)
+    n_total_workers = 1 + len(member_names) + (2 if request.reference_books_diagnostic else 0)
     _books_reserve = _resolve_ram_budget(request.max_rss_bytes, request.ram_guard)[1]
     _books_workers = plan_worker_count(
         n_total_workers, WORKER_PEAK_RSS_BYTES, request.ram_guard,
@@ -132,13 +139,21 @@ def _run_books_concurrent(
         frozen_gc_heap(),
         ProcessPoolExecutor(max_workers=_books_workers, mp_context=FORK_CONTEXT) as pool,
     ):
-        f_fast = pool.submit(
-            windows._book_outcome_worker,
-            "fast_reversal", token, n_symbols, root, request, start, end, initial_equity,
+        f_fast = (
+            pool.submit(
+                windows._book_outcome_worker,
+                "fast_reversal", token, n_symbols, root, request, start, end, initial_equity,
+            )
+            if request.reference_books_diagnostic
+            else None
         )
-        f_slow = pool.submit(
-            windows._book_outcome_worker,
-            "slow_momentum", token, n_symbols, root, request, start, end, initial_equity,
+        f_slow = (
+            pool.submit(
+                windows._book_outcome_worker,
+                "slow_momentum", token, n_symbols, root, request, start, end, initial_equity,
+            )
+            if request.reference_books_diagnostic
+            else None
         )
         f_blend = pool.submit(
             windows._book_outcome_worker,
@@ -151,8 +166,10 @@ def _run_books_concurrent(
             )
             for m_name in member_names
         }
-        fast_report, fast_records, _fast_traces = f_fast.result()
-        slow_report, slow_records, _slow_traces = f_slow.result()
+        fast_out = f_fast.result() if f_fast is not None else None
+        slow_out = f_slow.result() if f_slow is not None else None
+        fast_report, fast_records = (fast_out[0], fast_out[1]) if fast_out is not None else (None, ())
+        slow_report, slow_records = (slow_out[0], slow_out[1]) if slow_out is not None else (None, ())
         blend_report, blend_records, blend_traces = f_blend.result()
         member_reports: dict[str, MhsBookReport] = {}
         for m_name, f_member in f_members.items():
@@ -162,8 +179,11 @@ def _run_books_concurrent(
                 telemetry.absorb(m_records)
 
     if telemetry is not None:
-        for records in (fast_records, slow_records, blend_records):
-            telemetry.absorb(records)
+        if fast_records:
+            telemetry.absorb(fast_records)
+        if slow_records:
+            telemetry.absorb(slow_records)
+        telemetry.absorb(blend_records)
     return fast_report, slow_report, blend_report, blend_traces, member_reports or None
 
 
