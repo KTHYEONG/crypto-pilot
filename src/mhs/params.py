@@ -361,6 +361,15 @@ EXPOSURE_DRAWDOWN_BRAKE_FLOOR: float = 0.2
 
 FOLD_PANEL_WARMUP_HOURS: int = 720 + 168 + 24
 
+TRAIN_REFERENCE_PREFIX_TARGET_ATOL: float = 1e-12
+"""Max absolute difference between a fold's own train-window target weight and the shared
+reference's prefix weight for the shared replay to be reused (float-association drift only)."""
+
+TRAIN_REFERENCE_PREFIX_RETURN_ATOL: float = 1e-12
+"""Accepted absolute drift of a reused train-reference daily return versus the independent
+per-fold replay (measured maximum 2.2e-16); the acceptance bound asserted by the equivalence and
+perturbation tests."""
+
 EXECUTION_ROSTER_EXIT_MULTIPLIER: float = 2.0
 REBALANCE_TRACKING_ERROR_THRESHOLD: float = 0.20
 

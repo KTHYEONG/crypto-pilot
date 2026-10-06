@@ -58,6 +58,24 @@ from tests.unit.mhs.test_evaluation_appresearch import (  # noqa: F401
     _write_quote_volume_market,
 )
 
+@pytest.fixture
+def validation_only_train_reference(monkeypatch):
+    """Isolate validation replay scenarios from the separate train-reference replay contract."""
+    import src.mhs.evaluation.folds as folds_mod
+
+    fold = dataclasses.replace(_FOLD, train_start=pd.Timestamp("2020-06-01", tz="UTC"))
+    reference = pd.Series(
+        0.001,
+        index=pd.date_range(end=fold.train_end - pd.Timedelta(days=1), periods=100, freq="D", tz="UTC"),
+        dtype="float64",
+    )
+    assert reference.index[0] >= fold.train_start + pd.Timedelta(hours=FOLD_PANEL_WARMUP_HOURS)
+    folds_mod.integrity._assert_train_reference_returns_valid(reference, fold.train_end, 0)
+    monkeypatch.setattr(f"{__name__}._FOLD", fold)
+    monkeypatch.setattr(folds_mod, "_fold_train_reference_returns", lambda *a, **k: reference.copy())
+
+
+@pytest.mark.usefixtures("validation_only_train_reference")
 @pytest.mark.slow
 class TestAnchoredFoldBounded:
     """MHS-MEM-03-ANCHORED-FOLD-BOUNDED: each anchored fold uses bounded
@@ -176,6 +194,7 @@ class TestAnchoredFoldBounded:
         assert report.strict is not None
         assert report.failures == ()
 
+@pytest.mark.usefixtures("validation_only_train_reference")
 @pytest.mark.slow
 def test_anchored_fold_is_two_pass(mhs_market, monkeypatch) -> None:
     # SCENARIO_ANCHORED_FOLD_IS_TWO_PASS: the fold's reported primary
@@ -703,6 +722,7 @@ def _capturing_anchored_fold(
     root, fold, request, funding_by_symbol, initial_equity, fold_index,
     telemetry=None, slow_horizon_override=None, fast_horizon_override=None,
     funding_carry_override=None, committee_member_weights=None,
+    validation_plan=None, shared_reference=None,
 ):
     _CAPTURED_FOLD_SUBMISSIONS.append({
         "fold_index": fold_index,
@@ -720,6 +740,14 @@ def test_post_book_concurrently_forwards_only_fold_local_policy(monkeypatch) -> 
     monkeypatch.setattr(evidence_mod, "phase_1_anchored_purged_folds", lambda: (_FOLD,) * 4)
     monkeypatch.setattr(folds_mod, "phase_1_anchored_purged_folds", lambda: (_FOLD,) * 4)
     monkeypatch.setattr(folds_mod, "_run_anchored_fold", _capturing_anchored_fold)
+    monkeypatch.setattr(
+        folds_mod, "_build_fold_validation_plan",
+        lambda root, fold, request, funding, slow, committee: folds_mod._FoldValidationPlan(
+            target_weights=pd.DataFrame(), target_replay=pd.DataFrame(),
+            signal_available_at=pd.DatetimeIndex([], tz="UTC"),
+            terminal_censored=0, decision_intents=0,
+        ),
+    )
     monkeypatch.setattr(concurrency_mod, "ProcessPoolExecutor", _InlineExecutor)
     monkeypatch.setattr(parallel_mod, "plan_worker_count", lambda *a, **k: 1)
     monkeypatch.setattr(concurrency_mod, "plan_worker_count", lambda *a, **k: 1)

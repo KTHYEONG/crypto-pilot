@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterator
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from collections.abc import Iterator, Mapping, Sequence
+from concurrent.futures import Executor, Future, ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 
 import numpy as np
@@ -36,6 +36,7 @@ from src.mhs.params import (
     FOLD_PANEL_WARMUP_HOURS,
     FUNDING_CARRY_LOOKBACK_CANDIDATES_HOURS,
     MEASURED_EXECUTION_COST_TIERS_BPS,
+    TRAIN_REFERENCE_PREFIX_TARGET_ATOL,
 )
 from src.mhs.params import (
     PERIODS_PER_YEAR_1H as _PERIODS_PER_YEAR_1H,
@@ -53,7 +54,7 @@ from src.mhs.resources import (
     _worker_plan_observer,
 )
 from src.mhs.trend_sleeve import market_basket_log_price, time_series_trend_position, trend_sleeve_weights
-from src.mhs.types import BOOK_SPECS, TREND_SLEEVE_HORIZONS_HOURS, WORKER_PEAK_RSS_BYTES, BookSpec
+from src.mhs.types import BOOK_SPECS, TREND_SLEEVE_HORIZONS_HOURS, WORKER_PEAK_RSS_BYTES, BookSpec, ExecutionSpec
 
 from . import books, fold_weights, integrity, regime, specs, windows
 
@@ -366,16 +367,73 @@ def _fold_exposure_warmup(
     ]
 
 
-def _fold_train_reference_returns(
+_TrainReferenceGroupKey = tuple[pd.Timestamp, int | None, tuple[tuple[str, float], ...] | None]
+
+
+def _train_reference_group_key(
+    fold: AnchoredPurgedFold,
+    slow_horizon_override: int | None,
+    committee_member_weights: Mapping[str, float] | None,
+) -> _TrainReferenceGroupKey:
+    """Key under which folds share one train-reference replay.
+
+    The train reference depends on run constants plus ``train_start``, ``train_end``,
+    ``slow_horizon_override`` and ``committee_member_weights``; folds with equal keys differ only
+    in ``train_end`` and can read prefixes of one replay. Fast-horizon and funding-carry
+    overrides are report-only for the reference and are deliberately excluded.
+
+    Returns:
+        ``(train_start, slow_horizon_override, sorted (name, float) weight items or None)``.
+    """
+    if committee_member_weights is None:
+        weights_key: tuple[tuple[str, float], ...] | None = None
+    else:
+        weights_key = tuple(sorted((name, float(weight)) for name, weight in committee_member_weights.items()))
+    return (fold.train_start, slow_horizon_override, weights_key)
+
+
+@dataclass(frozen=True, slots=True)
+class _SharedTrainReference:
+    """One train-reference replay to a group horizon, reusable as per-fold prefixes.
+
+    Attributes:
+        group_key: Key shared by every fold of the group.
+        reference_start: ``train_start + FOLD_PANEL_WARMUP_HOURS``.
+        horizon_end: ``train_end`` of the group's latest usable fold.
+        target_weights: Train-window targets on ``[reference_start, horizon_end]`` exactly as
+            built for the horizon fold, restricted to columns with any NaN or nonzero entry.
+        signal_available_at: Signal times aligned row-for-row with ``target_weights``.
+        daily_returns: The horizon fold's certified daily returns (rows ``< horizon_end``).
+    """
+
+    group_key: _TrainReferenceGroupKey
+    reference_start: pd.Timestamp
+    horizon_end: pd.Timestamp
+    target_weights: pd.DataFrame
+    signal_available_at: pd.DatetimeIndex
+    daily_returns: pd.Series
+
+
+def _fold_reference_targets(
     root: str,
     fold: AnchoredPurgedFold,
     request: MhsDiagnosticRequest,
     funding_by_symbol: dict[str, pd.Series],
-    initial_equity: float,
     fold_index: int,
     slow_horizon_override: int | None,
     committee_member_weights: dict[str, float] | None,
-) -> pd.Series:
+) -> tuple[pd.DataFrame, pd.DatetimeIndex, list[str]]:
+    """Train-window decision path of one fold, without replay.
+
+    Returns:
+        ``(target_weights, signal_available_at, minute_roster)`` from
+        ``fold_weights._build_fold_target_weights`` with ``decision_start = train_start +
+        FOLD_PANEL_WARMUP_HOURS`` and ``decision_end = train_end``.
+    Raises:
+        DataIntegrityError: Empty reference window (message unchanged:
+            ``"fold <i>: train reference window is empty; do not borrow pre-DISCOVERY data"``).
+        ValueError, RuntimeError, DataIntegrityError: Propagated from the target build.
+    """
     reference_start = fold.train_start + pd.Timedelta(hours=FOLD_PANEL_WARMUP_HOURS)
     reference_end = fold.train_end
     if not reference_start < reference_end:
@@ -384,6 +442,28 @@ def _fold_train_reference_returns(
         root, fold, request, funding_by_symbol, slow_horizon_override, committee_member_weights,
         decision_start=reference_start, decision_end=reference_end,
     )
+    return target_weights, signal_available_at, minute_roster
+
+
+def _replay_fold_train_reference(
+    root: str,
+    fold: AnchoredPurgedFold,
+    request: MhsDiagnosticRequest,
+    funding_by_symbol: dict[str, pd.Series],
+    initial_equity: float,
+    fold_index: int,
+    target_weights: pd.DataFrame,
+    signal_available_at: pd.DatetimeIndex,
+    minute_roster: list[str],
+) -> pd.Series:
+    """Replay a fold's train decision path and return certified daily returns before ``train_end``.
+
+    Raises:
+        DataIntegrityError: perf_01a ledger certification, returns validity
+            (``_assert_train_reference_returns_valid``) or replay integrity errors, unchanged.
+    """
+    reference_start = fold.train_start + pd.Timedelta(hours=FOLD_PANEL_WARMUP_HOURS)
+    reference_end = fold.train_end
     target_replay = target_weights[minute_roster]
 
     def _ref_windows(target_frame: pd.DataFrame, signals: pd.DatetimeIndex) -> Iterator[MhsExecutionWindow]:
@@ -402,6 +482,242 @@ def _fold_train_reference_returns(
     integrity._assert_train_reference_returns_valid(daily, fold.train_end, fold_index)
     del target_weights, target_replay
     return daily
+
+
+def _fold_train_reference_returns(
+    root: str,
+    fold: AnchoredPurgedFold,
+    request: MhsDiagnosticRequest,
+    funding_by_symbol: dict[str, pd.Series],
+    initial_equity: float,
+    fold_index: int,
+    slow_horizon_override: int | None,
+    committee_member_weights: dict[str, float] | None,
+) -> pd.Series:
+    target_weights, signal_available_at, minute_roster = _fold_reference_targets(
+        root, fold, request, funding_by_symbol, fold_index, slow_horizon_override, committee_member_weights,
+    )
+    return _replay_fold_train_reference(
+        root, fold, request, funding_by_symbol, initial_equity, fold_index,
+        target_weights, signal_available_at, minute_roster,
+    )
+
+
+def _active_reference_columns(frame: pd.DataFrame) -> set[str]:
+    """Columns carrying any NaN or nonzero entry (all-zero columns are absent = 0.0)."""
+    active: set[str] = set()
+    for column in frame.columns:
+        series = frame[column]
+        if bool(series.isna().any()) or bool((series.fillna(0.0) != 0.0).any()):
+            active.add(str(column))
+    return active
+
+
+def _build_shared_train_reference(
+    root: str,
+    group_folds: tuple[tuple[int, AnchoredPurgedFold], ...],
+    request: MhsDiagnosticRequest,
+    funding_by_symbol: dict[str, pd.Series],
+    initial_equity: float,
+    slow_horizon_override: int | None,
+    committee_member_weights: dict[str, float] | None,
+) -> _SharedTrainReference | None:
+    """Replay the train reference once, to the latest ``train_end`` of a fold group.
+
+    The result is an optimization artifact, never evidence on its own: any failure of the
+    shared build, replay or perf_01a certification returns None so each fold recomputes its
+    independent reference and reports its own verdict (a shared failure may stem from data
+    after a shorter fold's ``train_end`` and must not leak into that fold).
+
+    Args:
+        group_folds: ``(fold_index, fold)`` pairs with one common group key, at least two.
+    Returns:
+        The shared reference, or None when the shared computation failed.
+    Raises:
+        ValueError: Precondition violation (fewer than two folds, mixed ``train_start``),
+            raised before any guarded work and never converted to None.
+    """
+    if len(group_folds) < 2:
+        raise ValueError(f"shared train reference requires at least two folds, got {len(group_folds)}")
+    first_start = group_folds[0][1].train_start
+    if any(fold.train_start != first_start for _, fold in group_folds):
+        raise ValueError("shared train reference requires one common train_start")
+    horizon_index, horizon_fold = group_folds[0]
+    for candidate_index, candidate_fold in group_folds[1:]:
+        if candidate_fold.train_end > horizon_fold.train_end or (
+            candidate_fold.train_end == horizon_fold.train_end and candidate_index < horizon_index
+        ):
+            horizon_index, horizon_fold = candidate_index, candidate_fold
+    ordered_indices = sorted(idx for idx, _ in group_folds)
+    try:
+        target_weights, signal_available_at, minute_roster = _fold_reference_targets(
+            root, horizon_fold, request, funding_by_symbol, horizon_index,
+            slow_horizon_override, committee_member_weights,
+        )
+        daily_returns = _replay_fold_train_reference(
+            root, horizon_fold, request, funding_by_symbol, initial_equity, horizon_index,
+            target_weights, signal_available_at, minute_roster,
+        )
+    except (DataIntegrityError, RuntimeError, ValueError) as exc:
+        _logger.info(
+            "[RISK] shared_train_reference folds=%s horizon_end=%s outcome=unavailable cause=%s",
+            ",".join(str(idx) for idx in ordered_indices), horizon_fold.train_end, type(exc).__name__,
+        )
+        return None
+    active = _active_reference_columns(target_weights)
+    restricted = target_weights[[c for c in target_weights.columns if str(c) in active]] if active else target_weights.iloc[:, 0:0]
+    shared = _SharedTrainReference(
+        group_key=_train_reference_group_key(horizon_fold, slow_horizon_override, committee_member_weights),
+        reference_start=horizon_fold.train_start + pd.Timedelta(hours=FOLD_PANEL_WARMUP_HOURS),
+        horizon_end=horizon_fold.train_end,
+        target_weights=restricted,
+        signal_available_at=signal_available_at,
+        daily_returns=daily_returns,
+    )
+    _logger.info(
+        "[RISK] shared_train_reference folds=%s horizon_end=%s outcome=built cause=none",
+        ",".join(str(idx) for idx in ordered_indices), horizon_fold.train_end,
+    )
+    return shared
+
+
+def _shared_train_reference_slice(
+    shared: _SharedTrainReference,
+    fold: AnchoredPurgedFold,
+    fold_index: int,
+    own_target_weights: pd.DataFrame,
+    own_signal_available_at: pd.DatetimeIndex,
+    spec: ExecutionSpec,
+) -> pd.Series | None:
+    """Return fold k's train reference as a prefix of the shared replay, or None to fall back.
+
+    Reuse is allowed only when the shared replay provably consumed fold k's own decision path
+    before ``train_end`` (the only channel through which data after ``train_end`` could reach
+    the prefix) and the prefix boundary cannot read past ``train_end``. Otherwise the caller
+    replays fold k independently, which is always correct.
+
+    Args:
+        own_target_weights, own_signal_available_at: Fold k's own train-window targets and
+            signals (``_fold_reference_targets``), compared against the shared prefix.
+        spec: Resolved base execution spec (censoring timeout).
+    Returns:
+        Daily returns with index ``< fold.train_end`` from ``shared.daily_returns``, or None.
+    """
+    expected_start = fold.train_start + pd.Timedelta(hours=FOLD_PANEL_WARMUP_HOURS)
+    if not (expected_start == shared.reference_start and fold.train_end <= shared.horizon_end):
+        _logger.debug("[RISK] train_reference fold=%s source=independent reason=horizon", fold_index)
+        return None
+    if fold.train_end != fold.train_end.normalize():
+        _logger.debug("[RISK] train_reference fold=%s source=independent reason=train_end_not_midnight", fold_index)
+        return None
+    mask = np.asarray(shared.target_weights.index <= fold.train_end)
+    prefix = shared.target_weights.loc[mask] if len(shared.target_weights) else shared.target_weights
+    try:
+        prefix_signals = shared.signal_available_at[mask]
+    except (IndexError, ValueError):
+        _logger.debug("[RISK] train_reference fold=%s source=independent reason=target_prefix_mismatch", fold_index)
+        return None
+    if not own_target_weights.index.equals(prefix.index):
+        _logger.debug("[RISK] train_reference fold=%s source=independent reason=target_prefix_mismatch", fold_index)
+        return None
+    if not own_signal_available_at.equals(prefix_signals):
+        _logger.debug("[RISK] train_reference fold=%s source=independent reason=target_prefix_mismatch", fold_index)
+        return None
+    own_active = _active_reference_columns(own_target_weights)
+    prefix_active = _active_reference_columns(prefix)
+    if own_active != prefix_active:
+        _logger.debug("[RISK] train_reference fold=%s source=independent reason=target_prefix_mismatch", fold_index)
+        return None
+    for column in own_active:
+        own_series = own_target_weights[column]
+        prefix_series = prefix[column]
+        own_nan = own_series.isna().to_numpy()
+        prefix_nan = prefix_series.isna().to_numpy()
+        if not bool((own_nan == prefix_nan).all()):
+            _logger.debug("[RISK] train_reference fold=%s source=independent reason=target_prefix_mismatch", fold_index)
+            return None
+        finite = ~own_nan
+        if finite.any():
+            delta = float(np.max(np.abs(
+                own_series.to_numpy(dtype="float64")[finite] - prefix_series.to_numpy(dtype="float64")[finite]
+            )))
+            if not delta <= TRAIN_REFERENCE_PREFIX_TARGET_ATOL:
+                _logger.debug("[RISK] train_reference fold=%s source=independent reason=target_prefix_mismatch", fold_index)
+                return None
+    execution_grid = pd.date_range(shared.reference_start, fold.train_end, freq="3min", tz="UTC")
+    truncated, _truncated_signals, _censored = integrity._truncate_replayable_decisions(
+        own_target_weights, own_signal_available_at, execution_grid, spec,
+    )
+    retained = set(truncated.index)
+    step = execution_grid[1] - execution_grid[0] if len(execution_grid) >= 2 else pd.Timedelta(minutes=3)
+    cutoff = fold.train_end - step
+    for position, decision_time in enumerate(own_target_weights.index):
+        if decision_time in retained:
+            continue
+        if not own_signal_available_at[position] >= cutoff:
+            _logger.debug("[RISK] train_reference fold=%s source=independent reason=censor_boundary", fold_index)
+            return None
+    sliced = shared.daily_returns.loc[shared.daily_returns.index < fold.train_end]
+    try:
+        integrity._assert_train_reference_returns_valid(sliced, fold.train_end, fold_index)
+    except DataIntegrityError:
+        _logger.debug("[RISK] train_reference fold=%s source=independent reason=slice_invalid", fold_index)
+        return None
+    _logger.debug("[RISK] train_reference fold=%s source=shared", fold_index)
+    return pd.Series(sliced.to_numpy(dtype="float64"), index=sliced.index, dtype="float64")
+
+
+def _reference_from_shared(
+    root: str,
+    fold: AnchoredPurgedFold,
+    request: MhsDiagnosticRequest,
+    funding_by_symbol: dict[str, pd.Series],
+    initial_equity: float,
+    fold_index: int,
+    slow_horizon_override: int | None,
+    committee_member_weights: dict[str, float] | None,
+    shared: _SharedTrainReference,
+) -> pd.Series:
+    """Fold k's train reference: the shared prefix when every reuse guard holds, else independent.
+
+    Raises:
+        Exactly what ``_fold_train_reference_returns`` raises for this fold (the own target
+        build always runs; on fallback the own replay runs on those same targets).
+    """
+    own_target_weights, own_signal_available_at, minute_roster = _fold_reference_targets(
+        root, fold, request, funding_by_symbol, fold_index, slow_horizon_override, committee_member_weights,
+    )
+    if _train_reference_group_key(fold, slow_horizon_override, committee_member_weights) != shared.group_key:
+        _logger.debug("[RISK] train_reference fold=%s source=independent reason=group_key", fold_index)
+        return _replay_fold_train_reference(
+            root, fold, request, funding_by_symbol, initial_equity, fold_index,
+            own_target_weights, own_signal_available_at, minute_roster,
+        )
+    sliced = _shared_train_reference_slice(
+        shared, fold, fold_index, own_target_weights, own_signal_available_at,
+        specs._resolved_base_execution_spec(request),
+    )
+    if sliced is not None:
+        return sliced
+    return _replay_fold_train_reference(
+        root, fold, request, funding_by_symbol, initial_equity, fold_index,
+        own_target_weights, own_signal_available_at, minute_roster,
+    )
+
+
+def _fold_failure_report(
+    fold: AnchoredPurgedFold, fold_index: int, exc: Exception,
+) -> MhsFoldReport:
+    """Incomplete-fold report for an expected fold error, with the stable reason code.
+
+    ``DataIntegrityError`` (a ``ValueError`` subclass, so checked first) maps through
+    ``integrity._classify_execution_failure``; any other ``RuntimeError``/``ValueError`` maps to
+    ``INCOMPLETE_ANCHORED_FOLD``. Shared by ``_run_anchored_fold`` and the validation phase so
+    both report identical codes.
+    """
+    if isinstance(exc, DataIntegrityError):
+        return _incomplete_fold_report(fold, fold_index, (integrity._classify_execution_failure(exc),))
+    return _incomplete_fold_report(fold, fold_index, (GO_REASON_INCOMPLETE_FOLD,))
 
 
 @dataclass(frozen=True, slots=True)
@@ -487,6 +803,9 @@ def _run_anchored_fold(
     fast_horizon_override: tuple[int, str] | None = None,
     funding_carry_override: tuple[int | None, int | None, str, float | None] | None = None,
     committee_member_weights: dict[str, float] | None = None,
+    *,
+    validation_plan: _FoldValidationPlan | None = None,
+    shared_reference: _SharedTrainReference | None = None,
 ) -> MhsFoldReport:
     """Replay one anchored fold: validation plan first, then the train-only sizing reference.
 
@@ -497,14 +816,26 @@ def _run_anchored_fold(
     validation build and the reference would fail, the validation failure is reported. The
     plan is built exactly once and replayed unchanged; train, validation and replay slices
     stay chronological, and the same 3m OHLCV economics drive every replay.
+
+    ``validation_plan`` injects a plan already built by the validation phase for this exact
+    fold and request (never rebuilt); ``shared_reference`` offers a group replay whose prefix
+    replaces this fold's train-reference replay only when every reuse guard of
+    ``_shared_train_reference_slice`` holds, else the independent reference is computed as
+    without it.
     """
     try:
         vs = fold.validation_start
         ve = fold.validation_end
-        plan = _build_fold_validation_plan(
-            root, fold, request, funding_by_symbol, slow_horizon_override, committee_member_weights,
-        )
-        train_reference = _fold_train_reference_returns(root, fold, request, funding_by_symbol, initial_equity, fold_index, slow_horizon_override, committee_member_weights)
+        if validation_plan is None:
+            plan = _build_fold_validation_plan(
+                root, fold, request, funding_by_symbol, slow_horizon_override, committee_member_weights,
+            )
+        else:
+            plan = validation_plan
+        if shared_reference is None:
+            train_reference = _fold_train_reference_returns(root, fold, request, funding_by_symbol, initial_equity, fold_index, slow_horizon_override, committee_member_weights)
+        else:
+            train_reference = _reference_from_shared(root, fold, request, funding_by_symbol, initial_equity, fold_index, slow_horizon_override, committee_member_weights, shared_reference)
         if telemetry is not None:
             telemetry.record(f"anchored_fold_{fold_index}_sizing_reference", grid_bars=len(train_reference), window_start=str(train_reference.index[0]), window_end=str(train_reference.index[-1]))
         from src.mhs.research_go import _resolved_growth_envelope as _resolve_envelope
@@ -684,9 +1015,189 @@ def _run_anchored_fold(
             realized_annualized_vol=realized_annualized_vol,
         )
     except DataIntegrityError as exc:
-        return _incomplete_fold_report(fold, fold_index, (integrity._classify_execution_failure(exc),))
-    except (RuntimeError, ValueError):
-        return _incomplete_fold_report(fold, fold_index, (GO_REASON_INCOMPLETE_FOLD,))
+        return _fold_failure_report(fold, fold_index, exc)
+    except (RuntimeError, ValueError) as exc:
+        return _fold_failure_report(fold, fold_index, exc)
+
+def _fold_validation_task(
+    token: str,
+    root: str,
+    fold: AnchoredPurgedFold,
+    request: MhsDiagnosticRequest,
+    fold_index: int,
+    slow_horizon_override: int | None,
+    committee_member_weights: dict[str, float] | None,
+) -> _FoldValidationPlan | MhsFoldReport:
+    """Phase V: build one fold's validation plan in a fork worker.
+
+    ``fold_funding`` is resolved from the fork-shared payload ``token``. An expected failure
+    returns the fold's final incomplete report (``_fold_failure_report``), exactly the report
+    ``_run_anchored_fold`` would produce for that failure.
+    """
+    funding_by_symbol: dict[str, pd.Series] = resolve_fork_shared(token)["fold_funding"]
+    try:
+        return _build_fold_validation_plan(
+            root, fold, request, funding_by_symbol, slow_horizon_override, committee_member_weights,
+        )
+    except (DataIntegrityError, RuntimeError, ValueError) as exc:
+        return _fold_failure_report(fold, fold_index, exc)
+
+
+def _shared_train_reference_task(
+    token: str,
+    root: str,
+    group_folds: tuple[tuple[int, AnchoredPurgedFold], ...],
+    request: MhsDiagnosticRequest,
+    initial_equity: float,
+    slow_horizon_override: int | None,
+    committee_member_weights: dict[str, float] | None,
+) -> _SharedTrainReference | None:
+    """Phase R: ``_build_shared_train_reference`` in a fork worker (funding via ``token``)."""
+    funding_by_symbol: dict[str, pd.Series] = resolve_fork_shared(token)["fold_funding"]
+    return _build_shared_train_reference(
+        root, group_folds, request, funding_by_symbol, initial_equity,
+        slow_horizon_override, committee_member_weights,
+    )
+
+
+def _anchored_fold_task(
+    token: str,
+    root: str,
+    fold: AnchoredPurgedFold,
+    request: MhsDiagnosticRequest,
+    initial_equity: float,
+    fold_index: int,
+    slow_horizon_override: int | None,
+    fast_horizon_override: tuple[int, str] | None,
+    funding_carry_override: tuple[int | None, int | None, str, float | None] | None,
+    committee_member_weights: dict[str, float] | None,
+    validation_plan: _FoldValidationPlan,
+    shared_reference: _SharedTrainReference | None,
+) -> MhsFoldReport:
+    """Phase E: the module-global ``_run_anchored_fold`` (telemetry None) with the injected plan
+    and optional shared reference, funding resolved from ``token``."""
+    funding_by_symbol: dict[str, pd.Series] = resolve_fork_shared(token)["fold_funding"]
+    return _run_anchored_fold(
+        root, fold, request, funding_by_symbol, initial_equity, fold_index, None,
+        slow_horizon_override, fast_horizon_override, funding_carry_override,
+        committee_member_weights, validation_plan=validation_plan, shared_reference=shared_reference,
+    )
+
+
+def _submit_fold_validation_phase(
+    pool: Executor,
+    token: str,
+    root: str,
+    fold_list: Sequence[AnchoredPurgedFold],
+    request: MhsDiagnosticRequest,
+    fold_slow_horizons: Mapping[int, int | None] | None,
+    fold_committee_weights: Mapping[int, dict[str, float]] | None,
+) -> dict[Future[_FoldValidationPlan | MhsFoldReport], int]:
+    """Submit phase V for every fold; returns futures keyed to fold indices.
+
+    Submits at least one task whenever ``fold_list`` is non-empty, so a fork pool has forked
+    all workers when this returns and the caller may start threads afterwards.
+    """
+    validation_futures: dict[Future[_FoldValidationPlan | MhsFoldReport], int] = {}
+    for idx, fold in enumerate(fold_list):
+        future = pool.submit(
+            _fold_validation_task,
+            token, root, fold, request, idx,
+            (fold_slow_horizons or {}).get(idx),
+            (fold_committee_weights or {}).get(idx),
+        )
+        validation_futures[future] = idx
+    return validation_futures
+
+
+def _complete_anchored_folds(
+    pool: Executor,
+    token: str,
+    validation_futures: Mapping[Future[_FoldValidationPlan | MhsFoldReport], int],
+    root: str,
+    fold_list: Sequence[AnchoredPurgedFold],
+    request: MhsDiagnosticRequest,
+    initial_equity: float,
+    fold_slow_horizons: Mapping[int, int | None] | None,
+    fold_fast_horizons: Mapping[int, tuple[int, str]] | None,
+    fold_funding_carry: Mapping[int, tuple[int | None, int | None, str, float | None]] | None,
+    fold_committee_weights: Mapping[int, dict[str, float]] | None,
+) -> tuple[MhsFoldReport, ...]:
+    """Finish phases V → R → E and return one report per fold in fold-index order.
+
+    Validation-unusable folds keep their phase-V incomplete report and never contribute to a
+    group horizon. Usable folds whose reference window is non-empty
+    (``train_start + FOLD_PANEL_WARMUP_HOURS < train_end``) are grouped by
+    ``_train_reference_group_key``; each group of two or more gets one phase-R task, and its
+    folds' phase-E tasks receive the result. Every other usable fold runs phase E immediately
+    with no shared reference.
+    """
+    plans: dict[int, _FoldValidationPlan] = {}
+    reports: dict[int, MhsFoldReport] = {}
+    for future, idx in validation_futures.items():
+        result = future.result()
+        if isinstance(result, MhsFoldReport):
+            reports[idx] = result
+        else:
+            plans[idx] = result
+    usable = sorted(plans.keys())
+    groups: dict[_TrainReferenceGroupKey, list[int]] = {}
+    for idx in usable:
+        fold = fold_list[idx]
+        if not fold.train_start + pd.Timedelta(hours=FOLD_PANEL_WARMUP_HOURS) < fold.train_end:
+            continue
+        key = _train_reference_group_key(
+            fold, (fold_slow_horizons or {}).get(idx), (fold_committee_weights or {}).get(idx),
+        )
+        groups.setdefault(key, []).append(idx)
+    shared_groups = sorted(
+        (sorted(indices) for indices in groups.values() if len(indices) >= 2),
+        key=lambda indices: indices[0],
+    )
+    shared_indices = {idx for group in shared_groups for idx in group}
+    _logger.info(
+        "[RISK] train_reference_plan folds=%s usable=%s shared_groups=%s shared_folds=%s independent_folds=%s",
+        len(fold_list), len(usable), len(shared_groups), len(shared_indices), len(usable) - len(shared_indices),
+    )
+    fold_e_futures: dict[Future[MhsFoldReport], int] = {}
+    for idx in usable:
+        if idx in shared_indices:
+            continue
+        fold_e_futures[pool.submit(
+            _anchored_fold_task,
+            token, root, fold_list[idx], request, initial_equity, idx,
+            (fold_slow_horizons or {}).get(idx),
+            (fold_fast_horizons or {}).get(idx),
+            (fold_funding_carry or {}).get(idx),
+            (fold_committee_weights or {}).get(idx),
+            plans[idx], None,
+        )] = idx
+    reference_futures: dict[Future[_SharedTrainReference | None], list[int]] = {}
+    for group in shared_groups:
+        group_folds = tuple((idx, fold_list[idx]) for idx in group)
+        reference_futures[pool.submit(
+            _shared_train_reference_task,
+            token, root, group_folds, request, initial_equity,
+            (fold_slow_horizons or {}).get(group[0]),
+            (fold_committee_weights or {}).get(group[0]),
+        )] = group
+    for reference_future in as_completed(reference_futures):
+        group = reference_futures[reference_future]
+        shared = reference_future.result()
+        for idx in group:
+            fold_e_futures[pool.submit(
+                _anchored_fold_task,
+                token, root, fold_list[idx], request, initial_equity, idx,
+                (fold_slow_horizons or {}).get(idx),
+                (fold_fast_horizons or {}).get(idx),
+                (fold_funding_carry or {}).get(idx),
+                (fold_committee_weights or {}).get(idx),
+                plans[idx], shared,
+            )] = idx
+    for fold_future, idx in fold_e_futures.items():
+        reports[idx] = fold_future.result()
+    return tuple(reports[i] for i in range(len(fold_list)))
+
 
 def _run_folds_parallel(
     root: str,
@@ -699,7 +1210,7 @@ def _run_folds_parallel(
     fold_funding_carry: dict[int, tuple[int | None, int | None, str, float | None]] | None = None,
     fold_committee_weights: dict[int, dict[str, float]] | None = None,
 ) -> tuple[MhsFoldReport, ...]:
-    """Run the three anchored folds concurrently, one process each.
+    """Run all resolved anchored folds in phased V/R/E over a fork pool.
 
     Each fold builds its own 1h panel and executes an independent strict/stress
     replay pair, so the folds are embarrassingly parallel.  ``ProcessPoolExecutor``
@@ -721,7 +1232,6 @@ def _run_folds_parallel(
     folds = resolved_anchored_folds(request)
     if not folds:
         return ()
-    reports: dict[int, MhsFoldReport] = {}
     _folds_reserve = _resolve_ram_budget(request.max_rss_bytes, request.ram_guard)[1]
     max_workers = plan_worker_count(
         min(3, len(folds)), WORKER_PEAK_RSS_BYTES, request.ram_guard,
@@ -729,22 +1239,18 @@ def _run_folds_parallel(
         reserve_bytes=_folds_reserve,
     )
     assert_fork_admission("anchored_folds", max_workers, WORKER_PEAK_RSS_BYTES, _folds_reserve)
-    with frozen_gc_heap(), ProcessPoolExecutor(max_workers=max_workers, mp_context=FORK_CONTEXT) as pool:
-        futures = {
-            pool.submit(
-                _run_anchored_fold,
-                root, fold, request, fold_funding, initial_equity, idx, None,
-                (fold_slow_horizons or {}).get(idx),
-                (fold_fast_horizons or {}).get(idx),
-                (fold_funding_carry or {}).get(idx),
-                (fold_committee_weights or {}).get(idx),
-            ): idx
-            for idx, fold in enumerate(folds)
-        }
-        for future in as_completed(futures):
-            idx = futures[future]
-            reports[idx] = future.result()
-    ordered = tuple(reports[i] for i in range(len(folds)))
+    with (
+        fork_shared_payload({"fold_funding": fold_funding}) as token,
+        frozen_gc_heap(),
+        ProcessPoolExecutor(max_workers=max_workers, mp_context=FORK_CONTEXT) as pool,
+    ):
+        validation_futures = _submit_fold_validation_phase(
+            pool, token, root, folds, request, fold_slow_horizons, fold_committee_weights,
+        )
+        ordered = _complete_anchored_folds(
+            pool, token, validation_futures, root, folds, request, initial_equity,
+            fold_slow_horizons, fold_fast_horizons, fold_funding_carry, fold_committee_weights,
+        )
     if telemetry is not None:
         for fold_report in ordered:
             fill_count = (
