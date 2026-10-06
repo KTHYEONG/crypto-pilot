@@ -36,6 +36,7 @@ class TestTypedArtifactRoundtrip:
     retain an explicit UTC timestamp and round-trip without strings or
     NaN-equity concealment."""
 
+    @pytest.mark.e2e_heavy
     @pytest.mark.xdist_group(MHS_SYNTHETIC_DEFAULT_GROUP)
     def test_ledger_and_times_round_trip_as_utc(self, report, tmp_path) -> None:
         from src.mhs.contracts import MhsOutputTier
@@ -69,6 +70,7 @@ class TestTypedArtifactRoundtrip:
         assert pd.api.types.is_datetime64_any_dtype(times["fill_time"])
         assert times["submit_time"].dt.tz is not None
 
+    @pytest.mark.e2e_heavy
     @pytest.mark.xdist_group(MHS_SYNTHETIC_DEFAULT_GROUP)
     def test_json_reference_carries_schema_and_checksum(self, report, tmp_path) -> None:
         import json
@@ -125,6 +127,7 @@ class TestTypedArtifactRoundtrip:
         assert "timestamp" in ledger.columns
         assert len(units) == 0
 
+    @pytest.mark.e2e_heavy
     @pytest.mark.xdist_group(MHS_SYNTHETIC_DEFAULT_GROUP)
     def test_completed_fold_artifacts_persisted(self, report, tmp_path) -> None:
         from dataclasses import replace
@@ -176,6 +179,7 @@ class TestTypedArtifactRoundtrip:
         strict_ledger = load_mhs_replay_artifact(artifact_dir, "fold0_strict", "ledger")
         assert "timestamp" in strict_ledger.columns
 
+@pytest.mark.e2e_heavy
 @pytest.mark.xdist_group(MHS_SYNTHETIC_DEFAULT_GROUP)
 class TestFullModeBackwardCompat:
     """MHS-OUTPUT-TIERING: FULL tier reproduces the pre-tiering 5-category
@@ -409,6 +413,7 @@ class TestFoldWindowTelemetryOracle:
         assert dict(oracle.termination_counts) == dict(windowed.termination_counts)
         assert oracle.fill_count == windowed.fill_count
 
+@pytest.mark.e2e_heavy
 @pytest.mark.xdist_group(MHS_SYNTHETIC_DEFAULT_GROUP)
 class TestMhsExecutionAnnualization:
     """SCENARIO_MHS_ANNUALIZATION_04: the real-execution-ledger headline
@@ -501,6 +506,7 @@ class TestTerminalPersistenceSubprocess:
             for b in payload["books"].values()
         )
 
+@pytest.mark.e2e_heavy
 class TestMhsSingleSourceReport:
     """The research report and replay ledger expose one fixed OHLCV source."""
 
