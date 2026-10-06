@@ -6,11 +6,11 @@ import itertools
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
 
 import numpy as np
 import pandas as pd
 
+from src.mhs.bootstrap import iter_stationary_bootstrap_index_chunks
 from src.mhs.source_gaps import SourceGapPlane, active_intervals
 
 _logger = logging.getLogger(__name__)
@@ -105,22 +105,11 @@ def _stationary_bootstrap_matrix(
     source: np.ndarray, n_paths: int, horizon_days: int, mean_block_days: int, rng: np.random.Generator,
 ) -> np.ndarray:
     """Draw one stationary block-bootstrap index matrix reused for every rung."""
-    n = int(source.size)
-    prob = 1.0 / float(mean_block_days)
-    lengths = rng.geometric(prob, size=(n_paths, horizon_days))
-    starts = rng.integers(0, n, size=(n_paths, horizon_days))
-    ends = np.cumsum(lengths, axis=1)
-    ends_trunc = np.minimum(ends, horizon_days)
-    used = ends_trunc - np.concatenate([np.zeros((n_paths, 1), dtype=np.int64), ends_trunc[:, :-1]], axis=1)
-    flat_used = used.ravel()
-    flat_starts = starts.ravel()
-    keep = flat_used > 0
-    flat_used = flat_used[keep]
-    flat_starts = flat_starts[keep]
-    block_start = np.cumsum(flat_used) - flat_used
-    offsets = np.arange(n_paths * horizon_days, dtype=np.int64) - np.repeat(block_start, flat_used)
-    indices = (np.repeat(flat_starts, flat_used) + offsets) % n
-    return cast(np.ndarray, source[indices].reshape(n_paths, horizon_days))
+    (chunk,) = iter_stationary_bootstrap_index_chunks(
+        rng, source_len=int(source.size), path_len=horizon_days, n_replicates=n_paths,
+        mean_block=mean_block_days, chunk_size=n_paths, max_blocks=horizon_days,
+    )
+    return np.asarray(source[chunk.indices], dtype="float64")
 
 
 def solve_log_growth_exposure(

@@ -12,6 +12,7 @@ import pytest
 from src.mhs.growth_exposure import (
     GapSample,
     LogGrowthExposureSolution,
+    _stationary_bootstrap_matrix,
     roster_gap_sample,
     solve_log_growth_exposure,
     structurally_excluded_symbols,
@@ -275,3 +276,36 @@ def test_structurally_excluded_symbols_respects_plane(tmp_path: Path) -> None:
     path = _write_gap_registry(tmp_path, [_gap_registry_row("LUNAUSDT", plane="funding")])
     assert structurally_excluded_symbols(plane="ohlcv_3m", path=path) == frozenset()
     assert structurally_excluded_symbols(plane="funding", path=path) == frozenset({"LUNAUSDT"})
+
+
+def test_bootstrap_matrix_golden_and_rng_continuity() -> None:
+    """Resampled matrix matches the kernel golden and leaves the shared rng stream intact."""
+    rng = np.random.default_rng(11)
+    result = _stationary_bootstrap_matrix(
+        np.arange(40, dtype="float64"), 4, 9, 3, rng,
+    )
+    assert result.dtype == np.float64
+    assert result.astype(np.int64).tolist() == [
+        [34, 26, 27, 3, 4, 5, 8, 22, 36],
+        [1, 2, 3, 6, 7, 8, 9, 17, 18],
+        [25, 26, 27, 28, 29, 27, 28, 29, 30],
+        [39, 0, 1, 2, 3, 4, 5, 6, 7],
+    ]
+    assert rng.random() == 0.8458901064450575
+
+
+def test_solve_with_gaps_golden() -> None:
+    """Gap-stressed solve pins argmax, ruin curve and growth curve."""
+    gaps = GapSample(magnitudes=np.array([0.3, 0.5, 0.8]), events_per_year=4.0)
+    solution = solve_log_growth_exposure(
+        _returns(), max_name_weight=0.05, gaps=gaps, mean_haircut=0.0, grid=_GRID,
+        plateau_tolerance=0.05, n_paths=128, horizon_years=2.0, mean_block_days=20, seed=7,
+    )
+    assert solution.argmax == 4.0
+    assert solution.chosen == 4.0
+    assert solution.ruin_probability == (0.0,) * 8
+    assert solution.growth == pytest.approx(
+        (0.34726699984612003, 0.6071059123408309, 0.7794422880582936, 0.8639211622701602,
+         0.8598889866112119, 0.7663664424811438, 0.5820084187455014, 0.30504473584580105),
+        rel=1e-12,
+    )
