@@ -273,7 +273,7 @@ def _book_outcome(
     grid_1h: pd.DatetimeIndex,
     opens: pd.DataFrame,
     bar_funding: pd.DataFrame,
-    phase: PhaseDiagnosticResult,
+    phase: PhaseDiagnosticResult | None,
     root: str,
     request: MhsDiagnosticRequest,
     funding_by_symbol: dict[str, pd.Series],

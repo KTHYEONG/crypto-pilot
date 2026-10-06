@@ -124,7 +124,9 @@ def canonical_report_run(mhs_report_cache, synthetic_market, request) -> Iterato
     root, end = synthetic_market
     spec = DiagnosticRunSpec(
         research_baseline(start=str(start), end=str(end), data_root=str(root),
-                          execution_timeframe="3m", log_run=False),
+                          execution_timeframe="3m", log_run=False,
+                          placebo_diagnostic=True, phase_diagnostic=True,
+                          signal_48h_diagnostic=True, bootstrap_ci_diagnostic=True),
         SYNTHETIC_DEFAULT_PROFILE,
     )
     with mhs_report_cache.lease(spec, consumer=request.node.nodeid) as entry:

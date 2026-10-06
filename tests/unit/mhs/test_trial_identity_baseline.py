@@ -284,3 +284,43 @@ def test_no_denominator_inflation_under_default_change(tmp_path, monkeypatch: py
         append_run_history_record(_trial_record(f"re{index}", dict(flags)), history_dir)
     after_reappend, _ = derive_trials_attempted(history_dir)
     assert after_reappend == SEARCH_TRIALS_ATTEMPTED + 3
+
+
+_REPORT_ONLY_FLAGS = (
+    "placebo_diagnostic",
+    "phase_diagnostic",
+    "signal_48h_diagnostic",
+    "bootstrap_ci_diagnostic",
+)
+
+
+def test_report_only_flags_never_rekey_trial() -> None:
+    for record, pinned in zip(_pinned_records(), _PINNED_KEYS, strict=True):
+        for value in (True, False):
+            extended = {
+                "flags": {**record["flags"], **dict.fromkeys(_REPORT_ONLY_FLAGS, value)},
+                "params_snapshot": record.get("params_snapshot", {"K": 1}),
+            }
+            if "params_snapshot" not in record:
+                extended.pop("params_snapshot")
+            assert trial_identity_key(extended) == pinned
+
+
+def test_report_only_flags_neutral_and_baselined_true() -> None:
+    for name in _REPORT_ONLY_FLAGS:
+        assert name in RESEARCH_NEUTRAL_FLAGS
+        assert TRIAL_IDENTITY_BASELINE[name] is True
+    assert list(TRIAL_IDENTITY_BASELINE)[:54] == list(_BASELINE_V1)
+
+
+def test_denominator_unchanged_by_report_only_flags(tmp_path) -> None:
+    history_dir = tmp_path / "history"
+    combos = [
+        {},
+        {"placebo_diagnostic": True},
+        {"placebo_diagnostic": True, "phase_diagnostic": True, "signal_48h_diagnostic": True, "bootstrap_ci_diagnostic": True},
+    ]
+    for index, extra in enumerate(combos):
+        append_run_history_record(_trial_record(f"r{index}", dict(extra)), history_dir)
+    count, _ = derive_trials_attempted(history_dir)
+    assert count == SEARCH_TRIALS_ATTEMPTED + 1

@@ -37,8 +37,7 @@ logger = logging.getLogger("MhsRunHistory")
 _REGISTRY_NAMESPACE = "mhs_legacy_horizon"
 _LIVE_SOURCE_ID = "live"
 
-# Registered whitelist of request fields that never enter a strategy decision
-# path (telemetry, resource guards, input-path pinning, opt-in extra replays).
+# Registered whitelist of request fields that never enter a strategy decision path (telemetry, resource guards, input-path pinning, opt-in extra replays, opt-in report-only diagnostics).
 # Fail-closed: any field NOT registered here always stays part of the trial
 # identity key, so a newly added alpha flag can never silently merge trials.
 RESEARCH_NEUTRAL_FLAGS: frozenset[str] = frozenset[str]({
@@ -54,6 +53,10 @@ RESEARCH_NEUTRAL_FLAGS: frozenset[str] = frozenset[str]({
     "committee_member_attribution",
     "discovery_gate_adjusted_net_t",
     "discovery_gate_regime_scaled_net_t",
+    "placebo_diagnostic",
+    "phase_diagnostic",
+    "signal_48h_diagnostic",
+    "bootstrap_ci_diagnostic",
 })
 
 # Pool-window admissibility for recorded trial outcomes: derived from the
@@ -284,7 +287,7 @@ def append_run_history_record(record: Mapping[str, Any], history_dir: Path | str
 # --- trial-set definition (single source for N and V) ------------------------
 
 
-# Frozen canonical value per registered request field for trial identity. A field whose recorded value dumps equal to its baseline is omitted from the identity key, so request defaults can change without re-keying recorded trials (I-DEFAULT-DECOUPLED). Append-only: a new field is appended with the value it had when introduced; an existing entry is never edited or removed (I-ID-STABLE). Values are JSON-native; the retired unset-gross sentinel is represented by its canonical dump string.
+# Frozen canonical value per registered request field for trial identity. A field whose recorded value dumps equal to its baseline is omitted from the identity key, so request defaults can change without re-keying recorded trials (I-DEFAULT-DECOUPLED). Append-only: a new field is appended with the value every record lacking the key actually ran under (its introduction default for new behavior; the prior unconditional behavior when a field makes existing behavior optional); an existing entry is never edited or removed (I-ID-STABLE). Values are JSON-native; the retired unset-gross sentinel is represented by its canonical dump string.
 TRIAL_IDENTITY_BASELINE: Final[Mapping[str, object]] = MappingProxyType(
     {
         "start": None,
@@ -341,6 +344,10 @@ TRIAL_IDENTITY_BASELINE: Final[Mapping[str, object]] = MappingProxyType(
         "input_manifest_path": None,
         "forward_execution_quality_dir": None,
         "forward_strategy_digest": None,
+        "placebo_diagnostic": True,
+        "phase_diagnostic": True,
+        "signal_48h_diagnostic": True,
+        "bootstrap_ci_diagnostic": True,
     }
 )
 

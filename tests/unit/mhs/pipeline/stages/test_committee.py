@@ -39,14 +39,18 @@ class _FakeSpec:
         self.min_symbols = 1
 
 
-def _bare_context() -> PipelineContext:
+def _bare_context(**overrides) -> PipelineContext:
     frame = pd.DataFrame(1.0, index=_GRID, columns=_SYMS)
+    params = {
+        "discovery_gate": False,
+        "trend_sleeve": False,
+        "trend_efficiency_overlay": False,
+        "phase_diagnostic": True,
+        "signal_48h_diagnostic": True,
+    }
+    params.update(overrides)
     ctx = PipelineContext(
-        config=research_baseline(
-            discovery_gate=False,
-            trend_sleeve=False,
-            trend_efficiency_overlay=False,
-        ),
+        config=research_baseline(**params),
         resolved_end=None,
         start=_GRID[0],
         end=_GRID[-1],
@@ -290,3 +294,77 @@ def test_fold_committee_uses_its_own_boundary_weights(monkeypatch) -> None:
     mapped = stage._fold_weights_from_boundaries(weights, folds)
     assert mapped == {0: {'a': 0.1}, 1: {'a': 0.2}}
     assert mapped[0] is not weights['top_level']
+
+
+def _numeric_context(**overrides) -> PipelineContext:
+    import numpy as np
+
+    from src.mhs.types import BOOK_SPECS
+
+    ctx = _bare_context(**overrides)
+    grid = pd.date_range("2021-01-01", periods=400, freq="1h", tz="UTC")
+    rng = np.random.default_rng(17)
+    frame = pd.DataFrame(
+        np.exp(np.cumsum(rng.normal(0.0001, 0.01, (400, 10)), axis=0)),
+        index=grid, columns=[f"S{i}" for i in range(10)],
+    )
+    ctx.grid_1h = grid
+    ctx.log_close = np.log(frame)
+    ctx.opens = frame
+    ctx.eligible = frame.notna()
+    ctx.execution_mask = frame.notna()
+    ctx.bar_funding = frame * 0.0
+    ctx.fast = BOOK_SPECS["fast_reversal"]
+    ctx.slow = BOOK_SPECS["slow_momentum"]
+    ctx.fast_grid = grid[::ctx.fast.step_hours]
+    ctx.slow_grid = grid[::ctx.slow.step_hours]
+    ctx.w_fast_1h = frame * 0.01
+    ctx.w_slow_1h = frame * 0.02
+    return ctx
+
+
+def test_default_run_computes_no_report_only_panel_diagnostics() -> None:
+    ctx_off = _numeric_context(
+        phase_diagnostic=False, signal_48h_diagnostic=False, placebo_diagnostic=False,
+    )
+    committee_stage.build_committee(ctx_off, StageTelemetry(log_run=False))
+    assert ctx_off.phase_fast is None
+    assert ctx_off.phase_slow is None
+    assert ctx_off.phase_blend is None
+    assert ctx_off.signal_48h.empty
+    assert ctx_off.xs_ic == {}
+    assert ctx_off.regression == {}
+    assert ctx_off.horizon_diagnostics == {}
+    ctx_on = _numeric_context(phase_diagnostic=True, signal_48h_diagnostic=True)
+    committee_stage.build_committee(ctx_on, StageTelemetry(log_run=False))
+    assert ctx_off.blend_1h.equals(ctx_on.blend_1h)
+    assert ctx_off.committee_execution_book == ctx_on.committee_execution_book
+    assert (ctx_off.regime_scale == ctx_on.regime_scale).all()
+
+
+def test_opt_in_reproduces_panel_diagnostics() -> None:
+    from src.mhs.evidence import PhaseDiagnosticResult
+
+    ctx = _numeric_context(phase_diagnostic=True, signal_48h_diagnostic=True)
+    log_close = ctx.log_close
+    signal = committee_stage.horizon_log_return(log_close, 48)
+    expected_phases = [
+        diagnostics_mod._phase_diagnostics(
+            log_close, ctx.eligible, ctx.opens, ctx.bar_funding, ctx.grid_1h, spec,
+        ) for spec in (ctx.fast, ctx.slow, ctx.slow)
+    ]
+    committee_stage.build_committee(ctx, StageTelemetry(log_run=False))
+    for phase, expected in zip((ctx.phase_fast, ctx.phase_slow, ctx.phase_blend), expected_phases, strict=True):
+        assert isinstance(phase, PhaseDiagnosticResult)
+        assert phase == expected
+    pd.testing.assert_frame_equal(ctx.signal_48h, signal)
+    assert ctx.xs_ic == committee_stage._statistics._xs_rank_ic(signal, ctx.opens, forward_bars=48)
+    assert ctx.regression == committee_stage._statistics._date_clustered_ols(ctx.opens, signal, forward_bars=48)
+    assert set(ctx.horizon_diagnostics) == {"realized_vol_48h_mean", "efficiency_ratio_48h_mean"}
+
+
+def test_placebo_alone_materializes_48h_signal_only() -> None:
+    ctx = _numeric_context(phase_diagnostic=False, signal_48h_diagnostic=False, placebo_diagnostic=True)
+    committee_stage.build_committee(ctx, StageTelemetry(log_run=False))
+    assert not ctx.signal_48h.empty
+    assert ctx.xs_ic == {}
