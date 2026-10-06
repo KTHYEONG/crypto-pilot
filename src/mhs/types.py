@@ -140,8 +140,8 @@ class HorizonBand:
 class ExecutionSpec:
     """Passive-execution cost and fill contract.
 
-    ``one_way_taker_bps`` reproduces ``CostModel()``'s 8.0 bp one-way assumption
-    so the two cost models stay comparable.
+    ``one_way_taker_bps`` defaults to the frozen 8.0 bp one-way
+    assumption (5 bp fee + 3 bp slippage, identical to ``XsCompositeSpec`` defaults).
 
     ``decision_anchor`` selects the reference price of one intent: the
     decision-bar mark (frozen default, bit-identical legacy behaviour) or the

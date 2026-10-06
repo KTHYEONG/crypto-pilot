@@ -75,8 +75,7 @@ def inverse_realized_vol_tilt(
 
     Cells with a non-finite or non-positive ``realized_vol`` fall back to a
     tilt of 1.0 (no scaling) rather than an undefined or infinite weight,
-    mirroring ``_causal_family_inverse_vol_weights``'s never-NaN fallback
-    (``src/research/technical_experts/cross_sectional.py``). This is an
+    so the output never contains NaN or infinite weights. This is an
     unnormalized intermediate -- callers renormalize afterward (e.g. via
     ``renormalize_within_mask``) to restore dollar-neutral/unit-gross.
     """
