@@ -16,6 +16,7 @@ import math
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from decimal import ROUND_DOWN, ROUND_UP, Decimal
+from http import HTTPStatus
 from typing import TYPE_CHECKING, Any, Literal
 
 import pandas as pd
@@ -1290,6 +1291,54 @@ def _unknown_outcome_horizon_s(client: Any) -> float:
     return float(DEFAULT_UNKNOWN_OUTCOME_HORIZON_S)
 
 
+def _lookup_unknown_submission(client: Any, rt: _IntentRuntime) -> bool:
+    """Query the unconfirmed submission by ``origClientOrderId``.
+
+    Returns:
+        True when the venue knows the order; False on ``-2013`` (not visible yet, which
+        alone never proves the order was not placed).
+
+    Raises:
+        VenueError: any other venue code (fail-closed).
+        TransientReadError: propagated; each caller decides whether a transient read is
+            undecidable (tick path) or fatal for the cleanup attempt (exit path).
+    """
+    assert rt.unresolved_id is not None
+    try:
+        client.query_order(rt.intent.symbol, rt.unresolved_id)
+    except VenueError as exc:
+        if exc.code != ORDER_DOES_NOT_EXIST_CODE:
+            raise
+        return False
+    return True
+
+
+def _adopt_unknown_submission(rt: _IntentRuntime, now: float, audit: AuditLog) -> None:
+    """Adopt a venue-confirmed unknown submission as the intent's active order."""
+    audit.record(
+        "order_unknown_adopted",
+        symbol=rt.intent.symbol,
+        client_order_id=rt.unresolved_id,
+    )
+    _adopt_unresolved(rt, now)
+
+
+def _declare_not_placed(rt: _IntentRuntime, audit: AuditLog) -> None:
+    """Record that an unconfirmed submission can no longer materialize and release it.
+
+    Callers must have established the venue's unknown-outcome horizon; the journal
+    terminal is written exactly once so restart recovery never re-resolves the id.
+    """
+    audit.record(
+        "order_unknown_not_placed",
+        symbol=rt.intent.symbol,
+        client_order_id=rt.unresolved_id,
+    )
+    _journal_terminal(rt, rt.unresolved_id, "NOT_PLACED")
+    rt.unresolved_id = None
+    rt.unknown_misses = 0
+
+
 def _resolve_unknown_submission(
     client: Any, rt: _IntentRuntime, now: float, audit: AuditLog
 ) -> bool:
@@ -1306,33 +1355,67 @@ def _resolve_unknown_submission(
     """
     assert rt.unresolved_id is not None
     try:
-        client.query_order(rt.intent.symbol, rt.unresolved_id)
+        found = _lookup_unknown_submission(client, rt)
     except TransientReadError:
         return False
-    except VenueError as exc:
-        if exc.code != -2013:
-            raise
-        rt.unknown_misses += 1
-        if rt.unknown_misses < UNKNOWN_SUBMISSION_MISS_LIMIT:
-            return False
-        if now - rt.unresolved_at < _unknown_outcome_horizon_s(client):
-            return False
+    if found:
+        _adopt_unknown_submission(rt, now, audit)
+        return True
+    rt.unknown_misses += 1
+    if rt.unknown_misses < UNKNOWN_SUBMISSION_MISS_LIMIT:
+        return False
+    if now - rt.unresolved_at < _unknown_outcome_horizon_s(client):
+        return False
+    _declare_not_placed(rt, audit)
+    return True
+
+
+def _resolve_unknown_at_exit(
+    client: Any,
+    rt: _IntentRuntime,
+    audit: AuditLog,
+    clock: Callable[[], float],
+    sleep_fn: Callable[[float], None],
+    now: float,
+) -> float | None:
+    """Resolve an unconfirmed submission when the execution window ends.
+
+    Unlike the tick path there is no later tick, so the rule is horizon-only: a
+    ``-2013`` at or beyond the unknown-outcome horizon declares the order never placed
+    without a consecutive-miss count. Before the horizon the remaining horizon is
+    slept once and the order re-queried once; if the sleeper could not advance the
+    clock (shutdown/abort cleanup) the order is left unresolved for restart recovery
+    instead of being declared early.
+
+    Returns:
+        The clock reading to continue window-end settlement with, or None when the
+        order was left unresolved and the intent must be skipped.
+
+    Raises:
+        VenueError: a lookup answered with a code other than ``-2013``.
+        TransientReadError: a lookup failed transiently (not swallowed at exit).
+    """
+    horizon = _unknown_outcome_horizon_s(client)
+    if _lookup_unknown_submission(client, rt):
+        _adopt_unknown_submission(rt, now, audit)
+        return now
+    if now - rt.unresolved_at >= horizon:
+        _declare_not_placed(rt, audit)
+        return now
+    sleep_fn(horizon - (now - rt.unresolved_at))
+    now = clock()
+    if _lookup_unknown_submission(client, rt):
+        _adopt_unknown_submission(rt, now, audit)
+        return now
+    if now - rt.unresolved_at < horizon:
         audit.record(
-            "order_unknown_not_placed",
+            "order_unknown_left_unresolved",
             symbol=rt.intent.symbol,
             client_order_id=rt.unresolved_id,
         )
-        _journal_terminal(rt, rt.unresolved_id, "NOT_PLACED")
-        rt.unresolved_id = None
-        rt.unknown_misses = 0
-        return True
-    audit.record(
-        "order_unknown_adopted",
-        symbol=rt.intent.symbol,
-        client_order_id=rt.unresolved_id,
-    )
-    _adopt_unresolved(rt, now)
-    return True
+        return None
+    _declare_not_placed(rt, audit)
+    return now
 
 
 def _poll_active(
@@ -1451,6 +1534,192 @@ def _end_sub_minimum(
         price=str(price),
         min_qty=str(rt.filters.min_qty),
         min_notional=str(rt.filters.min_notional),
+    )
+
+
+def _handle_post_error(
+    exc: VenueError,
+    rt: _IntentRuntime,
+    *,
+    order_id: str,
+    now: float,
+    policy: PassiveExecutionPolicy,
+    audit: AuditLog,
+    cycle_flags: _CycleFlags | None,
+) -> bool:
+    """Apply the scoped consequence of a rejected ``new_order`` to one intent.
+
+    Policy comes only from ``resolve_error_action``; the one exception is a venue rate
+    limit, which the REST layer reports as ``http_status=429`` with no venue code
+    (registry would read it as FAIL_CLOSED) and as ``-1003`` (RETRY_BACKOFF_LONG). A
+    rate-limited submission was not executed, so it is journaled NOT_PLACED and the
+    intent retries on a later tick with a fresh submit_seq. A post-only reprice signal
+    (BENIGN_REPRICE) is likewise NOT_PLACED and counts one chase. Scoped rejections
+    end only this intent; RISK_INCREASE_FREEZE additionally freezes every later
+    risk-increasing intent of the cycle. MARGIN_WAIT never retries a reduce-only
+    intent: insufficient margin on a reduction cannot be cured by waiting.
+
+    Returns:
+        True when the error was fully handled for this intent; False when the action
+        is not scoped to one intent (FAIL_CLOSED, unregistered code, RETRY_BACKOFF,
+        BENIGN, RESYNC_*), in which case the caller must re-raise the original
+        exception unchanged.
+    """
+    action = resolve_error_action(exc.code)
+    if exc.http_status == HTTPStatus.TOO_MANY_REQUESTS or action is ErrorAction.RETRY_BACKOFF_LONG:
+        _journal_terminal(rt, order_id, "NOT_PLACED")
+        audit.record(
+            "order_rate_limited",
+            symbol=rt.intent.symbol,
+            client_order_id=order_id,
+        )
+        return True
+    if action is ErrorAction.INTENT_REJECT:
+        _end_rejected(rt, audit, now, exc.code, order_id)
+        return True
+    if action is ErrorAction.MARGIN_WAIT:
+        if rt.intent.reduce_only:
+            _end_rejected(rt, audit, now, exc.code, order_id)
+            return True
+        rt.margin_rejects += 1
+        if rt.margin_rejects > policy.max_margin_rejects:
+            _end_rejected(rt, audit, now, exc.code, order_id)
+            return True
+        rt.margin_wait_until = now + policy.margin_retry_s
+        _journal_terminal(rt, order_id, "NOT_PLACED")
+        audit.record(
+            "intent_margin_wait",
+            symbol=rt.intent.symbol,
+            client_order_id=order_id,
+            margin_rejects=rt.margin_rejects,
+        )
+        return True
+    if action is ErrorAction.RISK_INCREASE_FREEZE:
+        if cycle_flags is not None:
+            cycle_flags.risk_increase_frozen = True
+            cycle_flags.freeze_code = exc.code
+        audit.record(
+            "risk_increase_frozen",
+            symbol=rt.intent.symbol,
+            code=exc.code,
+        )
+        _end_rejected(rt, audit, now, exc.code, order_id)
+        return True
+    if action is ErrorAction.BENIGN_REPRICE:
+        _journal_terminal(rt, order_id, "NOT_PLACED")
+        rt.chases += 1
+        return True
+    return False
+
+
+def _mark_posted(
+    rt: _IntentRuntime,
+    *,
+    order_id: str,
+    price: Decimal,
+    post_qty: Decimal,
+    now: float,
+    simulated: bool,
+) -> None:
+    """Make ``order_id`` the intent's active order with zero reported execution.
+
+    Must run before any fill of the new order is applied: fill settlement and
+    ``_release_active`` read the active-order fields. ``simulated`` marks a PAPER
+    order, which is later settled from the simulator instead of venue queries.
+    """
+    rt.active_id = order_id
+    rt.active_price = price
+    rt.active_post_qty = post_qty
+    rt.reported_executed = _ZERO
+    rt.posted_at = now
+    if simulated:
+        rt.paper_active = True
+
+
+def _record_order_posted(
+    rt: _IntentRuntime,
+    audit: AuditLog,
+    *,
+    order_id: str,
+    time_in_force: str,
+    price: Decimal,
+    post_qty: Decimal,
+    touch: tuple[Decimal, Decimal],
+    simulated: bool,
+) -> None:
+    """Count an IOC attempt and emit the ``order_posted`` evidence for one accepted post.
+
+    An IOC attempt is counted exactly when its post is announced, so a PAPER IOC that
+    completes the intent on submission (``paper_filled``) is neither counted nor
+    announced. ``simulated`` adds ``simulated=True`` to the event; LIVE events carry no
+    ``simulated`` key.
+    """
+    if time_in_force == "IOC":
+        rt.ioc_attempts += 1
+    fields: dict[str, Any] = {
+        "symbol": rt.intent.symbol,
+        "client_order_id": order_id,
+        "time_in_force": time_in_force,
+        "price": str(price),
+        "quantity": str(post_qty),
+        "bid": str(touch[0]),
+        "ask": str(touch[1]),
+        "phase": "passive" if time_in_force == "GTX" else "ioc",
+    }
+    if simulated:
+        fields["simulated"] = True
+    audit.record("order_posted", **fields)
+
+
+def _settle_paper_post(
+    rt: _IntentRuntime,
+    audit: AuditLog,
+    *,
+    order_id: str,
+    time_in_force: str,
+    price: Decimal,
+    post_qty: Decimal,
+    touch: tuple[Decimal, Decimal],
+    now: float,
+) -> None:
+    """Settle one suppressed PAPER post against this tick's observed touch only.
+
+    The simulator never reads a future quote. A fill that completes the intent ends it
+    FILLED with ``paper_filled`` evidence and no ``order_posted``; otherwise the order
+    rests (GTX) or is announced as an attempted IOC like a LIVE post.
+    """
+    executed_qty = _simulate_paper_fill(rt, touch, time_in_force, price, post_qty)
+    _mark_posted(rt, order_id=order_id, price=price, post_qty=post_qty, now=now, simulated=True)
+    if executed_qty > _ZERO:
+        _apply_fill(
+            rt,
+            quantity=executed_qty,
+            price=price,
+            liquidity="maker" if time_in_force == "GTX" else "taker",
+            client_order_id=order_id,
+            order_cumulative_qty=executed_qty,
+            simulated=True,
+            now=now,
+            audit=audit,
+            touch=touch,
+        )
+        if executed_qty >= post_qty:
+            _release_active(rt, "FILLED")
+        if rt.intent.quantity - rt.filled_total <= _ZERO:
+            rt.terminal_status = "FILLED"
+            rt.finalized_at = now
+            audit.record(
+                "paper_filled",
+                symbol=rt.intent.symbol,
+                client_order_id=order_id,
+                quantity=str(executed_qty),
+                price=str(price),
+                time_in_force=time_in_force,
+            )
+            return
+    _record_order_posted(
+        rt, audit, order_id=order_id, time_in_force=time_in_force, price=price,
+        post_qty=post_qty, touch=touch, simulated=True,
     )
 
 
@@ -1610,51 +1879,11 @@ def _poll_or_post(
         )
         return
     except VenueError as exc:
-        action = resolve_error_action(exc.code)
-        if action is ErrorAction.INTENT_REJECT:
-            _end_rejected(rt, audit, now, exc.code, order_id)
-            return
-        if action is ErrorAction.MARGIN_WAIT:
-            if rt.intent.reduce_only:
-                _end_rejected(rt, audit, now, exc.code, order_id)
-                return
-            rt.margin_rejects += 1
-            if rt.margin_rejects > policy.max_margin_rejects:
-                _end_rejected(rt, audit, now, exc.code, order_id)
-                return
-            rt.margin_wait_until = now + policy.margin_retry_s
-            _journal_terminal(rt, order_id, "NOT_PLACED")
-            audit.record(
-                "intent_margin_wait",
-                symbol=rt.intent.symbol,
-                client_order_id=order_id,
-                margin_rejects=rt.margin_rejects,
-            )
-            return
-        if action is ErrorAction.RISK_INCREASE_FREEZE:
-            if cycle_flags is not None:
-                cycle_flags.risk_increase_frozen = True
-                cycle_flags.freeze_code = exc.code
-            audit.record(
-                "risk_increase_frozen",
-                symbol=rt.intent.symbol,
-                code=exc.code,
-            )
-            _end_rejected(rt, audit, now, exc.code, order_id)
-            return
-        if exc.code in (-5022, -4131):
-            _journal_terminal(rt, order_id, "NOT_PLACED")
-            rt.chases += 1
-            return
-        if exc.http_status == 429 or exc.code == -1003:
-            _journal_terminal(rt, order_id, "NOT_PLACED")
-            audit.record(
-                "order_rate_limited",
-                symbol=rt.intent.symbol,
-                client_order_id=order_id,
-            )
-            return
-        raise
+        if not _handle_post_error(
+            exc, rt, order_id=order_id, now=now, policy=policy, audit=audit, cycle_flags=cycle_flags
+        ):
+            raise
+        return
     except OrderObsolete:
         _journal_terminal(rt, order_id, "OBSOLETE")
         rt.terminal_status = "OBSOLETE"
@@ -1666,62 +1895,15 @@ def _poll_or_post(
         rt.finalized_at = now
         return
     if isinstance(response, PaperResponse):
-        executed_qty = _simulate_paper_fill(rt, touch, time_in_force, price, post_qty)
-        rt.active_id = order_id
-        rt.active_price = price
-        rt.active_post_qty = post_qty
-        rt.reported_executed = _ZERO
-        rt.paper_active = True
-        rt.posted_at = now
-        if executed_qty > _ZERO:
-            liquidity: Literal["maker", "taker"] = "maker" if time_in_force == "GTX" else "taker"
-            _apply_fill(
-                rt,
-                quantity=executed_qty,
-                price=price,
-                liquidity=liquidity,
-                client_order_id=order_id,
-                order_cumulative_qty=executed_qty,
-                simulated=True,
-                now=now,
-                audit=audit,
-                touch=touch,
-            )
-            if executed_qty >= post_qty:
-                _release_active(rt, "FILLED")
-            if rt.intent.quantity - rt.filled_total <= _ZERO:
-                rt.terminal_status = "FILLED"
-                rt.finalized_at = now
-                audit.record(
-                    "paper_filled",
-                    symbol=rt.intent.symbol,
-                    client_order_id=order_id,
-                    quantity=str(executed_qty),
-                    price=str(price),
-                    time_in_force=time_in_force,
-                )
-                return
-        if time_in_force == "IOC":
-            rt.ioc_attempts += 1
-        audit.record("order_posted", symbol=rt.intent.symbol, client_order_id=order_id, time_in_force=time_in_force, price=str(price), quantity=str(post_qty), simulated=True, bid=str(bid), ask=str(ask), phase="passive" if time_in_force == "GTX" else "ioc")
+        _settle_paper_post(
+            rt, audit, order_id=order_id, time_in_force=time_in_force, price=price,
+            post_qty=post_qty, touch=touch, now=now,
+        )
         return
-    rt.active_id = order_id
-    rt.active_price = price
-    rt.active_post_qty = post_qty
-    rt.reported_executed = _ZERO
-    rt.posted_at = now
-    if time_in_force == "IOC":
-        rt.ioc_attempts += 1
-    audit.record(
-        "order_posted",
-        symbol=rt.intent.symbol,
-        client_order_id=order_id,
-        time_in_force=time_in_force,
-        price=str(price),
-        quantity=str(post_qty),
-        bid=str(bid),
-        ask=str(ask),
-        phase="passive" if time_in_force == "GTX" else "ioc",
+    _mark_posted(rt, order_id=order_id, price=price, post_qty=post_qty, now=now, simulated=False)
+    _record_order_posted(
+        rt, audit, order_id=order_id, time_in_force=time_in_force, price=price,
+        post_qty=post_qty, touch=touch, simulated=False,
     )
 
 
@@ -1738,60 +1920,10 @@ def _finalize(
             continue
         now = clock()
         if rt.unresolved_id is not None:
-            horizon = _unknown_outcome_horizon_s(client)
-            try:
-                client.query_order(rt.intent.symbol, rt.unresolved_id)
-            except VenueError as exc:
-                if exc.code != -2013:
-                    raise
-                elapsed = now - rt.unresolved_at
-                if elapsed < horizon:
-                    sleep_fn(horizon - elapsed)
-                    now = clock()
-                    try:
-                        client.query_order(rt.intent.symbol, rt.unresolved_id)
-                    except VenueError as exc2:
-                        if exc2.code != -2013:
-                            raise
-                        if now - rt.unresolved_at < horizon:
-                            # 대기 불가 경로(종료·중단): 지평 전에는 미접수로 확정하지 않고 재기동 복구에 남긴다.
-                            audit.record(
-                                "order_unknown_left_unresolved",
-                                symbol=rt.intent.symbol,
-                                client_order_id=rt.unresolved_id,
-                            )
-                            continue
-                        audit.record(
-                            "order_unknown_not_placed",
-                            symbol=rt.intent.symbol,
-                            client_order_id=rt.unresolved_id,
-                        )
-                        _journal_terminal(rt, rt.unresolved_id, "NOT_PLACED")
-                        rt.unresolved_id = None
-                        rt.unknown_misses = 0
-                    else:
-                        audit.record(
-                            "order_unknown_adopted",
-                            symbol=rt.intent.symbol,
-                            client_order_id=rt.unresolved_id,
-                        )
-                        _adopt_unresolved(rt, now)
-                else:
-                    audit.record(
-                        "order_unknown_not_placed",
-                        symbol=rt.intent.symbol,
-                        client_order_id=rt.unresolved_id,
-                    )
-                    _journal_terminal(rt, rt.unresolved_id, "NOT_PLACED")
-                    rt.unresolved_id = None
-                    rt.unknown_misses = 0
-            else:
-                audit.record(
-                    "order_unknown_adopted",
-                    symbol=rt.intent.symbol,
-                    client_order_id=rt.unresolved_id,
-                )
-                _adopt_unresolved(rt, now)
+            resolved_now = _resolve_unknown_at_exit(client, rt, audit, clock, sleep_fn, now)
+            if resolved_now is None:
+                continue
+            now = resolved_now
         if rt.active_id is not None:
             if not rt.paper_active:
                 confirmation = cancel_and_confirm(client, rt.intent.symbol, rt.active_id)

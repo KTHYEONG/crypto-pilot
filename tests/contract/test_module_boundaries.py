@@ -369,7 +369,8 @@ def test_source_module_size_budget() -> None:
         "src/mhs/execution/accumulator.py": 1897,
         "src/live/runner.py": 1656,
         "src/live/scheduler.py": 999,
-        "src/live/executor.py": 1848,
+        # Shared post/unknown-submission primitives retain the executor lifecycle and contracts.
+        "src/live/executor.py": 1980,
         "src/live/tax_ledger.py": 1209,
         "src/live/rest.py": 815,
         "src/mhs/resources.py": 917,
@@ -462,7 +463,6 @@ def test_no_function_exceeds_length_budget() -> None:
     frozen = {
         "src/live/runner.py::run_shadow_cycle": 609,
         "src/live/scheduler.py::run_daemon": 345,
-        "src/live/executor.py::_poll_or_post": 268,
         "src/live/frozen_signal.py::run_frozen_signal_step": 312,
         "src/mhs/account_ledger.py::replay_account": 308,
         "src/cli/commands/backtest.py::run_frozen_account_command": 284,
