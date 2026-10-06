@@ -197,7 +197,7 @@ def _required_symbols(settings: LiveSettings, weights_path: Path) -> set[str]:
     from src.live.ledger import default_ledger_path, load_ledger
 
     required: set[str] = set()
-    ledger_path = Path(settings.ledger_path) if settings.ledger_path else default_ledger_path()
+    ledger_path = settings.resolved_ledger_path(default_ledger_path)
     if ledger_path.exists():
         for symbol, qty in load_ledger(ledger_path).positions.items():
             if qty != 0:
@@ -362,7 +362,7 @@ def _default_frozen_step(target: pd.Timestamp, settings: LiveSettings, weights_p
         unit_forward_path=Path(weights_path).parent / "frozen_unit_forward.parquet",
         venue_rules_dir=VENUE_RULES_DIR,
         fallback_venue_path=Path(settings.venue_fallback_path),
-        ledger_path=Path(settings.ledger_path) if settings.ledger_path else default_ledger_path(),
+        ledger_path=settings.resolved_ledger_path(default_ledger_path),
         seed_equity_usdt=settings.notional_equity_usdt,
         account_equity_usdt=None if settings.mode.suppresses_mutations else fetch_live_account_equity(settings, _utc_now()),
         non_crypto=non_crypto,

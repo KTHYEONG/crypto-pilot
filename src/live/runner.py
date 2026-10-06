@@ -646,7 +646,7 @@ def _commit_and_record(
         return committed
     events = _fill_events_from_journal(journal, fresh, fallback=fallback_attempt)
     try:
-        fills_dir = Path(settings.fills_dir) if settings.fills_dir else default_fills_dir()
+        fills_dir = settings.resolved_fills_dir(default_fills_dir)
         append_fills(events, fills_dir)
     except Exception as exc:  # noqa: BLE001
         with contextlib.suppress(Exception):
@@ -656,7 +656,7 @@ def _commit_and_record(
     batch_records: tuple[TaxRecord, ...] = ()
     if track_cash:
         try:
-            tax_dir = Path(settings.tax_ledger_dir) if settings.tax_ledger_dir else default_tax_ledger_dir()
+            tax_dir = settings.resolved_tax_ledger_dir(default_tax_ledger_dir)
             tax_dir.mkdir(parents=True, exist_ok=True)
             batch_records = simulated_tax_records(events, settings.mode.value)
             if batch_records:
@@ -753,7 +753,7 @@ def _write_execution_quality_once(
 ) -> None:
     """Write execution-quality records once per attempt (all exit paths; observed_at distinguishes retries)."""
     try:
-        execution_quality_dir = Path(settings.execution_quality_dir) if settings.execution_quality_dir else default_execution_quality_dir()
+        execution_quality_dir = settings.resolved_execution_quality_dir(default_execution_quality_dir)
         records = build_execution_quality_records(
             decision_time, settings.mode.value, weights, marks, intents, outcomes,
             **_execution_quality_metadata(settings, observed_at),
@@ -865,11 +865,11 @@ def run_shadow_cycle(
     depth_recorders: list[ExecutionDepthRecorder] = []
     try:
         _assert_run_manifest_compatible(settings)
-        ledger_path = Path(settings.ledger_path) if settings.ledger_path else default_ledger_path()
+        ledger_path = settings.resolved_ledger_path(default_ledger_path)
         last_executed = load_ledger(ledger_path).last_executed_decision_time
         if last_executed is not None and decision_time <= last_executed:
             try:
-                _journal_flushed = OrderJournal(Path(settings.order_journal_path) if settings.order_journal_path else default_order_journal_path())
+                _journal_flushed = OrderJournal(settings.resolved_order_journal_path(default_order_journal_path))
                 _flushed_state = load_ledger(ledger_path)
                 if _flushed_state.journal_recorded_fill_seq < _flushed_state.journal_applied_fill_seq:
                     from src.live.audit import AuditLog as _AuditLog  # noqa: PLC0415
@@ -928,7 +928,7 @@ def run_shadow_cycle(
         ledger_positions = ledger_state.positions
 
         # 3) 고아 주문 정리는 재조정 '이전에' 이뤄져야 한다(GTX 잔존 -> 원장 괴리 방지).
-        journal = OrderJournal(Path(settings.order_journal_path) if settings.order_journal_path else default_order_journal_path())
+        journal = OrderJournal(settings.resolved_order_journal_path(default_order_journal_path))
         cycle_context = JournalAttempt(
             attempt_seq=-1,
             decision_time=decision_time,
@@ -1052,7 +1052,7 @@ def run_shadow_cycle(
                 premium = None
             if quotes:
                 micro_records = build_microstructure_records(decision_time, settings.mode.value, quotes, premium)
-                microstructure_dir = Path(settings.microstructure_dir) if settings.microstructure_dir else default_microstructure_dir()
+                microstructure_dir = settings.resolved_microstructure_dir(default_microstructure_dir)
                 append_microstructure(micro_records, microstructure_dir)
         except Exception as exc:  # noqa: BLE001
             with contextlib.suppress(Exception):
@@ -1085,7 +1085,7 @@ def run_shadow_cycle(
                 raise DataIntegrityError(f"held symbols absent from exchangeInfo symbols={','.join(absent_held)}; resolve via actual venue settlement or live account reconciliation")
             delisted = _delisted_held_symbols(ledger_state.positions, exchange_info_payload, now_ts)
             cash_before = ledger_state.cash_usdt
-            funding_tax_dir = Path(settings.tax_ledger_dir) if settings.tax_ledger_dir else default_tax_ledger_dir()
+            funding_tax_dir = settings.resolved_tax_ledger_dir(default_tax_ledger_dir)
             ledger_state, accrual, funding_records = _accrue_ledger_funding(
                 ledger_state,
                 now_ts,
@@ -1124,11 +1124,7 @@ def run_shadow_cycle(
                         paper_booked, mode=settings.mode.value
                     )
                     if settlement_records:
-                        settlement_tax_dir = (
-                            Path(settings.tax_ledger_dir)
-                            if settings.tax_ledger_dir
-                            else default_tax_ledger_dir()
-                        )
+                        settlement_tax_dir = settings.resolved_tax_ledger_dir(default_tax_ledger_dir)
                         append_tax_records(settlement_records, settlement_tax_dir)
                     save_ledger(ledger_path, ledger_state)
                     for settlement in paper_booked:
@@ -1350,7 +1346,7 @@ def run_shadow_cycle(
                 intent_count=len(outcomes),
                 dropped_notional_fraction=float(dropped_fraction),
             )
-            portfolio_dir = Path(settings.portfolio_state_dir) if settings.portfolio_state_dir else default_portfolio_state_dir()
+            portfolio_dir = settings.resolved_portfolio_state_dir(default_portfolio_state_dir)
             append_portfolio_state(portfolio_record, portfolio_dir)
         except Exception as exc:  # noqa: BLE001 - observability-only, never halts cycle
             with contextlib.suppress(Exception):
@@ -1363,7 +1359,7 @@ def run_shadow_cycle(
         # PAPER simulated TRADE records + per-batch cash reconciliation already ran
         # inside _commit_and_record; only LIVE venue collection remains here.
         try:
-            tax_dir = Path(settings.tax_ledger_dir) if settings.tax_ledger_dir else default_tax_ledger_dir()
+            tax_dir = settings.resolved_tax_ledger_dir(default_tax_ledger_dir)
             tax_dir.mkdir(parents=True, exist_ok=True)
             if not settings.mode.suppresses_mutations and settings.tax_collection_enabled:
                 try:

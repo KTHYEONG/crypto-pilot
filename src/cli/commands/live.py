@@ -270,7 +270,7 @@ def _run_tax_collect(args: argparse.Namespace) -> None:
         audit,
         recv_window_ms=settings.recv_window_ms,
     )
-    ledger_dir = Path(settings.tax_ledger_dir) if settings.tax_ledger_dir else default_tax_ledger_dir()
+    ledger_dir = settings.resolved_tax_ledger_dir(default_tax_ledger_dir)
     from src.live.tax_ledger import collect_and_persist_live_tax
 
     symbols: list[str] = []

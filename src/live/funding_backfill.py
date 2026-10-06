@@ -341,9 +341,9 @@ def run_paper_funding_backfill(
         _assert_daemon_idle(
             heartbeat_path if heartbeat_path is not None else _resolve_heartbeat_path(settings), now
         )
-    ledger_path = Path(settings.ledger_path) if settings.ledger_path else default_ledger_path()
+    ledger_path = settings.resolved_ledger_path(default_ledger_path)
     state = load_ledger(ledger_path)
-    fills = load_fills(Path(settings.fills_dir) if settings.fills_dir else default_fills_dir())
+    fills = load_fills(settings.resolved_fills_dir(default_fills_dir))
     fills = fills[fills["mode"] == settings.mode.value] if "mode" in fills.columns else fills.iloc[0:0]
     if fills.empty:
         reconstruct_position_history(fills, {})
