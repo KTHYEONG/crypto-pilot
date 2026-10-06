@@ -48,9 +48,9 @@ def _run_books_concurrent(
     w_slow_execution: pd.DataFrame,
     opens: pd.DataFrame,
     bar_funding: pd.DataFrame,
-    phase_fast: PhaseDiagnosticResult,
-    phase_slow: PhaseDiagnosticResult,
-    phase_blend: PhaseDiagnosticResult,
+    phase_fast: PhaseDiagnosticResult | None,
+    phase_slow: PhaseDiagnosticResult | None,
+    phase_blend: PhaseDiagnosticResult | None,
     start: pd.Timestamp,
     end: pd.Timestamp,
     funding_by_symbol: dict[str, pd.Series],
@@ -186,19 +186,25 @@ def _run_post_diag_deploy(
     dict[str, int],
     DeploymentReadinessResult,
 ]:
-    """Diagnostics + deployment readiness, one background-thread unit.
+    """Report-only diagnostics + deployment readiness, one background-thread unit.
 
-    ``compute_deployment_readiness`` is invoked with ``research_go_eligible=None``:
-    the only value it needs from the anchored folds is the final Research-GO
-    boolean flag, which the caller patches in after the folds resolve.  This is
-    what lets the whole 77s post-book tail overlap the ~78s fold pool.
+    ``compute_deployment_readiness`` is invoked with ``research_go_eligible=None``: the only
+    value it needs from the anchored folds is the final Research-GO boolean, which the caller
+    patches in after the folds resolve, so this tail overlaps the fold pool. The bootstrap CI
+    (``bootstrap_ci_diagnostic``) and the 48h placebo percentile (``placebo_diagnostic``) are
+    opt-in report-only values and are ``None`` when not requested; participation warnings,
+    termination counts and deployment readiness are always computed.
+
+    Raises:
+        DataIntegrityError: the blend has no primary replay, or the placebo is requested and
+            the blend has no naive Sharpe.
     """
     bootstrap_ci: tuple[float, float] | None = None
     if blend_report.primary is None:
         raise DataIntegrityError("post-book tail requires a blend primary replay")
     equity_1h = blend_report.primary.ledger.equity.resample("1h").last().dropna()
     net_1h = equity_1h.pct_change().dropna()
-    if len(net_1h) >= 2:
+    if request.bootstrap_ci_diagnostic and len(net_1h) >= 2:
         bootstrap_ci = _statistics._bootstrap_ci(
             net_1h, _statistics._BOOTSTRAP_REPLICATES, _statistics._BOOTSTRAP_MEAN_BLOCK, _statistics._BOOTSTRAP_SEED,
         )
@@ -207,12 +213,14 @@ def _run_post_diag_deploy(
         execution_symbols, minute_grid,
     )
     termination_counts = dict(blend_report.primary.termination_counts)
-    if blend_report.primary_naive_sharpe is None:
-        raise DataIntegrityError("blend report requires a naive Sharpe for the placebo")
-    placebo_percentile = _statistics._placebo_sharpe_percentile(
-        signal_48h, eligible, opens, bar_funding, grid_1h,
-        fast, blend_report.primary_naive_sharpe, 500, _statistics._BOOTSTRAP_SEED,
-    )
+    placebo_percentile: float | None = None
+    if request.placebo_diagnostic:
+        if blend_report.primary_naive_sharpe is None:
+            raise DataIntegrityError("blend report requires a naive Sharpe for the placebo")
+        placebo_percentile = _statistics._placebo_sharpe_percentile(
+            signal_48h, eligible, opens, bar_funding, grid_1h,
+            fast, blend_report.primary_naive_sharpe, 500, _statistics._BOOTSTRAP_SEED,
+        )
     deployment = compute_deployment_readiness(
         equity_1h,
         _PERIODS_PER_YEAR_1H,

@@ -71,6 +71,43 @@ def _fold_weights_from_boundaries(
     return {i: dict(weights_by_boundary[f"fold_{i}"]) for i, _fold in enumerate(folds)}
 
 
+def _report_only_panel_diagnostics(ctx: PipelineContext) -> None:
+    """Compute the opt-in report-only 1h-panel diagnostics while ``log_close`` is alive.
+
+    Phase robustness (``phase_diagnostic``) and the 48h raw-return statistics
+    (``signal_48h_diagnostic``) never feed a weight, a replay or a gate; ``signal_48h`` is
+    materialized only when the 48h statistics or the placebo (``placebo_diagnostic``) consume it,
+    so the default run keeps no extra T x N panel alive.
+    """
+    if ctx.config.phase_diagnostic:
+        ctx.phase_fast = diagnostics._phase_diagnostics(ctx.log_close, ctx.eligible, ctx.opens, ctx.bar_funding, ctx.grid_1h, ctx.fast)
+        ctx.phase_slow = diagnostics._phase_diagnostics(ctx.log_close, ctx.eligible, ctx.opens, ctx.bar_funding, ctx.grid_1h, ctx.slow)
+        _blend_spec, _blend_grid = books._active_blend_book_and_grid(ctx.fast, ctx.slow, ctx.fast_grid, ctx.slow_grid)
+        del _blend_grid
+        ctx.phase_blend = diagnostics._phase_diagnostics(ctx.log_close, ctx.eligible, ctx.opens, ctx.bar_funding, ctx.grid_1h, _blend_spec)
+    else:
+        ctx.phase_fast = None
+        ctx.phase_slow = None
+        ctx.phase_blend = None
+    if ctx.config.signal_48h_diagnostic or ctx.config.placebo_diagnostic:
+        ctx.signal_48h = horizon_log_return(ctx.log_close, 48)
+    if ctx.config.signal_48h_diagnostic:
+        ctx.xs_ic = _statistics._xs_rank_ic(ctx.signal_48h, ctx.opens, forward_bars=48)
+        ctx.regression = _statistics._date_clustered_ols(ctx.opens, ctx.signal_48h, forward_bars=48)
+        ctx.horizon_diagnostics = {
+            "realized_vol_48h_mean": float(
+                realized_vol(ctx.log_close, 48).mean().mean()
+            ),
+            "efficiency_ratio_48h_mean": float(
+                efficiency_ratio(ctx.log_close, 48).mean().mean()
+            ),
+        }
+    else:
+        ctx.xs_ic = {}
+        ctx.regression = {}
+        ctx.horizon_diagnostics = {}
+
+
 def build_committee(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
     """Construct the committee execution book and all committee-tier diagnostics."""
     from src.mhs.research_go import _resolved_growth_envelope
@@ -195,19 +232,8 @@ def build_committee(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
     del ctx.w_fast_1h, ctx.w_slow_1h
     gc.collect()
 
-    ctx.phase_fast = diagnostics._phase_diagnostics(ctx.log_close, ctx.eligible, ctx.opens, ctx.bar_funding, ctx.grid_1h, ctx.fast)
-    ctx.phase_slow = diagnostics._phase_diagnostics(ctx.log_close, ctx.eligible, ctx.opens, ctx.bar_funding, ctx.grid_1h, ctx.slow)
-    _blend_spec, _blend_grid = books._active_blend_book_and_grid(ctx.fast, ctx.slow, ctx.fast_grid, ctx.slow_grid)
-    del _blend_grid
-    ctx.phase_blend = diagnostics._phase_diagnostics(ctx.log_close, ctx.eligible, ctx.opens, ctx.bar_funding, ctx.grid_1h, _blend_spec)
+    _report_only_panel_diagnostics(ctx)
 
-    # R3: the 48h cross-sectional statistics depend only on the 1h panel, not
-    # the book replays.  Computing them here -- and computing ``signal_48h``
-    # once so the placebo reuses it -- lets ``log_close`` be released before the
-    # three top-level replays instead of staying alive throughout them
-    # (spec §3.1, ``memory_opt``).
-    ctx.signal_48h = horizon_log_return(ctx.log_close, 48)
-    ctx.xs_ic = _statistics._xs_rank_ic(ctx.signal_48h, ctx.opens, forward_bars=48)
     ctx.trend_sleeve_diagnostic = diagnostics._trend_sleeve_diagnostic(
         ctx.log_close, ctx.eligible, ctx.opens, ctx.bar_funding, ctx.execution_mask,
         ctx.current_book_for_diagnostic, ctx.config,
@@ -218,15 +244,6 @@ def build_committee(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
     # Feature-axis opt-in diagnostics run after fold pool with evicted caches.
     ctx.multi_feature_diagnostic = None
     ctx.committee_diagnostic = None
-    ctx.regression = _statistics._date_clustered_ols(ctx.opens, ctx.signal_48h, forward_bars=48)
-    ctx.horizon_diagnostics = {
-        "realized_vol_48h_mean": float(
-            realized_vol(ctx.log_close, 48).mean().mean()
-        ),
-        "efficiency_ratio_48h_mean": float(
-            efficiency_ratio(ctx.log_close, 48).mean().mean()
-        ),
-    }
     ctx.discovery_qualification = None
     ctx.full_history_yearly_net_t = None
     ctx.funding_carry_worst_year_corr = None
