@@ -947,3 +947,221 @@ def test_income_sends_end_time(tmp_path, monkeypatch) -> None:
     assert client.income(start_time_ms=1, end_time_ms=2) == []
     query = dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(calls[0]).query))
     assert query["endTime"] == "2"
+
+
+def test_mutation_double_resync_raises_exhausted_without_sleep(tmp_path, monkeypatch) -> None:
+    """Mutation -1021 twice breaks the resync loop with the exhausted error and no sleep."""
+    import pytest
+    from urllib.parse import urlparse
+    from src.live.errors import VenueError
+    from src.live.rest import HttpResponse
+
+    methods: list[str] = []
+
+    def _responder(method, url):
+        methods.append(method)
+        if urlparse(url).path == "/fapi/v1/time":
+            return HttpResponse(status_code=200, headers={}, body=b'{"serverTime": 5}')
+        return HttpResponse(status_code=400, headers={}, body=b'{"code":-1021,"msg":"timestamp"}')
+
+    client, calls, sleeps = _rest_client(tmp_path, monkeypatch, _responder, audit_name="mut_double_resync.jsonl")
+    with pytest.raises(VenueError) as exc_info:
+        client.new_order({"symbol": "AAAUSDT"})
+    assert exc_info.value.code is None
+    assert exc_info.value.http_status == 0
+    assert "exhausted retries" in str(exc_info.value)
+    assert methods == ["POST", "GET", "POST"]
+    assert [urlparse(u).path for u in calls] == ["/fapi/v1/order", "/fapi/v1/time", "/fapi/v1/order"]
+    assert sleeps == []
+
+
+def test_mutation_registry_branches_match_read_branches(tmp_path, monkeypatch) -> None:
+    """Mutation registry codes behave like the read branches with one send and no sleep."""
+    import pytest
+    from src.live.errors import OrderObsolete, VenueError
+    from src.live.rest import HttpResponse
+
+    cases = [
+        (-2011, "BENIGN", None),
+        (-2022, "BENIGN_ABORT", OrderObsolete),
+        (-5022, "BENIGN_REPRICE", VenueError),
+        (-1022, "FAIL_CLOSED", VenueError),
+        (-2019, "MARGIN_WAIT", VenueError),
+    ]
+    for code, _label, exc_type in cases:
+        client, calls, sleeps = _rest_client(
+            tmp_path, monkeypatch,
+            lambda m, u, c=code: HttpResponse(status_code=400, headers={}, body=f'{{"code":{c},"msg":"x"}}'.encode()),
+            audit_name=f"mut_branch_{code}.jsonl",
+        )
+        if exc_type is None:
+            assert client.new_order({"symbol": "AAAUSDT"}) == {"code": code, "msg": "x"}
+        else:
+            with pytest.raises(exc_type) as exc_info:
+                client.new_order({"symbol": "AAAUSDT"})
+            if isinstance(exc_info.value, VenueError):
+                assert exc_info.value.code == code
+                assert exc_info.value.http_status == 400
+        assert len(calls) == 1
+        assert sleeps == []
+
+
+def test_mutation_backoff_codes_are_never_resent(tmp_path, monkeypatch) -> None:
+    """Mutation -1003 raises without resend or sleep."""
+    import pytest
+    from src.live.errors import VenueError
+    from src.live.rest import HttpResponse
+
+    client, calls, sleeps = _rest_client(
+        tmp_path, monkeypatch,
+        lambda m, u: HttpResponse(status_code=400, headers={}, body=b'{"code":-1003,"msg":"throttled"}'),
+        audit_name="mut_backoff.jsonl",
+    )
+    with pytest.raises(VenueError) as exc_info:
+        client.new_order({"symbol": "AAAUSDT"})
+    assert len(calls) == 1
+    assert sleeps == []
+    assert exc_info.value.code == -1003
+    assert "venue rejected POST /fapi/v1/order; mutation not retried" in str(exc_info.value)
+
+
+def test_mutation_non_json_success_body_is_not_resent(tmp_path, monkeypatch) -> None:
+    """Mutation 200 with a non-JSON body returns None with one send and no sleep."""
+    from src.live.rest import HttpResponse
+
+    client, calls, sleeps = _rest_client(
+        tmp_path, monkeypatch,
+        lambda m, u: HttpResponse(status_code=200, headers={}, body=b"<html>"),
+        audit_name="mut_html.jsonl",
+    )
+    assert client.new_order({"symbol": "AAAUSDT"}) is None
+    assert len(calls) == 1
+    assert sleeps == []
+
+
+def test_rejection_digest_is_shared_across_methods(tmp_path, monkeypatch) -> None:
+    """GET and POST rejections digest the same body identically; empty 429 digests empty."""
+    import pytest
+    from src.live.errors import VenueError
+    from src.live.rest import HttpResponse
+    from src.live.errors import payload_digest
+
+    rejected = b'{"code":-1022,"msg":"x"}'
+    client, _, _ = _rest_client(
+        tmp_path, monkeypatch,
+        lambda m, u: HttpResponse(status_code=400, headers={}, body=rejected),
+        audit_name="digest_get.jsonl",
+    )
+    with pytest.raises(VenueError) as get_exc:
+        client.request("GET", "/fapi/v1/order")
+    client2, _, _ = _rest_client(
+        tmp_path, monkeypatch,
+        lambda m, u: HttpResponse(status_code=400, headers={}, body=rejected),
+        audit_name="digest_post.jsonl",
+    )
+    with pytest.raises(VenueError) as post_exc:
+        client2.new_order({"symbol": "AAAUSDT"})
+    assert get_exc.value.payload_digest == payload_digest('{"code":-1022,"msg":"x"}')
+    assert post_exc.value.payload_digest == payload_digest('{"code":-1022,"msg":"x"}')
+    client3, _, _ = _rest_client(
+        tmp_path, monkeypatch,
+        lambda m, u: HttpResponse(status_code=429, headers={}, body=b""),
+        audit_name="digest_429.jsonl",
+    )
+    with pytest.raises(VenueError) as rate_exc:
+        client3.new_order({"symbol": "AAAUSDT"})
+    assert rate_exc.value.payload_digest == payload_digest("")
+
+
+def test_decode_body_classifies_empty_invalid_and_valid() -> None:
+    """_decode_body classifies empty, invalid and valid response bodies."""
+    from src.live.rest import BinanceFuturesRestClient
+
+    assert BinanceFuturesRestClient._decode_body(b"") == (None, True)
+    assert BinanceFuturesRestClient._decode_body(b"{bad") == (None, False)
+    assert BinanceFuturesRestClient._decode_body(b"\xff\xfe") == (None, False)
+    assert BinanceFuturesRestClient._decode_body(b'{"a":1}') == ({"a": 1}, True)
+
+
+def test_build_url_headers_omits_empty_query_and_absent_key(tmp_path) -> None:
+    """Unsigned keyless requests carry no query string or API-key header; signed ones do."""
+    from pydantic import SecretStr
+    from src.live.audit import AuditLog
+    from src.live.rest import BinanceFuturesRestClient
+    from src.live.settings import ExecutionMode
+
+    keyless = BinanceFuturesRestClient(
+        "https://fapi.binance.com", None, None, ExecutionMode.LIVE_TESTNET,
+        AuditLog(tmp_path / "k.jsonl"),
+    )
+    url, headers = keyless._build_url_headers("/fapi/v1/time", {}, signed=False)
+    assert "?" not in url
+    assert headers == {}
+    keyed = BinanceFuturesRestClient(
+        "https://fapi.binance.com", SecretStr("k"), SecretStr("s"), ExecutionMode.LIVE_TESTNET,
+        AuditLog(tmp_path / "k2.jsonl"),
+    )
+    url2, headers2 = keyed._build_url_headers("/fapi/v1/order", {"symbol": "AAAUSDT"}, signed=True)
+    assert "timestamp=" in url2 and "recvWindow=" in url2 and "signature=" in url2
+    assert headers2 == {"X-MBX-APIKEY": "k"}
+
+
+def test_raise_for_action_leaves_loop_owned_actions_to_caller(tmp_path, monkeypatch) -> None:
+    """Loop-owned actions return None; every other registry action raises; unknown fails closed."""
+    from typing import cast
+    from typing import Any
+    import pytest
+    from src.live.errors import ErrorAction, OrderObsolete, VenueError
+    from src.live.rest import BinanceFuturesRestClient, HttpResponse
+
+    client, _, _ = _rest_client(
+        tmp_path, monkeypatch,
+        lambda m, u: HttpResponse(status_code=400, headers={}, body=b"{}"),
+        audit_name="raise_action.jsonl",
+    )
+    response = HttpResponse(status_code=400, headers={}, body=b'{"code":-1022,"msg":"x"}')
+    for action in (
+        ErrorAction.BENIGN,
+        ErrorAction.RESYNC_CLOCK,
+        ErrorAction.RETRY_BACKOFF,
+        ErrorAction.RETRY_BACKOFF_LONG,
+    ):
+        assert client._raise_for_action(action, method="GET", path="/fapi/v1/order", response=response, error_code=-1022) is None
+    for action in ErrorAction:
+        if action in (
+            ErrorAction.BENIGN,
+            ErrorAction.RESYNC_CLOCK,
+            ErrorAction.RETRY_BACKOFF,
+            ErrorAction.RETRY_BACKOFF_LONG,
+        ):
+            continue
+        with pytest.raises(OrderObsolete if action is ErrorAction.BENIGN_ABORT else VenueError):
+            client._raise_for_action(action, method="GET", path="/fapi/v1/order", response=response, error_code=-1022)
+    with pytest.raises(VenueError):
+        client._raise_for_action(
+            cast(Any, "future-action"), method="GET", path="/fapi/v1/order", response=response, error_code=-9999
+        )
+
+
+def test_get_429_then_double_resync_reraises_rate_limit_error(tmp_path, monkeypatch) -> None:
+    """GET 429 followed by two -1021s re-raises the preserved 429 error."""
+    import pytest
+    from urllib.parse import urlparse
+    from src.live.errors import VenueError
+    from src.live.rest import HttpResponse
+
+    state = {"n": 0}
+
+    def _responder(method, url):
+        if urlparse(url).path == "/fapi/v1/time":
+            return HttpResponse(status_code=200, headers={}, body=b'{"serverTime": 5}')
+        state["n"] += 1
+        if state["n"] == 1:
+            return HttpResponse(status_code=429, headers={}, body=b"")
+        return HttpResponse(status_code=400, headers={}, body=b'{"code":-1021,"msg":"timestamp"}')
+
+    client, calls, sleeps = _rest_client(tmp_path, monkeypatch, _responder, audit_name="get_429_resync.jsonl")
+    with pytest.raises(VenueError) as exc_info:
+        client.request("GET", "/fapi/v1/order")
+    assert exc_info.value.http_status == 429
+    assert sleeps == [1.0]
