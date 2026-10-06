@@ -2074,7 +2074,6 @@ def test_run_daemon_alerts_interrupted_stage_once_and_logs_banner(tmp_path, monk
     from src.live.runner import CycleReport
     from src.live.settings import LiveSettings
     from src.live.scheduler import DECISION_RELEASE_OFFSET
-    from src.live.signal_step_result import SignalStepResult, signal_step_result_path, write_signal_step_result
 
     monkeypatch.setattr(sched, "_strategy_params_present", lambda settings: True, raising=False)
     monkeypatch.setattr(sched, "prune_old_audit_logs", lambda *a, **k: 0)
@@ -2090,7 +2089,6 @@ def test_run_daemon_alerts_interrupted_stage_once_and_logs_banner(tmp_path, monk
     state_path = tmp_path / "state.json"
     target = pd.Timestamp("2026-08-24 00:00Z")
     ready = target + DECISION_RELEASE_OFFSET + pd.Timedelta(minutes=20)
-    result_path = signal_step_result_path(artifact)
 
     import logging
 
@@ -2151,7 +2149,6 @@ def test_run_daemon_touches_heartbeat_ts_while_waiting_without_creating_it(tmp_p
     from src.live.runner import CycleReport
     from src.live.settings import LiveSettings
     from src.live.scheduler import DECISION_RELEASE_OFFSET
-    from src.live.signal_step_result import SignalStepResult, signal_step_result_path, write_signal_step_result
 
     monkeypatch.setattr(sched, "_strategy_params_present", lambda settings: True, raising=False)
     monkeypatch.setattr(sched, "prune_old_audit_logs", lambda *a, **k: 0)
@@ -2167,7 +2164,6 @@ def test_run_daemon_touches_heartbeat_ts_while_waiting_without_creating_it(tmp_p
     state_path = tmp_path / "state.json"
     target = pd.Timestamp("2026-08-24 00:00Z")
     ready = target + DECISION_RELEASE_OFFSET + pd.Timedelta(minutes=20)
-    result_path = signal_step_result_path(artifact)
 
     base_payload = {
         "decision_time": "2026-08-23T00:00:00+00:00", "status": "HALT", "attempts": 2,
