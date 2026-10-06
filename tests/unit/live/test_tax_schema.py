@@ -98,7 +98,8 @@ def _collect(client, symbols, watermark, **over):
     kw.update(over)
     found: list = []
     records, new_wm = collect_tax_records(
-        client, symbols, watermark, "live_testnet", now=NOW, issues=found, **kw
+        client, symbols, watermark, "live_testnet", now=NOW, settlement_asset="USDT",
+        issues=found, **kw
     )
     return records, new_wm, found
 

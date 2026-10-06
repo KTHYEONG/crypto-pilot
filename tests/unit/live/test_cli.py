@@ -566,19 +566,40 @@ def test_cli_ledger_resync_wires_flags_and_exit_codes(monkeypatch) -> None:
 def test_tax_collect_cli_uses_durable_collect_path_and_audits_issues(monkeypatch, tmp_path) -> None:
     """`live tax-collect` routes through collect_and_persist_live_tax (same path as the daemon) and audits every issue."""
     import json
+    from decimal import Decimal
 
+    import pandas as pd
+
+    import src.live.account as account_mod
     import src.live.audit as audit_mod
     import src.live.rest as rest_mod
     import src.live.tax_ledger as tax_mod
 
+    monkeypatch.setenv("LIVE_MODE", "live_testnet")
+    monkeypatch.setenv("LIVE_ORDER_API_KEY", "test-key")
+    monkeypatch.setenv("LIVE_ORDER_API_SECRET", "test-secret")
     monkeypatch.setenv("LIVE_TAX_LEDGER_DIR", str(tmp_path / "tax"))
     audit_path = tmp_path / "tax_collect_audit.jsonl"
     monkeypatch.setattr(audit_mod, "default_audit_log_path", lambda name, for_date=None: audit_path)
-    monkeypatch.setattr(rest_mod, "BinanceFuturesRestClient", lambda *a, **k: object())
+
+    now = pd.Timestamp("2026-11-01 00:00:00", tz="UTC")
+    snapshot = account_mod.AccountSnapshot(
+        taken_at=now, wallet_balance=Decimal("2000"), available_balance=Decimal("2000"),
+        total_maint_margin=Decimal("0"), unrealized_pnl=Decimal("0"),
+        positions={}, dual_side_position=False, multi_assets_margin=False,
+    )
+    monkeypatch.setattr(account_mod, "fetch_account_snapshot", lambda client, now=None: snapshot)
+    monkeypatch.setattr(account_mod, "assert_venue_configuration", lambda snap: None)
+
+    class _Client:
+        def sync_server_time(self) -> None:
+            return None
+
+    monkeypatch.setattr(rest_mod, "BinanceFuturesRestClient", lambda *a, **k: _Client())
     seen: dict = {}
 
-    def _collect(client, symbols, tax_dir, mode, *, now, settings):
-        seen.update(tax_dir=tax_dir, symbols=list(symbols), now=now)
+    def _collect(client, symbols, tax_dir, mode, *, now, settings, venue_snapshot=None):
+        seen.update(tax_dir=tax_dir, symbols=list(symbols), now=now, venue_snapshot=venue_snapshot)
         return 3, (tax_mod.TaxCollectionIssue(stream="income", stage="page_cap", detail="budget"),)
 
     monkeypatch.setattr(tax_mod, "collect_and_persist_live_tax", _collect)
@@ -739,3 +760,175 @@ def test_tax_summary_incomplete_warns(tmp_path, monkeypatch, caplog) -> None:
     with caplog.at_level(logging.WARNING, logger="LiveCli"):
         live_mod._run_tax_summary(args)
     assert "coverage_unknown" in caplog.text
+
+
+def _stub_live_tax_collect_env(monkeypatch, tmp_path, *, mode="live_testnet", positions=None, dual_side=False):
+    from decimal import Decimal
+
+    import pandas as pd
+
+    import src.live.account as account_mod
+    import src.live.audit as audit_mod
+    import src.live.rest as rest_mod
+
+    monkeypatch.setenv("LIVE_MODE", mode)
+    monkeypatch.setenv("LIVE_ORDER_API_KEY", "test-key")
+    monkeypatch.setenv("LIVE_ORDER_API_SECRET", "test-secret")
+    audit_path = tmp_path / "tax_collect_audit.jsonl"
+    monkeypatch.setattr(audit_mod, "default_audit_log_path", lambda name, for_date=None: audit_path)
+    now = pd.Timestamp("2026-11-01 00:00:00", tz="UTC")
+    snapshot = account_mod.AccountSnapshot(
+        taken_at=now, wallet_balance=Decimal("2000"), available_balance=Decimal("2000"),
+        total_maint_margin=Decimal("0"), unrealized_pnl=Decimal("0"),
+        positions=dict(positions or {}), dual_side_position=dual_side, multi_assets_margin=False,
+    )
+
+    class _Client:
+        def sync_server_time(self) -> None:
+            return None
+
+    monkeypatch.setattr(rest_mod, "BinanceFuturesRestClient", lambda *a, **k: _Client())
+    monkeypatch.setattr(account_mod, "fetch_account_snapshot", lambda client, now=None: snapshot)
+    return snapshot
+
+
+def test_tax_collect_refuses_suppressed_modes(monkeypatch, tmp_path) -> None:
+    import pytest
+
+    import src.live.tax_ledger as tax_mod
+
+    _stub_live_tax_collect_env(monkeypatch, tmp_path, mode="paper")
+    calls: list = []
+    monkeypatch.setattr(tax_mod, "collect_and_persist_live_tax", lambda *a, **k: calls.append(1))
+    args = build_root_parser().parse_args(["live", "tax-collect"])
+    with pytest.raises(SystemExit) as excinfo:
+        args.handler(args)
+    assert excinfo.value.code == 1
+    assert calls == []
+
+
+def test_tax_collect_passes_snapshot_empty_request_and_resolved_dir(monkeypatch, tmp_path) -> None:
+    from decimal import Decimal
+
+    import src.live.tax_ledger as tax_mod
+
+    snapshot = _stub_live_tax_collect_env(monkeypatch, tmp_path, positions={"AAAUSDT": Decimal("1")})
+    import src.live.account as account_mod
+
+    monkeypatch.setattr(account_mod, "assert_venue_configuration", lambda snap: None)
+    monkeypatch.setenv("LIVE_TAX_LEDGER_DIR", str(tmp_path / "tax"))
+    seen: dict = {}
+
+    def _collect(client, symbols, tax_dir, mode, *, now, settings, venue_snapshot=None):
+        seen.update(symbols=symbols, tax_dir=tax_dir, venue_snapshot=venue_snapshot)
+        return 0, ()
+
+    monkeypatch.setattr(tax_mod, "collect_and_persist_live_tax", _collect)
+    args = build_root_parser().parse_args(["live", "tax-collect"])
+    args.handler(args)
+    assert tuple(seen["symbols"]) == ()
+    assert seen["tax_dir"] == tmp_path / "tax"
+    assert seen["venue_snapshot"].positions == {"AAAUSDT": Decimal("1")}
+    assert seen["venue_snapshot"].taken_at == snapshot.taken_at
+
+
+def test_tax_collect_uses_account_scoped_ledger_across_run_ids(monkeypatch, tmp_path) -> None:
+    import src.live.account as account_mod
+    import src.live.tax_ledger as tax_mod
+
+    _stub_live_tax_collect_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(account_mod, "assert_venue_configuration", lambda snap: None)
+    monkeypatch.delenv("LIVE_TAX_LEDGER_DIR", raising=False)
+    seen: list = []
+
+    def _collect(client, symbols, tax_dir, mode, *, now, settings, venue_snapshot=None):
+        seen.append(tax_dir)
+        return 0, ()
+
+    monkeypatch.setattr(tax_mod, "collect_and_persist_live_tax", _collect)
+    args = build_root_parser().parse_args(["live", "tax-collect"])
+    monkeypatch.setenv("LIVE_RECORD_RUN_ID", "run_a_12345678")
+    args.handler(args)
+    monkeypatch.setenv("LIVE_RECORD_RUN_ID", "run_b_12345678")
+    args.handler(args)
+    assert len(seen) == 2
+    assert seen[0] == seen[1]
+    assert seen[0].name == "testnet"
+    assert "runs" not in seen[0].parts
+
+
+def test_tax_collect_halts_on_hedge_mode(monkeypatch, tmp_path) -> None:
+    import pytest
+
+    import src.live.tax_ledger as tax_mod
+
+    _stub_live_tax_collect_env(monkeypatch, tmp_path, dual_side=True)
+    calls: list = []
+    monkeypatch.setattr(tax_mod, "collect_and_persist_live_tax", lambda *a, **k: calls.append(1))
+    args = build_root_parser().parse_args(["live", "tax-collect"])
+    with pytest.raises(SystemExit) as excinfo:
+        args.handler(args)
+    assert excinfo.value.code == 1
+    assert calls == []
+
+
+def test_tax_summary_live_mode_reads_account_scoped_ledger(monkeypatch, tmp_path) -> None:
+    import argparse
+
+    import src.cli.commands.live as live_mod
+
+    monkeypatch.setenv("LIVE_MODE", "live_testnet")
+    monkeypatch.setenv("LIVE_ORDER_API_KEY", "test-key")
+    monkeypatch.setenv("LIVE_ORDER_API_SECRET", "test-secret")
+    monkeypatch.setenv("LIVE_RECORD_RUN_ID", "run_a_12345678")
+    monkeypatch.delenv("LIVE_TAX_LEDGER_DIR", raising=False)
+    seen: dict = {}
+
+    def _fake(year, ledger_dir, *, source, config, coverage=None, boundary_marks=None, derive_boundary_marks=None):
+        seen.update(ledger_dir=ledger_dir, source=source, coverage=coverage)
+        return {"reconciliation": {"status": "not_applicable", "issues": []}, "mode": "live_testnet"}
+
+    monkeypatch.setattr("src.live.tax_summary.summarize_tax_year", _fake)
+    monkeypatch.setattr("src.live.tax_summary.write_tax_summary", lambda summary, path: None)
+    args = argparse.Namespace(year=2027, mode=None, ledger_dir=None, source=None, boundary_marks=None, output=str(tmp_path / "o.json"))
+    live_mod._run_tax_summary(args)
+    assert seen["ledger_dir"].name == "testnet"
+    assert "runs" not in seen["ledger_dir"].parts
+    assert seen["source"] == "venue"
+
+
+def test_tax_summary_uses_persisted_coverage_for_venue(monkeypatch, tmp_path) -> None:
+    import argparse
+    import io
+    import json
+    from contextlib import redirect_stdout
+
+    import pandas as pd
+
+    import src.cli.commands.live as live_mod
+    from src.live.tax_ledger import TaxWatermark, save_tax_watermark
+
+    ledger_dir = tmp_path / "venue_tax"
+    watermark = TaxWatermark(
+        last_trade_id={},
+        last_collected_at=pd.Timestamp("2028-01-02", tz="UTC"),
+        known_trade_symbols=frozenset(),
+        income_covered_from=pd.Timestamp("2026-08-03", tz="UTC"),
+        income_gaps=(),
+        genesis_at=pd.Timestamp("2026-11-01", tz="UTC"),
+        genesis_positions={},
+    )
+    save_tax_watermark(ledger_dir / "watermark.json", watermark)
+    args = argparse.Namespace(year=2027, mode="live_testnet", ledger_dir=str(ledger_dir), source=None, boundary_marks=None, output=None)
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        live_mod._run_tax_summary(args)
+    out_path = __import__("pathlib").Path(buf.getvalue().strip())
+    assert json.loads(out_path.read_text())["reconciliation"]["status"] == "reconciled"
+    (ledger_dir / "watermark.json").unlink()
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        live_mod._run_tax_summary(args)
+    summary = json.loads(__import__("pathlib").Path(buf.getvalue().strip()).read_text())
+    assert summary["reconciliation"]["status"] == "incomplete"
+    assert "genesis_missing" in {issue["code"] for issue in summary["reconciliation"]["issues"]}

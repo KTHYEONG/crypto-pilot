@@ -532,3 +532,12 @@ def test_event_info_order_recovery_unresolved_is_warning() -> None:
     assert "order_recovery_unresolved" in EVENT_INFO
     assert EVENT_INFO["order_recovery_unresolved"]["severity_label"] == "WARNING"
     assert event_severity("order_recovery_unresolved") == "WARNING"
+
+
+def test_event_info_tax_genesis_not_flat_is_critical() -> None:
+    """tax_genesis_not_flat is a registered CRITICAL event."""
+    from src.live.alerting import EVENT_INFO
+
+    assert "tax_genesis_not_flat" in EVENT_INFO
+    assert EVENT_INFO["tax_genesis_not_flat"]["severity_label"] == "CRITICAL"
+    assert "docker logs --tail 200 mhs-live-daemon" in EVENT_INFO["tax_genesis_not_flat"]["action"]

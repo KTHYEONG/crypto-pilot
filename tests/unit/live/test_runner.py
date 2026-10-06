@@ -496,7 +496,7 @@ def test_live_tax_issues_audited_without_halting(tmp_path, monkeypatch) -> None:
     runner_mod, settings, path, decision_time, now = _seed_live_tax_cycle(tmp_path, monkeypatch)
     calls: list = []
 
-    def _fake_collect(client, symbols, tax_dir, mode, *, now, settings=None):
+    def _fake_collect(client, symbols, tax_dir, mode, *, now, settings=None, venue_snapshot=None):
         calls.append((symbols, str(tax_dir), mode))
         return 2, (TaxCollectionIssue(stream="trades:AAAUSDT", stage="fetch", detail="boom"),)
 
@@ -516,7 +516,7 @@ def test_live_tax_invalid_watermark_audited_once(tmp_path, monkeypatch) -> None:
 
     runner_mod, settings, path, decision_time, now = _seed_live_tax_cycle(tmp_path, monkeypatch)
 
-    def _fake_collect(client, symbols, tax_dir, mode, *, now, settings=None):
+    def _fake_collect(client, symbols, tax_dir, mode, *, now, settings=None, venue_snapshot=None):
         raise DataIntegrityError("tax watermark unreadable")
 
     monkeypatch.setattr(runner_mod, "collect_and_persist_live_tax", _fake_collect)
@@ -781,7 +781,7 @@ def test_live_collection_receives_wall_clock_now(tmp_path, monkeypatch) -> None:
     runner_mod, settings, path, decision_time, now = _seed_live_tax_cycle(tmp_path, monkeypatch)
     seen: dict = {}
 
-    def _fake_collect(client, symbols, tax_dir, mode, *, now, settings=None):
+    def _fake_collect(client, symbols, tax_dir, mode, *, now, settings=None, venue_snapshot=None):
         seen["now"] = now
         return 0, ()
 
@@ -799,7 +799,7 @@ def test_live_tax_retention_gap_alerts(tmp_path, monkeypatch) -> None:
     runner_mod, settings, path, decision_time, now = _seed_live_tax_cycle(tmp_path, monkeypatch)
     alerts: list = []
 
-    def _fake_collect(client, symbols, tax_dir, mode, *, now, settings=None):
+    def _fake_collect(client, symbols, tax_dir, mode, *, now, settings=None, venue_snapshot=None):
         return 0, (TaxCollectionIssue(stream="income", stage="retention_gap", detail="uncovered [a..b]"),)
 
     monkeypatch.setattr(runner_mod, "collect_and_persist_live_tax", _fake_collect)
@@ -831,3 +831,75 @@ def test_runner_selects_strict_passive_repeg_policy_from_settings(tmp_path, monk
     assert captured["policy"].passive_pricing == "anchored_repeg"
     assert captured["policy"].repeg_interval_s == 30.0
     assert captured["policy"].passive_deadline_s == 1800.0
+
+
+def test_live_collection_receives_cycle_venue_snapshot(tmp_path, monkeypatch) -> None:
+    """The cycle's venue snapshot reaches collection as the genesis-anchoring snapshot."""
+    from decimal import Decimal
+
+    import src.live.runner as runner_mod
+    from src.live.account import AccountSnapshot
+
+    runner_mod, settings, path, decision_time, now = _seed_live_tax_cycle(tmp_path, monkeypatch)
+    seen: dict = {}
+
+    def _fake_collect(client, symbols, tax_dir, mode, *, now, settings=None, venue_snapshot=None):
+        seen["venue_snapshot"] = venue_snapshot
+        return 0, ()
+
+    monkeypatch.setattr(runner_mod, "collect_and_persist_live_tax", _fake_collect)
+    real_fetch = runner_mod.fetch_account_snapshot
+
+    def _with_position(client, now=None):
+        snap = real_fetch(client, now=now)
+        return AccountSnapshot(
+            taken_at=snap.taken_at, wallet_balance=snap.wallet_balance,
+            available_balance=snap.available_balance, total_maint_margin=snap.total_maint_margin,
+            unrealized_pnl=snap.unrealized_pnl, positions={"AAAUSDT": Decimal("1")},
+            dual_side_position=snap.dual_side_position, multi_assets_margin=snap.multi_assets_margin,
+        )
+
+    monkeypatch.setattr(runner_mod, "fetch_account_snapshot", _with_position)
+    report = runner_mod.run_shadow_cycle(settings, decision_time, path, now=now)
+    assert report.status in ("COMPLETE", "DEGRADED")
+    assert seen["venue_snapshot"].positions == {"AAAUSDT": Decimal("1")}
+    assert seen["venue_snapshot"].taken_at == now
+
+
+def test_disabled_live_collection_is_audited(tmp_path, monkeypatch) -> None:
+    """tax_collection_enabled=False skips collection with one audit event, cycle COMPLETE."""
+    import src.live.runner as runner_mod
+
+    runner_mod, settings, path, decision_time, now = _seed_live_tax_cycle(tmp_path, monkeypatch)
+    settings.tax_collection_enabled = False
+    calls: list = []
+
+    def _fake_collect(client, symbols, tax_dir, mode, *, now, settings=None, venue_snapshot=None):
+        calls.append(symbols)
+        return 0, ()
+
+    monkeypatch.setattr(runner_mod, "collect_and_persist_live_tax", _fake_collect)
+    report = runner_mod.run_shadow_cycle(settings, decision_time, path, now=now)
+    assert report.status == "COMPLETE"
+    assert calls == []
+    assert len(_audit_events_by_name(tmp_path, "tax_collection_disabled")) == 1
+
+
+def test_non_flat_genesis_alerts(tmp_path, monkeypatch) -> None:
+    """A genesis_not_flat issue dispatches exactly one tax_genesis_not_flat alert."""
+    import src.live.runner as runner_mod
+    from src.live.tax_ledger import TaxCollectionIssue
+
+    runner_mod, settings, path, decision_time, now = _seed_live_tax_cycle(tmp_path, monkeypatch)
+    alerts: list = []
+
+    def _fake_collect(client, symbols, tax_dir, mode, *, now, settings=None, venue_snapshot=None):
+        return 0, (TaxCollectionIssue(stream="genesis", stage="genesis_not_flat", detail="AAAUSDT=1"),)
+
+    monkeypatch.setattr(runner_mod, "collect_and_persist_live_tax", _fake_collect)
+    monkeypatch.setattr(runner_mod, "dispatch_alert", lambda settings, **kw: alerts.append(kw))
+    report = runner_mod.run_shadow_cycle(settings, decision_time, path, now=now)
+    assert report.status == "COMPLETE"
+    genesis = [a for a in alerts if a["event"] == "tax_genesis_not_flat"]
+    assert len(genesis) == 1
+    assert genesis[0]["detail"] == "AAAUSDT=1"

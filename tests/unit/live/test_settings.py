@@ -699,3 +699,22 @@ def test_tax_summary_settings_validated() -> None:
         LiveSettings(tax_settlement_asset="usdt")
     with pytest.raises(ValueError, match="tax_timezone"):
         LiveSettings(tax_timezone="Mars/Olympus")
+
+
+def test_live_modes_do_not_derive_run_scoped_tax_ledger(tmp_path, monkeypatch) -> None:
+    import src.common.paths as paths_mod
+    import src.live.settings as settings_mod
+    from src.live.settings import LiveSettings
+
+    monkeypatch.setattr(paths_mod, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(settings_mod, "DATA_DIR", tmp_path)
+    live = LiveSettings(
+        mode="live_testnet", record_run_id="run_a_12345678",
+        order_api_key="k", order_api_secret="s",  # noqa: S106 - hermetic test credential
+    )
+    assert live.tax_ledger_dir is None
+    assert live.ledger_path == str(tmp_path / "state" / "runs" / "run_a_12345678" / "position_ledger.json")
+    assert live.fills_dir == str(tmp_path / "state" / "runs" / "run_a_12345678" / "fills")
+    assert live.order_journal_path == str(tmp_path / "state" / "runs" / "run_a_12345678" / "order_journal.jsonl")
+    paper = LiveSettings(mode="paper", record_run_id="run_a_12345678")
+    assert paper.tax_ledger_dir == str(tmp_path / "state" / "runs" / "run_a_12345678" / "tax_ledger")

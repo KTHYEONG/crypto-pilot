@@ -114,11 +114,13 @@ from src.live.sizing import target_quantities
 from src.live.tax_ledger import (
     TaxLedgerCorruptError,
     TaxRecord,
+    VenuePositionSnapshot,
     append_tax_records,
     collect_and_persist_live_tax,
     default_tax_ledger_dir,
     funding_tax_records,
     reconcile_cycle_cash,
+    resolve_tax_ledger_dir,
     simulated_tax_records,
 )
 from src.live.venue_listing import SettlementEvidence, settlement_evidence_from_bars
@@ -1289,10 +1291,14 @@ def _collect_live_tax_fail_soft(
     *,
     order_client: Any,
     symbols: Sequence[str],
+    snapshot: AccountSnapshot,
     decision_time: pd.Timestamp,
     now: pd.Timestamp,
 ) -> None:
     """Collect venue tax evidence after a mutating cycle; never halts the cycle.
+
+    ``snapshot`` is the venue account state at cycle start; the first collection into a ledger
+    records it as the genesis that anchors the yearly fold.
 
     Suppressed modes only ensure the tax directory exists: their simulated TRADE
     records and cash reconciliation were already written by the journal commit.
@@ -1300,8 +1306,12 @@ def _collect_live_tax_fail_soft(
     retention gap (income older than the venue keeps) is alerted for operator backfill.
     """
     try:
-        tax_dir = settings.resolved_tax_ledger_dir(default_tax_ledger_dir)
+        tax_dir = resolve_tax_ledger_dir(settings)
         tax_dir.mkdir(parents=True, exist_ok=True)
+        if not settings.mode.suppresses_mutations and not settings.tax_collection_enabled:
+            audit.record("tax_collection_disabled", mode=settings.mode.value, tax_dir=str(tax_dir))
+            logger.warning("[DATA] tax_collection_disabled mode=%s tax_dir=%s", settings.mode.value, tax_dir)
+            return
         if not settings.mode.suppresses_mutations and settings.tax_collection_enabled:
             try:
                 _, live_tax_issues = collect_and_persist_live_tax(
@@ -1311,6 +1321,7 @@ def _collect_live_tax_fail_soft(
                     settings.mode.value,
                     now=now,
                     settings=settings,
+                    venue_snapshot=VenuePositionSnapshot(taken_at=snapshot.taken_at, positions=dict(snapshot.positions)),
                 )
             except DataIntegrityError as exc:
                 audit.record("tax_watermark_invalid", error=str(exc))
@@ -1343,6 +1354,15 @@ def _collect_live_tax_fail_soft(
                             detail=live_issue.detail,
                             decision_time=decision_time,
                             dedupe_key=f"tax_income_gap:{live_issue.detail}",
+                            now=now,
+                        )
+                    elif live_issue.stage == "genesis_not_flat":
+                        dispatch_alert(
+                            settings,
+                            event="tax_genesis_not_flat",
+                            detail=live_issue.detail,
+                            decision_time=decision_time,
+                            dedupe_key=f"tax_genesis_not_flat:{tax_dir}",
                             now=now,
                         )
     except Exception as exc:
@@ -1649,7 +1669,7 @@ def run_shadow_cycle(
         if depth_summary is not None:
             audit.record("exec_depth_capture", **dataclasses.asdict(depth_summary))
         _collect_live_tax_fail_soft(
-            settings, audit, order_client=order_client, symbols=wanted_symbols,
+            settings, audit, order_client=order_client, symbols=wanted_symbols, snapshot=snapshot,
             decision_time=decision_time, now=now_ts,
         )
 

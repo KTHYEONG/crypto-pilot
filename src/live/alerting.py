@@ -290,6 +290,15 @@ EVENT_INFO: dict[str, dict[str, str]] = {
         "impact": "복구 불가한 거래소 소득 기록 공백이 발생했습니다. 세금 집계가 불완전합니다.",
         "action": "docker logs --tail 200 mhs-live-daemon\ndocker exec mhs-live-daemon uv run python -m src.cli.main live tax-collect",
     },
+    "tax_genesis_not_flat": {
+        "title": "세금 원장 기준시점 포지션 보유",
+        "severity_badge": "🚨 긴급",
+        "severity_label": "CRITICAL",
+        "header_color": "#dc2626",
+        "bg_color": "#fef2f2",
+        "impact": "세금 원장 수집이 포지션 보유 상태에서 시작되어 이 원장의 연간 집계는 완결성을 증명할 수 없습니다.",
+        "action": "docker logs --tail 200 mhs-live-daemon\ndocker exec mhs-live-daemon cat /app/data/state/tax_ledger/<testnet|mainnet>/watermark.json",
+    },
     "daemon_unresponsive": {
         "title": "라이브 데몬 무응답",
         "severity_badge": "🚨 긴급",

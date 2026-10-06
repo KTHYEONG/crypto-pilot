@@ -665,7 +665,7 @@ def test_tax_fail_soft_paths(monkeypatch, tmp_path) -> None:
     settings = _paper_settings(tmp_path, "tx")
     audit = AuditLog(tmp_path / "audit.jsonl")
     _collect_live_tax_fail_soft(
-        settings, audit, order_client=object(), symbols=[], decision_time=DECISION, now=NOW
+        settings, audit, order_client=object(), symbols=[], snapshot=_flat_snapshot(), decision_time=DECISION, now=NOW
     )
     live_settings = _live_settings(tmp_path, "txl")
 
@@ -675,7 +675,7 @@ def test_tax_fail_soft_paths(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(runner_mod, "collect_and_persist_live_tax", _corrupt)
     monkeypatch.setattr(runner_mod, "dispatch_alert", lambda *a, **k: None)
     _collect_live_tax_fail_soft(
-        live_settings, audit, order_client=object(), symbols=["AAAUSDT"], decision_time=DECISION, now=NOW
+        live_settings, audit, order_client=object(), symbols=["AAAUSDT"], snapshot=_flat_snapshot(), decision_time=DECISION, now=NOW
     )
     class Issue:
         stream = "s"
@@ -686,7 +686,7 @@ def test_tax_fail_soft_paths(monkeypatch, tmp_path) -> None:
         runner_mod, "collect_and_persist_live_tax", lambda *a, **k: ((), [Issue()])
     )
     _collect_live_tax_fail_soft(
-        live_settings, audit, order_client=object(), symbols=["AAAUSDT"], decision_time=DECISION, now=NOW
+        live_settings, audit, order_client=object(), symbols=["AAAUSDT"], snapshot=_flat_snapshot(), decision_time=DECISION, now=NOW
     )
     monkeypatch.setattr(
         runner_mod,
@@ -694,7 +694,7 @@ def test_tax_fail_soft_paths(monkeypatch, tmp_path) -> None:
         lambda *a, **k: (_ for _ in ()).throw(OSError("io")),
     )
     _collect_live_tax_fail_soft(
-        live_settings, audit, order_client=object(), symbols=["AAAUSDT"], decision_time=DECISION, now=NOW
+        live_settings, audit, order_client=object(), symbols=["AAAUSDT"], snapshot=_flat_snapshot(), decision_time=DECISION, now=NOW
     )
     records = [json.loads(line) for line in audit.path.read_text().splitlines()]
     assert [record["event"] for record in records] == [

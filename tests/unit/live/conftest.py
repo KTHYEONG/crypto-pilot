@@ -76,6 +76,7 @@ def _isolate_live_state_paths(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None
     replacements = {
         "default_order_journal_path": state / "order_journal.jsonl",
         "default_tax_ledger_dir": state / "tax_ledger",
+        "default_venue_tax_ledger_root": state / "venue_tax_ledger",
         "default_execution_quality_dir": state / "execution_quality",
         "default_microstructure_dir": state / "microstructure",
         "default_portfolio_state_dir": state / "portfolio_state",
