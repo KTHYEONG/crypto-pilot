@@ -51,6 +51,9 @@ DELETED_MODULES: Final[tuple[str, ...]] = (
     "src.quant.evaluation.promotion",
     "src.quant.technical_experts.catalog",
     "src.quant.technical_experts.contracts",
+    "src.common.settings",
+    "src.live.signal_step_result",
+    "src.mhs.pipeline.stages.diagnostic",
     "src.quant.technical_experts.trend_screen_catalog",
 )
 RETIRED_SYMBOLS: Final[tuple[tuple[str, str], ...]] = (
