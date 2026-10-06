@@ -19,7 +19,7 @@
 - /live_capture/raw/*.json
 + /live_capture/raw/archive/**
 + /live_capture/**
-# Exclude re-downloadable market data (ohlcv, markPriceKlines, funding, metrics).
+# Exclude re-downloadable market data (ohlcv, funding) and any retired legacy feed dirs.
 - /futures/**
 # Exclude everything else by default.
 - **
