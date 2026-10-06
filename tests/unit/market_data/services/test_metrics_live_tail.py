@@ -1,7 +1,6 @@
-"""Contract coverage for the OI/LSR live REST tail top-up.
+"""Contract coverage for the metrics live merge helper.
 
-Covers _merge_metrics_frames precedence, ensure_metrics_live_tail canonical
-schema + PIT lag, per-endpoint fail-soft, and a regression guard that the
+Covers _merge_metrics_frames precedence and a regression guard that the
 authoritative merge path stays equivalent to the pre-refactor concat.
 """
 
@@ -10,9 +9,7 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-import src.market_data.services.futures_collection as fc
 from src.market_data.services.futures_collection import DataCollector
-from src.market_data.storage.schemas import METRICS_CANONICAL_COLUMNS
 
 
 def _mk(ts: list[int], oi: list[float]) -> pd.DataFrame:
@@ -64,48 +61,3 @@ def test_ensure_metrics_data_still_byte_identical_after_merge_refactor() -> None
 
 
 _TS = [1_788_000_000_000, 1_788_000_300_000, 1_788_000_600_000]
-
-
-def _canned(endpoint: str, symbol: str, *, period: str = "5m", limit: int = 500):
-    if endpoint == "openInterestHist":
-        return [{"timestamp": t, "sumOpenInterest": "100.0", "sumOpenInterestValue": "9000.0"} for t in _TS]
-    if endpoint == "globalLongShortAccountRatio":
-        return [{"timestamp": t, "longShortRatio": "1.5"} for t in _TS]
-    if endpoint == "topLongShortPositionRatio":
-        return [{"timestamp": t, "longShortRatio": "2.5"} for t in _TS]
-    if endpoint == "takerlongshortRatio":
-        return [{"timestamp": t, "buySellRatio": "0.8"} for t in _TS]
-    raise AssertionError(endpoint)
-
-
-def test_ensure_metrics_live_tail_writes_canonical_schema(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(fc, "metrics_path", lambda sym: tmp_path / f"{sym}.parquet")
-    collector = DataCollector()
-    monkeypatch.setattr(collector.client, "fetch_futures_data_metric", _canned)
-
-    collector.ensure_metrics_live_tail("BTCUSDT", lookback_days=30)
-
-    df = pd.read_parquet(tmp_path / "BTCUSDT.parquet")
-    assert list(df.columns) == list(METRICS_CANONICAL_COLUMNS)
-    assert (df["available_at"] - df["datetime"] == pd.Timedelta(minutes=5)).all()
-    assert df["long_short_ratio"].tolist() == pytest.approx([1.5] * len(df))
-    assert df["top_trader_long_short_ratio"].tolist() == pytest.approx([2.5] * len(df))
-    assert df["sum_taker_long_short_vol_ratio"].tolist() == pytest.approx([0.8] * len(df))
-    assert df["sum_open_interest"].tolist() == pytest.approx([100.0] * len(df))
-
-
-def test_ensure_metrics_live_tail_failsoft_on_partial_endpoint_failure(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(fc, "metrics_path", lambda sym: tmp_path / f"{sym}.parquet")
-    collector = DataCollector()
-
-    def _flaky(endpoint, symbol, *, period="5m", limit=500):
-        if endpoint == "takerlongshortRatio":
-            raise ConnectionError("boom")
-        return _canned(endpoint, symbol, period=period, limit=limit)
-
-    monkeypatch.setattr(collector.client, "fetch_futures_data_metric", _flaky)
-
-    # The per-symbol loop in _refresh_live_universe wraps this in try/except; a
-    # raised error must surface here (not be silently swallowed inside the method).
-    with pytest.raises(ConnectionError):
-        collector.ensure_metrics_live_tail("BTCUSDT")

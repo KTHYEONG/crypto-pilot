@@ -1223,7 +1223,7 @@ def _run_folds_parallel(
     codes, matching the sequential path.
 
     ``fork`` (not ``spawn``) is required: spawn workers re-import the module and
-    lose the caller's monkeypatched ``funding_path``/``_mark_price_path`` (used
+    lose the caller's monkeypatched ``funding_path`` (used
     by the synthetic-market test suite and reproducible diagnostic fixtures),
     and the Phase-1 11.4GiB RSS regression was traced to the main process's own
     top-level matrices and minute-frame retention, not to fork-COW sharing, so

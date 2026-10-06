@@ -48,7 +48,7 @@ __all__ = [
 #: The explicit fork context pinned as ``mp_context`` for every MHS
 #: ``ProcessPoolExecutor``.  ``spawn`` is unusable here: it re-imports the
 #: module in each worker and drops the caller's monkeypatched
-#: ``funding_path``/``_mark_price_path``, and pickling still copies the panels.
+#: ``funding_path``, and pickling still copies the panels.
 FORK_CONTEXT: BaseContext = multiprocessing.get_context("fork")
 
 #: Module-global read-only payload registry inherited copy-on-write by fork

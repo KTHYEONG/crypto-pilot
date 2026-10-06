@@ -8,7 +8,6 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-import src.market_data.services.futures_collection as fc
 import src.mhs.marks as marks
 from src.common.errors import DataIntegrityError
 from src.mhs.evaluation import folds as folds_mod
@@ -104,8 +103,6 @@ def _copy_market(root: Path, tmp_path_factory, tag: str) -> Path:
 
 def _point_marks_at(root: Path, monkeypatch) -> None:
     monkeypatch.setattr(marks, "funding_path", lambda sym: root / "funding" / f"{sym}.parquet")
-    monkeypatch.setattr(fc, "_mark_price_path",
-                        lambda symbol, timeframe: root / "markPriceKlines" / timeframe / f"{symbol}.parquet")
     from src.mhs.marks import clear_mhs_market_data_caches
 
     clear_mhs_market_data_caches()

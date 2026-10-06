@@ -66,8 +66,8 @@ def _write_mhs_market(root: Path, symbols: list[str], n_hours: int = N_HOURS) ->
     rng = np.random.default_rng(20260807)
     epoch = (hourly - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta("1ms")
     hour_dir, minute_dir = root / "1h", root / "1m"
-    funding_dir, mark_dir = root / "funding", root / "markPriceKlines" / "1h"
-    for d in (hour_dir, minute_dir, funding_dir, mark_dir):
+    funding_dir = root / "funding"
+    for d in (hour_dir, minute_dir, funding_dir):
         d.mkdir(parents=True, exist_ok=True)
     minute_idx = pd.date_range(START, end, freq="1min", tz="UTC")
     minute_epoch = (minute_idx - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta("1ms")
@@ -89,30 +89,17 @@ def _write_mhs_market(root: Path, symbols: list[str], n_hours: int = N_HOURS) ->
         pd.DataFrame({
             "timestamp": epoch, "funding_rate": [0.00005] * sym_n, "datetime": hourly,
         }).to_parquet(funding_dir / f"{sym}.parquet")
-        mark_hourly = (
-            pd.Series(minute_prices, index=minute_idx).resample("1h").last().reindex(hourly).to_numpy()
-        )
-        pd.DataFrame({
-            "timestamp": epoch, "open": mark_hourly, "high": mark_hourly,
-            "low": mark_hourly, "close": mark_hourly, "datetime": hourly,
-        }).to_parquet(mark_dir / f"{sym}.parquet")
     return end
 
 
 @pytest.fixture(scope="module")
 def fold_market(tmp_path_factory) -> tuple[Path, pd.Timestamp]:
-    import src.market_data.services.futures_collection as fc
-
     root = tmp_path_factory.mktemp("mhs_opt_market")
     end = _write_mhs_market(root, DEV_SYMBOLS)
-    originals = {"funding_path": marks.funding_path, "mark_price_path": fc._mark_price_path}
+    originals = {"funding_path": marks.funding_path}
     marks.funding_path = lambda sym: root / "funding" / f"{sym}.parquet"
-    fc._mark_price_path = (
-        lambda symbol, timeframe: root / "markPriceKlines" / timeframe / f"{symbol}.parquet"
-    )
     yield root, end
     marks.funding_path = originals["funding_path"]
-    fc._mark_price_path = originals["mark_price_path"]
 
 
 @pytest.fixture(scope="module")

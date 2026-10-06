@@ -9,7 +9,6 @@ import pytest
 from src.cli.commands.data import (
     _mhs_execution,
     _refresh_live_universe,
-    _refresh_one_symbol_tail,
     add_data_commands,
 )
 
@@ -63,29 +62,6 @@ def test_data_collect_mhs_execution_threads_timeframe_to_plan(monkeypatch) -> No
     args = parser.parse_args(["data", "collect", "mhs-execution"])
     _mhs_execution(args)
     assert captured["timeframe"] == "3m"
-
-
-def test_data_refresh_one_symbol_tail_never_calls_mark_collector() -> None:
-    """MHS collection excludes mark: per-symbol dispatch requests only the
-    declared trade-OHLCV and funding feeds even when the collector exposes
-    mark/metrics methods."""
-    calls: list[str] = []
-
-    class _Collector:
-        def ensure_ohlcv_data(self, symbol, timeframe, start, end):
-            calls.append("ohlcv")
-
-        def ensure_funding_data(self, symbol, start, end):
-            calls.append("funding")
-
-        def ensure_mark_price_data(self, symbol, timeframe, start, end):
-            calls.append("mark")
-
-        def ensure_mark_price_klines(self, symbol, timeframe, start, end):
-            calls.append("mark_legacy")
-
-    assert _refresh_one_symbol_tail(_Collector(), "AAAUSDT", "2026-01-01", "2026-01-02") is True
-    assert calls == ["ohlcv", "funding"]
 
 
 def test_data_refresh_live_universe_registered_and_dispatches(monkeypatch) -> None:
@@ -152,12 +128,6 @@ def test_data_refresh_live_universe_one_symbol_failure_does_not_abort(tmp_path, 
             funding = [last - k * FUNDING_DEFAULT_INTERVAL_MS for k in (2, 1, 0)]
             pd.DataFrame({"timestamp": funding, "funding_rate": [0.0001] * 3}).to_parquet(funding_dir / f"{symbol}.parquet", index=False)
 
-        def ensure_mark_price_data(self, symbol, timeframe, start, end):
-            pass
-
-        def ensure_metrics_live_tail(self, symbol, *, lookback_days=7):
-            pass
-
     monkeypatch.setattr(data_refresh, "DataCollector", FlakyCollector)
 
     parser = _mhs_parser()
@@ -167,57 +137,6 @@ def test_data_refresh_live_universe_one_symbol_failure_does_not_abort(tmp_path, 
     assert sorted(seen) == ["AAAUSDT", "BUSDT"]
 
 
-
-
-def test_refresh_live_universe_metrics_tail_is_failsoft(tmp_path, monkeypatch) -> None:
-    """Fresh symbols never reach the metrics tail."""
-    import pandas as pd
-    import src.live.data_refresh as data_refresh
-    from src.market_data.services.futures_collection import FUNDING_DEFAULT_INTERVAL_MS, last_settled_funding_epoch_ms
-
-    monkeypatch.setenv("LIVE_MIN_UNIVERSE_SYMBOLS", "1")
-    monkeypatch.setattr("src.common.paths.FUTURES_DATA_DIR", tmp_path)
-    ohlcv_dir = tmp_path / "ohlcv" / "1h"
-    ohlcv_dir.mkdir(parents=True)
-    funding_dir = tmp_path / "funding"
-    funding_dir.mkdir(parents=True)
-    now = pd.Timestamp.now(tz="UTC")
-
-    def _write_symbol(symbol: str, fresh: bool) -> None:
-        tail = now.floor("1h") if fresh else now.floor("1h") - pd.Timedelta(days=5)
-        stamps = [int((tail - pd.Timedelta(hours=h)).value // 10**6) for h in range(48)]
-        pd.DataFrame({"timestamp": stamps, "close": [1.0] * 48}).to_parquet(ohlcv_dir / f"{symbol}.parquet", index=False)
-        last = last_settled_funding_epoch_ms(now, FUNDING_DEFAULT_INTERVAL_MS)
-        if not fresh:
-            last -= 3 * FUNDING_DEFAULT_INTERVAL_MS
-        funding = [last - k * FUNDING_DEFAULT_INTERVAL_MS for k in (2, 1, 0)]
-        pd.DataFrame({"timestamp": funding, "funding_rate": [0.0001] * 3}).to_parquet(funding_dir / f"{symbol}.parquet", index=False)
-    for symbol in ("R0USDT", "R1USDT", "R2USDT"):
-        _write_symbol(symbol, fresh=True)
-    tail_calls: list[str] = []
-
-    class FakeCollector:
-        def ensure_ohlcv_data(self, symbol, timeframe, start, end):
-            raise AssertionError("fresh symbols must not be refreshed")
-
-        def ensure_funding_data(self, symbol, start, end):
-            raise AssertionError("fresh symbols must not be refreshed")
-
-        def ensure_mark_price_data(self, symbol, timeframe, start, end):
-            pass
-
-        def ensure_metrics_live_tail(self, symbol, *, lookback_days=7):
-            tail_calls.append(symbol)
-            if symbol == "R0USDT":
-                raise ConnectionError("metrics endpoint down")
-
-    monkeypatch.setattr(data_refresh, "DataCollector", FakeCollector)
-
-    parser = _mhs_parser()
-    args = parser.parse_args(["data", "refresh-live-universe"])
-    _refresh_live_universe(args)
-
-    assert tail_calls == []
 
 
 def test_refresh_live_universe_cold_box_fails_loud(tmp_path, monkeypatch) -> None:

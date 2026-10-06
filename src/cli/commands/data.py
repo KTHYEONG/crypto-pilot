@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import logging
-from typing import Any
 
 import pandas as pd
 
@@ -161,17 +160,6 @@ def _report_internal_gaps(args: argparse.Namespace) -> None:
     for sym, spans in sorted(gaps.items()):
         for start, end, length in spans:
             _logger.info("internal gap symbol=%s start=%s end=%s length_bars=%d", sym, start, end, length)
-
-
-def _refresh_one_symbol_tail(collector: Any, symbol: str, start: str, end: str) -> bool:
-    """Refresh the MHS live-universe data required by the declared trade-OHLCV and funding contract. The command does not create mark-price or daily-metrics artifacts as a hidden prerequisite."""
-    try:
-        collector.ensure_ohlcv_data(symbol, "1h", start, end)
-        collector.ensure_funding_data(symbol, start, end)
-        return True
-    except Exception as exc:  # noqa: BLE001 - one symbol's flakiness must not abort the batch
-        _logger.warning("[DATA] refresh_live_universe symbol=%s failed error=%s", symbol, exc)
-        return False
 
 
 def _normalize_market(args: argparse.Namespace) -> None:

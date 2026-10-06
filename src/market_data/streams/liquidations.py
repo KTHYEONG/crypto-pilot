@@ -348,58 +348,6 @@ def _earliest_ingest_merge(
     return combined
 
 
-def load_liquidation_events(
-    directory: Path | str | None = None,
-    *,
-    since: pd.Timestamp | None = None,
-) -> pd.DataFrame:
-    if directory is None:
-        directory = default_liquidations_dir()
-    directory = Path(directory)
-    if not directory.exists():
-        return pd.DataFrame()
-    files = sorted(directory.glob("liquidations_*.parquet"))
-    if not files:
-        return pd.DataFrame()
-    frames: list[pd.DataFrame] = []
-    for p in files:
-        try:
-            df = pd.read_parquet(p)
-            if df.empty:
-                continue
-            frames.append(df)
-        except Exception as exc:  # noqa: BLE001
-            _logger.debug("load_liquidation_events skip %s: %s", p, exc)
-            continue
-    if not frames:
-        return pd.DataFrame()
-    combined = pd.concat(frames, ignore_index=True)
-    if combined.empty:
-        return pd.DataFrame()
-    # ensure tz-aware event_time
-    if "event_time" in combined.columns:
-        combined["event_time"] = pd.to_datetime(combined["event_time"], utc=True)
-    if "ingested_at" in combined.columns:
-        combined["ingested_at"] = pd.to_datetime(combined["ingested_at"], utc=True)
-    if "raw_order_json" in combined.columns:
-        combined["raw_order_json"] = combined["raw_order_json"].astype("string")
-    # dedup globally (cross-file same key unlikely but keep)
-    dedup_subset = [c for c in ["symbol", "event_time_ms", "price", "orig_qty", "filled_accum_qty"] if c in combined.columns]
-    if dedup_subset:
-        # ensure event_time_ms exists
-        if "event_time_ms" not in combined.columns and "event_time" in combined.columns:
-            combined["event_time_ms"] = pd.to_datetime(combined["event_time"], utc=True).astype("int64") // 1_000_000
-        combined = combined.drop_duplicates(subset=dedup_subset, keep="last")
-    if since is not None:
-        since_ts = pd.to_datetime(since, utc=True)
-        if "event_time" in combined.columns:
-            combined = combined[combined["event_time"] >= since_ts]
-    # sort by event_time
-    if "event_time" in combined.columns:
-        combined = combined.sort_values("event_time").reset_index(drop=True)
-    return combined
-
-
 def default_liquidations_dir() -> Path:
     return DATA_DIR / "futures" / "liquidations"
 

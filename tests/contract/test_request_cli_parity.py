@@ -328,12 +328,9 @@ def test_marks_align_on_three_minute_grid() -> None:
 def test_missing_execution_cache_rejected_without_fallback() -> None:
     import pytest
 
-    from src.common.errors import DataIntegrityError
     from src.market_data.services import mhs_execution as mec
 
     assert mec._coverage("AAA", "3m", "2025-01-01", "2025-01-02", root="/nonexistent")["status"] == "MISSING"
-    with pytest.raises(DataIntegrityError, match="incomplete"):
-        mec.assert_execution_data_coverage(["AAA"], "3m", "2025-01-01", "2025-01-02", root="/nonexistent")
     with pytest.raises(ValueError, match="execution_timeframe"):
         mec._coverage("AAA", "1m", "2025-01-01", "2025-01-02", root="/nonexistent")  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="execution_timeframe"):
@@ -356,22 +353,6 @@ def test_execution_coverage_counts_three_minute_bars(tmp_path) -> None:
     assert result["rows"] == 4
 
 
-def test_execution_manifest_refresh_rejects_legacy_interval(tmp_path) -> None:
-    import json
-
-    import pytest
-
-    from src.market_data.services import mhs_execution as mec
-
-    manifest = tmp_path / "plan.json"
-    manifest.write_text(
-        json.dumps({"timeframe": "1m", "start": "2025-01-01", "end": "2025-01-02", "symbols": []}),
-        encoding="utf-8",
-    )
-    with pytest.raises(ValueError, match="execution_timeframe"):
-        mec.refresh_mhs_execution_manifest(manifest)
-
-
 def test_hourly_and_generic_contracts_preserved() -> None:
     import pandas as pd
     import pytest
@@ -381,8 +362,6 @@ def test_hourly_and_generic_contracts_preserved() -> None:
 
     assert fc._TIMEFRAME_MS["1m"] == 60_000
     assert fc._TIMEFRAME_MS["5m"] == 300_000
-    with pytest.raises(ValueError, match="hourly"):
-        mec.assert_relevant_mark_price_coverage(pd.DataFrame(), timeframe="3m")
     empty = pd.DataFrame(index=pd.DatetimeIndex([], tz="UTC"))
     mec.apply_dynamic_gap_exclusion(empty, "3m")
     mec.apply_dynamic_gap_exclusion(empty, "1h")

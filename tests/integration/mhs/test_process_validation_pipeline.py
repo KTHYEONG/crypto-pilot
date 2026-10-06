@@ -170,7 +170,6 @@ def test_held_symbol_window_carries_funding_knowledge_source(monkeypatch: pytest
     import pandas as pd
 
     import src.mhs.execution.window_stream as ws
-
     grid = pd.date_range("2024-01-01", periods=8, freq="3min", tz="UTC")
     weights = pd.DataFrame({"AAA": [1.0, 0.0], "BBB": [0.0, 0.0]}, index=pd.DatetimeIndex([grid[0], grid[2]], tz="UTC"))
     signals = pd.DatetimeIndex([grid[0] + pd.Timedelta(minutes=3), grid[2] + pd.Timedelta(minutes=3)], tz="UTC")
@@ -192,9 +191,6 @@ def test_held_symbol_window_carries_funding_knowledge_source(monkeypatch: pytest
             pd.DataFrame(1.0, index=grid, columns=["AAA", "BBB"]),
         ),
     )
-    import src.mhs.evaluation.integrity as integ
-
-    monkeypatch.setattr(integ, "_assert_cache_required_marks", lambda *a, **k: None)
     allocation = ws._estimate_mhs_execution_allocation(n_symbols=2, n_columns=2, bound_count=2)
     window = ws._materialize_execution_piece(
         piece_grid=grid,

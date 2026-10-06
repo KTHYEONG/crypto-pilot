@@ -23,7 +23,6 @@ import pandas as pd
 import pyarrow.parquet as pq
 import pytest
 
-import src.market_data.services.futures_collection as fc
 from src.mhs import marks as mhs_marks
 from src.mhs.evaluation.books import (
     _candidate_weight_books,
@@ -57,13 +56,13 @@ def _write_mark_market(
     symbols: list[str],
     n_hours: int = 96,
 ) -> None:
-    """1h mark + 3m OHLCV + 1h funding synthetic market (MHS convention)."""
+    """1h + 3m OHLCV + 1h funding synthetic market (MHS convention)."""
     hourly = pd.date_range(_START, periods=n_hours, freq="1h", tz="UTC")
     minute = pd.date_range(_START, _START + pd.Timedelta(hours=n_hours - 1), freq="3min", tz="UTC")
     rng = np.random.default_rng(20260807)
     epoch_h = (hourly - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta("1ms")
     epoch_m = (minute - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta("1ms")
-    for d in (root / "3m", root / "1h", root / "funding", root / "markPriceKlines" / "1h"):
+    for d in (root / "3m", root / "1h", root / "funding"):
         d.mkdir(parents=True, exist_ok=True)
     for i, sym in enumerate(symbols):
         drift = 1e-5 * (i - len(symbols) / 2.0)
@@ -84,23 +83,12 @@ def _write_mark_market(
         pd.DataFrame(
             {"timestamp": epoch_h, "funding_rate": [0.00005] * n_hours, "datetime": hourly},
         ).to_parquet(root / "funding" / f"{sym}.parquet")
-        mark = (
-            pd.Series(mp, index=minute).resample("1h").last().reindex(hourly).to_numpy()
-        )
-        pd.DataFrame(
-            {"timestamp": epoch_h, "open": mark, "high": mark, "low": mark,
-             "close": mark, "datetime": hourly},
-        ).to_parquet(root / "markPriceKlines" / "1h" / f"{sym}.parquet")
 
 
 @pytest.fixture
 def mark_market(tmp_path, monkeypatch):
     root = tmp_path / "market"
     _write_mark_market(root, _SYMBOLS)
-    monkeypatch.setattr(
-        fc, "_mark_price_path",
-        lambda symbol, timeframe: root / "markPriceKlines" / timeframe / f"{symbol}.parquet",
-    )
     monkeypatch.setattr(
         mhs_marks, "funding_path", lambda sym: root / "funding" / f"{sym}.parquet",
     )
@@ -333,10 +321,6 @@ def test_scenario_06_no_dataframe_in_submit_args(tmp_path, monkeypatch) -> None:
 
     root = tmp_path / "market"
     _write_mark_market(root, _SYMBOLS, n_hours=2700)
-    monkeypatch.setattr(
-        fc, "_mark_price_path",
-        lambda symbol, timeframe: root / "markPriceKlines" / timeframe / f"{symbol}.parquet",
-    )
     monkeypatch.setattr(
         mhs_marks, "funding_path", lambda sym: root / "funding" / f"{sym}.parquet",
     )

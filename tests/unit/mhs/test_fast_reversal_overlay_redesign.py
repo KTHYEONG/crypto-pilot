@@ -9,7 +9,6 @@ import numpy as np
 import pandas as pd
 import pytest
 
-import src.market_data.services.futures_collection as fc
 from src.mhs.diagnostic_run import run_mhs_horizon_diagnostic
 import src.mhs.evaluation.books as books_mod
 import src.mhs.evaluation.fold_weights as fold_weights
@@ -58,8 +57,7 @@ def _write_market(root: Path, n_hours: int, log_price_fn, include_minute: bool =
     mdir = root / "1m"
     threed = root / "3m"
     fdir = root / "funding"
-    mkdir = root / "markPriceKlines" / "1h"
-    for d in (hdir, mdir, threed, fdir, mkdir):
+    for d in (hdir, mdir, threed, fdir):
         d.mkdir(parents=True, exist_ok=True)
     minute_idx = pd.date_range(_START, end, freq="1min", tz="UTC")
     minute_epoch = (minute_idx - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta("1ms")
@@ -92,11 +90,6 @@ def _write_market(root: Path, n_hours: int, log_price_fn, include_minute: bool =
             ).dropna()
             three.insert(0, "timestamp", (three.index - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta("1ms"))
             three.to_parquet(threed / f"{sym}.parquet", index=False)
-            mark = pd.Series(mp, index=minute_idx).resample("1h").last().reindex(hourly).to_numpy()
-            pd.DataFrame(
-                {"timestamp": epoch, "open": mark, "high": mark, "low": mark,
-                 "close": mark, "datetime": hourly},
-            ).to_parquet(mkdir / f"{sym}.parquet")
     return end
 
 
@@ -133,7 +126,6 @@ def mhs_market(tmp_path, monkeypatch):
     n_hours = 2700
     end = _write_market(root, n_hours, _random_walk_log_px(n_hours))
     monkeypatch.setattr(marks, "funding_path", lambda sym: root / "funding" / f"{sym}.parquet")
-    monkeypatch.setattr(fc, "_mark_price_path", lambda symbol, timeframe: root / "markPriceKlines" / timeframe / f"{symbol}.parquet")
     # Retained loaders are stateless; the shared invalidation entry point
     # keeps runs isolated when fixtures redirect data roots between tests.
     marks.clear_mhs_market_data_caches()
@@ -146,7 +138,6 @@ def choppy_market(tmp_path, monkeypatch):
     n_hours = 3200
     end = _write_market(root, n_hours, _trend_choppy_log_px(n_hours), include_minute=True)
     monkeypatch.setattr(marks, "funding_path", lambda sym: root / "funding" / f"{sym}.parquet")
-    monkeypatch.setattr(fc, "_mark_price_path", lambda symbol, timeframe: root / "markPriceKlines" / timeframe / f"{symbol}.parquet")
     # Retained loaders are stateless; the shared invalidation entry point
     # keeps runs isolated when fixtures redirect data roots between tests.
     marks.clear_mhs_market_data_caches()

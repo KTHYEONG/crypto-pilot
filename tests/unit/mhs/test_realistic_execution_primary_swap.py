@@ -18,7 +18,6 @@ import numpy as np
 import pandas as pd
 import pytest
 
-import src.market_data.services.futures_collection as fc
 from src.mhs.contracts import (
     MhsBookReport,
     MhsOutputTier,
@@ -84,8 +83,7 @@ def _write_mhs_market(root: Path) -> pd.Timestamp:
     hdir = root / "1h"
     mdir = root / "1m"
     fdir = root / "funding"
-    mkdir = root / "markPriceKlines" / "1h"
-    for d in (hdir, mdir, fdir, mkdir):
+    for d in (hdir, mdir, fdir):
         d.mkdir(parents=True, exist_ok=True)
     minute_idx = pd.date_range(_START, end, freq="1min", tz="UTC")
     minute_epoch = (minute_idx - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta("1ms")
@@ -114,10 +112,6 @@ def _write_mhs_market(root: Path) -> pd.Timestamp:
         pd.DataFrame(
             {"timestamp": epoch, "funding_rate": [0.00005] * n_hours, "datetime": hourly},
         ).to_parquet(fdir / f"{sym}.parquet")
-        mark = pd.Series(mp, index=minute_idx).resample("1h").last().reindex(hourly).to_numpy()
-        pd.DataFrame(
-            {"timestamp": epoch, "open": mark, "high": mark, "low": mark, "close": mark, "datetime": hourly},
-        ).to_parquet(mkdir / f"{sym}.parquet")
     return end
 
 
@@ -126,7 +120,6 @@ def mhs_market(tmp_path, monkeypatch):
     root = tmp_path / "market"
     end = _write_mhs_market(root)
     monkeypatch.setattr(marks, "funding_path", lambda sym: root / "funding" / f"{sym}.parquet")
-    monkeypatch.setattr(fc, "_mark_price_path", lambda symbol, timeframe: root / "markPriceKlines" / timeframe / f"{symbol}.parquet")
     # Retained loaders are stateless; the shared invalidation entry point
     # keeps runs isolated when fixtures redirect data roots between tests.
     marks.clear_mhs_market_data_caches()

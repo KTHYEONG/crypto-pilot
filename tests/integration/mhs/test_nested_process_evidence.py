@@ -582,10 +582,9 @@ def test_canonical_envelope_discloses_valuation_source() -> None:
     assert "MARK_PRICE" not in (base_payload["valuation_source"], stress_payload["valuation_source"])
 
 
-def test_mark_mutation_cannot_change_ohlcv_output(tmp_path, monkeypatch) -> None:
+def test_mark_mutation_cannot_change_ohlcv_output(tmp_path) -> None:
     import pathlib
 
-    import src.market_data.services.futures_collection as fc
     from src.mhs.backtest.inventory import replay_process_execution
     from src.mhs.execution.window_stream import _iter_mhs_execution_windows
     from src.mhs.types import ExecutionSpec
@@ -612,7 +611,6 @@ def test_mark_mutation_cannot_change_ohlcv_output(tmp_path, monkeypatch) -> None
     spec = ExecutionSpec()
     mark_path = tmp_path / "mark.parquet"
     pd.DataFrame({"timestamp": ms_3m, "datetime": grid_3m, "close": 100.0}).to_parquet(mark_path, index=False)
-    monkeypatch.setattr(fc, "_mark_price_path", lambda symbol, timeframe: mark_path)
     first_windows = list(
         _iter_mhs_execution_windows(targets, signals, str(root), "3m", start, end, funding, spec)
     )
