@@ -35,6 +35,7 @@ from tests.integration.mhs.test_mhs_horizon_diagnostic import (  # noqa: F401
     _write_mhs_market,
 )
 
+@pytest.mark.e2e_heavy
 @pytest.mark.xdist_group(MHS_SYNTHETIC_DEFAULT_GROUP)
 class TestQualityCalibrationWiring:
     """Quality calibration wiring contract: top-level books apply matching signal calibration."""
@@ -99,6 +100,7 @@ class TestQualityCalibrationWiring:
 class TestMhsHorizonDiagnostic:
     """MHS-10-DIAGNOSTIC-HOLDOUT-SEALED: dev-only diagnostic on a synthetic panel."""
 
+    @pytest.mark.e2e_heavy
     @pytest.mark.xdist_group(MHS_SYNTHETIC_DEFAULT_GROUP)
     def test_produces_frozen_books_and_separate_evidence_paths(self, report) -> None:
         assert report.status == "COMPLETE"
@@ -114,6 +116,7 @@ class TestMhsHorizonDiagnostic:
 
         assert research_baseline().execution_timeframe == "3m"
 
+    @pytest.mark.e2e_heavy
     @pytest.mark.xdist_group(MHS_SYNTHETIC_DEFAULT_GROUP)
     def test_diagnostic_ensemble_separate_from_executable_tranche(self, report) -> None:
         fast = report.books["fast_reversal"]
@@ -146,6 +149,7 @@ class TestMhsHorizonDiagnostic:
                 ),
             )
 
+@pytest.mark.e2e_heavy
 @pytest.mark.xdist_group(MHS_SYNTHETIC_DEFAULT_GROUP)
 class TestResourceTelemetry:
     """MHS-31-RESOURCE-TELEMETRY-ORDER: the report carries ordered non-negative
@@ -196,6 +200,7 @@ class TestResourceTelemetry:
             }
         assert report.research_go.eligible is False
 
+@pytest.mark.e2e_heavy
 @pytest.mark.xdist_group(MHS_SYNTHETIC_DEFAULT_GROUP)
 class TestWindowExecutionTelemetry:
     """MHS-31-RESOURCE-TELEMETRY-ORDER: per-window telemetry is ordered and
@@ -231,6 +236,7 @@ class TestWindowExecutionTelemetry:
         assert report.research_go.eligible is False
         assert "INCOMPLETE_ANCHORED_FOLD" in report.research_go.reason_codes
 
+@pytest.mark.e2e_heavy
 @pytest.mark.xdist_group(MHS_SYNTHETIC_DEFAULT_GROUP)
 class TestStrictSimulatedPrimary:
     """MHS-19-STRICT-SIMULATED-PRIMARY: the realistic immediate-taker bound is
@@ -256,6 +262,7 @@ class TestStrictSimulatedPrimary:
         assert fast.tail.event_window_bars > 0
         assert set(fast.tail.winsor_curve) == {10, 20, 30, 50}
 
+@pytest.mark.e2e_heavy
 class TestTouchDiagnostic:
     """MHS execution fill-model realism Phase 1: ``touch_diagnostic=True``
     adds an opt-in ``OHLCV_TOUCH_PROXY`` replay leg alongside the strict/stress
@@ -313,12 +320,14 @@ class TestFreezeBeforeFinalOos:
         with pytest.raises(Exception, match="cannot assign"):
             obs.filled_quantity = 0.1
 
+    @pytest.mark.e2e_heavy
     @pytest.mark.xdist_group(MHS_SYNTHETIC_DEFAULT_GROUP)
     def test_mhs_5m_03_signal_preservation(self, report) -> None:
         """MHS-5M-03-SIGNAL-PRESERVATION: signal and replay universes are reported separately."""
         assert isinstance(report.execution_symbols, tuple)
         assert report.execution_symbols
 
+@pytest.mark.e2e_heavy
 @pytest.mark.xdist_group(MHS_SYNTHETIC_DEFAULT_GROUP)
 class TestOhlcvValuationSource:
     """Every replay uses the fixed three-minute OHLCV valuation source."""
@@ -371,6 +380,7 @@ class TestMarkModeCli:
         with pytest.raises(SystemExit):
             parser.parse_args(["mhs-horizon-diagnostic", "--mark-mode", "bogus"])
 
+@pytest.mark.e2e_heavy
 @pytest.mark.xdist_group(MHS_LATE_MARKET_GROUP)
 class TestPitExecutionGrid:
     """MHS-25-FULL-PERIOD-PIT-GRID: a late-listed symbol never clips the replay
@@ -451,6 +461,7 @@ class TestAnchoredFoldGoGate:
     incomplete fold, negative strict Sharpe, non-positive stress Sharpe, or
     relevant termination produces Research GO false and reason codes."""
 
+    @pytest.mark.e2e_heavy
     @pytest.mark.xdist_group(MHS_SYNTHETIC_DEFAULT_GROUP)
     def test_three_folds_reported_and_go_false(self, report) -> None:
         expected = phase_1_anchored_purged_folds()
@@ -469,6 +480,7 @@ class TestAnchoredFoldGoGate:
         # The gate boolean routes to deployment readiness, never primary_valid alone.
         assert report.deployment_readiness.research_go_eligible is False
 
+    @pytest.mark.e2e_heavy
     @pytest.mark.xdist_group(MHS_SYNTHETIC_DEFAULT_GROUP)
     def test_fold_metrics_exposed(self, report) -> None:
         fold_report = report.folds[0]
@@ -558,6 +570,7 @@ class TestAnchoredFoldGoGate:
         assert GO_REASON_INCOMPLETE_FOLD in incomplete.reason_codes
         assert incomplete.eligible is False
 
+@pytest.mark.e2e_heavy
 class TestFoldSafeHorizonEfficiency:
     """SCENARIO_MHS_HORIZON_SEARCH_EFF_06_FULL_DIAGNOSTIC_REPORT_UNCHANGED: the
     discovery weight cache (Q3) is a pure performance change -- running the
@@ -621,6 +634,8 @@ class TestFoldSafeHorizonEfficiency:
         assert fold_safe_report.research_go == fold_safe_baseline_report.research_go
         assert fold_safe_report.blend.primary_autocorr_sharpe == fold_safe_baseline_report.blend.primary_autocorr_sharpe
 
+@pytest.mark.e2e_heavy
+@pytest.mark.mhs_parallel_parity
 class TestMhsPerfOptimizationO3FoldParity:
     """SCENARIO_O3_FOLD_PARITY: the three anchored folds run in parallel worker
     processes produce bit-identical per-fold evidence to a sequential baseline

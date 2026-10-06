@@ -16,7 +16,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 JsonDiag = dict[str, Any]
 
@@ -252,6 +252,103 @@ def _integration_targets(test_files: list[str]) -> list[str]:
     return targets
 
 
+HEAVY_MARKER: Final[str] = "e2e_heavy"
+PERIODIC_HEAVY_GATE: Final[str] = "uv run pytest tests/integration -m e2e_heavy -n 8 --dist loadgroup"
+_HEAVY_TIMEOUT_SECONDS: Final[int] = 3600
+
+
+def _marker_expression(*, run_slow: bool, include_heavy: bool) -> str:
+    """Pytest ``-m`` expression for the verification run.
+
+    Returns:
+        ``"slow"`` when ``run_slow`` (the slow and heavy tiers are disjoint);
+        ``"not slow"`` when ``include_heavy``; otherwise ``"not slow and not e2e_heavy"``.
+    """
+    if run_slow:
+        return "slow"
+    if include_heavy:
+        return "not slow"
+    return "not slow and not e2e_heavy"
+
+
+def _is_integration_target(target: str) -> bool:
+    """Whether a pytest target (path or node id) lies under a ``tests/integration/`` directory.
+
+    The path part before the first ``::`` is compared in POSIX form: it starts with
+    ``tests/integration/`` or contains ``/tests/integration/``.
+    """
+    path_part = target.split("::", 1)[0].replace("\\", "/")
+    return path_part.startswith("tests/integration/") or "/tests/integration/" in path_part
+
+
+def _collect_deferred_heavy(targets: list[str]) -> list[str]:
+    """Node ids among ``targets`` that the default run would skip as ``e2e_heavy``.
+
+    Runs ``<python> -m pytest --collect-only -p no:cacheprovider -p no:warnings
+    -m "not slow and e2e_heavy" <targets>`` through ``run_cmd`` only when at least one target
+    satisfies ``_is_integration_target`` (heavy marks exist only there); otherwise returns
+    ``[]`` without spawning a process. Do NOT pass ``-q``: ``addopts`` already supplies one,
+    and ``-qq`` collapses the listing to per-file counts with no node ids (a silent drop).
+
+    Returns:
+        Sorted unique stdout lines (whole line, right-stripped; parametrised ids may contain
+        spaces) matching ``^\\S+\\.py::`` (node ids relative to rootdir).
+        Exit status 5 (nothing selected) yields ``[]``.
+
+    Raises:
+        RuntimeError: Any other non-zero exit (collection error, guard ``UsageError``,
+            timeout 124); the message carries the first 10 lines of stdout/stderr.
+    """
+    if not any(_is_integration_target(t) for t in targets):
+        return []
+    cmd = [
+        sys.executable, "-m", "pytest", "--collect-only",
+        "-p", "no:cacheprovider", "-p", "no:warnings",
+        "-m", "not slow and e2e_heavy", *targets,
+    ]
+    res = run_cmd(cmd)
+    if res.returncode == 0:
+        ids: list[str] = []
+        for line in (res.stdout or "").splitlines():
+            stripped = line.rstrip()
+            if re.match(r"^\S+\.py::", stripped):
+                ids.append(stripped)
+        return sorted(set(ids))
+    if res.returncode == 5:
+        return []
+    combined = ((res.stdout or "") + "\n" + (res.stderr or "")).splitlines()[:10]
+    raise RuntimeError(f"heavy-tier collection failed (exit {res.returncode}):\n" + "\n".join(combined))
+
+
+def _deferral_lines(deferred: list[str]) -> tuple[list[str], list[JsonDiag]]:
+    """Human lines and JSON diagnostics announcing deferred heavy tests.
+
+    Returns:
+        ``([], [])`` when ``deferred`` is empty; otherwise a header
+        ``"DEFERRED | <n> e2e_heavy test(s) not run; include with --run-heavy or run the periodic gate: <PERIODIC_HEAVY_GATE>"``
+        followed by one ``"DEFERRED | <nodeid>"`` per id, and one diagnostic per id
+        ``{"file": <path part>, "line": 0, "error": "deferred e2e_heavy: <nodeid>",
+        "fix_hint": "uv run python tools/verify.py --run-heavy --files <path part>  (or the periodic gate)"}``.
+    """
+    if not deferred:
+        return [], []
+    header = (
+        f"DEFERRED | {len(deferred)} e2e_heavy test(s) not run; "
+        f"include with --run-heavy or run the periodic gate: {PERIODIC_HEAVY_GATE}"
+    )
+    lines = [header] + [f"DEFERRED | {nodeid}" for nodeid in deferred]
+    diags: list[JsonDiag] = []
+    for nodeid in deferred:
+        path_part = nodeid.split("::", 1)[0]
+        diags.append({
+            "file": path_part,
+            "line": 0,
+            "error": f"deferred e2e_heavy: {nodeid}",
+            "fix_hint": f"uv run python tools/verify.py --run-heavy --files {path_part}  (or the periodic gate)",
+        })
+    return lines, diags
+
+
 # ---------------------------------------------------------------------------
 # Diff Coverage Gate
 # ---------------------------------------------------------------------------
@@ -414,6 +511,11 @@ def main() -> None:
         help="Run tests marked slow (real-data suite) instead of excluding them",
     )
     parser.add_argument(
+        "--run-heavy",
+        action="store_true",
+        help="Include e2e_heavy tests instead of deferring and listing them",
+    )
+    parser.add_argument(
         "--pre-impl",
         action="store_true",
         help="Validate spec blueprint paths and wiring anchors before implementation",
@@ -505,6 +607,15 @@ def main() -> None:
         print(_emit_json("PASS", "all", [], None), file=sys.stderr)
         return
 
+    deferred: list[str] = []
+    if not (args.run_heavy or args.run_slow):
+        try:
+            deferred = _collect_deferred_heavy(test_files)
+        except RuntimeError as exc:
+            _exit_with_diags("pytest-collect", "FAIL | Heavy-tier collection failed",
+                             [{"file": "", "line": 0, "error": str(exc), "fix_hint": "Fix collection errors or tier marks"}])
+    deferral_lines, deferral_diags = _deferral_lines(deferred)
+
     # 5. Smart Pytest Execution (Resource Safety Guard)
     # 5. Smart Pytest Execution (Resource Safety Guard: Serial Execution Default)
     # 다중 프로젝트 및 로컬 동시성 환경 안정성을 위해 기본값은 항상 단일 프로세스(-n 0)로 고정.
@@ -524,6 +635,8 @@ def main() -> None:
         target_workers = int(env_workers)
         worker_count = min(target_workers, os.cpu_count() or 2, len(test_files))
         xdist_args = ["-p", "no:cacheprovider", "-n", str(worker_count)]
+        if worker_count > 1:
+            xdist_args += ["--dist", "loadgroup"]
 
     src_files = [f for f in py_files if f.startswith("src/")]
     Path("scratch").mkdir(exist_ok=True)
@@ -539,14 +652,19 @@ def main() -> None:
         "-m",
         "pytest",
         "-m",
-        "not slow" if not args.run_slow else "slow",
+        _marker_expression(run_slow=args.run_slow, include_heavy=args.run_heavy),
         *test_files,
         *xdist_args,
         *cov_args,
         "-vv",
         "--tb=line",
     ]
-    pytest_timeout = args.timeout or max(60, min(240, 20 * len(test_files)))
+    if args.timeout is not None:
+        pytest_timeout = args.timeout
+    elif args.run_heavy:
+        pytest_timeout = _HEAVY_TIMEOUT_SECONDS
+    else:
+        pytest_timeout = max(60, min(240, 20 * len(test_files)))
     with workspace:
         pt_res = run_cmd(
             pytest_cmd, timeout=pytest_timeout,
@@ -556,6 +674,9 @@ def main() -> None:
             _check_diff_coverage(src_files, cov_json_path, unmapped)
             if pt_res.returncode == 0 and cov_args else ([], None)
         )
+
+    for line in deferral_lines:
+        print(line)
 
     if pt_res.returncode == 124:
         active_tests = [line.strip() for line in pt_res.stdout.splitlines() if line.startswith("tests/")]
@@ -571,6 +692,18 @@ def main() -> None:
             }],
         )
 
+    if pt_res.returncode == 5 and deferred:
+        unmapped_diags = [
+            {"file": m, "line": 0, "error": f"unmapped: no test covers {m}", "fix_hint": "Add tests/unit coverage for this module"}
+            for m in unmapped
+        ]
+        deferred_suffix = f", {len(deferred)} deferred e2e_heavy"
+        unmapped_suffix = f", {len(unmapped_diags)} unmapped" if unmapped_diags else ""
+        elapsed = time.monotonic() - started
+        print(f"PASS | All checks passed (Scaffolding-Clean, Lint, Type, Tests 0 passed{unmapped_suffix}{deferred_suffix}) in {elapsed:.2f}s")
+        print(_emit_json("PASS", "all", unmapped_diags + deferral_diags, None), file=sys.stderr)
+        return
+
     if pt_res.returncode == 0:
         if cov_diags:
             _exit_with_diags(
@@ -584,11 +717,12 @@ def main() -> None:
         ]
         cov_suffix = f", Diff-Coverage {cov_pct}%" if cov_pct is not None else ""
         unmapped_suffix = f", {len(unmapped_diags)} unmapped" if unmapped_diags else ""
+        deferred_suffix = f", {len(deferred)} deferred e2e_heavy" if deferred else ""
         passed = re.search(r"\b(\d+) passed\b", pt_res.stdout)
         test_summary = f"Tests {passed[1]} passed" if passed else "Tests"
         elapsed = time.monotonic() - started
-        print(f"PASS | All checks passed (Scaffolding-Clean, Lint, Type, {test_summary}{cov_suffix}{unmapped_suffix}) in {elapsed:.2f}s")
-        print(_emit_json("PASS", "all", unmapped_diags, cov_pct), file=sys.stderr)
+        print(f"PASS | All checks passed (Scaffolding-Clean, Lint, Type, {test_summary}{cov_suffix}{unmapped_suffix}{deferred_suffix}) in {elapsed:.2f}s")
+        print(_emit_json("PASS", "all", unmapped_diags + deferral_diags, cov_pct), file=sys.stderr)
     else:
         last_err = [
             line
