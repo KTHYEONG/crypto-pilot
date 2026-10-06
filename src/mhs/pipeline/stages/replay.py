@@ -1,4 +1,4 @@
-"""S6: Top-level execution replay (fast/slow/blend books).
+"""S6: Top-level execution replay: the blend book always, the standalone fast/slow reference books on request.
 
 Extracted verbatim from ``evaluation.py`` lines 3987-4059 (execution-symbol
 resolution, minute-grid construction, ``has_minute_data`` check,
@@ -26,7 +26,7 @@ from src.mhs.telemetry import StageTelemetry
 
 
 def run_replays(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
-    """Run the top-level fast/slow/blend book replays against the minute market."""
+    """Replay the top-level books against the minute market; only the blend's failure enters ``book_reasons``."""
     ctx.execution_symbols = sorted(
         set(ctx.w_fast_execution.columns[ctx.w_fast_execution.ne(0.0).any(axis=0)])
         | set(ctx.w_slow_execution.columns[ctx.w_slow_execution.ne(0.0).any(axis=0)])
@@ -99,17 +99,19 @@ def run_replays(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
             return
         # execution_mask stays alive: the post-fold opt-in diagnostics consume
         # it (a bool panel, ~20 MB).
-        ctx.books = {"fast_reversal": book_report_fast, "slow_momentum": book_report_slow}
+        ctx.books = {}
+        if book_report_fast is not None:
+            ctx.books["fast_reversal"] = book_report_fast
+        if book_report_slow is not None:
+            ctx.books["slow_momentum"] = book_report_slow
         ctx.blend_report = book_report_blend
     else:
         ctx.books = {}
         ctx.blend_report = None
         ctx.blend_traces = {}
 
-    ctx.book_reasons = tuple(
-        sorted(
-            b.failure.reason
-            for b in [*ctx.books.values(), ctx.blend_report]
-            if b is not None and b.failure is not None
-        )
+    ctx.book_reasons = (
+        (ctx.blend_report.failure.reason,)
+        if ctx.blend_report is not None and ctx.blend_report.failure is not None
+        else ()
     )

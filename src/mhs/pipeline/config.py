@@ -196,4 +196,6 @@ def resolve_cli_request(explicit: Mapping[str, Any]) -> MhsDiagnosticRequest:
         phase_diagnostic=bool(_get("phase_diagnostic")),
         signal_48h_diagnostic=bool(_get("signal_48h_diagnostic")),
         bootstrap_ci_diagnostic=bool(_get("bootstrap_ci_diagnostic")),
+        reference_books_diagnostic=bool(_get("reference_books_diagnostic")),
+        patient_reference_diagnostic=bool(_get("patient_reference_diagnostic")),
     )

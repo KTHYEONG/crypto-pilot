@@ -806,7 +806,7 @@ class TestDiagnosticCanonicalOhlcvEconomics:
         report = run_mhs_horizon_diagnostic(
             research_baseline(
                 start=str(START), end=str(end), data_root=str(root),
-                execution_timeframe="3m", log_run=False,
+                execution_timeframe="3m", log_run=False, reference_books_diagnostic=True,
             ),
         )
         assert report.status == "COMPLETE"

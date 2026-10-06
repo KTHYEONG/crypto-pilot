@@ -137,7 +137,7 @@ class MhsDiagnosticRequest:
         metadata=cli_param(
             flag="--touch-diagnostic",
             help=(
-                "Additionally replay slow_momentum/blend under OHLCV_TOUCH_PROXY "
+                "Additionally replay every top-level book under OHLCV_TOUCH_PROXY "
                 "alongside the strict/stress pair -- adds a second full window "
                 "pass, opt-in only"
             ),
@@ -148,7 +148,7 @@ class MhsDiagnosticRequest:
         metadata=cli_param(
             flag="--ladder-diagnostic",
             help=(
-                "Additionally replay slow_momentum/blend under OHLCV_LADDERED_PROXY "
+                "Additionally replay every top-level book under OHLCV_LADDERED_PROXY "
                 "alongside the strict/stress pair -- adds a third full window pass "
                 "with the escalating limit ladder, opt-in only"
             ),
@@ -159,7 +159,7 @@ class MhsDiagnosticRequest:
         metadata=cli_param(
             flag="--peg-chase-diagnostic",
             help=(
-                "Additionally replay slow_momentum/blend under OHLCV_PEG_CHASE_PROXY "
+                "Additionally replay every top-level book under OHLCV_PEG_CHASE_PROXY "
                 "(submit-bar anchor) alongside the strict/stress pair -- opt-in only"
             ),
         ),
@@ -713,6 +713,14 @@ class MhsDiagnosticRequest:
     bootstrap_ci_diagnostic: bool = field(
         default=False,
         metadata=cli_param(flag='--bootstrap-ci-diagnostic', help='Opt-in report-only stationary block-bootstrap 95%% CI of the blend mean hourly return; deployment-readiness and deploy-gate bootstraps stay mandatory'),
+    )
+    reference_books_diagnostic: bool = field(
+        default=False,
+        metadata=cli_param(flag='--reference-books-diagnostic', help='Opt-in report-only top-level replays of the standalone fast_reversal and slow_momentum books; their failures are reported but never block Research-GO (the blend and anchored folds are always replayed)'),
+    )
+    patient_reference_diagnostic: bool = field(
+        default=False,
+        metadata=cli_param(flag='--patient-reference-diagnostic', help='Opt-in report-only failure-isolated OHLCV_STRICT_PROXY patient-reference bound on every replayed top-level book; never a gate input'),
     )
 
     def __post_init__(self) -> None:

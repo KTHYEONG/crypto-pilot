@@ -102,7 +102,7 @@ def test_file_size_budget() -> None:
         "tests/unit/live/test_data_refresh.py": 71709,
         "tests/unit/mhs/test_process_backtest.py": 140056,
         "tests/unit/cli/commands/test_backtest.py": 81671,
-        "tests/unit/mhs/evaluation/test_windows.py": 84336,
+        "tests/unit/mhs/evaluation/test_windows.py": 87424,
         # Existing fold replay and shared-reference regression suite; freeze its current size.
         "tests/unit/mhs/test_evaluation_folds.py": 62668,
     }
@@ -235,7 +235,7 @@ def test_evaluation_modules_respect_size_budget() -> None:
     budget = 700
     # frozen at measured size; growth fails, shrink requires deleting/lowering the entry.
     allowlist: dict[str, int] = {
-        "src/mhs/evaluation/windows.py": 713,
+        "src/mhs/evaluation/windows.py": 712,
         # Fold validation, shared train-reference reuse and fork scheduling form one lifecycle.
         "src/mhs/evaluation/folds.py": 1262,
     }
@@ -386,12 +386,12 @@ def test_source_module_size_budget() -> None:
         "src/mhs/backtest/paths.py": 849,
         "src/mhs/backtest/journal.py": 1091,
         "src/mhs/backtest/inventory.py": 873,
-        "src/mhs/evaluation/windows.py": 713,
+        "src/mhs/evaluation/windows.py": 712,
         # Unified MhsDiagnosticRequest carries per-field CLI/validation metadata as the single schema source (spec 10 parts 2-3).
         # Freeze the existing fold lifecycle; further growth requires decomposition.
         "src/mhs/evaluation/folds.py": 1262,
         # Declare-once request schema: each MHS option is exactly one field plus CLI metadata.
-        "src/mhs/contracts.py": 890,
+        "src/mhs/contracts.py": 898,
         # Checkpoint advancement, retention and the loop stay co-located for review;
         # _run_retention_pass persists the checkpoint and is not split out.
         "src/market_data/streams/normalizer.py": 1112,
@@ -470,7 +470,7 @@ def test_no_function_exceeds_length_budget() -> None:
         "src/live/frozen_signal.py::run_frozen_signal_step": 312,
         "src/mhs/account_ledger.py::replay_account": 308,
         "src/cli/commands/backtest.py::run_frozen_account_command": 284,
-        "src/mhs/evaluation/windows.py::_book_outcome": 411,
+        "src/mhs/evaluation/windows.py::_book_outcome": 368,
         "src/mhs/execution/accumulator.py::_consume_append_ledger": 252,
         "src/mhs/execution/window_stream.py::_iter_mhs_execution_windows": 382,
         "src/mhs/backtest/paths.py::run_process_paths": 261,
