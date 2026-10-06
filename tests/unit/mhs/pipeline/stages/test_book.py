@@ -65,6 +65,68 @@ def _bare_context() -> PipelineContext:
     return ctx
 
 
+def _seamed_context(monkeypatch: pytest.MonkeyPatch, committee_capital: bool) -> PipelineContext:
+    import src.mhs.evaluation.books as books_mod
+    import src.mhs.evaluation.specs as specs_mod
+
+    def _fake_signal_ema_span(sign: int, horizon_hours: int, step_hours: int) -> int:
+        return 4
+
+    def _fake_book_weights(log_close, eligible, spec, grid, *, ema_span):
+        return pd.DataFrame(spec.horizon_hours / 1000.0, index=grid, columns=log_close.columns)
+
+    def _fake_horizon_ensemble_execution_weights(*_a: object, **_k: object) -> pd.DataFrame:
+        return pd.DataFrame(0.0, index=_GRID, columns=_SYMS)
+
+    monkeypatch.setattr(specs_mod, "_signal_ema_span", _fake_signal_ema_span, raising=False)
+    monkeypatch.setattr(books_mod, "_book_weights", _fake_book_weights, raising=False)
+    monkeypatch.setattr(
+        books_mod, "_horizon_ensemble_execution_weights", _fake_horizon_ensemble_execution_weights, raising=False
+    )
+    monkeypatch.setattr(
+        book_stage, "_pit_execution_mask",
+        lambda quote_vol, eligible, universe_size: pd.DataFrame(True, index=quote_vol.index, columns=quote_vol.columns), raising=False
+    )
+    monkeypatch.setattr(
+        book_stage, "inverse_realized_vol_tilt", lambda w, vol: w,
+    )
+    monkeypatch.setattr(book_stage, "realized_vol", lambda log_close, horizon: pd.DataFrame(0.1, index=log_close.index, columns=log_close.columns))
+    monkeypatch.setattr(
+        book_stage, "renormalize_within_mask", lambda w, mask, min_symbols: w,
+    )
+
+    ctx = _bare_context()
+    ctx.config = research_baseline(
+        fast_book_mode="single_horizon", execution_coverage_gate=False,
+        beta_neutralize=False, committee_capital=committee_capital,
+    )
+    book_stage.build_books(ctx, StageTelemetry(log_run=False))
+    return ctx
+
+
+def test_build_books_committee_path_skips_1h_fast_slow_views(monkeypatch: pytest.MonkeyPatch) -> None:
+    ctx = _seamed_context(monkeypatch, committee_capital=True)
+
+    assert ctx.w_fast_1h.empty
+    assert ctx.w_slow_1h.empty
+    assert not ctx.w_fast_execution.empty
+    assert not ctx.w_slow_execution.empty
+    assert not ctx.execution_mask.empty
+
+
+def test_build_books_non_committee_path_materializes_1h_views(monkeypatch: pytest.MonkeyPatch) -> None:
+    import pandas as pd
+
+    ctx = _seamed_context(monkeypatch, committee_capital=False)
+
+    pd.testing.assert_frame_equal(
+        ctx.w_fast_1h, ctx.w_fast.reindex(ctx.grid_1h).ffill().fillna(0.0), check_exact=True,
+    )
+    pd.testing.assert_frame_equal(
+        ctx.w_slow_1h, ctx.w_slow.reindex(ctx.grid_1h).ffill().fillna(0.0), check_exact=True,
+    )
+
+
 def test_build_books_reaches_seam_functions(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[str] = []
 

@@ -25,7 +25,10 @@ def test_single_configuration_type() -> None:
     assert not hasattr(config, "MemberSet")
     assert not hasattr(params, "COMMITTEE_TARGET_GROSS_UNSET")
     assert not hasattr(research_go, "_resolved_committee_target_gross")
-    assert not hasattr(deployment_policy.TargetWeightPolicy, "to_request")
+    assert not hasattr(deployment_policy, "build_deployment_policy")
+    assert not hasattr(deployment_policy, "TargetWeightPolicy")
+    assert not hasattr(deployment_policy, "SignalWindowPolicy")
+    assert not hasattr(deployment_policy, "MhsDeploymentPolicy")
 
 
 def test_production_defaults_equal_no_arg_cli() -> None:
@@ -93,38 +96,6 @@ def test_horizon_diagnostic_delegates_to_orchestrator(monkeypatch) -> None:
     assert run_mhs_horizon_diagnostic(request) is sentinel
     assert len(calls) == 1
     assert calls[0] is request
-
-
-def test_deployment_policy_carries_every_target_weight_field() -> None:
-    from src.mhs.deployment_policy import TargetWeightPolicy, build_deployment_policy
-    from src.mhs.types import COMMITTEE_TARGET_GROSS
-
-    request = research_baseline(
-        committee_capital=True, committee_tranche_smoothing=True, committee_tranche_count=7,
-    )
-    policy = build_deployment_policy(
-        request,
-        slow_horizon_hours=168,
-        committee_member_weights={"a": 1.0},
-        admitted_members=("a",),
-        target_annual_vol=0.20,
-        exposure_cap=3.0,
-    )
-    for field in dataclasses.fields(TargetWeightPolicy):
-        expected = getattr(request, field.name)
-        actual = getattr(policy.target_weights, field.name)
-        if expected is None:
-            assert actual is None, field.name
-        elif isinstance(expected, bool):
-            assert actual is expected or actual == expected, field.name
-        elif isinstance(expected, int):
-            assert actual == int(expected), field.name
-        elif isinstance(expected, float):
-            assert actual == float(expected), field.name
-        else:
-            assert actual == str(expected), field.name
-    assert policy.target_weights.committee_tranche_count == 7
-    assert policy.target_weights.committee_target_gross == COMMITTEE_TARGET_GROSS
 
 
 def test_pickle_safe_defaults() -> None:
