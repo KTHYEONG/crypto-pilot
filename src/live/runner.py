@@ -26,6 +26,7 @@ from src.common.errors import DataIntegrityError
 from src.common.paths import FUTURES_DATA_DIR, LIVE_CAPTURE_DIR
 from src.live.account import (
     RECONCILE_QTY_TOLERANCE_FRACTION,
+    AccountSnapshot,
     assert_suppressed_venue_flat,
     assert_venue_configuration,
     effective_positions,
@@ -59,6 +60,7 @@ from src.live.executor import (
     ExecutionInterrupted,
     ExecutionOutcome,
     ForeignOpenOrderError,
+    OrphanSweep,
     UnresolvedOrder,
     cancel_orphan_orders,
     execute_intents,
@@ -850,6 +852,508 @@ def _ensure_run_manifest(settings: LiveSettings, now: pd.Timestamp) -> None:
     os.replace(tmp, path)
 
 
+def _cycle_fallback_attempt(
+    settings: LiveSettings, decision_time: pd.Timestamp, now: pd.Timestamp
+) -> JournalAttempt:
+    """Journal context for fills that belong to no execution attempt of this cycle.
+
+    Orphan settlements, recovered orders and the already-executed evidence flush carry
+    no attempt of their own; their evidence is attributed to this decision with a
+    zero pre-trade equity sentinel (``attempt_seq=-1``). It is never persisted as an
+    attempt.
+    """
+    return JournalAttempt(
+        attempt_seq=-1,
+        decision_time=decision_time,
+        run_id=decision_time.strftime("%Y%m%d"),
+        mode=settings.mode.value,
+        pre_trade_equity=Decimal(0),
+        sizing_anchor="decision_ohlcv_close",
+        decision_marks={},
+        started_at=now,
+    )
+
+
+def _flush_already_executed(
+    settings: LiveSettings, ledger_path: Path, decision_time: pd.Timestamp, now: pd.Timestamp
+) -> None:
+    """Best-effort evidence flush for a decision whose execution stamp already exists.
+
+    Ledger fills applied but not yet recorded as evidence (fills parquet, tax rows)
+    are emitted once so a crash between commit and evidence is repaired without
+    re-running the cycle. Any failure is logged and swallowed: the execution stamp
+    alone guarantees the day is not traded twice, and the next call retries the flush.
+    """
+    try:
+        journal = OrderJournal(settings.resolved_order_journal_path(default_order_journal_path))
+        state = load_ledger(ledger_path)
+        if state.journal_recorded_fill_seq < state.journal_applied_fill_seq:
+            audit = AuditLog(default_audit_log_path("shadow_cycle", for_date=decision_time))
+            _commit_and_record(
+                settings,
+                ledger_path,
+                state,
+                journal,
+                audit,
+                fallback_attempt=_cycle_fallback_attempt(settings, decision_time, now),
+                equity=None,
+                executed_decision_time=None,
+            )
+    except Exception as exc:
+        logger.warning("[SYS] already_executed flush failed error=%s", exc)
+
+
+def _record_delisting_settlements(
+    settings: LiveSettings,
+    audit: AuditLog,
+    booked: Sequence[DelistingSettlement],
+    *,
+    decision_time: pd.Timestamp,
+    now: pd.Timestamp,
+    alert_includes_price: bool,
+) -> None:
+    """Emit audit evidence and one operator alert per booked delisting settlement.
+
+    ``alert_includes_price`` is True for PAPER, where the settlement price is the
+    evidenced flat close; LIVE settlements carry no price because the venue books the
+    cash. Alerts share the per-cycle ``delisting_settled`` dedupe key, so at most one
+    alert is delivered per decision.
+    """
+    for settlement in booked:
+        audit.record(
+            "delisting_settlement_booked",
+            symbol=settlement.symbol,
+            qty=str(settlement.quantity),
+            price=None if settlement.price is None else str(settlement.price),
+            fee=str(settlement.fee),
+            delivery_time=settlement.delivery_time.isoformat(),
+            evidence_source=settlement.evidence_source,
+        )
+        if alert_includes_price:
+            detail = (
+                f"symbol={settlement.symbol} qty={settlement.quantity} "
+                f"price={settlement.price} source={settlement.evidence_source}"
+            )
+        else:
+            detail = (
+                f"symbol={settlement.symbol} qty={settlement.quantity} "
+                f"source={settlement.evidence_source}"
+            )
+        _notify_event(
+            settings,
+            event="delisting_settled",
+            detail=detail,
+            decision_time=decision_time,
+            now=now,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class _PreTradeReconciliation:
+    ledger_state: LedgerState
+    sweep: OrphanSweep
+    derisk_reasons: tuple[str, ...]
+    frozen_symbols: tuple[str, ...]
+
+
+def _reconcile_pre_trade(
+    settings: LiveSettings,
+    *,
+    order_client: Any,
+    journal: OrderJournal,
+    audit: AuditLog,
+    ledger_path: Path,
+    ledger_state: LedgerState,
+    snapshot: AccountSnapshot,
+    exchange_info: Mapping[str, Any],
+    run_id: str,
+    decision_time: pd.Timestamp,
+    now: pd.Timestamp,
+) -> _PreTradeReconciliation:
+    """Bring ledger and venue into agreement before any new order is planned.
+
+    Orphan orders are swept, unresolved submissions recovered, and orders recovery left
+    open cancelled with venue confirmation before reconciliation, so a resting order
+    from an earlier attempt can never be mistaken for a position breach; every fill they
+    reveal is committed first. Own orders still open after a confirmed cancel attempt
+    are audited and alerted, and their symbols are frozen for this cycle only (never
+    persisted as de-risk state). A journal shorter than the ledger halts
+    immediately because later fills would otherwise be dropped silently. In mutating
+    modes, venue-settled delistings are booked, residual breaches optionally adopted
+    as venue force-closes, and any remaining breach or foreign open order puts the
+    account into de-risk instead of halting (unless de-risk mode is disabled).
+
+    Returns:
+        The committed ledger state, the orphan sweep (its foreign symbols are excluded
+        from trading), the sorted de-risk reasons in force for this cycle (empty when
+        the account is trusted), and the sorted symbols frozen by unresolved own orders.
+
+    Raises:
+        DataIntegrityError: the order journal regressed behind the ledger, or a recovery
+            / settlement order query answered without a status.
+        ReconciliationBreach: a position breach with de-risk mode disabled.
+        ForeignOpenOrderError: a foreign open order with de-risk mode disabled.
+        LiveTradingError: suppressed-mode venue not flat, or any sweep/recovery/commit
+            failure (propagated unchanged).
+    """
+    if journal.last_fill_seq() < ledger_state.journal_applied_fill_seq:
+        _notify_event(
+            settings,
+            event="order_journal_regressed",
+            detail=(
+                f"journal_last_fill_seq={journal.last_fill_seq()} "
+                f"ledger_applied={ledger_state.journal_applied_fill_seq}"
+            ),
+            decision_time=decision_time,
+            now=now,
+        )
+        raise DataIntegrityError(
+            f"order journal regressed: last fill_seq {journal.last_fill_seq()} "
+            f"< ledger applied {ledger_state.journal_applied_fill_seq}"
+        )
+    sweep = cancel_orphan_orders(
+        order_client,
+        run_id,
+        audit,
+        journal=journal,
+        now=now,
+        taker_fee_bps=float(settings.taker_fee_bps),
+    )
+    recovery = recover_unresolved_orders(
+        order_client,
+        journal,
+        audit,
+        now=now,
+        lookback=pd.Timedelta(hours=settings.journal_recovery_lookback_hours),
+        taker_fee_bps=float(settings.taker_fee_bps),
+    )
+    settlement = settle_unresolved_orders(
+        order_client, journal, audit, recovery.unresolved, taker_fee_bps=float(settings.taker_fee_bps)
+    )
+    fallback_attempt = _cycle_fallback_attempt(settings, decision_time, now)
+    ledger_state = _commit_and_record(
+        settings,
+        ledger_path,
+        ledger_state,
+        journal,
+        audit,
+        fallback_attempt=fallback_attempt,
+        equity=None,
+        executed_decision_time=None,
+    )
+    frozen_symbols = _record_unresolved_orders(
+        settings,
+        audit,
+        (*sweep.unconfirmed, *settlement.still_open),
+        decision_time=decision_time,
+        now=now,
+    )
+    derisk_reasons: tuple[str, ...] = ()
+    if settings.mode.suppresses_mutations:
+        assert_suppressed_venue_flat(snapshot)
+    else:
+        ledger_positions = ledger_state.positions
+        settled = settled_delisting_symbols(
+            exchange_info, snapshot.positions, ledger_positions, now=now
+        )
+        for symbol in settled:
+            audit.record(
+                "delisting_settlement_pending",
+                symbol=symbol,
+                ledger_qty=str(ledger_positions[symbol]),
+            )
+        ledger_state, delisting_booked = book_delisting_settlements(
+            ledger_state,
+            mode=settings.mode,
+            exchange_info=exchange_info,
+            venue_positions=snapshot.positions,
+            evidence={},
+            fee_bps=Decimal(0),
+            now=now,
+        )
+        if delisting_booked:
+            save_ledger(ledger_path, ledger_state)
+            ledger_positions = ledger_state.positions
+            _record_delisting_settlements(
+                settings,
+                audit,
+                delisting_booked,
+                decision_time=decision_time,
+                now=now,
+                alert_includes_price=False,
+            )
+        breaches = find_position_breaches(
+            snapshot,
+            ledger_positions,
+            qty_tolerance_fraction=RECONCILE_QTY_TOLERANCE_FRACTION,
+            settled_symbols=settled,
+        )
+        if breaches and settings.venue_force_close_auto_adopt:
+            ledger_state = _adopt_force_closes(
+                settings,
+                order_client,
+                journal,
+                audit,
+                ledger_path,
+                ledger_state,
+                breaches,
+                now=now,
+                fallback_attempt=fallback_attempt,
+            )
+            ledger_positions = ledger_state.positions
+            breaches = find_position_breaches(
+                snapshot,
+                ledger_positions,
+                qty_tolerance_fraction=RECONCILE_QTY_TOLERANCE_FRACTION,
+                settled_symbols=settled,
+            )
+        reasons = (("reconciliation_breach",) if breaches else ()) + (
+            ("foreign_open_orders",) if sweep.foreign_symbols else ()
+        )
+        if reasons and not settings.derisk_mode_enabled:
+            _raise_account_breach(breaches, sweep.foreign_symbols)
+        if reasons:
+            ledger_state = enter_derisk(ledger_path, ledger_state, reasons=reasons, now=now)
+            derisk_reasons = tuple(sorted(set(ledger_state.derisk_reasons)))
+            if breaches and not settings.venue_force_close_auto_adopt:
+                audit.record(
+                    "derisk_entered",
+                    reasons=derisk_reasons,
+                    force_close_auto_adopt="off",
+                )
+            else:
+                audit.record("derisk_entered", reasons=derisk_reasons)
+        elif ledger_state.derisk_since is not None:
+            derisk_reasons = tuple(sorted(set(ledger_state.derisk_reasons)))
+    return _PreTradeReconciliation(
+        ledger_state=ledger_state,
+        sweep=sweep,
+        derisk_reasons=derisk_reasons,
+        frozen_symbols=frozen_symbols,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _PaperSettlement:
+    ledger_state: LedgerState
+    cash_before: Decimal | None
+    funding_records: tuple[TaxRecord, ...]
+    settlement_records: tuple[TaxRecord, ...]
+
+
+def _settle_paper_funding_and_delistings(
+    settings: LiveSettings,
+    audit: AuditLog,
+    *,
+    ledger_state: LedgerState,
+    ledger_path: Path,
+    exchange_info: Mapping[str, Any],
+    run_id: str,
+    decision_time: pd.Timestamp,
+    now: pd.Timestamp,
+) -> _PaperSettlement:
+    """Accrue simulated funding and book evidenced delisting settlements for a suppressed-mode ledger.
+
+    A held symbol missing from exchangeInfo, a delisted holding without flat-kline
+    settlement evidence, or funding data lagging beyond the halt bound stops the cycle:
+    synthesizing a price or a funding rate would fabricate PnL. ``cash_before`` is the
+    ledger cash before any of these postings so the cycle cash reconciliation can
+    explain funding and settlement moves together with fills.
+
+    Raises:
+        DataIntegrityError: absent held symbol, unresolved delisted holding, or funding
+            lag above the halt threshold.
+    """
+    absent_held = held_symbols_absent_from_exchange(ledger_state.positions, exchange_info)
+    if absent_held:
+        audit.record("held_symbol_absent", symbols=absent_held)
+        raise DataIntegrityError(
+            f"held symbols absent from exchangeInfo symbols={','.join(absent_held)}; "
+            "resolve via actual venue settlement or live account reconciliation"
+        )
+    delisted = _delisted_held_symbols(ledger_state.positions, exchange_info, now)
+    cash_before = ledger_state.cash_usdt
+    funding_tax_dir = settings.resolved_tax_ledger_dir(default_tax_ledger_dir)
+    ledger_state, accrual, funding_records = _accrue_ledger_funding(
+        ledger_state,
+        now,
+        ledger_path,
+        closed_at=delisted,
+        tax_dir=funding_tax_dir,
+        run_id=settings.record_run_id or run_id,
+        mode=settings.mode.value,
+    )
+    settlement_records: tuple[TaxRecord, ...] = ()
+    if delisted:
+        proven: dict[str, SettlementEvidence] = {}
+        for delisted_symbol, delivery_time in delisted.items():
+            try:
+                flat_evidence = settlement_evidence_from_bars(
+                    FUTURES_DATA_DIR / "ohlcv" / "1h" / f"{delisted_symbol}.parquet",
+                    symbol=delisted_symbol,
+                    delivery_time=delivery_time,
+                    min_flat_bars=settings.delisting_settlement_min_flat_bars,
+                    price_rtol=settings.delisting_settlement_price_rtol,
+                )
+            except DataIntegrityError:
+                flat_evidence = None
+            if flat_evidence is not None:
+                proven[delisted_symbol] = flat_evidence
+        ledger_state, paper_booked = book_delisting_settlements(
+            ledger_state,
+            mode=settings.mode,
+            exchange_info=exchange_info,
+            venue_positions={},
+            evidence=proven,
+            fee_bps=Decimal(str(settings.delisting_settlement_fee_bps)),
+            now=now,
+        )
+        if paper_booked:
+            settlement_records = tuple(
+                delisting_settlement_tax_records(paper_booked, mode=settings.mode.value)
+            )
+            if settlement_records:
+                settlement_tax_dir = settings.resolved_tax_ledger_dir(default_tax_ledger_dir)
+                append_tax_records(settlement_records, settlement_tax_dir)
+            save_ledger(ledger_path, ledger_state)
+            _record_delisting_settlements(
+                settings,
+                audit,
+                paper_booked,
+                decision_time=decision_time,
+                now=now,
+                alert_includes_price=True,
+            )
+        unresolved = {
+            symbol: delivery_time
+            for symbol, delivery_time in delisted.items()
+            if ledger_state.positions.get(symbol, Decimal(0)) != 0
+        }
+        if unresolved:
+            ledger_state = _settle_delisted_paper_positions(
+                ledger_state, unresolved, now, ledger_path, audit, settings, decision_time
+            )
+    _enforce_funding_lag(accrual, settings, decision_time, now)
+    return _PaperSettlement(
+        ledger_state=ledger_state,
+        cash_before=cash_before,
+        funding_records=tuple(funding_records),
+        settlement_records=tuple(settlement_records),
+    )
+
+
+def _write_portfolio_state_fail_soft(
+    settings: LiveSettings,
+    audit: AuditLog,
+    *,
+    final_state: LedgerState,
+    snapshot: AccountSnapshot,
+    equity: Decimal,
+    marks: Mapping[str, Decimal],
+    intent_count: int,
+    dropped_fraction: float,
+    decision_time: pd.Timestamp,
+) -> None:
+    """Append the post-cycle portfolio-state record; observability only, never halts the cycle."""
+    try:
+        equity_eff, equity_source = resolve_effective_equity(
+            settings.mode, equity, final_state.cash_usdt, final_state.positions, marks
+        )
+        gross_notional = sum(
+            (abs(qty * marks[symbol]) for symbol, qty in final_state.positions.items() if symbol in marks),
+            Decimal(0),
+        )
+        n_holdings = sum(1 for qty in final_state.positions.values() if qty != 0)
+        portfolio_record = PortfolioStateRecord(
+            decision_time=decision_time,
+            mode=settings.mode.value,
+            equity_usdt=float(equity_eff),
+            equity_source=equity_source,
+            cash_usdt=float(final_state.cash_usdt) if final_state.cash_usdt is not None else None,
+            wallet_balance_usdt=float(snapshot.wallet_balance) if snapshot.wallet_balance is not None else None,
+            unrealized_pnl_usdt=float(snapshot.unrealized_pnl) if snapshot.unrealized_pnl is not None else None,
+            equity_high_water_mark_usdt=float(final_state.equity_high_water_mark),
+            gross_notional_usdt=float(gross_notional),
+            n_holdings=int(n_holdings),
+            intent_count=intent_count,
+            dropped_notional_fraction=float(dropped_fraction),
+        )
+        portfolio_dir = settings.resolved_portfolio_state_dir(default_portfolio_state_dir)
+        append_portfolio_state(portfolio_record, portfolio_dir)
+    except Exception as exc:
+        with contextlib.suppress(Exception):
+            audit.record("portfolio_state_write_failed", error=str(exc))
+        logger.warning("[SYS] portfolio_state write failed error=%s", exc)
+
+
+def _collect_live_tax_fail_soft(
+    settings: LiveSettings,
+    audit: AuditLog,
+    *,
+    order_client: Any,
+    symbols: Sequence[str],
+    decision_time: pd.Timestamp,
+    now: pd.Timestamp,
+) -> None:
+    """Collect venue tax evidence after a mutating cycle; never halts the cycle.
+
+    Suppressed modes only ensure the tax directory exists: their simulated TRADE
+    records and cash reconciliation were already written by the journal commit.
+    A corrupt watermark is alerted and skipped; collection issues are audited, and a
+    retention gap (income older than the venue keeps) is alerted for operator backfill.
+    """
+    try:
+        tax_dir = settings.resolved_tax_ledger_dir(default_tax_ledger_dir)
+        tax_dir.mkdir(parents=True, exist_ok=True)
+        if not settings.mode.suppresses_mutations and settings.tax_collection_enabled:
+            try:
+                _, live_tax_issues = collect_and_persist_live_tax(
+                    order_client,
+                    symbols,
+                    tax_dir,
+                    settings.mode.value,
+                    now=now,
+                    settings=settings,
+                )
+            except DataIntegrityError as exc:
+                audit.record("tax_watermark_invalid", error=str(exc))
+                logger.warning("[SYS] tax_watermark_invalid error=%s", exc)
+                dispatch_alert(
+                    settings,
+                    event="tax_ledger_corrupt",
+                    detail=f"path={tax_dir} error={type(exc).__name__}",
+                    decision_time=decision_time,
+                    dedupe_key=f"tax_ledger_corrupt:{decision_time.date()}",
+                    now=now,
+                )
+            else:
+                for live_issue in live_tax_issues:
+                    audit.record(
+                        "tax_collect_issue",
+                        stream=live_issue.stream,
+                        stage=live_issue.stage,
+                        detail=live_issue.detail,
+                    )
+                    logger.warning(
+                        "[EXEC] tax_collect_issue stream=%s stage=%s",
+                        live_issue.stream,
+                        live_issue.stage,
+                    )
+                    if live_issue.stage == "retention_gap":
+                        dispatch_alert(
+                            settings,
+                            event="tax_income_gap",
+                            detail=live_issue.detail,
+                            decision_time=decision_time,
+                            dedupe_key=f"tax_income_gap:{live_issue.detail}",
+                            now=now,
+                        )
+    except Exception as exc:
+        with contextlib.suppress(Exception):
+            audit.record("tax_ledger_write_failed", error=str(exc))
+        logger.warning("[SYS] tax_ledger write failed error=%s", exc)
+
+
 def run_shadow_cycle(
     settings: LiveSettings,
     decision_time: pd.Timestamp,
@@ -868,28 +1372,7 @@ def run_shadow_cycle(
         ledger_path = settings.resolved_ledger_path(default_ledger_path)
         last_executed = load_ledger(ledger_path).last_executed_decision_time
         if last_executed is not None and decision_time <= last_executed:
-            try:
-                _journal_flushed = OrderJournal(settings.resolved_order_journal_path(default_order_journal_path))
-                _flushed_state = load_ledger(ledger_path)
-                if _flushed_state.journal_recorded_fill_seq < _flushed_state.journal_applied_fill_seq:
-                    from src.live.audit import AuditLog as _AuditLog  # noqa: PLC0415
-                    _flush_audit = _AuditLog(default_audit_log_path("shadow_cycle", for_date=decision_time))
-                    _cycle_fallback = JournalAttempt(
-                        attempt_seq=-1,
-                        decision_time=decision_time,
-                        run_id=decision_time.strftime("%Y%m%d"),
-                        mode=settings.mode.value,
-                        pre_trade_equity=Decimal(0),
-                        sizing_anchor="decision_ohlcv_close",
-                        decision_marks={},
-                        started_at=now_ts,
-                    )
-                    _commit_and_record(
-                        settings, ledger_path, _flushed_state, _journal_flushed, _flush_audit,
-                        fallback_attempt=_cycle_fallback, equity=None, executed_decision_time=None,
-                    )
-            except Exception as exc:  # noqa: BLE001 - flush is best-effort; stamp still guards
-                logger.warning("[SYS] already_executed flush failed error=%s", exc)
+            _flush_already_executed(settings, ledger_path, decision_time, now_ts)
             logger.info("[EXEC] cycle skipped decision_time=%s reason=already_executed last_executed=%s", decision_time, last_executed)
             return CycleReport(status="COMPLETE", reason="already_executed", decision_time=decision_time, intent_count=0)
         # 1) effective decision time gating (weights_asof)
@@ -929,113 +1412,16 @@ def run_shadow_cycle(
 
         # 3) 고아 주문 정리는 재조정 '이전에' 이뤄져야 한다(GTX 잔존 -> 원장 괴리 방지).
         journal = OrderJournal(settings.resolved_order_journal_path(default_order_journal_path))
-        cycle_context = JournalAttempt(
-            attempt_seq=-1,
-            decision_time=decision_time,
-            run_id=run_id,
-            mode=settings.mode.value,
-            pre_trade_equity=Decimal(0),
-            sizing_anchor="decision_ohlcv_close",
-            decision_marks={},
-            started_at=now_ts,
+        pre_trade = _reconcile_pre_trade(
+            settings, order_client=order_client, journal=journal, audit=audit, ledger_path=ledger_path,
+            ledger_state=ledger_state, snapshot=snapshot, exchange_info=exchange_info_payload,
+            run_id=run_id, decision_time=decision_time, now=now_ts,
         )
-        if journal.last_fill_seq() < ledger_state.journal_applied_fill_seq:
-            # 저널이 원장보다 짧으면(유실·잘림) 이후 체결이 조용히 버려지므로 즉시 중단한다.
-            _notify_event(
-                settings,
-                event="order_journal_regressed",
-                detail=f"journal_last_fill_seq={journal.last_fill_seq()} ledger_applied={ledger_state.journal_applied_fill_seq}",
-                decision_time=decision_time,
-                now=now_ts,
-            )
-            raise DataIntegrityError(
-                f"order journal regressed: last fill_seq {journal.last_fill_seq()} "
-                f"< ledger applied {ledger_state.journal_applied_fill_seq}"
-            )
-        sweep = cancel_orphan_orders(order_client, run_id, audit, journal=journal, now=now_ts, taker_fee_bps=float(settings.taker_fee_bps))
-        recovery = recover_unresolved_orders(order_client, journal, audit, now=now_ts, lookback=pd.Timedelta(hours=settings.journal_recovery_lookback_hours), taker_fee_bps=float(settings.taker_fee_bps))
-        unresolved_settlement = settle_unresolved_orders(order_client, journal, audit, recovery.unresolved, taker_fee_bps=float(settings.taker_fee_bps))
-        ledger_state = _commit_and_record(settings, ledger_path, ledger_state, journal, audit, fallback_attempt=cycle_context, equity=None, executed_decision_time=None)
+        ledger_state = pre_trade.ledger_state
         ledger_positions = ledger_state.positions
-        frozen_symbols = _record_unresolved_orders(settings, audit, (*sweep.unconfirmed, *unresolved_settlement.still_open), decision_time=decision_time, now=now_ts)
-        derisk_reasons: list[str] = []
-        if settings.mode.suppresses_mutations:
-            assert_suppressed_venue_flat(snapshot)
-        else:
-            settled = settled_delisting_symbols(
-                exchange_info_payload, snapshot.positions, ledger_positions, now=now_ts
-            )
-            for symbol in settled:
-                audit.record(
-                    "delisting_settlement_pending",
-                    symbol=symbol,
-                    ledger_qty=str(ledger_positions[symbol]),
-                )
-            ledger_state, delisting_booked = book_delisting_settlements(
-                ledger_state,
-                mode=settings.mode,
-                exchange_info=exchange_info_payload,
-                venue_positions=snapshot.positions,
-                evidence={},
-                fee_bps=Decimal(0),
-                now=now_ts,
-            )
-            if delisting_booked:
-                save_ledger(ledger_path, ledger_state)
-                ledger_positions = ledger_state.positions
-                for settlement in delisting_booked:
-                    audit.record(
-                        "delisting_settlement_booked",
-                        symbol=settlement.symbol,
-                        qty=str(settlement.quantity),
-                        price=None if settlement.price is None else str(settlement.price),
-                        fee=str(settlement.fee),
-                        delivery_time=settlement.delivery_time.isoformat(),
-                        evidence_source=settlement.evidence_source,
-                    )
-                    _notify_event(
-                        settings,
-                        event="delisting_settled",
-                        detail=f"symbol={settlement.symbol} qty={settlement.quantity} source={settlement.evidence_source}",
-                        decision_time=decision_time,
-                        now=now_ts,
-                    )
-            breaches = find_position_breaches(
-                snapshot,
-                ledger_positions,
-                qty_tolerance_fraction=RECONCILE_QTY_TOLERANCE_FRACTION,
-                settled_symbols=settled,
-            )
-            if breaches and settings.venue_force_close_auto_adopt:
-                ledger_state = _adopt_force_closes(
-                    settings, order_client, journal, audit, ledger_path, ledger_state,
-                    breaches, now=now_ts, fallback_attempt=cycle_context,
-                )
-                ledger_positions = ledger_state.positions
-                breaches = find_position_breaches(
-                    snapshot,
-                    ledger_positions,
-                    qty_tolerance_fraction=RECONCILE_QTY_TOLERANCE_FRACTION,
-                    settled_symbols=settled,
-                )
-            reasons = (("reconciliation_breach",) if breaches else ()) + (
-                ("foreign_open_orders",) if sweep.foreign_symbols else ()
-            )
-            if reasons and not settings.derisk_mode_enabled:
-                _raise_account_breach(breaches, sweep.foreign_symbols)
-            if reasons:
-                ledger_state = enter_derisk(ledger_path, ledger_state, reasons=reasons, now=now_ts)
-                derisk_reasons = sorted(set(ledger_state.derisk_reasons))
-                if breaches and not settings.venue_force_close_auto_adopt:
-                    audit.record(
-                        "derisk_entered",
-                        reasons=derisk_reasons,
-                        force_close_auto_adopt="off",
-                    )
-                else:
-                    audit.record("derisk_entered", reasons=derisk_reasons)
-            elif ledger_state.derisk_since is not None:
-                derisk_reasons = sorted(set(ledger_state.derisk_reasons))
+        sweep = pre_trade.sweep
+        derisk_reasons = list(pre_trade.derisk_reasons)
+        frozen_symbols = pre_trade.frozen_symbols
 
         # weights already loaded as effective row (reused)
         current_positions = effective_positions(settings.mode, snapshot, ledger_positions)
@@ -1079,81 +1465,14 @@ def run_shadow_cycle(
         funding_records: tuple[TaxRecord, ...] = ()
         settlement_records: tuple[TaxRecord, ...] = ()
         if settings.mode.suppresses_mutations:
-            absent_held = held_symbols_absent_from_exchange(ledger_state.positions, exchange_info_payload)
-            if absent_held:
-                audit.record("held_symbol_absent", symbols=absent_held)
-                raise DataIntegrityError(f"held symbols absent from exchangeInfo symbols={','.join(absent_held)}; resolve via actual venue settlement or live account reconciliation")
-            delisted = _delisted_held_symbols(ledger_state.positions, exchange_info_payload, now_ts)
-            cash_before = ledger_state.cash_usdt
-            funding_tax_dir = settings.resolved_tax_ledger_dir(default_tax_ledger_dir)
-            ledger_state, accrual, funding_records = _accrue_ledger_funding(
-                ledger_state,
-                now_ts,
-                ledger_path,
-                closed_at=delisted,
-                tax_dir=funding_tax_dir,
-                run_id=settings.record_run_id or run_id,
-                mode=settings.mode.value,
+            paper = _settle_paper_funding_and_delistings(
+                settings, audit, ledger_state=ledger_state, ledger_path=ledger_path,
+                exchange_info=exchange_info_payload, run_id=run_id, decision_time=decision_time, now=now_ts,
             )
-            if delisted:
-                proven: dict[str, SettlementEvidence] = {}
-                for delisted_symbol, delivery_time in delisted.items():
-                    try:
-                        flat_evidence = settlement_evidence_from_bars(
-                            FUTURES_DATA_DIR / "ohlcv" / "1h" / f"{delisted_symbol}.parquet",
-                            symbol=delisted_symbol,
-                            delivery_time=delivery_time,
-                            min_flat_bars=settings.delisting_settlement_min_flat_bars,
-                            price_rtol=settings.delisting_settlement_price_rtol,
-                        )
-                    except DataIntegrityError:
-                        flat_evidence = None
-                    if flat_evidence is not None:
-                        proven[delisted_symbol] = flat_evidence
-                ledger_state, paper_booked = book_delisting_settlements(
-                    ledger_state,
-                    mode=settings.mode,
-                    exchange_info=exchange_info_payload,
-                    venue_positions={},
-                    evidence=proven,
-                    fee_bps=Decimal(str(settings.delisting_settlement_fee_bps)),
-                    now=now_ts,
-                )
-                if paper_booked:
-                    settlement_records = delisting_settlement_tax_records(
-                        paper_booked, mode=settings.mode.value
-                    )
-                    if settlement_records:
-                        settlement_tax_dir = settings.resolved_tax_ledger_dir(default_tax_ledger_dir)
-                        append_tax_records(settlement_records, settlement_tax_dir)
-                    save_ledger(ledger_path, ledger_state)
-                    for settlement in paper_booked:
-                        audit.record(
-                            "delisting_settlement_booked",
-                            symbol=settlement.symbol,
-                            qty=str(settlement.quantity),
-                            price=None if settlement.price is None else str(settlement.price),
-                            fee=str(settlement.fee),
-                            delivery_time=settlement.delivery_time.isoformat(),
-                            evidence_source=settlement.evidence_source,
-                        )
-                        _notify_event(
-                            settings,
-                            event="delisting_settled",
-                            detail=f"symbol={settlement.symbol} qty={settlement.quantity} price={settlement.price} source={settlement.evidence_source}",
-                            decision_time=decision_time,
-                            now=now_ts,
-                        )
-                unresolved = {
-                    symbol: delivery_time
-                    for symbol, delivery_time in delisted.items()
-                    if ledger_state.positions.get(symbol, Decimal(0)) != 0
-                }
-                if unresolved:
-                    ledger_state = _settle_delisted_paper_positions(
-                        ledger_state, unresolved, now_ts, ledger_path, audit, settings, decision_time
-                    )
-            _enforce_funding_lag(accrual, settings, decision_time, now_ts)
+            ledger_state = paper.ledger_state
+            cash_before = paper.cash_before
+            funding_records = paper.funding_records
+            settlement_records = paper.settlement_records
             ledger_positions = ledger_state.positions
             current_positions = effective_positions(settings.mode, snapshot, ledger_positions)
         _audit_sizing_mark_fallbacks(audit, ledger_positions, marks, decision_marks)
@@ -1325,89 +1644,17 @@ def run_shadow_cycle(
             _commit_on_abort(settings, ledger_path, ledger_state, journal, audit, attempt=attempt, equity=equity, stage="abort")
             raise
         assert final_state is not None
-        try:
-            equity_eff, equity_source = resolve_effective_equity(settings.mode, equity, final_state.cash_usdt, final_state.positions, marks)
-            gross_notional = sum(
-                (abs(qty * marks[symbol]) for symbol, qty in final_state.positions.items() if symbol in marks),
-                Decimal(0),
-            )
-            n_holdings = sum(1 for qty in final_state.positions.values() if qty != 0)
-            portfolio_record = PortfolioStateRecord(
-                decision_time=decision_time,
-                mode=settings.mode.value,
-                equity_usdt=float(equity_eff),
-                equity_source=equity_source,
-                cash_usdt=float(final_state.cash_usdt) if final_state.cash_usdt is not None else None,
-                wallet_balance_usdt=float(snapshot.wallet_balance) if snapshot.wallet_balance is not None else None,
-                unrealized_pnl_usdt=float(snapshot.unrealized_pnl) if snapshot.unrealized_pnl is not None else None,
-                equity_high_water_mark_usdt=float(final_state.equity_high_water_mark),
-                gross_notional_usdt=float(gross_notional),
-                n_holdings=int(n_holdings),
-                intent_count=len(outcomes),
-                dropped_notional_fraction=float(dropped_fraction),
-            )
-            portfolio_dir = settings.resolved_portfolio_state_dir(default_portfolio_state_dir)
-            append_portfolio_state(portfolio_record, portfolio_dir)
-        except Exception as exc:  # noqa: BLE001 - observability-only, never halts cycle
-            with contextlib.suppress(Exception):
-                audit.record("portfolio_state_write_failed", error=str(exc))
-            logger.warning("[SYS] portfolio_state write failed error=%s", exc)
+        _write_portfolio_state_fail_soft(
+            settings, audit, final_state=final_state, snapshot=snapshot, equity=equity, marks=marks,
+            intent_count=len(outcomes), dropped_fraction=dropped_fraction, decision_time=decision_time,
+        )
         depth_summary = _stop_depth(settings.exec_depth_post_window_s)
         if depth_summary is not None:
             audit.record("exec_depth_capture", **dataclasses.asdict(depth_summary))
-        # tax ledger — fail-soft, never halts cycle (uses append_tax_records(tax_records, tax_dir))
-        # PAPER simulated TRADE records + per-batch cash reconciliation already ran
-        # inside _commit_and_record; only LIVE venue collection remains here.
-        try:
-            tax_dir = settings.resolved_tax_ledger_dir(default_tax_ledger_dir)
-            tax_dir.mkdir(parents=True, exist_ok=True)
-            if not settings.mode.suppresses_mutations and settings.tax_collection_enabled:
-                try:
-                    _, live_tax_issues = collect_and_persist_live_tax(
-                        order_client,
-                        wanted_symbols,
-                        tax_dir,
-                        settings.mode.value,
-                        now=now_ts,
-                        settings=settings,
-                    )
-                except DataIntegrityError as exc:
-                    audit.record("tax_watermark_invalid", error=str(exc))
-                    logger.warning("[SYS] tax_watermark_invalid error=%s", exc)
-                    dispatch_alert(
-                        settings,
-                        event="tax_ledger_corrupt",
-                        detail=f"path={tax_dir} error={type(exc).__name__}",
-                        decision_time=decision_time,
-                        dedupe_key=f"tax_ledger_corrupt:{decision_time.date()}",
-                        now=now_ts,
-                    )
-                else:
-                    for live_issue in live_tax_issues:
-                        audit.record(
-                            "tax_collect_issue",
-                            stream=live_issue.stream,
-                            stage=live_issue.stage,
-                            detail=live_issue.detail,
-                        )
-                        logger.warning(
-                            "[EXEC] tax_collect_issue stream=%s stage=%s",
-                            live_issue.stream,
-                            live_issue.stage,
-                        )
-                        if live_issue.stage == "retention_gap":
-                            dispatch_alert(
-                                settings,
-                                event="tax_income_gap",
-                                detail=live_issue.detail,
-                                decision_time=decision_time,
-                                dedupe_key=f"tax_income_gap:{live_issue.detail}",
-                                now=now_ts,
-                            )
-        except Exception as exc:  # noqa: BLE001
-            with contextlib.suppress(Exception):
-                audit.record("tax_ledger_write_failed", error=str(exc))
-            logger.warning("[SYS] tax_ledger write failed error=%s", exc)
+        _collect_live_tax_fail_soft(
+            settings, audit, order_client=order_client, symbols=wanted_symbols,
+            decision_time=decision_time, now=now_ts,
+        )
 
         degraded = derisk_active or bool(frozen_symbols)
         report_reasons = sorted(set(derisk_reasons) | ({UNRESOLVED_ORDERS_REASON} if frozen_symbols else set()))
