@@ -22,6 +22,7 @@ from typing import Any
 
 import pandas as pd
 
+from src.common.durable_io import durable_write_text
 from src.common.errors import DataIntegrityError
 from src.common.paths import FUTURES_DATA_DIR, LIVE_CAPTURE_DIR
 from src.live.account import (
@@ -831,9 +832,7 @@ def _assert_run_manifest_compatible(settings: LiveSettings) -> None:
     if set(mismatched) <= allowed and allowed:
         for key in allowed:
             raw[key] = current[key]
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        tmp.write_text(json.dumps(raw, indent=2, sort_keys=True), encoding="utf-8")
-        os.replace(tmp, path)
+        durable_write_text(path, json.dumps(raw, indent=2, sort_keys=True))
         return
     key = mismatched[0]
     raise DataIntegrityError(
@@ -847,9 +846,7 @@ def _ensure_run_manifest(settings: LiveSettings, now: pd.Timestamp) -> None:
         return
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = _current_run_manifest(settings, now)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-    os.replace(tmp, path)
+    durable_write_text(path, json.dumps(payload, indent=2, sort_keys=True))
 
 
 def _cycle_fallback_attempt(

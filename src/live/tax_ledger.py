@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import pandas as pd
 
+from src.common.durable_io import durable_write_text
 from src.common.errors import DataIntegrityError
 from src.common.paths import DATA_DIR
 from src.live.order_journal import truncate_durably
@@ -830,13 +831,7 @@ def save_tax_watermark(path: Path, watermark: TaxWatermark) -> None:
         if watermark.last_collected_at is not None
         else None,
     }
-    tmp_path = watermark_path.with_suffix(watermark_path.suffix + ".tmp")
-    with tmp_path.open("w", encoding="utf-8") as f:
-        f.write(json.dumps(payload, sort_keys=True))
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp_path, watermark_path)
-    _fsync_dir(watermark_path.parent)
+    durable_write_text(watermark_path, json.dumps(payload, sort_keys=True))
 
 
 def collect_and_persist_live_tax(

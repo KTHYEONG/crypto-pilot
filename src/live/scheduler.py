@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Any
 import pandas as pd
 
 from src.common.daemon_stages import BUSY_STAGES
+from src.common.durable_io import durable_write_text
 from src.common.errors import DataIntegrityError
 from src.common.paths import DATA_DIR, FUTURES_DATA_DIR, VENUE_RULES_DIR
 from src.live.errors import CausalityViolation
@@ -86,9 +87,7 @@ def next_decision_time(last_processed: pd.Timestamp | None, now: pd.Timestamp) -
 
 def _atomic_write_text(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
-    tmp_path.write_text(text, encoding="utf-8")
-    os.replace(tmp_path, path)
+    durable_write_text(path, text)
 
 
 def _load_daemon_state(state_path: Path) -> DaemonState:

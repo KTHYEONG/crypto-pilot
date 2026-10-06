@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import threading
 import time
 from collections.abc import AsyncIterator, Callable, Sequence
@@ -16,6 +15,7 @@ from typing import Any
 
 import pandas as pd
 
+from src.common.durable_io import durable_replace, durable_write_text
 from src.market_data.streams.coverage import CoverageTracker
 
 _logger = logging.getLogger(__name__)
@@ -358,9 +358,7 @@ class ExecutionDepthRecorder:
                 "symbols": symbols,
                 "symbols_missing": list(summary.symbols_missing),
             }
-            tmp = target.with_name(f".{target.name}.tmp")
-            tmp.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
-            os.replace(tmp, target)
+            durable_write_text(target, json.dumps(manifest, indent=2, sort_keys=True))
         except Exception as exc:
             _logger.warning("[EXEC] stage=exec_depth_capture status=MANIFEST_FAILED error=%s", exc)
 
@@ -371,9 +369,7 @@ class ExecutionDepthRecorder:
             frame = _rows_to_frame(rows, self._levels)
             first = pd.Timestamp(frame["received_at"].iloc[0]).tz_convert("UTC")
             target = self._part_path(first, self._parts)
-            tmp = target.with_name(f".{target.name}.tmp")
-            frame.to_parquet(tmp, index=False, compression="zstd")
-            os.replace(tmp, target)
+            durable_replace(target, lambda tmp: frame.to_parquet(tmp, index=False, compression="zstd"))
         except Exception as exc:
             self._flush_failures += 1
             _logger.warning(

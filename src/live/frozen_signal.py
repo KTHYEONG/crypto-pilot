@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import logging
 import math
-import os
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -13,6 +12,7 @@ import numpy as np
 import pandas as pd
 from pydantic import SecretStr
 
+from src.common.durable_io import durable_replace, durable_write_text
 from src.common.errors import DataIntegrityError
 from src.live.deployed_weights import append_weight_row, decision_ohlcv_close_path, load_weights_frame
 from src.live.errors import ArtifactSealError, CausalityViolation
@@ -373,9 +373,7 @@ def run_frozen_signal_step(
     # HALT 이후 재시도가 낡은 창으로 되돌아가지 않도록, 이후 점검이 실패하기 전에 forward를 먼저 영속화한다.
     forward_new = history[history.index > bootstrap.index[-1]]
     forward_path.parent.mkdir(parents=True, exist_ok=True)
-    forward_tmp = forward_path.with_suffix(forward_path.suffix + ".tmp")
-    forward_new.to_frame("unit_return").to_parquet(forward_tmp, index=True)
-    os.replace(forward_tmp, forward_path)
+    durable_replace(forward_path, lambda tmp: forward_new.to_frame("unit_return").to_parquet(tmp, index=True))
     past = history[history.index <= day]
     moments = bayesian_unit_moments(
         len(past), float(past.sum()), float((past**2).sum()),
@@ -462,7 +460,5 @@ def run_frozen_signal_step(
         "written": report.written,
         "created_at": pd.Timestamp.now(tz="UTC").isoformat(),
     }
-    report_tmp = report_path.with_suffix(report_path.suffix + ".tmp")
-    report_tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-    os.replace(report_tmp, report_path)
+    durable_write_text(report_path, json.dumps(payload, indent=2, sort_keys=True))
     return report

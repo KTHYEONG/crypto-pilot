@@ -346,3 +346,40 @@ def test_ledger_resync_refuses_while_own_orders_unresolved(tmp_path, monkeypatch
     assert ledger_path.read_bytes() == before
     assert not [f for f in OrderJournal(Path(settings.order_journal_path)).fills_after(-1) if f.kind == "operator_resync"]
     assert any(json.loads(line).get("event") == "order_recovery_unresolved" for line in audit_path.read_text(encoding="utf-8").splitlines() if line.strip())
+
+
+def test_ledger_resync_backup_dir_fsync_io_error_propagates(resync_env, tmp_path, monkeypatch) -> None:
+    """A directory fsync I/O error on the backup now propagates; the backup bytes are already written."""
+    import errno
+    import os
+
+    settings = _resync_settings(tmp_path, "eio")
+    ledger_path = Path(settings.ledger_path)
+    save_ledger(ledger_path, LedgerState(positions={}, equity_high_water_mark=Decimal("0")))
+    enter_derisk(ledger_path, load_ledger(ledger_path), reasons=("reconciliation_breach",), now=NOW)
+    before = ledger_path.read_bytes()
+    backup_dir = Path(settings.ledger_resync_backup_dir)
+
+    real_open = os.open
+    real_fsync = os.fsync
+    dir_fds: list[int] = []
+
+    def _open(p, flags, *args, **kwargs):
+        fd = real_open(p, flags, *args, **kwargs)
+        if str(p) == str(backup_dir):
+            dir_fds.append(fd)
+        return fd
+
+    def _fsync(fd):
+        if fd in dir_fds:
+            raise OSError(errno.EIO, "disk error")
+        return real_fsync(fd)
+
+    monkeypatch.setattr(os, "open", _open)
+    monkeypatch.setattr(os, "fsync", _fsync)
+    with pytest.raises(OSError, match="disk error") as excinfo:
+        resync_mod.run_ledger_resync(settings, apply=True, now=NOW)
+    assert excinfo.value.errno == errno.EIO
+    backups = list(backup_dir.glob("live_position_ledger.*.json"))
+    assert len(backups) == 1
+    assert backups[0].read_bytes() == before
