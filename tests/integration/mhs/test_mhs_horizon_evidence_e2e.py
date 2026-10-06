@@ -241,22 +241,15 @@ class TestFoldWindowTelemetryOracle:
 
     @pytest.fixture(scope="class")
     def fold_market(self, tmp_path_factory) -> tuple[Path, pd.Timestamp]:
-        import src.market_data.services.futures_collection as fc
-
         root = tmp_path_factory.mktemp("mhs_fold_market")
         end = _write_mhs_market(root, DEV_SYMBOLS, n_hours=3000)
         _write_3m_cache(root)
         originals = {
             "funding_path": marks.funding_path,
-            "mark_price_path": fc._mark_price_path,
         }
         marks.funding_path = lambda sym: root / "funding" / f"{sym}.parquet"
-        fc._mark_price_path = (
-            lambda symbol, timeframe: root / "markPriceKlines" / timeframe / f"{symbol}.parquet"
-        )
         yield root, end
         marks.funding_path = originals["funding_path"]
-        fc._mark_price_path = originals["mark_price_path"]
 
     def _single_panel_oracle(
         self, root: Path, funding_by_symbol: dict[str, pd.Series],
@@ -514,12 +507,9 @@ class TestMhsSingleSourceReport:
 
     @pytest.fixture(scope="module")
     def refactor_report(self, synthetic_market) -> MhsHorizonDiagnosticReport:
-        import src.market_data.services.futures_collection as fc
-
         root, end = synthetic_market
         originals = {
             "funding_path": marks.funding_path,
-            "mark_price_path": fc._mark_price_path,
             "_BOOTSTRAP_REPLICATES": statistics._BOOTSTRAP_REPLICATES,
             "_BOOTSTRAP_MEAN_BLOCK": statistics._BOOTSTRAP_MEAN_BLOCK,
             "_BOOTSTRAP_SEED": statistics._BOOTSTRAP_SEED,
@@ -528,9 +518,6 @@ class TestMhsSingleSourceReport:
         }
 
         marks.funding_path = lambda sym: root / "funding" / f"{sym}.parquet"
-        fc._mark_price_path = (
-            lambda symbol, timeframe: root / "markPriceKlines" / timeframe / f"{symbol}.parquet"
-        )
         statistics._BOOTSTRAP_REPLICATES = 20
         statistics._BOOTSTRAP_MEAN_BLOCK = 24
         statistics._BOOTSTRAP_SEED = 20260807
@@ -547,9 +534,7 @@ class TestMhsSingleSourceReport:
             )
         finally:
             for name, value in originals.items():
-                if name == "mark_price_path":
-                    fc._mark_price_path = value
-                elif name == "funding_path":
+                if name == "funding_path":
                     marks.funding_path = value
                 else:
                     setattr(statistics, name, value)

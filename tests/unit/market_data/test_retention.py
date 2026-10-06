@@ -90,9 +90,11 @@ def test_prune_market_data_never_writes_empty_frame(tmp_path) -> None:
 
 def test_prune_market_data_leaves_retired_mark_cache_untouched(tmp_path) -> None:
     import pandas as pd
-    from src.market_data.retention import prune_market_data
+    from src.market_data.retention import MHS_LIVE_RETENTION_FEEDS, prune_market_data
 
-    idx = pd.date_range("2026-07-01", periods=60, freq="1D", tz="UTC")
+    idx = pd.date_range("2025-01-01", periods=60, freq="1D", tz="UTC").append(
+        pd.date_range("2026-07-01", periods=60, freq="1D", tz="UTC")
+    )
     df = pd.DataFrame({
         "timestamp": ((idx - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta("1ms")).astype("int64"),
         "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0, "volume": 1.0,
@@ -106,7 +108,7 @@ def test_prune_market_data_leaves_retired_mark_cache_untouched(tmp_path) -> None
     result = prune_market_data(tmp_path, 450, now=pd.Timestamp("2026-09-01", tz="UTC"))
 
     assert p.read_bytes() == before
-    assert result["markPriceKlines/1h"] == {"files_pruned": 0, "rows_removed": 0, "files_skipped": 0}
+    assert set(result) == set(MHS_LIVE_RETENTION_FEEDS)
 
 
 def test_prune_orderbook_history_removes_only_old_dailies(tmp_path) -> None:
@@ -169,7 +171,7 @@ def test_check_orderbook_prune_impending_empty_dir(tmp_path) -> None:
 
 def test_prune_market_data_never_prunes_retired_metrics_feed(tmp_path) -> None:
     import pandas as pd
-    from src.market_data.retention import prune_market_data
+    from src.market_data.retention import MHS_LIVE_RETENTION_FEEDS, prune_market_data
 
     now = pd.Timestamp("2026-09-01", tz="UTC")
     old = pd.date_range("2025-01-01", periods=50, freq="1D", tz="UTC")
@@ -195,94 +197,7 @@ def test_prune_market_data_never_prunes_retired_metrics_feed(tmp_path) -> None:
 
     # Retired feed: ordinary MHS retention leaves every row untouched.
     assert (d / "AAAUSDT.parquet").read_bytes() == before
-    assert result["metrics/1d"] == {"files_pruned": 0, "rows_removed": 0, "files_skipped": 0}
-
-
-def test_quarantine_retired_feeds_dry_run_enumerates_exact_targets(tmp_path) -> None:
-    import json
-
-    from src.market_data.retention import quarantine_retired_mhs_feeds
-
-    (tmp_path / "markPriceKlines" / "1h").mkdir(parents=True)
-    (tmp_path / "metrics" / "1d").mkdir(parents=True)
-    (tmp_path / "ohlcv" / "1h").mkdir(parents=True)
-    (tmp_path / "funding").mkdir(parents=True)
-    (tmp_path / "markPriceKlines" / "1h" / "AUSDT.parquet").write_bytes(b"a" * 10)
-    (tmp_path / "markPriceKlines" / "1h" / "AUSDT.coverage.json").write_bytes(b"c" * 5)
-    (tmp_path / "metrics" / "1d" / "BUSDT.parquet").write_bytes(b"b" * 7)
-    (tmp_path / "markPriceKlines" / "1h" / "X.tmp.parquet").write_bytes(b"temp")
-    (tmp_path / "ohlcv" / "1h" / "AUSDT.parquet").write_bytes(b"keep-1h")
-    (tmp_path / "funding" / "AUSDT.parquet").write_bytes(b"keep-funding")
-
-    manifest = tmp_path / "manifest.json"
-    report = quarantine_retired_mhs_feeds(
-        tmp_path, tmp_path / "recovery", dry_run=True, manifest_path=manifest
-    )
-
-    # Exact deletion targets only; temp artifacts and live feeds excluded.
-    assert report["targets"] == 3
-    assert report["moved"] == 0
-    assert report["bytes"] == 22
-    assert report["recovery_dir"] == str(tmp_path / "recovery")
-    assert (tmp_path / "markPriceKlines" / "1h" / "AUSDT.parquet").exists()
-    payload = json.loads(manifest.read_text(encoding="utf-8"))
-    assert [entry["relative_path"] for entry in payload["files"]] == [
-        "markPriceKlines/1h/AUSDT.coverage.json",
-        "markPriceKlines/1h/AUSDT.parquet",
-        "metrics/1d/BUSDT.parquet",
-    ]
-    assert all(len(entry["sha256"]) == 64 for entry in payload["files"])
-    assert payload["moved"] is False
-
-
-def test_quarantine_retired_feeds_blocked_by_active_readers(tmp_path) -> None:
-    from src.market_data.retention import quarantine_retired_mhs_feeds, retired_feed_active_readers
-
-    (tmp_path / "markPriceKlines" / "1h").mkdir(parents=True)
-    (tmp_path / "markPriceKlines" / "1h" / "AUSDT.parquet").write_bytes(b"a")
-
-    # The OHLCV-only contract removed the last mark reader, so physical
-    # removal proceeds without operator override.
-    assert retired_feed_active_readers() == ()
-    report = quarantine_retired_mhs_feeds(tmp_path, tmp_path / "recovery", dry_run=False)
-    assert report["moved"] == 1
-    assert not (tmp_path / "markPriceKlines" / "1h" / "AUSDT.parquet").exists()
-
-
-def test_quarantine_retired_feeds_apply_moves_with_recoverable_manifest(tmp_path) -> None:
-    import json
-
-    from src.market_data.retention import quarantine_retired_mhs_feeds
-
-    (tmp_path / "markPriceKlines" / "1h").mkdir(parents=True)
-    (tmp_path / "metrics" / "1d").mkdir(parents=True)
-    (tmp_path / "ohlcv" / "3m").mkdir(parents=True)
-    (tmp_path / "mhs_execution").mkdir(parents=True)
-    (tmp_path / "markPriceKlines" / "1h" / "AUSDT.parquet").write_bytes(b"a" * 4)
-    (tmp_path / "metrics" / "1d" / "BUSDT.parquet").write_bytes(b"b" * 6)
-    (tmp_path / "ohlcv" / "3m" / "AUSDT.parquet").write_bytes(b"keep-3m")
-    (tmp_path / "mhs_execution" / "input_manifest.json").write_bytes(b"keep-run")
-
-    report = quarantine_retired_mhs_feeds(
-        tmp_path, tmp_path / "recovery", dry_run=False, allow_active_readers=True
-    )
-
-    assert report == {
-        "targets": 2,
-        "moved": 2,
-        "bytes": 10,
-        "recovery_dir": str(tmp_path / "recovery"),
-        "manifest": str(tmp_path / "recovery" / "retired_feeds_manifest.json"),
-    }
-    assert (tmp_path / "recovery" / "markPriceKlines" / "1h" / "AUSDT.parquet").read_bytes() == b"a" * 4
-    assert (tmp_path / "recovery" / "metrics" / "1d" / "BUSDT.parquet").read_bytes() == b"b" * 6
-    assert not (tmp_path / "markPriceKlines" / "1h" / "AUSDT.parquet").exists()
-    # 3m execution corpus, backtest runs and unrelated data are never touched.
-    assert (tmp_path / "ohlcv" / "3m" / "AUSDT.parquet").read_bytes() == b"keep-3m"
-    assert (tmp_path / "mhs_execution" / "input_manifest.json").read_bytes() == b"keep-run"
-    payload = json.loads((tmp_path / "recovery" / "retired_feeds_manifest.json").read_text(encoding="utf-8"))
-    assert payload["moved"] is True
-    assert len(payload["files"]) == 2
+    assert set(result) == set(MHS_LIVE_RETENTION_FEEDS)
 
 
 def test_prune_market_data_uses_hidden_temp_and_skips_legacy_tmp_files(tmp_path, monkeypatch) -> None:

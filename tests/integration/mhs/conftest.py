@@ -83,30 +83,22 @@ def _mhs_parallel_parity_uncap(request: pytest.FixtureRequest, monkeypatch: pyte
 
 @pytest.fixture(scope="module")
 def synthetic_market(tmp_path_factory) -> tuple[Path, pd.Timestamp]:
-    import src.market_data.services.futures_collection as fc
-
     dev_symbols, _, write_market = _load_horizon_diagnostic_helpers()
     root = tmp_path_factory.mktemp("mhs_market")
     end = write_market(root, dev_symbols)
     originals = {
         "funding_path": marks.funding_path,
-        "mark_price_path": fc._mark_price_path,
         "_BOOTSTRAP_REPLICATES": statistics._BOOTSTRAP_REPLICATES,
         "_BOOTSTRAP_MEAN_BLOCK": statistics._BOOTSTRAP_MEAN_BLOCK,
         "_BOOTSTRAP_SEED": statistics._BOOTSTRAP_SEED,
     }
     marks.funding_path = lambda sym: root / "funding" / f"{sym}.parquet"
-    fc._mark_price_path = (
-        lambda symbol, timeframe: root / "markPriceKlines" / timeframe / f"{symbol}.parquet"
-    )
     statistics._BOOTSTRAP_REPLICATES = 20
     statistics._BOOTSTRAP_MEAN_BLOCK = 24
     statistics._BOOTSTRAP_SEED = 20260807
     yield root, end
     for name, value in originals.items():
-        if name == "mark_price_path":
-            fc._mark_price_path = value
-        elif name == "funding_path":
+        if name == "funding_path":
             marks.funding_path = value
         else:
             setattr(statistics, name, value)

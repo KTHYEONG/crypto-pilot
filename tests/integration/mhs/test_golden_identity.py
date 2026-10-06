@@ -93,7 +93,6 @@ def matrix_market(request, tmp_path_factory):
     Non-baseline goldens need the ``taker_buy_quote`` column, so those markets
     are written via ``test_evaluation._write_mhs_market(include_taker_buy_quote=True)``.
     """
-    import src.market_data.services.futures_collection as fc
     import src.mhs.marks as marks
     import src.mhs.statistics as statistics
     from tests.unit.mhs.test_evaluation_appresearch import (
@@ -113,26 +112,18 @@ def matrix_market(request, tmp_path_factory):
 
     originals = {
         "funding_path": marks.funding_path,
-        "_mark_price_path": fc._mark_price_path,
         "_BOOTSTRAP_REPLICATES": statistics._BOOTSTRAP_REPLICATES,
         "_BOOTSTRAP_MEAN_BLOCK": statistics._BOOTSTRAP_MEAN_BLOCK,
         "_BOOTSTRAP_SEED": statistics._BOOTSTRAP_SEED,
     }
     marks.funding_path = lambda sym: root / "funding" / f"{sym}.parquet"
-    # test_evaluation writes mark frames under markPriceKlines/1h
-
-    def _mp(symbol, timeframe):
-        return root / "markPriceKlines" / timeframe / f"{symbol}.parquet"
-
-    fc._mark_price_path = _mp
     statistics._BOOTSTRAP_REPLICATES = 20
     statistics._BOOTSTRAP_MEAN_BLOCK = 24
     statistics._BOOTSTRAP_SEED = 20260807
     yield root, end, start
     marks.funding_path = originals["funding_path"]
-    fc._mark_price_path = originals["_mark_price_path"]
     for nm, val in originals.items():
-        if nm == "funding_path" or nm == "_mark_price_path":
+        if nm == "funding_path":
             continue
         setattr(statistics, nm, val)
 

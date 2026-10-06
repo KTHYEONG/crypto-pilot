@@ -4,22 +4,19 @@ from __future__ import annotations
 
 import concurrent.futures
 import json
-from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, cast
+from typing import Literal
 
 import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
 
-import src.market_data.services.futures_collection as _futures_collection
 from src.common.errors import DataIntegrityError
 from src.common.paths import FUTURES_DATA_DIR, funding_path
 from src.market_data.services.futures_collection import DataCollector
 from src.market_data.services.label_arrays import decode_ms_labels_ns, sorted_unique_labels
 from src.mhs.books import phase_tranche_book, rank_weight_book
-from src.mhs.data_provenance import resolve_required_mhs_input_paths, seal_mhs_input_manifest
 from src.mhs.horizons import horizon_log_return
 from src.mhs.panel import liquid_half_eligibility, load_base_panel
 from src.mhs.types import BOOK_SPECS
@@ -142,32 +139,6 @@ def _coverage(
     }
 
 
-def assert_execution_data_coverage(
-    symbols: Sequence[str], timeframe: Literal["3m"], start: str, end: str, root: str | None = None,
-) -> None:
-    """Fail closed unless every symbol has full ``[start, end]`` execution cache coverage.
-
-    Reuses ``_coverage`` (local Parquet metadata reads only -- no network, no
-    ``DataCollector``) and raises ``DataIntegrityError`` naming every symbol
-    whose status is not ``PRESENT`` (``MISSING`` file or ``GAPPED`` internal
-    bars), so a pre-flight diagnostic gate fails with an actionable symbol list
-    instead of a late opaque ``MISSING_DATA`` termination count. ``root`` is the
-    synthetic-cache root for tests; when ``None`` the canonical
-    ``FUTURES_DATA_DIR / 'ohlcv'`` path is used (backward compatible with the
-    existing ``_coverage`` call sites).
-    """
-    deficient = {
-        symbol: status
-        for symbol in symbols
-        if (status := str(_coverage(symbol, timeframe, start, end, root)["status"])) != "PRESENT"
-    }
-    if deficient:
-        listed = ", ".join(f"{s} ({status})" for s, status in sorted(deficient.items()))
-        raise DataIntegrityError(
-            f"execution data coverage incomplete for {len(deficient)} symbols: {listed}"
-        )
-
-
 def roster_membership_intervals(
     execution_mask: pd.DataFrame,
 ) -> dict[str, tuple[tuple[pd.Timestamp, pd.Timestamp], ...]]:
@@ -213,7 +184,7 @@ def assert_relevant_execution_data_coverage(
 ) -> None:
     """Fail closed unless every roster-membership interval has full cache coverage.
 
-    Same local-Parquet-metadata semantics as ``assert_execution_data_coverage``
+    Same local-Parquet-metadata semantics as the full-universe coverage gate
     (``_coverage`` only -- no network, no ``DataCollector``) but scoped to the
     roster's per-symbol contiguous membership intervals instead of the full
     universe x full period Cartesian product. A gap that lies entirely OUTSIDE a
@@ -236,97 +207,6 @@ def assert_relevant_execution_data_coverage(
         )
 
 
-def _mark_availability_index(path: Path) -> pd.DatetimeIndex:
-    """Sorted unique mark-availability times for one symbol's mark parquet.
-
-    Causal availability rules: only rows whose ``close`` is finite AND
-    strictly positive count, and a row at time ``t`` becomes available only
-    at ``t + 1h``.
-    """
-    if not path.exists():
-        return pd.DatetimeIndex([], tz="UTC")
-    try:
-        df = pd.read_parquet(path)
-    except Exception:  # noqa: BLE001
-        return pd.DatetimeIndex([], tz="UTC")
-    if df.empty or "close" not in df.columns:
-        return pd.DatetimeIndex([], tz="UTC")
-    if "datetime" in df.columns:
-        dt = pd.to_datetime(df["datetime"], utc=True, errors="coerce")
-    elif "timestamp" in df.columns:
-        dt = pd.to_datetime(df["timestamp"], unit="ms", utc=True, errors="coerce")
-    else:
-        return pd.DatetimeIndex([], tz="UTC")
-    close = pd.to_numeric(df["close"], errors="coerce")
-    valid = dt.notna() & close.notna() & (close > 0)
-    if not bool(valid.any()):
-        return pd.DatetimeIndex([], tz="UTC")
-    avail = dt[valid] + pd.Timedelta(hours=1)
-    return pd.DatetimeIndex(avail.drop_duplicates()).sort_values()
-
-
-def _mark_covers_grid(
-    avail: pd.DatetimeIndex,
-    grid: pd.DatetimeIndex,
-    ffill_limit: int,
-) -> bool:
-    """Whether every hour of ``grid`` is causally covered by available marks.
-
-    Availability points are reindexed onto the grid with ``method='ffill'``
-    and the same ``limit`` the gate derives from ``stale_hours``, so a gate
-    that passes cannot die mid-replay from a missing mark.
-    """
-    if avail.empty or grid.empty:
-        return False
-    source = pd.Series(True, index=avail)
-    aligned = (
-        source.reindex(grid, method="ffill", limit=ffill_limit)
-        if ffill_limit > 0
-        else source.reindex(grid)
-    )
-    return bool(aligned.fillna(False).all())
-
-
-def assert_relevant_mark_price_coverage(
-    execution_mask: pd.DataFrame,
-    timeframe: str = "1h",
-    stale_hours: int = 0,
-) -> None:
-    """Fail closed unless every roster hour has a causally available mark.
-
-    Reuses ``roster_membership_intervals`` and checks each hour of each
-    membership interval against the symbol's ``markPriceKlines`` parquet
-    (resolved via ``futures_collection._mark_price_path``) using EXACTLY the
-    causal availability rules of the mark panel: rows with finite,
-    strictly-positive ``close`` become available at ``datetime + 1h``, and a stale-carry allowance of ``stale_hours`` is
-    honored with the same ``ffill`` limit. A gate that is more permissive than
-    the replay would let a run pass and then die mid-replay -- this gate is
-    deliberately strict.
-    """
-    if timeframe != "1h":
-        raise ValueError(f"unsupported timeframe '{timeframe}' (mark coverage is hourly)")
-    if stale_hours < 0:
-        raise ValueError("stale_hours must be non-negative")
-    intervals = roster_membership_intervals(execution_mask)
-    if not intervals:
-        return
-    ffill_limit = max(0, stale_hours - 1) if stale_hours > 0 else 0
-    deficient: list[str] = []
-    for symbol, ivs in sorted(intervals.items()):
-        path = _futures_collection._mark_price_path(symbol, timeframe)
-        avail = _mark_availability_index(path)
-        for iv_start, iv_end in ivs:
-            grid = pd.date_range(iv_start, iv_end, freq="1h", tz="UTC")
-            if not _mark_covers_grid(avail, grid, ffill_limit):
-                deficient.append(f"{symbol} ({iv_start}..{iv_end}) mark coverage deficient")
-    if deficient:
-        listed = "; ".join(deficient)
-        raise DataIntegrityError(
-            f"relevant mark-price coverage incomplete for {len(deficient)} "
-            f"interval(s): {listed}"
-        )
-
-
 # Dynamic gap-exclusion threshold: reuses the SAME 720h invariant
 # ``liquid_half_eligibility(min_history_bars=720)`` already requires for a
 # symbol to become liquidity-eligible at all (src/mhs/panel.py). A contiguous
@@ -340,7 +220,6 @@ def assert_relevant_mark_price_coverage(
 DYNAMIC_GAP_EXCLUSION_HOURS = 720.0
 
 _OHLCV_BAR_STEP_MINUTES = {"3m": 3, "1h": 60}
-_MARK_AVAILABILITY_LAG_HOURS = 1
 
 
 def _require_gap_threshold(min_gap_hours: float) -> float:
@@ -368,25 +247,6 @@ def _row_group_ms_min_ns(column: object) -> int | None:
         if isinstance(minimum, bool) or not isinstance(minimum, (int, np.integer, float)):
             return None
         return int(minimum) * 1_000_000
-    except Exception:  # noqa: BLE001
-        return None
-
-
-def _row_group_datetime_min_ns(column: object) -> int | None:
-    """Minimum label of a datetime chunk in nanoseconds, or None if unknown."""
-    try:
-        if column is None:
-            return None
-        stats = getattr(column, "statistics", None)
-        if stats is None or not getattr(column, "is_stats_set", False) or not getattr(stats, "has_min_max", False):
-            return None
-        minimum = stats.min
-        if minimum is None:
-            return None
-        stamp = pd.to_datetime(minimum, utc=True, errors="coerce")
-        if not isinstance(stamp, pd.Timestamp) or pd.isna(stamp):
-            return None
-        return int(stamp.as_unit("ns").value)
     except Exception:  # noqa: BLE001
         return None
 
@@ -452,86 +312,6 @@ def _read_ohlcv_labels(
     return sorted_unique_labels(chunks)
 
 
-def _read_mark_labels(
-    symbol: str, timeframe: str, *, observed_through_ns: int | None = None,
-) -> np.ndarray | None:
-    """Read compact valid mark labels from their established source root.
-
-    Args:
-        symbol: Existing mark source symbol.
-        timeframe: Existing hourly mark interval.
-        observed_through_ns: Inclusive latest useful label, or full audit range.
-
-    Returns:
-        Sorted unique int64 UTC labels with finite positive closes, or None.
-
-    Raises:
-        DataIntegrityError: Existing mark provenance cannot be established.
-    """
-    path = _futures_collection._mark_price_path(symbol, timeframe)
-    if not path.exists():
-        return None
-    try:
-        reader = pq.ParquetFile(path)
-        names = list(reader.schema_arrow.names)
-    except Exception as exc:
-        raise DataIntegrityError(f"mark source unreadable symbol={symbol!r} path={path}") from exc
-    if "close" not in names or ("datetime" not in names and "timestamp" not in names):
-        raise DataIntegrityError(f"mark source schema inconsistent symbol={symbol!r} path={path}")
-    use_datetime = "datetime" in names
-    time_column = "datetime" if use_datetime else "timestamp"
-    columns = [time_column, "close"]
-    try:
-        meta = reader.metadata
-        if meta.num_rows == 0:
-            raise DataIntegrityError(f"mark source schema inconsistent symbol={symbol!r} path={path}")
-        positions = {meta.row_group(0).column(j).path_in_schema: j for j in range(meta.row_group(0).num_columns)} if meta.num_row_groups else {time_column: 0}
-        time_pos = positions.get(time_column, names.index(time_column))
-        chunks: list[np.ndarray] = []
-        for group in range(meta.num_row_groups):
-            if observed_through_ns is not None:
-                chunk_meta = meta.row_group(group).column(time_pos)
-                earliest = _row_group_datetime_min_ns(chunk_meta) if use_datetime else _row_group_ms_min_ns(chunk_meta)
-                if earliest is not None and earliest > int(observed_through_ns):
-                    continue
-            try:
-                table = reader.read_row_group(group, columns=columns, use_threads=False)
-                if use_datetime:
-                    time_raw = table.column("datetime").to_pandas()
-                else:
-                    time_raw = table.column("timestamp").to_numpy()
-                close_raw = table.column("close").to_numpy()
-                del table
-            except Exception as exc:
-                raise DataIntegrityError(f"mark source unreadable symbol={symbol!r} path={path}") from exc
-            if use_datetime:
-                moments = pd.to_datetime(time_raw, utc=True, errors="coerce")
-            else:
-                moments = pd.to_datetime(time_raw, unit="ms", utc=True, errors="coerce")
-            del time_raw
-            closes = np.asarray(pd.to_numeric(close_raw, errors="coerce"), dtype="float64")
-            del close_raw
-            keep = np.asarray(moments.notna()) & np.isfinite(closes) & (closes > 0.0)
-            del closes
-            if not bool(np.any(keep)):
-                del moments, keep
-                continue
-            valid = pd.DatetimeIndex(moments[keep]).sort_values()
-            del moments, keep
-            values = np.asarray(valid.as_unit("ns").asi8, dtype="int64")
-            del valid
-            if observed_through_ns is not None:
-                values = values[values <= int(observed_through_ns)]
-                if len(values) == 0:
-                    continue
-            chunks.append(values)
-    except DataIntegrityError:
-        raise
-    except Exception as exc:
-        raise DataIntegrityError(f"mark source unreadable symbol={symbol!r} path={path}") from exc
-    return sorted_unique_labels(chunks)
-
-
 def _causal_gap_excluded(
     member: np.ndarray,
     decision_ns: np.ndarray,
@@ -584,24 +364,6 @@ def _causal_gap_excluded(
     return excluded
 
 
-def _apply_causal_gap_exclusion(
-    execution_mask: pd.DataFrame,
-    intervals: dict[str, tuple[tuple[pd.Timestamp, pd.Timestamp], ...]],
-    labels_by_symbol: dict[str, np.ndarray | None],
-    lag_ns: int,
-    gap_ns: int,
-) -> tuple[pd.DataFrame, dict[str, tuple[tuple[pd.Timestamp, pd.Timestamp], ...]]]:
-    """Zero membership cells under structural gaps; report newly excluded runs."""
-    decision_ns = np.asarray(execution_mask.index.as_unit("ns").asi8, dtype="int64")
-    adjusted = execution_mask.copy()
-    for symbol in intervals:
-        member = execution_mask[symbol].to_numpy(dtype=bool)
-        dropped = _causal_gap_excluded(member, decision_ns, labels_by_symbol[symbol], lag_ns, gap_ns)
-        adjusted[symbol] = member & ~dropped
-    dropped_frame = execution_mask & ~adjusted
-    return adjusted, roster_membership_intervals(dropped_frame)
-
-
 def apply_dynamic_gap_exclusion(
     execution_mask: pd.DataFrame,
     timeframe: Literal["3m", "1h"],
@@ -646,49 +408,6 @@ def apply_dynamic_gap_exclusion(
     return adjusted, roster_membership_intervals(execution_mask & ~adjusted)
 
 
-def apply_dynamic_mark_gap_exclusion(
-    execution_mask: pd.DataFrame,
-    timeframe: str = "1h",
-    root: str | None = None,
-    min_gap_hours: float = DYNAMIC_GAP_EXCLUSION_HOURS,
-) -> tuple[pd.DataFrame, dict[str, tuple[tuple[pd.Timestamp, pd.Timestamp], ...]]]:
-    """Restrict membership using published hourly mark observations.
-
-    Args:
-        execution_mask: UTC decision-time membership.
-        timeframe: Hourly mark source interval.
-        root: Existing compatibility argument; it must not imply root isolation.
-        min_gap_hours: Existing structural history-gap threshold.
-
-    Returns:
-        Causal membership and observed mark exclusion intervals.
-
-    Raises:
-        ValueError: Mark interval or threshold is unsupported.
-        DataIntegrityError: Mark provenance is inconsistent.
-    """
-    if timeframe != "1h":
-        raise ValueError(f"unsupported timeframe '{timeframe}' (mark coverage is hourly)")
-    gap_hours = _require_gap_threshold(min_gap_hours)
-    intervals = roster_membership_intervals(execution_mask)
-    if not intervals:
-        return execution_mask, {}
-    lag_ns = _MARK_AVAILABILITY_LAG_HOURS * 3_600_000_000_000
-    gap_ns = int(gap_hours * 3_600_000_000_000)
-    decision_ns = np.asarray(execution_mask.index.as_unit("ns").asi8, dtype="int64")
-    observed_through_ns = int(decision_ns[-1]) - lag_ns
-    adjusted = execution_mask.copy()
-    for symbol in intervals:
-        member = execution_mask[symbol].to_numpy(dtype=bool)
-        labels = _read_mark_labels(
-            symbol, timeframe, observed_through_ns=observed_through_ns,
-        )
-        dropped = _causal_gap_excluded(member, decision_ns, labels, lag_ns, gap_ns)
-        del labels
-        adjusted[symbol] = member & ~dropped
-    return adjusted, roster_membership_intervals(execution_mask & ~adjusted)
-
-
 def collect_mhs_execution_data(
     plan: MhsExecutionCollectionPlan, *, execute: bool = False, workers: int = 4,
 ) -> dict[str, object]:
@@ -712,39 +431,3 @@ def collect_mhs_execution_data(
         payload["mode"] = "completed"
         path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     return payload
-
-
-def refresh_mhs_execution_manifest(manifest_path: str | Path) -> dict[str, object]:
-    """Refresh per-symbol coverage from local files without network access."""
-    path = Path(manifest_path)
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    timeframe = str(payload["timeframe"])
-    if timeframe != "3m":
-        raise ValueError(f"unknown execution_timeframe '{timeframe}'")
-    execution_timeframe: Literal["3m"] = "3m"
-    statuses = {
-        symbol: _coverage(symbol, execution_timeframe, str(payload["start"]), str(payload["end"]))
-        for symbol in payload["symbols"]
-    }
-    payload["statuses"] = statuses
-    payload["mode"] = "validated_local"
-    symbols = [str(symbol) for symbol in payload["symbols"]]
-    attestation_path = path.with_name(path.stem + ".inputs.json")
-    payload["input_manifest_digest"] = seal_mhs_input_manifest(
-        [
-            candidate
-            for candidate in resolve_required_mhs_input_paths(
-                data_root=FUTURES_DATA_DIR,
-                panel_symbols=symbols,
-                execution_symbols=symbols,
-                execution_timeframe=execution_timeframe,
-            )
-            if candidate.exists()
-        ],
-        data_root=FUTURES_DATA_DIR,
-        output_path=attestation_path,
-    )
-    payload["input_manifest_path"] = str(attestation_path)
-    payload["input_seal"] = "unverified"
-    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    return cast(dict[str, object], payload)

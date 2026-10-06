@@ -1,27 +1,9 @@
-"""Unit isolation for src.market_data.services.mhs_execution manifest sealing."""
+"""Causal OHLCV gap exclusion and bounded source-label decoding contracts."""
 
 from __future__ import annotations
 
-import json
-
-
-def test_refresh_mhs_execution_manifest_seals_required_inputs(tmp_path) -> None:
-    import src.market_data.services.mhs_execution as module
-
-    manifest = tmp_path / "plan.json"
-    manifest.write_text(
-        json.dumps({"timeframe": "3m", "start": "2025-01-01", "end": "2025-01-02", "symbols": []}),
-        encoding="utf-8",
-    )
-    result = module.refresh_mhs_execution_manifest(manifest)
-    attestation = tmp_path / "plan.inputs.json"
-    assert attestation.exists()
-    assert result["input_manifest_path"] == str(attestation)
-    assert isinstance(result["input_manifest_digest"], str)
-    assert len(result["input_manifest_digest"]) == 64
-    sealed = json.loads(attestation.read_text(encoding="utf-8"))
-    assert sealed["digest"] == result["input_manifest_digest"]
-    assert sealed["files"] == []
+import numpy as np
+import pandas as pd
 
 
 def _write_ohlcv_bars(path, labels) -> None:
@@ -29,15 +11,6 @@ def _write_ohlcv_bars(path, labels) -> None:
 
     ms = (labels - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta(milliseconds=1)
     pd.DataFrame({"timestamp": ms.to_numpy(dtype="int64")}).to_parquet(path)
-
-
-def _write_mark_bars(path, labels, close=100.0) -> None:
-    import pandas as pd
-
-    ms = (labels - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta(milliseconds=1)
-    pd.DataFrame(
-        {"timestamp": ms.to_numpy(dtype="int64"), "datetime": labels, "close": close}
-    ).to_parquet(path)
 
 
 def test_future_bar_deletion_leaves_past_eligibility_unchanged(tmp_path) -> None:
@@ -59,30 +32,6 @@ def test_future_bar_deletion_leaves_past_eligibility_unchanged(tmp_path) -> None
     assert before.loc[cutoff, "S0"]
     assert after.loc[cutoff, "S0"]
     assert before.loc[:cutoff].equals(after.loc[:cutoff])
-
-
-def test_future_mark_corruption_leaves_past_eligibility_unchanged(tmp_path, monkeypatch) -> None:
-    """Future mark changes do not move earlier eligibility."""
-    import pandas as pd
-    import src.market_data.services.futures_collection as fc
-    from src.market_data.services.mhs_execution import apply_dynamic_mark_gap_exclusion
-
-    grid = pd.date_range("2022-01-01", periods=200, freq="1h", tz="UTC")
-    mask = pd.DataFrame(True, index=grid, columns=["S0"])
-    cutoff = grid[50]
-    path = tmp_path / "S0.parquet"
-    monkeypatch.setattr(fc, "_mark_price_path", lambda symbol, timeframe: path)
-    _write_mark_bars(path, grid)
-    before, _ = apply_dynamic_mark_gap_exclusion(mask)
-    import pyarrow.parquet as pq
-
-    table = pq.read_table(path)
-    frame = table.to_pandas()
-    frame.loc[frame.index[100:], "close"] = -5.0
-    frame.to_parquet(path)
-    after, _ = apply_dynamic_mark_gap_exclusion(mask)
-    assert before.loc[:cutoff].equals(after.loc[:cutoff])
-    assert bool(after.loc[cutoff, "S0"])
 
 
 def test_observed_threshold_starts_at_threshold_not_last_bar(tmp_path) -> None:
@@ -136,7 +85,6 @@ def test_gap_exclusion_rejects_bad_interval_and_threshold(tmp_path) -> None:
     import pytest
     from src.market_data.services.mhs_execution import (
         apply_dynamic_gap_exclusion,
-        apply_dynamic_mark_gap_exclusion,
     )
 
     mask = pd.DataFrame(
@@ -149,21 +97,15 @@ def test_gap_exclusion_rejects_bad_interval_and_threshold(tmp_path) -> None:
     for bad in (0.0, -1.0, float("nan"), float("inf")):
         with pytest.raises(ValueError, match=r".+"):
             apply_dynamic_gap_exclusion(mask, "3m", root=str(tmp_path), min_gap_hours=bad)
-        with pytest.raises(ValueError, match=r".+"):
-            apply_dynamic_mark_gap_exclusion(mask, min_gap_hours=bad)
-    with pytest.raises(ValueError, match=r".+"):
-        apply_dynamic_mark_gap_exclusion(mask, timeframe="3m")
 
 
-def test_gap_exclusion_unreadable_source_raises(tmp_path, monkeypatch) -> None:
-    """Corrupt execution/mark sources fail provenance, not silent exclusion."""
+def test_gap_exclusion_unreadable_source_raises(tmp_path) -> None:
+    """Corrupt execution sources fail provenance, not silent exclusion."""
     import pandas as pd
     import pytest
-    import src.market_data.services.futures_collection as fc
     from src.common.errors import DataIntegrityError
     from src.market_data.services.mhs_execution import (
         apply_dynamic_gap_exclusion,
-        apply_dynamic_mark_gap_exclusion,
     )
 
     mask = pd.DataFrame(
@@ -176,27 +118,6 @@ def test_gap_exclusion_unreadable_source_raises(tmp_path, monkeypatch) -> None:
     (root / "3m" / "S0.parquet").write_bytes(b"not a parquet file")
     with pytest.raises(DataIntegrityError, match=r".+"):
         apply_dynamic_gap_exclusion(mask, "3m", root=str(tmp_path / "ohlcv"))
-    mark_path = tmp_path / "mark.parquet"
-    mark_path.write_bytes(b"not a parquet file")
-    monkeypatch.setattr(fc, "_mark_price_path", lambda symbol, timeframe: mark_path)
-    with pytest.raises(DataIntegrityError, match=r".+"):
-        apply_dynamic_mark_gap_exclusion(mask)
-
-
-def test_mark_gap_exclusion_root_has_no_isolation_effect(tmp_path, monkeypatch) -> None:
-    """The mark root argument never changes resolution or results."""
-    import pandas as pd
-    import src.market_data.services.futures_collection as fc
-    from src.market_data.services.mhs_execution import apply_dynamic_mark_gap_exclusion
-
-    grid = pd.date_range("2022-01-01", periods=30, freq="1h", tz="UTC")
-    mask = pd.DataFrame(True, index=grid, columns=["S0"])
-    path = tmp_path / "S0.parquet"
-    monkeypatch.setattr(fc, "_mark_price_path", lambda symbol, timeframe: path)
-    _write_mark_bars(path, grid)
-    first, _ = apply_dynamic_mark_gap_exclusion(mask, root=str(tmp_path / "a"))
-    second, _ = apply_dynamic_mark_gap_exclusion(mask, root=str(tmp_path / "b"))
-    assert first.equals(second)
 
 
 def test_gap_exclusion_rejects_non_numeric_threshold() -> None:
@@ -214,13 +135,11 @@ def test_gap_exclusion_rejects_non_numeric_threshold() -> None:
         apply_dynamic_gap_exclusion(mask, "3m", min_gap_hours="bad")
 
 
-def test_missing_source_file_excludes_everything(tmp_path, monkeypatch) -> None:
+def test_missing_source_file_excludes_everything(tmp_path) -> None:
     """An absent source is a whole-run gap, reported for diagnostics."""
     import pandas as pd
-    import src.market_data.services.futures_collection as fc
     from src.market_data.services.mhs_execution import (
         apply_dynamic_gap_exclusion,
-        apply_dynamic_mark_gap_exclusion,
     )
 
     grid = pd.date_range("2022-01-01", periods=5, freq="1h", tz="UTC")
@@ -228,11 +147,6 @@ def test_missing_source_file_excludes_everything(tmp_path, monkeypatch) -> None:
     root = tmp_path / "ohlcv"
     (root / "3m").mkdir(parents=True)
     adjusted, excluded = apply_dynamic_gap_exclusion(mask, "3m", root=str(root))
-    assert not bool(adjusted.to_numpy().any())
-    assert excluded["S0"] == ((grid[0], grid[-1]),)
-    missing = tmp_path / "absent.parquet"
-    monkeypatch.setattr(fc, "_mark_price_path", lambda symbol, timeframe: missing)
-    adjusted, excluded = apply_dynamic_mark_gap_exclusion(mask)
     assert not bool(adjusted.to_numpy().any())
     assert excluded["S0"] == ((grid[0], grid[-1]),)
 
@@ -256,94 +170,32 @@ def test_ohlcv_source_without_timestamp_raises(tmp_path) -> None:
         apply_dynamic_gap_exclusion(mask, "3m", root=str(root))
 
 
-def test_mark_source_without_close_raises(tmp_path, monkeypatch) -> None:
-    """A close-less mark file fails mark provenance."""
-    import pandas as pd
-    import pytest
-    import src.market_data.services.futures_collection as fc
-    from src.common.errors import DataIntegrityError
-    from src.market_data.services.mhs_execution import apply_dynamic_mark_gap_exclusion
-
-    mask = pd.DataFrame(
-        True,
-        index=pd.date_range("2022-01-01", periods=3, freq="1h", tz="UTC"),
-        columns=["S0"],
-    )
-    path = tmp_path / "noclose.parquet"
-    pd.DataFrame({"timestamp": [1640995200000]}).to_parquet(path)
-    monkeypatch.setattr(fc, "_mark_price_path", lambda symbol, timeframe: path)
-    with pytest.raises(DataIntegrityError, match=r".+"):
-        apply_dynamic_mark_gap_exclusion(mask)
-
-
-def test_mark_timestamp_only_file_derives_labels(tmp_path, monkeypatch) -> None:
-    """Without a datetime column, mark labels derive from millisecond stamps."""
-    import numpy as np
-    import pandas as pd
-    import src.market_data.services.futures_collection as fc
-    from src.market_data.services.mhs_execution import apply_dynamic_mark_gap_exclusion
-
-    grid = pd.date_range("2022-01-01", periods=10, freq="1h", tz="UTC")
-    mask = pd.DataFrame(True, index=grid, columns=["S0"])
-    path = tmp_path / "tsclose.parquet"
-    ms = (grid - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta(milliseconds=1)
-    pd.DataFrame({"timestamp": ms.to_numpy(dtype="int64"), "close": 100.0}).to_parquet(path)
-    monkeypatch.setattr(fc, "_mark_price_path", lambda symbol, timeframe: path)
-    adjusted, excluded = apply_dynamic_mark_gap_exclusion(mask)
-    assert not bool(adjusted.loc[grid[0], "S0"])
-    assert bool(adjusted.loc[grid[1]:].to_numpy().all())
-    assert excluded == {"S0": ((grid[0], grid[0]),)}
-    assert np.array_equal(adjusted.loc[grid[1]:].to_numpy(), mask.loc[grid[1]:].to_numpy())
-
-
-def test_mark_source_without_time_columns_raises(tmp_path, monkeypatch) -> None:
-    """A mark file with neither datetime nor timestamp fails provenance."""
-    import pandas as pd
-    import pytest
-    import src.market_data.services.futures_collection as fc
-    from src.common.errors import DataIntegrityError
-    from src.market_data.services.mhs_execution import apply_dynamic_mark_gap_exclusion
-
-    mask = pd.DataFrame(
-        True,
-        index=pd.date_range("2022-01-01", periods=3, freq="1h", tz="UTC"),
-        columns=["S0"],
-    )
-    path = tmp_path / "notime.parquet"
-    pd.DataFrame({"close": [100.0, 101.0]}).to_parquet(path)
-    monkeypatch.setattr(fc, "_mark_price_path", lambda symbol, timeframe: path)
-    with pytest.raises(DataIntegrityError, match=r".+"):
-        apply_dynamic_mark_gap_exclusion(mask)
-
-
-def test_leading_span_below_threshold_stays_eligible(tmp_path, monkeypatch) -> None:
+def test_leading_span_below_threshold_stays_eligible(tmp_path) -> None:
     """No published observation excludes, even inside the threshold (corrected baseline)."""
     import pandas as pd
-    import src.market_data.services.futures_collection as fc
-    from src.market_data.services.mhs_execution import apply_dynamic_mark_gap_exclusion
+    from src.market_data.services.mhs_execution import apply_dynamic_gap_exclusion
 
     grid = pd.date_range("2022-01-01", periods=300, freq="1h", tz="UTC")
     mask = pd.DataFrame(True, index=grid, columns=["S0"])
-    path = tmp_path / "late.parquet"
-    monkeypatch.setattr(fc, "_mark_price_path", lambda symbol, timeframe: path)
-    _write_mark_bars(path, grid[100:])
-    adjusted, _ = apply_dynamic_mark_gap_exclusion(mask, min_gap_hours=720.0)
+    root = tmp_path
+    (root / "1h").mkdir()
+    _write_ohlcv_bars(root / "1h" / "S0.parquet", grid[100:])
+    adjusted, _ = apply_dynamic_gap_exclusion(mask, "1h", root=str(root), min_gap_hours=720.0)
     assert not bool(adjusted.loc[grid[50], "S0"])
     assert bool(adjusted.loc[grid[150], "S0"])
 
 
-def test_leading_span_above_threshold_excluded_until_first_bar(tmp_path, monkeypatch) -> None:
+def test_leading_span_above_threshold_excluded_until_first_bar(tmp_path) -> None:
     """A leading absence past the threshold excludes until bars are published."""
     import pandas as pd
-    import src.market_data.services.futures_collection as fc
-    from src.market_data.services.mhs_execution import apply_dynamic_mark_gap_exclusion
+    from src.market_data.services.mhs_execution import apply_dynamic_gap_exclusion
 
     grid = pd.date_range("2022-01-01", periods=2000, freq="1h", tz="UTC")
     mask = pd.DataFrame(True, index=grid, columns=["S0"])
-    path = tmp_path / "late.parquet"
-    monkeypatch.setattr(fc, "_mark_price_path", lambda symbol, timeframe: path)
-    _write_mark_bars(path, grid[800:])
-    adjusted, excluded = apply_dynamic_mark_gap_exclusion(mask, min_gap_hours=720.0)
+    root = tmp_path
+    (root / "1h").mkdir()
+    _write_ohlcv_bars(root / "1h" / "S0.parquet", grid[800:])
+    adjusted, excluded = apply_dynamic_gap_exclusion(mask, "1h", root=str(root), min_gap_hours=720.0)
     assert not bool(adjusted.loc[grid[100], "S0"])
     assert not bool(adjusted.loc[grid[799], "S0"])
     assert bool(adjusted.loc[grid[801], "S0"])
@@ -352,6 +204,29 @@ def test_leading_span_above_threshold_excluded_until_first_bar(tmp_path, monkeyp
 
 def _causal_ns(hours: float = 0.0, minutes: float = 0.0) -> int:
     return int(hours * 3_600_000_000_000 + minutes * 60_000_000_000)
+
+
+def _full_history_gap_exclusion_oracle(
+    execution_mask: pd.DataFrame,
+    intervals: dict[str, tuple[tuple[pd.Timestamp, pd.Timestamp], ...]],
+    labels_by_symbol: dict[str, np.ndarray | None],
+    lag_ns: int,
+    gap_ns: int,
+) -> tuple[pd.DataFrame, dict[str, tuple[tuple[pd.Timestamp, pd.Timestamp], ...]]]:
+    """Unbounded reference for ``apply_dynamic_gap_exclusion`` over fully loaded labels."""
+    from src.market_data.services.mhs_execution import (
+        _causal_gap_excluded,
+        roster_membership_intervals,
+    )
+
+    decision_ns = np.asarray(execution_mask.index.as_unit("ns").asi8, dtype="int64")
+    adjusted = execution_mask.copy()
+    for symbol in intervals:
+        member = execution_mask[symbol].to_numpy(dtype=bool)
+        dropped = _causal_gap_excluded(member, decision_ns, labels_by_symbol[symbol], lag_ns, gap_ns)
+        adjusted[symbol] = member & ~dropped
+    dropped_frame = execution_mask & ~adjusted
+    return adjusted, roster_membership_intervals(dropped_frame)
 
 
 def test_causal_gap_future_only_first_labels_exclude_identically() -> None:
@@ -441,7 +316,6 @@ def test_causal_gap_future_perturbation_leaves_prefix_masks_unchanged() -> None:
     import pandas as pd
 
     from src.market_data.services.mhs_execution import (
-        _apply_causal_gap_exclusion,
         _causal_gap_excluded,
         roster_membership_intervals,
     )
@@ -463,8 +337,8 @@ def test_causal_gap_future_perturbation_leaves_prefix_masks_unchanged() -> None:
     )
     frame = pd.DataFrame(True, index=grid, columns=["S0"])
     intervals = roster_membership_intervals(frame)
-    first, _ = _apply_causal_gap_exclusion(frame, intervals, {"S0": recovery_a}, lag, gap)
-    second, _ = _apply_causal_gap_exclusion(frame, intervals, {"S0": recovery_b}, lag, gap)
+    first, _ = _full_history_gap_exclusion_oracle(frame, intervals, {"S0": recovery_a}, lag, gap)
+    second, _ = _full_history_gap_exclusion_oracle(frame, intervals, {"S0": recovery_b}, lag, gap)
     assert first.equals(second)
 
 
@@ -565,42 +439,6 @@ def test_read_ohlcv_labels_projects_timestamp_only(tmp_path, monkeypatch) -> Non
     assert real_file is not None
 
 
-def test_read_mark_labels_projects_time_and_close(tmp_path, monkeypatch) -> None:
-    """Datetime precedence holds and unrelated mark columns stay undecoded."""
-    import pandas as pd
-    import pyarrow.parquet as pq
-    from src.market_data.services import mhs_execution as mod
-    import src.market_data.services.futures_collection as fc
-
-    grid = pd.date_range("2022-01-01", periods=9, freq="1h", tz="UTC")
-    ms = (grid - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta(milliseconds=1)
-    path = tmp_path / "M.parquet"
-    pd.DataFrame(
-        {
-            "timestamp": ms.to_numpy(dtype="int64"),
-            "datetime": grid,
-            "close": 100.0,
-            "open": 1.0,
-            "funding": 0.01,
-        }
-    ).to_parquet(path, row_group_size=4)
-    monkeypatch.setattr(fc, "_mark_price_path", lambda symbol, timeframe: path)
-    seen: dict[str, object] = {}
-    orig_read = pq.ParquetFile.read_row_group
-
-    def spy_read(self, i, columns=None, use_threads=True, **kwargs):
-        seen["columns"] = list(columns or [])
-        seen["threads"] = use_threads
-        return orig_read(self, i, columns=columns, use_threads=use_threads, **kwargs)
-
-    monkeypatch.setattr(pq.ParquetFile, "read_row_group", spy_read)
-    out = mod._read_mark_labels("M", "1h")
-    assert seen["columns"] == ["datetime", "close"]
-    assert seen["threads"] is False
-    assert out is not None
-    assert out.tolist() == _ns_of(grid).tolist()
-
-
 def test_bounded_scan_skips_future_row_groups(tmp_path, monkeypatch) -> None:
     """Trusted statistics after the useful bound are never decoded."""
     import pandas as pd
@@ -674,7 +512,6 @@ def test_bounded_scan_preserves_predecessor_for_first_decision(tmp_path) -> None
     """Predecessor history before the first decision keeps the trailing gap."""
     import pandas as pd
     from src.market_data.services.mhs_execution import (
-        _apply_causal_gap_exclusion,
         _read_ohlcv_labels,
         apply_dynamic_gap_exclusion,
         roster_membership_intervals,
@@ -692,7 +529,7 @@ def test_bounded_scan_preserves_predecessor_for_first_decision(tmp_path) -> None
     bounded, _ = apply_dynamic_gap_exclusion(mask, "3m", root=str(root), min_gap_hours=1.0)
     decision_ns = _ns_of(mask_grid)
     full_labels = _read_ohlcv_labels("S0", "3m", str(root))
-    oracle, _ = _apply_causal_gap_exclusion(
+    oracle, _ = _full_history_gap_exclusion_oracle(
         mask,
         roster_membership_intervals(mask),
         {"S0": full_labels},
@@ -724,25 +561,6 @@ def test_read_ohlcv_labels_deduplicates_unordered(tmp_path) -> None:
     assert np.array_equal(out, np.unique(_ns_of(grid[[0, 1, 2, 3, 5, 7]])))
 
 
-def test_read_mark_labels_rejects_invalid_closes(tmp_path, monkeypatch) -> None:
-    """NaN, zero, negative and infinite closes never count as valid marks."""
-    import numpy as np
-    import pandas as pd
-    from src.market_data.services import mhs_execution as mod
-    import src.market_data.services.futures_collection as fc
-
-    grid = pd.date_range("2022-01-01", periods=5, freq="1h", tz="UTC")
-    path = tmp_path / "M.parquet"
-    pd.DataFrame(
-        {"datetime": grid, "close": [float("nan"), 0.0, -3.0, float("inf"), float("-inf")]}
-    ).to_parquet(path)
-    monkeypatch.setattr(fc, "_mark_price_path", lambda symbol, timeframe: path)
-    out = mod._read_mark_labels("M", "1h")
-    assert out is not None
-    assert len(out) == 0
-    assert np is not None
-
-
 def test_public_masks_hold_single_symbol_history(tmp_path, monkeypatch) -> None:
     """Reused decode buffers still yield per-symbol gaps, proving bounded lifetime."""
     import numpy as np
@@ -763,28 +581,21 @@ def test_public_masks_hold_single_symbol_history(tmp_path, monkeypatch) -> None:
         return shared["buf"]
 
     monkeypatch.setattr(mod, "_read_ohlcv_labels", fake_read)
-    monkeypatch.setattr(
-        mod, "_apply_causal_gap_exclusion", lambda *a, **k: (_ for _ in ()).throw(AssertionError("retained"))
-    )
     adjusted, _ = mod.apply_dynamic_gap_exclusion(mask, "1h", root=str(tmp_path), min_gap_hours=2.0)
     assert bool(adjusted.loc[grid[-1], "S0"])
     assert not bool(adjusted.loc[grid[-1], "S1"])
 
 
-def test_bounded_provenance_errors_carry_symbol_and_path(tmp_path, monkeypatch) -> None:
+def test_bounded_provenance_errors_carry_symbol_and_path(tmp_path) -> None:
     """Absence is None; corrupt or schema-invalid sources name symbol and path."""
     import pandas as pd
     import pytest
     from src.common.errors import DataIntegrityError
     from src.market_data.services import mhs_execution as mod
-    import src.market_data.services.futures_collection as fc
 
     root = tmp_path / "ohlcv"
     (root / "3m").mkdir(parents=True)
     assert mod._read_ohlcv_labels("ABSENT", "3m", str(root)) is None
-    missing = tmp_path / "missing.parquet"
-    monkeypatch.setattr(fc, "_mark_price_path", lambda symbol, timeframe: missing)
-    assert mod._read_mark_labels("ABSENT", "1h") is None
     bad = root / "3m" / "BAD.parquet"
     bad.write_bytes(b"not a parquet file")
     with pytest.raises(DataIntegrityError, match=r"BAD"):
@@ -793,36 +604,17 @@ def test_bounded_provenance_errors_carry_symbol_and_path(tmp_path, monkeypatch) 
     pd.DataFrame({"close": [1.0]}).to_parquet(noschema)
     with pytest.raises(DataIntegrityError, match=r"NOSCHEMA"):
         mod._read_ohlcv_labels("NOSCHEMA", "3m", str(root))
-    mark_bad = tmp_path / "mark_bad.parquet"
-    mark_bad.write_bytes(b"not a parquet file")
-    monkeypatch.setattr(fc, "_mark_price_path", lambda symbol, timeframe: mark_bad)
-    with pytest.raises(DataIntegrityError, match=r"S0"):
-        mod._read_mark_labels("S0", "1h")
-    for name, frame in (
-        ("NO_CLOSE", pd.DataFrame({"datetime": pd.date_range("2022-01-01", periods=2, tz="UTC")})),
-        ("NO_TIME", pd.DataFrame({"close": [1.0, 2.0]})),
-        ("EMPTY", pd.DataFrame({"datetime": [], "close": []})),
-    ):
-        p = tmp_path / f"{name}.parquet"
-        frame.to_parquet(p)
-        monkeypatch.setattr(fc, "_mark_price_path", lambda symbol, timeframe, _p=p: _p)
-        with pytest.raises(DataIntegrityError, match=r".+"):
-            mod._read_mark_labels("S0", "1h")
 
 
-def test_bounded_masks_match_full_history_oracle(tmp_path, monkeypatch) -> None:
-    """Hourly, three-minute and mark bounded masks equal the corrected oracle."""
+def test_bounded_masks_match_full_history_oracle(tmp_path) -> None:
+    """Hourly and three-minute bounded masks equal the full-history oracle."""
     import numpy as np
     import pandas as pd
     from src.market_data.services.mhs_execution import (
-        _apply_causal_gap_exclusion,
-        _read_mark_labels,
         _read_ohlcv_labels,
         apply_dynamic_gap_exclusion,
-        apply_dynamic_mark_gap_exclusion,
         roster_membership_intervals,
     )
-    import src.market_data.services.futures_collection as fc
 
     grid3 = pd.date_range("2022-01-01", periods=400, freq="3min", tz="UTC")
     hole3 = grid3[(grid3 < grid3[100]) | (grid3 >= grid3[200])]
@@ -833,12 +625,9 @@ def test_bounded_masks_match_full_history_oracle(tmp_path, monkeypatch) -> None:
     grid1 = pd.date_range("2022-01-01", periods=60, freq="1h", tz="UTC")
     hole1 = grid1[(grid1 < grid1[10]) | (grid1 >= grid1[30])]
     _write_ohlcv_bars(root / "1h" / "S0.parquet", hole1)
-    mark_path = tmp_path / "mark.parquet"
-    monkeypatch.setattr(fc, "_mark_price_path", lambda symbol, timeframe: mark_path)
-    _write_mark_bars(mark_path, grid1[(grid1 < grid1[10]) | (grid1 >= grid1[30])])
     mask3 = pd.DataFrame(True, index=pd.date_range(grid3[0], grid3[-1], freq="1h", tz="UTC"), columns=["S0"])
     bounded3, excl3 = apply_dynamic_gap_exclusion(mask3, "3m", root=str(root), min_gap_hours=1.0)
-    oracle3, oracle_excl3 = _apply_causal_gap_exclusion(
+    oracle3, oracle_excl3 = _full_history_gap_exclusion_oracle(
         mask3,
         roster_membership_intervals(mask3),
         {"S0": _read_ohlcv_labels("S0", "3m", str(root))},
@@ -848,8 +637,8 @@ def test_bounded_masks_match_full_history_oracle(tmp_path, monkeypatch) -> None:
     assert bounded3.equals(oracle3)
     assert excl3 == oracle_excl3
     mask1 = pd.DataFrame(True, index=grid1, columns=["S0"])
-    bounded1, _ = apply_dynamic_gap_exclusion(mask1, "1h", root=str(root), min_gap_hours=1.0)
-    oracle1, _ = _apply_causal_gap_exclusion(
+    bounded1, excl1 = apply_dynamic_gap_exclusion(mask1, "1h", root=str(root), min_gap_hours=1.0)
+    oracle1, oracle_excl1 = _full_history_gap_exclusion_oracle(
         mask1,
         roster_membership_intervals(mask1),
         {"S0": _read_ohlcv_labels("S0", "1h", str(root))},
@@ -857,16 +646,7 @@ def test_bounded_masks_match_full_history_oracle(tmp_path, monkeypatch) -> None:
         int(1.0 * 3_600_000_000_000),
     )
     assert bounded1.equals(oracle1)
-    boundedm, exclm = apply_dynamic_mark_gap_exclusion(mask1, min_gap_hours=1.0)
-    oraclem, oracle_exclm = _apply_causal_gap_exclusion(
-        mask1,
-        roster_membership_intervals(mask1),
-        {"S0": _read_mark_labels("S0", "1h")},
-        1 * 3_600_000_000_000,
-        int(1.0 * 3_600_000_000_000),
-    )
-    assert boundedm.equals(oraclem)
-    assert exclm == oracle_exclm
+    assert excl1 == oracle_excl1
     assert np is not None
 
 
@@ -878,8 +658,6 @@ def test_row_group_stat_helpers_handle_untrusted_metadata() -> None:
     assert mod._row_group_ms_min_ns(None) is None
     assert mod._row_group_ms_min_ns(SimpleNamespace(statistics=None, is_stats_set=True)) is None
     assert mod._row_group_ms_min_ns(SimpleNamespace(statistics=SimpleNamespace(has_min_max=False), is_stats_set=True)) is None
-    assert mod._row_group_datetime_min_ns(None) is None
-    assert mod._row_group_datetime_min_ns(SimpleNamespace(statistics=None, is_stats_set=True)) is None
 
     class _Boom:
         is_stats_set = True
@@ -889,18 +667,15 @@ def test_row_group_stat_helpers_handle_untrusted_metadata() -> None:
             raise RuntimeError("boom")
 
     assert mod._row_group_ms_min_ns(_Boom()) is None
-    assert mod._row_group_datetime_min_ns(_Boom()) is None
     none_stat = SimpleNamespace(has_min_max=True, min=None, max=None)
     assert mod._row_group_ms_min_ns(SimpleNamespace(statistics=none_stat, is_stats_set=False)) is None
     assert mod._row_group_ms_min_ns(SimpleNamespace(statistics=none_stat, is_stats_set=True)) is None
-    assert mod._row_group_datetime_min_ns(SimpleNamespace(statistics=none_stat, is_stats_set=True)) is None
     bool_stat = SimpleNamespace(has_min_max=True, min=True, max=True)
     assert mod._row_group_ms_min_ns(SimpleNamespace(statistics=bool_stat, is_stats_set=True)) is None
     str_stat = SimpleNamespace(has_min_max=True, min="bad", max="bad")
     assert mod._row_group_ms_min_ns(SimpleNamespace(statistics=str_stat, is_stats_set=True)) is None
     inf_stat = SimpleNamespace(has_min_max=True, min=float("inf"), max=float("inf"))
     assert mod._row_group_ms_min_ns(SimpleNamespace(statistics=inf_stat, is_stats_set=True)) is None
-    assert mod._row_group_datetime_min_ns(SimpleNamespace(statistics=str_stat, is_stats_set=True)) is None
 
 
 def test_bounded_scan_boundary_and_decode_failures(tmp_path, monkeypatch) -> None:
@@ -911,7 +686,6 @@ def test_bounded_scan_boundary_and_decode_failures(tmp_path, monkeypatch) -> Non
     import pytest
     from src.common.errors import DataIntegrityError
     from src.market_data.services import mhs_execution as mod
-    import src.market_data.services.futures_collection as fc
 
     grid = pd.date_range("2022-01-01", periods=6, freq="3min", tz="UTC")
     root = tmp_path / "ohlcv"
@@ -935,11 +709,6 @@ def test_bounded_scan_boundary_and_decode_failures(tmp_path, monkeypatch) -> Non
     monkeypatch.setattr(pq.ParquetFile, "read_row_group", _boom)
     with pytest.raises(DataIntegrityError, match=r"S0"):
         mod._read_ohlcv_labels("S0", "3m", str(root))
-    mark_path = tmp_path / "mark.parquet"
-    monkeypatch.setattr(fc, "_mark_price_path", lambda symbol, timeframe: mark_path)
-    _write_mark_bars(mark_path, grid)
-    with pytest.raises(DataIntegrityError, match=r"S0"):
-        mod._read_mark_labels("S0", "1h")
     monkeypatch.setattr(pq.ParquetFile, "read_row_group", real_read)
     orig_to_datetime = pd.to_datetime
 
@@ -950,43 +719,8 @@ def test_bounded_scan_boundary_and_decode_failures(tmp_path, monkeypatch) -> Non
     intact = mod._read_ohlcv_labels("S0", "3m", str(root))
     assert intact is not None
     assert intact.tolist() == _ns_of(grid).tolist()
-    with pytest.raises(DataIntegrityError, match=r"S0"):
-        mod._read_mark_labels("S0", "1h")
     monkeypatch.setattr(pd, "to_datetime", orig_to_datetime)
-    monkeypatch.setattr(mod, "_row_group_datetime_min_ns", lambda column: None)
-    early_mark = int(_ns_of(grid[:1])[-1]) - 1
-    empty_mark = mod._read_mark_labels("S0", "1h", observed_through_ns=early_mark)
-    assert empty_mark is not None
-    assert len(empty_mark) == 0
     assert np is not None
-
-
-def test_bounded_mark_scan_skips_future_row_groups(tmp_path, monkeypatch) -> None:
-    """Mark groups entirely after the useful bound are never decoded."""
-    import pyarrow.parquet as pq
-    from src.market_data.services import mhs_execution as mod
-    import src.market_data.services.futures_collection as fc
-    import pandas as pd
-
-    grid = pd.date_range("2022-01-01", periods=12, freq="1h", tz="UTC")
-    path = tmp_path / "mark.parquet"
-    monkeypatch.setattr(fc, "_mark_price_path", lambda symbol, timeframe: path)
-    _write_mark_bars(path, grid)
-    table = pq.read_table(path)
-    pq.write_table(table, path, row_group_size=4)
-    bound = int(_ns_of(grid[:4])[-1])
-    decoded: list[int] = []
-    orig_read = pq.ParquetFile.read_row_group
-
-    def spy_read(self, i, columns=None, use_threads=False, **kwargs):
-        decoded.append(i)
-        return orig_read(self, i, columns=columns, use_threads=use_threads, **kwargs)
-
-    monkeypatch.setattr(pq.ParquetFile, "read_row_group", spy_read)
-    out = mod._read_mark_labels("S0", "1h", observed_through_ns=bound)
-    assert out is not None
-    assert out.tolist() == _ns_of(grid[:4]).tolist()
-    assert decoded == [0]
 
 
 def _ref_decode_ms(raw):  # type: ignore[no-untyped-def]
@@ -1076,20 +810,3 @@ def test_ohlcv_out_of_range_label_fails_closed(tmp_path) -> None:
     pd.DataFrame({"timestamp": np.array([big], dtype="int64")}).to_parquet(root / "3m" / "S0.parquet")
     with pytest.raises(DataIntegrityError, match="execution source unreadable"):
         _read_ohlcv_labels("S0", "3m", str(root))
-
-
-def test_mark_labels_tail_unchanged(tmp_path, monkeypatch) -> None:
-    import numpy as np
-    import pandas as pd
-    import src.market_data.services.futures_collection as fc
-    from src.market_data.services.mhs_execution import _read_mark_labels
-
-    grid = pd.date_range("2022-01-01", periods=8, freq="1h", tz="UTC")
-    close = [100.0, 101.0, -1.0, 102.0, 103.0, 104.0, 105.0, 106.0]
-    path = tmp_path / "M.parquet"
-    pd.DataFrame({"datetime": grid, "close": close}).to_parquet(path, row_group_size=4)
-    monkeypatch.setattr(fc, "_mark_price_path", lambda symbol, timeframe: path)
-    out = _read_mark_labels("M", "1h")
-    assert out is not None
-    keep = grid[[0, 1, 3, 4, 5, 6, 7]]
-    assert np.array_equal(out, np.asarray(pd.DatetimeIndex(keep).as_unit("ns").asi8, dtype="int64"))

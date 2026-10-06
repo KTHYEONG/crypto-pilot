@@ -30,7 +30,6 @@ from pathlib import Path
 
 
 import src.mhs.marks as marks
-import src.market_data.services.futures_collection as fc
 import src.mhs.pipeline.stages.fold as fold_stage
 from src.mhs import statistics as _statistics
 from src.mhs.diagnostic_run import run_mhs_horizon_diagnostic
@@ -83,19 +82,15 @@ def capture_golden_matrix(out_dir: Path) -> dict[str, Path]:
             # committee / fold-safe code paths can load the panel.
             end = _write_mhs_market(root, n_hours=2700, include_taker_buy_quote=(name != "baseline"))
             _write_3m_cache(root)
-            # Redirect the funding/mark-price resolvers to the synthetic root;
+            # Redirect the funding resolver to the synthetic root;
             # without this, _load_funding_series reads the real production data
             # directory and "no dev symbol has funding coverage" is raised.
             orig_funding_path = marks.funding_path
-            orig_mark_price_path = fc._mark_price_path
             orig_replicates = _statistics._BOOTSTRAP_REPLICATES
             orig_block = _statistics._BOOTSTRAP_MEAN_BLOCK
             orig_seed = _statistics._BOOTSTRAP_SEED
             orig_derive = fold_stage.derive_trials_attempted
             marks.funding_path = lambda sym, _root=root: _root / "funding" / f"{sym}.parquet"
-            fc._mark_price_path = (
-                lambda symbol, timeframe, _root=root: _root / "markPriceKlines" / timeframe / f"{symbol}.parquet"
-            )
             _statistics._BOOTSTRAP_REPLICATES = 20
             _statistics._BOOTSTRAP_MEAN_BLOCK = 24
             _statistics._BOOTSTRAP_SEED = 20260807
@@ -119,7 +114,6 @@ def capture_golden_matrix(out_dir: Path) -> dict[str, Path]:
                 summary = build_report_summary(report)
             finally:
                 marks.funding_path = orig_funding_path
-                fc._mark_price_path = orig_mark_price_path
                 _statistics._BOOTSTRAP_REPLICATES = orig_replicates
                 _statistics._BOOTSTRAP_MEAN_BLOCK = orig_block
                 _statistics._BOOTSTRAP_SEED = orig_seed

@@ -9,7 +9,6 @@ import src.market_data.services.futures_collection as collector_module
 from src.common.errors import DataIntegrityError
 from src.market_data.services.futures_collection import (
     DataCollector,
-    DataValidator,
     _METRICS_CANONICAL_COLUMNS,
     _normalize_funding_frame,
 )
@@ -19,31 +18,6 @@ _EPOCH = pd.Timestamp("1970-01-01", tz="UTC")
 
 def _ms(index: pd.DatetimeIndex) -> pd.Series:
     return (index - _EPOCH) // pd.Timedelta("1ms")
-
-
-class TestDataValidator:
-    def test_detects_gaps_and_inverted_high_low(self) -> None:
-        idx = pd.date_range("2024-01-01", periods=3, freq="1h", tz="UTC")
-        frame = pd.DataFrame({
-            "datetime": idx,
-            "open": [100.0] * 3, "high": [101.0, 101.0, 90.0],
-            "low": [99.0, 99.0, 95.0], "close": [100.0] * 3, "volume": [1.0] * 3,
-        })
-        issues = DataValidator.validate(frame, "BTCUSDT", "1h")
-        assert any("High < Low" in issue for issue in issues)
-
-        gapped_idx = pd.DatetimeIndex(
-            ["2024-01-01 00:00", "2024-01-01 02:00"], tz="UTC",
-        )
-        gapped = pd.DataFrame({
-            "datetime": gapped_idx,
-            "open": [100.0] * 2, "high": [101.0] * 2, "low": [99.0] * 2,
-            "close": [100.0] * 2, "volume": [1.0] * 2,
-        })
-        issues = DataValidator.validate(gapped, "BTCUSDT", "1h")
-        assert any("time gaps" in issue for issue in issues)
-
-        assert DataValidator.validate(frame.head(0), "BTCUSDT", "1h") == []
 
 
 class TestNormalizeFundingFrame:

@@ -7,7 +7,6 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-import src.market_data.services.futures_collection as fc
 from src.market_data.services import mhs_execution as mhs_execution_collection
 from src.common.errors import DataIntegrityError
 
@@ -34,76 +33,6 @@ def _write_cache(
         idx = idx.delete(range(*drop_slice.indices(len(idx))))
     (root / interval).mkdir(parents=True, exist_ok=True)
     pd.DataFrame({"timestamp": _epoch_ms(idx)}).to_parquet(root / interval / f"{symbol}.parquet")
-
-
-def _write_mark_cache(
-    root: Path, symbol: str, hourly_idx: pd.DatetimeIndex, closes: list[float | None],
-) -> None:
-    """Write one symbol's ``1h`` markPriceKlines Parquet with ``datetime`` and
-    ``close`` columns (``None`` entries become NaN)."""
-    d = root / "markPriceKlines" / "1h"
-    d.mkdir(parents=True, exist_ok=True)
-    pd.DataFrame(
-        {
-            "timestamp": _epoch_ms(hourly_idx),
-            "datetime": hourly_idx,
-            "close": closes,
-        }
-    ).to_parquet(d / f"{symbol}.parquet")
-
-
-def _pin_mark_path(monkeypatch: pytest.MonkeyPatch, root: Path) -> None:
-    """Route ``_mark_price_path`` to ``root``. ``mhs_execution_collection``
-    resolves the path through ``_futures_collection._mark_price_path`` at call
-    time and ``_futures_collection`` is the same module object as ``fc``, so
-    patching ``fc`` reaches the gate."""
-    monkeypatch.setattr(
-        fc, "_mark_price_path",
-        lambda symbol, timeframe: root / "markPriceKlines" / timeframe / f"{symbol}.parquet",
-    )
-
-
-def test_mhs_execution_data_coverage_gate_missing_symbol_raises(tmp_path) -> None:
-    # SCENARIO_MHS_EXECUTION_DATA_COVERAGE_GATE_MISSING_SYMBOL_RAISES: only
-    # BTCUSDT has a parquet file; MISSINGUSDT has none. The gate must raise
-    # DataIntegrityError listing MISSINGUSDT with its MISSING status.
-    root = tmp_path / "cache"
-    _write_cache(root, "BTCUSDT")
-    with pytest.raises(DataIntegrityError) as exc_info:
-        mhs_execution_collection.assert_execution_data_coverage(
-            ["BTCUSDT", "MISSINGUSDT"], "3m", _START, _END, root=str(root),
-        )
-    message = str(exc_info.value)
-    assert "MISSINGUSDT" in message
-    assert "MISSING" in message
-
-
-def test_mhs_execution_data_coverage_gate_all_present_noop(tmp_path) -> None:
-    # SCENARIO_MHS_EXECUTION_DATA_COVERAGE_GATE_ALL_PRESENT_NOOP: every symbol
-    # PRESENT with full [start, end] internal coverage never raises.
-    root = tmp_path / "cache"
-    for symbol in ("BTCUSDT", "ETHUSDT"):
-        _write_cache(root, symbol)
-    assert mhs_execution_collection.assert_execution_data_coverage(
-        ["BTCUSDT", "ETHUSDT"], "3m", _START, _END, root=str(root),
-    ) is None
-
-
-def test_mhs_execution_data_coverage_gate_gapped_symbol_raises(tmp_path) -> None:
-    # SCENARIO_MHS_EXECUTION_DATA_COVERAGE_GATE_GAPPED_SYMBOL_RAISES: a file
-    # with an interior hole inside [start, end] (missing_internal_bars > 0)
-    # raises DataIntegrityError naming the symbol with its GAPPED status.
-    root = tmp_path / "cache"
-    _write_cache(root, "BTCUSDT")
-    _write_cache(root, "GAPPEDUSDT", drop_slice=slice(120, 132))
-    with pytest.raises(DataIntegrityError) as exc_info:
-        mhs_execution_collection.assert_execution_data_coverage(
-            ["BTCUSDT", "GAPPEDUSDT"], "3m", _START, _END, root=str(root),
-        )
-    message = str(exc_info.value)
-    assert "GAPPEDUSDT" in message
-    assert "GAPPED" in message
-    assert "BTCUSDT" not in message
 
 
 def test_mhs_coverage_root_override_backward_compatible(tmp_path, monkeypatch) -> None:
@@ -233,80 +162,6 @@ def test_relevant_execution_coverage_raises_on_gap_inside_membership(tmp_path) -
     message = str(exc_info.value)
     assert "GAPUSDT" in message
     assert "GAPPED" in message
-
-
-def test_relevant_mark_coverage_raises_when_roster_precedes_mark(tmp_path, monkeypatch) -> None:
-    # SCENARIO_RELEVANT_MARK_COVERAGE_RAISES_WHEN_ROSTER_PRECEDES_MARK: a
-    # symbol in the roster from 2021-01-30 but whose mark parquet starts
-    # 2022-04-01 (the measured VETUSDT case) raises naming the symbol -- the
-    # failure the current pipeline only discovers 91 seconds into the replay.
-    root = tmp_path / "cache"
-    mark_idx = pd.date_range("2022-04-01", periods=72, freq="1h", tz="UTC")
-    _write_mark_cache(root, "VETUSDT", mark_idx, [100.0] * len(mark_idx))
-    _pin_mark_path(monkeypatch, root)
-    idx = pd.date_range("2021-01-30", periods=100, freq="1h", tz="UTC")
-    mask = pd.DataFrame({"VETUSDT": [True] * len(idx)}, index=idx)
-    with pytest.raises(DataIntegrityError) as exc_info:
-        mhs_execution_collection.assert_relevant_mark_price_coverage(mask)
-    assert "VETUSDT" in str(exc_info.value)
-
-
-def test_relevant_mark_coverage_rejects_nonpositive_mark(tmp_path, monkeypatch) -> None:
-    # SCENARIO_RELEVANT_MARK_COVERAGE_REJECTS_NONPOSITIVE_MARK: rows existing
-    # across the whole interval but carrying close<=0 or NaN are treated as NOT
-    # covered, matching _cached_mark_panel's finite-and-strictly-positive
-    # filter rather than counting row presence alone.
-    root = tmp_path / "cache"
-    idx = pd.date_range("2021-01-01", periods=48, freq="1h", tz="UTC")
-    closes = [100.0] * len(idx)
-    closes[10] = 0.0
-    closes[20] = None
-    _write_mark_cache(root, "A", idx, closes)
-    _pin_mark_path(monkeypatch, root)
-    # Roster from hour 1 so the fixture's own marks cover every interval hour.
-    mask = pd.DataFrame({"A": [False] + [True] * (len(idx) - 1)}, index=idx)
-    with pytest.raises(DataIntegrityError) as exc_info:
-        mhs_execution_collection.assert_relevant_mark_price_coverage(mask)
-    assert "A" in str(exc_info.value)
-
-
-def test_relevant_mark_coverage_applies_one_hour_availability_shift(tmp_path, monkeypatch) -> None:
-    # SCENARIO_RELEVANT_MARK_COVERAGE_APPLIES_ONE_HOUR_AVAILABILITY_SHIFT: a
-    # mark row is available only from timestamp + 1h. With marks covering
-    # [idx[0], idx[-1]] and the roster spanning the same window, the last row
-    # (== interval end) cannot cover the final interval hour and the first hour
-    # needs a prior-day mark, so the gate raises -- a no-shift gate would pass.
-    # The control (roster from hour 1) passes because each interval hour is
-    # covered by the PRIOR hour's mark.
-    root = tmp_path / "cache"
-    idx = pd.date_range("2021-01-01", periods=48, freq="1h", tz="UTC")
-    _write_mark_cache(root, "A", idx, [100.0] * len(idx))
-    _pin_mark_path(monkeypatch, root)
-    all_mask = pd.DataFrame({"A": [True] * len(idx)}, index=idx)
-    with pytest.raises(DataIntegrityError) as exc_info:
-        mhs_execution_collection.assert_relevant_mark_price_coverage(all_mask)
-    assert "A" in str(exc_info.value)
-    shifted_mask = pd.DataFrame({"A": [False] + [True] * (len(idx) - 1)}, index=idx)
-    assert mhs_execution_collection.assert_relevant_mark_price_coverage(shifted_mask) is None
-
-
-def test_relevant_mark_coverage_stale_carry_allowance(tmp_path, monkeypatch) -> None:
-    # SCENARIO_RELEVANT_MARK_COVERAGE_STALE_CARRY_ALLOWANCE: a 6-hour internal
-    # hole raises with stale_hours=0 but passes with stale_hours=24, matching
-    # the cache_required vs cache_required_stale_carry replay modes.
-    root = tmp_path / "cache"
-    idx = pd.date_range("2021-01-01", periods=48, freq="1h", tz="UTC")
-    closes = [100.0] * len(idx)
-    for h in range(20, 26):
-        closes[h] = None
-    _write_mark_cache(root, "A", idx, closes)
-    _pin_mark_path(monkeypatch, root)
-    mask = pd.DataFrame({"A": [False] + [True] * (len(idx) - 1)}, index=idx)
-    with pytest.raises(DataIntegrityError):
-        mhs_execution_collection.assert_relevant_mark_price_coverage(mask, stale_hours=0)
-    assert mhs_execution_collection.assert_relevant_mark_price_coverage(
-        mask, stale_hours=24,
-    ) is None
 
 
 def test_mhs_execution_plan_reads_warmup_so_short_windows_plan(tmp_path, monkeypatch) -> None:

@@ -389,8 +389,6 @@ class TestPitExecutionGrid:
 
     @pytest.fixture(scope="class")
     def late_market_report(self, tmp_path_factory):
-        import src.market_data.services.futures_collection as fc
-
         root = tmp_path_factory.mktemp("mhs_late_market")
         end = _write_mhs_market(
             root, DEV_SYMBOLS,
@@ -399,7 +397,6 @@ class TestPitExecutionGrid:
         )
         originals = {
             "funding_path": marks.funding_path,
-            "mark_price_path": fc._mark_price_path,
             "_BOOTSTRAP_REPLICATES": statistics._BOOTSTRAP_REPLICATES,
             "_BOOTSTRAP_MEAN_BLOCK": statistics._BOOTSTRAP_MEAN_BLOCK,
             "_BOOTSTRAP_SEED": statistics._BOOTSTRAP_SEED,
@@ -407,9 +404,6 @@ class TestPitExecutionGrid:
             "_bootstrap_ci": statistics._bootstrap_ci,
         }
         marks.funding_path = lambda sym: root / "funding" / f"{sym}.parquet"
-        fc._mark_price_path = (
-            lambda symbol, timeframe: root / "markPriceKlines" / timeframe / f"{symbol}.parquet"
-        )
         statistics._BOOTSTRAP_REPLICATES = 20
         statistics._BOOTSTRAP_MEAN_BLOCK = 24
         statistics._BOOTSTRAP_SEED = 20260807
@@ -425,9 +419,7 @@ class TestPitExecutionGrid:
             )
         finally:
             for name, value in originals.items():
-                if name == "mark_price_path":
-                    fc._mark_price_path = value
-                elif name == "funding_path":
+                if name == "funding_path":
                     marks.funding_path = value
                 else:
                     setattr(statistics, name, value)
@@ -644,18 +636,12 @@ class TestMhsPerfOptimizationO3FoldParity:
 
     @pytest.fixture(scope="module")
     def fold_parity_request(self, tmp_path_factory) -> tuple[Path, pd.Timestamp]:
-        import src.market_data.services.futures_collection as fc
-
         root = tmp_path_factory.mktemp("mhs_fold_parity")
         end = _write_mhs_market(root, DEV_SYMBOLS)
-        originals = {"funding_path": marks.funding_path, "mark_price_path": fc._mark_price_path}
+        originals = {"funding_path": marks.funding_path}
         marks.funding_path = lambda sym: root / "funding" / f"{sym}.parquet"
-        fc._mark_price_path = (
-            lambda symbol, timeframe: root / "markPriceKlines" / timeframe / f"{symbol}.parquet"
-        )
         yield root, end
         marks.funding_path = originals["funding_path"]
-        fc._mark_price_path = originals["mark_price_path"]
 
     def test_parallel_folds_match_sequential_folds(self, fold_parity_request) -> None:
         from src.mhs.evaluation.folds import (
@@ -738,41 +724,6 @@ class TestSingleSourceDiagnosticControls:
         assert "apply_dynamic_mark_gap_exclusion" not in source
         assert "assert_relevant_mark_price_coverage" not in source
 
-    @pytest.mark.slow
-    def test_mark_cache_only_gap_cannot_change_diagnostic_source(
-        self, synthetic_market, tmp_path, monkeypatch,
-    ) -> None:
-        """A mark-cache-only gap cannot change signal membership or ledger source."""
-        import src.market_data.services.futures_collection as fc
-
-        root, end = synthetic_market
-        if not (root / "3m").exists():
-            pytest.skip("3m synthetic execution market not yet available")
-        gap_dir = tmp_path / "markPriceKlines" / "1h"
-        gap_dir.mkdir(parents=True, exist_ok=True)
-        gap_start = pd.Timestamp("2021-02-01", tz="UTC")
-        gap_end = pd.Timestamp("2021-02-10", tz="UTC")
-        for sym in DEV_SYMBOLS:
-            frame = pd.read_parquet(root / "markPriceKlines" / "1h" / f"{sym}.parquet")
-            drop = (frame["datetime"] >= gap_start) & (frame["datetime"] < gap_end)
-            frame.loc[drop, "close"] = float("nan")
-            frame.to_parquet(gap_dir / f"{sym}.parquet")
-        monkeypatch.setattr(
-            fc,
-            "_mark_price_path",
-            lambda symbol, timeframe: gap_dir / f"{symbol}.parquet",
-        )
-        report = run_mhs_horizon_diagnostic(
-            research_baseline(
-                start=str(START), end=str(end), data_root=str(root),
-                execution_timeframe="3m", log_run=False,
-            ),
-        )
-        assert report.status == "COMPLETE"
-        assert report.blend is not None
-        assert report.blend.primary is not None
-        assert report.blend.primary.ledger.mark_source == "OHLCV_CLOSE_FALLBACK"
-
 @pytest.mark.slow
 class TestDiagnosticCanonicalOhlcvEconomics:
     """Research diagnostic and pipeline price the same 3m trade bars."""
@@ -784,25 +735,9 @@ class TestDiagnosticCanonicalOhlcvEconomics:
             pytest.skip("3m synthetic execution market not yet available")
         return root, end
 
-    def test_mark_only_gap_leaves_books_invariant(self, ohlcv_market, tmp_path, monkeypatch) -> None:
-        """A missing mark cache changes neither target weights nor ledger source."""
-        import src.market_data.services.futures_collection as fc
-
+    def test_books_price_on_ohlcv_close(self, ohlcv_market) -> None:
+        """Every book's primary ledger marks to 3m trade close."""
         root, end = ohlcv_market
-        gap_dir = tmp_path / "markPriceKlines" / "1h"
-        gap_dir.mkdir(parents=True, exist_ok=True)
-        gap_start = pd.Timestamp("2021-02-01", tz="UTC")
-        gap_end = pd.Timestamp("2021-02-10", tz="UTC")
-        for sym in DEV_SYMBOLS:
-            frame = pd.read_parquet(root / "markPriceKlines" / "1h" / f"{sym}.parquet")
-            drop = (frame["datetime"] >= gap_start) & (frame["datetime"] < gap_end)
-            frame.loc[drop, "close"] = float("nan")
-            frame.to_parquet(gap_dir / f"{sym}.parquet")
-        monkeypatch.setattr(
-            fc,
-            "_mark_price_path",
-            lambda symbol, timeframe: gap_dir / f"{symbol}.parquet",
-        )
         report = run_mhs_horizon_diagnostic(
             research_baseline(
                 start=str(START), end=str(end), data_root=str(root),
