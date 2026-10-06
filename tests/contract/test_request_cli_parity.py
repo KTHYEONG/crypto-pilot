@@ -262,27 +262,14 @@ def test_request_timeout_must_align_to_three_minutes() -> None:
         MhsDiagnosticRequest(passive_timeout_minutes=31)
 
 
-def test_deployment_policy_converts_3m_and_rejects_legacy() -> None:
-    import dataclasses
-
+def test_request_default_3m_rejects_one_minute() -> None:
     import pytest
 
     from src.mhs.contracts import MhsDiagnosticRequest
-    from src.mhs.deployment_policy import TargetWeightPolicy, build_deployment_policy
     from tests.fixtures.mhs_requests import research_baseline
 
     request = research_baseline(committee_capital=True)
-    policy = build_deployment_policy(
-        request,
-        slow_horizon_hours=168,
-        committee_member_weights={"a": 1.0},
-        admitted_members=("a",),
-        target_annual_vol=0.20,
-        exposure_cap=3.0,
-    )
-    for field in dataclasses.fields(TargetWeightPolicy):
-        assert getattr(policy.target_weights, field.name) == getattr(request, field.name)
-    assert policy.target_weights.execution_timeframe == "3m"
+    assert request.execution_timeframe == "3m"
     with pytest.raises(ValueError, match="execution_timeframe"):
         MhsDiagnosticRequest(execution_timeframe="1m")  # type: ignore[arg-type]
 

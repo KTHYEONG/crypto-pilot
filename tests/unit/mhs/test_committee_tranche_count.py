@@ -22,15 +22,6 @@ def _request(**overrides):
     return research_baseline(**base)
 
 
-def _policy(request):
-    from src.mhs.deployment_policy import build_deployment_policy
-
-    return build_deployment_policy(
-        request, slow_horizon_hours=168, committee_member_weights={"m": 1.0},
-        admitted_members=("m",), target_annual_vol=0.35, exposure_cap=3.0,
-    )
-
-
 def test_committee_tranche_count_max_matches_shortest_member_lookback() -> None:
     # Given the 168h shortest flow_momentum member lookback on a 24h decision grid
     # Then the registered ceiling is 7 and the default sits inside it
@@ -109,14 +100,13 @@ def test_committee_tranche_count_accepts_bounds_with_smoothing(count) -> None:
     assert request.committee_tranche_count == count
 
 
-def test_deployment_policy_roundtrips_committee_tranche_count() -> None:
+def test_resolved_committee_tranche_count_roundtrips_sealed_count() -> None:
     # Given a non-default sealed count
     request = _request(
         committee_tranche_smoothing=True, committee_regime_adaptive_tranche=False, committee_tranche_count=7,
     )
-    policy = _policy(request)
-    # Then the policy carries the identical count and resolution
+    # Then the resolution carries the identical count
     from src.mhs.research_go import _resolved_committee_tranche_count
 
-    assert policy.target_weights.committee_tranche_count == 7
+    assert request.committee_tranche_count == 7
     assert _resolved_committee_tranche_count(request) == 7

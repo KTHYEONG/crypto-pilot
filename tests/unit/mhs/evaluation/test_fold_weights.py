@@ -184,3 +184,166 @@ def test_effective_window_rejects_pre_train_start_and_empty_span() -> None:
     same = pd.Timestamp("2021-05-01", tz="UTC")
     with pytest.raises(ValueError, match="empty or precedes fold train_start"):
         _resolve_effective_fold_window(fold, same, same)
+
+
+def _committee_fold_panel():
+    import numpy as np
+    import pandas as pd
+
+    from src.mhs.evidence import AnchoredPurgedFold
+
+    idx = pd.date_range("2021-01-01", periods=2000, freq="1h", tz="UTC")
+    cols = [f"SYM{i}USDT" for i in range(9)] + ["BTCUSDT"]
+    rng = np.random.default_rng(7)
+    close = pd.DataFrame(
+        100 + np.cumsum(rng.normal(0, 0.1, (2000, 10)), axis=0), index=idx, columns=cols,
+    )
+    quote_vol = pd.DataFrame(1e6, index=idx, columns=cols)
+    base_panel = {
+        "close": close,
+        "open": close.copy(),
+        "quote_vol": quote_vol,
+        "taker_buy_quote": quote_vol * 0.55,
+    }
+    fold = AnchoredPurgedFold(idx[0], idx[100], idx[800], idx[1800], 24, 24)
+    funding = {c: pd.Series(0.0, index=idx) for c in cols}
+    return base_panel, fold, funding
+
+
+def _run_fold_target(request, base_panel, fold, funding):
+    from src.mhs.evaluation.fold_weights import _build_fold_target_weights
+
+    return _build_fold_target_weights(
+        "root", fold, request, funding,
+        base_panel=base_panel, require_minute_roster=False, panel_warmup_hours=24,
+    )
+
+
+def test_committee_fold_book_invariant_to_fast_slow_only_knobs(monkeypatch) -> None:
+    import dataclasses
+
+    import pandas as pd
+
+    from tests.fixtures.mhs_requests import research_baseline
+
+    def _unexpected_momentum_computation(*args, **kwargs):
+        raise AssertionError("committee folds must skip unused momentum computations")
+
+    for name in ("_book_weights", "_horizon_ensemble_execution_weights"):
+        monkeypatch.setattr(fold_weights.books, name, _unexpected_momentum_computation)
+    monkeypatch.setattr(fold_weights.specs, "_signal_ema_span", _unexpected_momentum_computation)
+    for name in (
+        "inverse_realized_vol_tilt", "renormalize_within_mask",
+        "beta_neutralize_weights", "crash_regime_tilt_weights",
+    ):
+        monkeypatch.setattr(fold_weights, name, _unexpected_momentum_computation)
+
+    base_panel, fold, funding = _committee_fold_panel()
+    base_request = research_baseline(committee_capital=True)
+    base = _run_fold_target(base_request, base_panel, fold, funding)
+    assert base[0].ne(0.0).any().any()
+    for knob in (
+        {"fast_book_mode": "horizon_ensemble"},
+        {"slow_book_mode": "horizon_ensemble"},
+        {"ensemble_signal": "vol_normalized"},
+        {"crash_regime_tilt_alpha": 0.5},
+    ):
+        variant = _run_fold_target(
+            dataclasses.replace(base_request, **knob), base_panel, fold, funding,
+        )
+        pd.testing.assert_frame_equal(variant[0], base[0], check_exact=True)
+        pd.testing.assert_index_equal(variant[1], base[1], exact=True)
+        assert variant[2] == base[2]
+        pd.testing.assert_index_equal(variant[3], base[3], exact=True)
+
+    neutralized = _run_fold_target(
+        dataclasses.replace(base_request, beta_neutralize=True), base_panel, fold, funding,
+    )
+    assert not base[0].equals(neutralized[0])
+
+
+def test_committee_fold_book_still_honors_beta_neutralization() -> None:
+    import dataclasses
+
+    from tests.fixtures.mhs_requests import research_baseline
+
+    base_panel, fold, funding = _committee_fold_panel()
+    base_request = research_baseline(committee_capital=True)
+    base = _run_fold_target(base_request, base_panel, fold, funding)
+    neutralized = _run_fold_target(
+        dataclasses.replace(base_request, beta_neutralize=True), base_panel, fold, funding,
+    )
+    assert not base[0].equals(neutralized[0])
+
+
+def test_non_committee_fold_book_still_uses_fast_slow_knobs(monkeypatch) -> None:
+    import dataclasses
+
+    import src.mhs.evaluation.books as books_mod
+    from src.mhs.types import BOOK_SPECS
+    from tests.fixtures.mhs_requests import research_baseline
+
+    base_panel, fold, funding = _committee_fold_panel()
+    base_request = research_baseline()
+    base = _run_fold_target(base_request, base_panel, fold, funding)
+    for knob in (
+        {"slow_book_mode": "horizon_ensemble"},
+        {"beta_neutralize": True},
+        {"crash_regime_tilt_alpha": 0.5},
+    ):
+        variant = _run_fold_target(
+            dataclasses.replace(base_request, **knob),
+            base_panel, fold, funding,
+        )
+        assert not base[0].equals(variant[0]), knob
+
+    real = books_mod._horizon_ensemble_execution_weights
+    seen_specs: list = []
+
+    def _spy(log_close, eligible, execution_mask, spec, grid, *args, **kwargs):
+        seen_specs.append(spec)
+        return real(log_close, eligible, execution_mask, spec, grid, *args, **kwargs)
+
+    monkeypatch.setattr(books_mod, "_horizon_ensemble_execution_weights", _spy)
+    _run_fold_target(
+        dataclasses.replace(base_request, fast_book_mode="horizon_ensemble"),
+        base_panel, fold, funding,
+    )
+    assert BOOK_SPECS["fast_reversal"] in seen_specs
+
+
+def test_non_committee_fold_preserves_execution_order(monkeypatch) -> None:
+    from tests.fixtures.mhs_requests import research_baseline
+
+    calls = []
+
+    def _record(module, name, label):
+        original = getattr(module, name)
+
+        def _spy(*args, **kwargs):
+            calls.append(label)
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(module, name, _spy)
+
+    _record(fold_weights.books, "_book_weights", "fast_book")
+    _record(fold_weights, "_pit_execution_mask", "execution_mask")
+    _record(fold_weights, "inverse_realized_vol_tilt", "fast_tilt")
+    _record(fold_weights, "renormalize_within_mask", "fast_execution")
+    _record(fold_weights.books, "_horizon_ensemble_execution_weights", "slow_execution")
+    _record(fold_weights, "causal_market_beta", "causal_beta")
+    _record(fold_weights, "beta_neutralize_weights", "slow_neutralize")
+    _record(fold_weights.folds, "_trend_sleeve_position", "trend_position")
+    _record(fold_weights, "crash_regime_tilt_weights", "crash_tilt")
+
+    base_panel, fold, funding = _committee_fold_panel()
+    request = research_baseline(
+        beta_neutralize=True, trend_sleeve=True, trend_sleeve_gross=0.1,
+        crash_regime_tilt_alpha=0.5,
+    )
+    result = _run_fold_target(request, base_panel, fold, funding)
+    assert result[0].ne(0.0).any().any()
+    assert calls == [
+        "fast_book", "execution_mask", "fast_tilt", "fast_execution",
+        "slow_execution", "causal_beta", "slow_neutralize", "trend_position", "crash_tilt",
+    ]

@@ -82,7 +82,15 @@ def _build_fold_target_weights(
     apply_rebalance_deadband: bool = True,
     panel_quarantine: PanelQuarantine | None = None,
 ) -> tuple[pd.DataFrame, pd.DatetimeIndex, list[str], pd.DatetimeIndex]:
-    """Fold eligibility uses the same completed trade OHLCV and observed funding sources as top-level selection. Historical Mark availability cannot select fold members."""
+    """Build one fold's causal decision-grid target book from completed trade OHLCV and observed funding.
+
+    Fold eligibility uses the same completed trade OHLCV and observed funding sources as
+    top-level selection; historical mark availability cannot select fold members. Under
+    committee capital the blended target is the committee execution book and the fast/slow
+    momentum books are never built, so fast/slow-only knobs (fast_book_mode, slow_book_mode,
+    ensemble_signal, crash_regime_tilt_alpha) cannot influence the result; beta_neutralize
+    still applies through the committee book's causal beta.
+    """
     ts = fold.train_start
     vs, ve = _resolve_effective_fold_window(fold, decision_start, decision_end)
     if apply_rebalance_deadband is False and request.rebalance_filter != "per_symbol_deadband":
@@ -150,26 +158,28 @@ def _build_fold_target_weights(
     )
     fast_grid = pd.date_range(panel_start, ve, freq="6h", tz="UTC")
     slow_grid = pd.date_range(panel_start, ve, freq="24h", tz="UTC")
-    fast_ema = specs._signal_ema_span(fast.band.sign, fast.horizon_hours, fast.step_hours)
-    slow_ema = specs._signal_ema_span(slow.band.sign, slow.horizon_hours, slow.step_hours)
-    w_fast = books._book_weights(log_close, eligible, fast, fast_grid, ema_span=fast_ema)
+    if not request.committee_capital:
+        fast_ema = specs._signal_ema_span(fast.band.sign, fast.horizon_hours, fast.step_hours)
+        slow_ema = specs._signal_ema_span(slow.band.sign, slow.horizon_hours, slow.step_hours)
+        w_fast = books._book_weights(log_close, eligible, fast, fast_grid, ema_span=fast_ema)
     execution_mask = _pit_execution_mask(quote_vol, eligible, request.execution_universe_size)
-    if request.fast_book_mode == "horizon_ensemble":
-        w_fast_execution = books._horizon_ensemble_execution_weights(
-            log_close, eligible, execution_mask, fast, fast_grid,
-            "horizon_ensemble", "raw", fast_ema,
+    if not request.committee_capital:
+        if request.fast_book_mode == "horizon_ensemble":
+            w_fast_execution = books._horizon_ensemble_execution_weights(
+                log_close, eligible, execution_mask, fast, fast_grid,
+                "horizon_ensemble", "raw", fast_ema,
+            )
+        else:
+            w_fast_tilted = inverse_realized_vol_tilt(
+                w_fast, realized_vol(log_close, fast.horizon_hours).reindex(fast_grid),
+            )
+            w_fast_execution = renormalize_within_mask(
+                w_fast_tilted, execution_mask.reindex(w_fast.index).fillna(False), fast.min_symbols,
+            )
+        w_slow_execution = books._horizon_ensemble_execution_weights(
+            log_close, eligible, execution_mask, slow, slow_grid,
+            request.slow_book_mode, request.ensemble_signal, slow_ema,
         )
-    else:
-        w_fast_tilted = inverse_realized_vol_tilt(
-            w_fast, realized_vol(log_close, fast.horizon_hours).reindex(fast_grid),
-        )
-        w_fast_execution = renormalize_within_mask(
-            w_fast_tilted, execution_mask.reindex(w_fast.index).fillna(False), fast.min_symbols,
-        )
-    w_slow_execution = books._horizon_ensemble_execution_weights(
-        log_close, eligible, execution_mask, slow, slow_grid,
-        request.slow_book_mode, request.ensemble_signal, slow_ema,
-    )
     # I-SINGLE-CONFIGURATION: one causal-beta computation shared by the legacy
     # slow-book neutralize and the committee execution book below.
     causal_beta = (
@@ -180,7 +190,7 @@ def _build_fold_target_weights(
         if request.beta_neutralize
         else None
     )
-    if causal_beta is not None:
+    if not request.committee_capital and causal_beta is not None:
         w_slow_execution = beta_neutralize_weights(
             w_slow_execution,
             causal_beta.reindex(w_slow_execution.index),
@@ -197,18 +207,17 @@ def _build_fold_target_weights(
     )
     del eligible
     if not request.committee_capital:
-        del quote_vol
-    del w_fast
-    if request.fast_book_mode == "single_horizon":
-        del w_fast_tilted
-    w_slow_execution_1h = w_slow_execution.reindex(grid_1h).ffill().fillna(0.0)
-    if request.crash_regime_tilt_alpha is not None:
-        w_slow_execution_1h = crash_regime_tilt_weights(
-            w_slow_execution_1h, log_close,
-            execution_mask.reindex(grid_1h).ffill().fillna(False),
-            CRASH_REGIME_REFERENCE_SYMBOLS, slow.horizon_hours,
-            request.crash_regime_tilt_alpha, min_symbols=slow.min_symbols,
-        )
+        del quote_vol, w_fast
+        if request.fast_book_mode == "single_horizon":
+            del w_fast_tilted
+        w_slow_execution_1h = w_slow_execution.reindex(grid_1h).ffill().fillna(0.0)
+        if request.crash_regime_tilt_alpha is not None:
+            w_slow_execution_1h = crash_regime_tilt_weights(
+                w_slow_execution_1h, log_close,
+                execution_mask.reindex(grid_1h).ffill().fillna(False),
+                CRASH_REGIME_REFERENCE_SYMBOLS, slow.horizon_hours,
+                request.crash_regime_tilt_alpha, min_symbols=slow.min_symbols,
+            )
     if request.committee_capital:
         blend_1h = committee._committee_execution_book(
             close, quote_vol, taker_buy_quote, execution_mask, slow_grid, slow.min_symbols,
@@ -230,7 +239,7 @@ def _build_fold_target_weights(
             BOOK_BLEND_WEIGHTS["fast_reversal"] * w_fast_execution.reindex(grid_1h).ffill().fillna(0.0)
             + BOOK_BLEND_WEIGHTS["slow_momentum"] * w_slow_execution_1h
         )
-    del w_fast_execution, w_slow_execution, w_slow_execution_1h
+        del w_fast_execution, w_slow_execution, w_slow_execution_1h
     # Apply the additive sleeve before the regime cash-scale multiply and the
     # rebalance_filter branch so it inherits the same de-risking and turnover
     # gating the committee book already uses.

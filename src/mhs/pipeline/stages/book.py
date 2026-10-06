@@ -36,7 +36,12 @@ _logger = logging.getLogger("MhsHorizonDiagnostic")
 
 
 def build_books(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
-    """Build causal signal books and an execution roster from completed 1h trade bars and observed 3m execution coverage. The optional coverage gate checks relevant trade OHLCV and funding, never mark-price cache completeness."""
+    """Build causal signal books and an execution roster from completed 1h trade bars and observed 3m execution coverage.
+
+    The optional coverage gate checks relevant trade OHLCV and funding, never mark-price cache
+    completeness. The 1h fast/slow book views feed only the non-committee blend and are
+    materialized only when committee capital is off.
+    """
     ctx.fast_grid = pd.date_range(ctx.start, ctx.end, freq="6h", tz="UTC")
     ctx.slow_grid = pd.date_range(ctx.start, ctx.end, freq="24h", tz="UTC")
 
@@ -44,8 +49,9 @@ def build_books(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
     ctx.slow_ema = specs._signal_ema_span(ctx.slow.band.sign, ctx.slow.horizon_hours, ctx.slow.step_hours)
     ctx.w_fast = books._book_weights(ctx.log_close, ctx.eligible, ctx.fast, ctx.fast_grid, ema_span=ctx.fast_ema)
     ctx.w_slow = books._book_weights(ctx.log_close, ctx.eligible, ctx.slow, ctx.slow_grid, ema_span=ctx.slow_ema)
-    ctx.w_fast_1h = ctx.w_fast.reindex(ctx.grid_1h).ffill().fillna(0.0)
-    ctx.w_slow_1h = ctx.w_slow.reindex(ctx.grid_1h).ffill().fillna(0.0)
+    if not ctx.config.committee_capital:
+        ctx.w_fast_1h = ctx.w_fast.reindex(ctx.grid_1h).ffill().fillna(0.0)
+        ctx.w_slow_1h = ctx.w_slow.reindex(ctx.grid_1h).ffill().fillna(0.0)
     ctx.execution_mask = _pit_execution_mask(
         ctx.quote_vol, ctx.eligible, ctx.config.execution_universe_size
     )
