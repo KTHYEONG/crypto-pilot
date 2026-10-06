@@ -9,6 +9,52 @@ from __future__ import annotations
 import src.mhs.evaluation.fold_weights as fold_weights
 
 
+def test_rebalance_trigger_holds_unscaled_book_before_regime_scaling():
+    import pandas as pd
+
+    from src.mhs.contracts import MhsDiagnosticRequest
+
+    dates = pd.date_range("2027-01-01", periods=3, freq="h", tz="UTC")
+    weights = pd.DataFrame({"LONG": [0.5, 0.51, 0.75], "SHORT": [-0.5, -0.51, -0.75]}, index=dates)
+    scale = pd.Series([1.0, 0.1, 0.2], index=dates)
+    result = fold_weights._rebalance_fold_weights(
+        weights, scale, MhsDiagnosticRequest(rebalance_filter="portfolio_trigger"), True, None,
+    )
+    expected = pd.DataFrame({"LONG": [0.5, 0.05, 0.15], "SHORT": [-0.5, -0.05, -0.15]}, index=dates)
+    pd.testing.assert_frame_equal(result, expected)
+    assert result.sum(axis=1).eq(0).all()
+
+
+def test_rebalance_without_deadband_preserves_scaled_targets():
+    import pandas as pd
+
+    from src.mhs.contracts import MhsDiagnosticRequest
+
+    dates = pd.date_range("2027-01-01", periods=2, freq="h", tz="UTC")
+    weights = pd.DataFrame({"LONG": [0.5, 0.51], "SHORT": [-0.5, -0.51]}, index=dates)
+    scale = pd.Series([1.0, 0.5], index=dates)
+    result = fold_weights._rebalance_fold_weights(
+        weights, scale, MhsDiagnosticRequest(rebalance_filter="per_symbol_deadband"), False, weights.iloc[0],
+    )
+    expected = pd.DataFrame({"LONG": [0.5, 0.255], "SHORT": [-0.5, -0.255]}, index=dates)
+    pd.testing.assert_frame_equal(result, expected)
+
+
+def test_portfolio_trigger_rejects_per_symbol_seed():
+    import pandas as pd
+    import pytest
+
+    from src.mhs.contracts import MhsDiagnosticRequest
+
+    dates = pd.date_range("2027-01-01", periods=1, freq="h", tz="UTC")
+    weights = pd.DataFrame({"BTCUSDT": [1.0]}, index=dates)
+    with pytest.raises(ValueError, match="deadband_seed_row requires"):
+        fold_weights._rebalance_fold_weights(
+            weights, pd.Series([1.0], index=dates), MhsDiagnosticRequest(rebalance_filter="portfolio_trigger"),
+            True, weights.iloc[0],
+        )
+
+
 def test_fold_weights_module_present() -> None:
     assert fold_weights.__name__ == "src.mhs.evaluation.fold_weights"
     assert callable(fold_weights._build_fold_target_weights)

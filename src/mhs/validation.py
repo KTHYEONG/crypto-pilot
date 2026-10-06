@@ -135,6 +135,11 @@ def _validate_committee_tranche_count(request: MhsDiagnosticRequest) -> None:
         )
 
 
+def _require_bool(request: MhsDiagnosticRequest, field: str) -> None:
+    if not isinstance(getattr(request, field), bool):
+        raise ValueError(f"{field} must be a bool")
+
+
 def validate_request(request: MhsDiagnosticRequest) -> None:
     """Validate the single-source MHS diagnostic request and its timing, capital and execution controls without authorizing a mark-price valuation branch.
 
@@ -182,20 +187,13 @@ def validate_request(request: MhsDiagnosticRequest) -> None:
         raise ValueError("discovery_gate_adjusted_net_t requires discovery_gate=True")
     if request.discovery_gate_regime_scaled_net_t and not request.discovery_gate:
         raise ValueError("discovery_gate_regime_scaled_net_t requires discovery_gate=True")
-    if not isinstance(request.beta_neutralize, bool):
-        raise ValueError("beta_neutralize must be a bool")
-    if not isinstance(request.trend_efficiency_overlay, bool):
-        raise ValueError("trend_efficiency_overlay must be a bool")
-    if not isinstance(request.pnl_vol_target, bool):
-        raise ValueError("pnl_vol_target must be a bool")
-    if not isinstance(request.trend_sleeve, bool):
-        raise ValueError("trend_sleeve must be a bool")
-    if not isinstance(request.multi_feature_book, bool):
-        raise ValueError("multi_feature_book must be a bool")
-    if not isinstance(request.committee_book, bool):
-        raise ValueError("committee_book must be a bool")
-    if not isinstance(request.committee_kelly_sizing, bool):
-        raise ValueError("committee_kelly_sizing must be a bool")
+    _require_bool(request, "beta_neutralize")
+    _require_bool(request, "trend_efficiency_overlay")
+    _require_bool(request, "pnl_vol_target")
+    _require_bool(request, "trend_sleeve")
+    _require_bool(request, "multi_feature_book")
+    _require_bool(request, "committee_book")
+    _require_bool(request, "committee_kelly_sizing")
     if request.committee_kelly_sizing and not (
         request.committee_book or request.committee_capital
     ):
@@ -256,22 +254,14 @@ def validate_request(request: MhsDiagnosticRequest) -> None:
             )
         if not request.pnl_vol_target:
             raise ValueError("exposure_drawdown_brake requires pnl_vol_target=True")
-    if not isinstance(request.ram_guard, bool):
-        raise ValueError("ram_guard must be a bool")
-    if not isinstance(request.committee_member_attribution, bool):
-        raise ValueError("committee_member_attribution must be a bool")
-    if not isinstance(request.placebo_diagnostic, bool):
-        raise ValueError("placebo_diagnostic must be a bool")
-    if not isinstance(request.phase_diagnostic, bool):
-        raise ValueError("phase_diagnostic must be a bool")
-    if not isinstance(request.signal_48h_diagnostic, bool):
-        raise ValueError("signal_48h_diagnostic must be a bool")
-    if not isinstance(request.bootstrap_ci_diagnostic, bool):
-        raise ValueError("bootstrap_ci_diagnostic must be a bool")
-    if not isinstance(request.reference_books_diagnostic, bool):
-        raise ValueError("reference_books_diagnostic must be a bool")
-    if not isinstance(request.patient_reference_diagnostic, bool):
-        raise ValueError("patient_reference_diagnostic must be a bool")
+    _require_bool(request, "ram_guard")
+    _require_bool(request, "committee_member_attribution")
+    _require_bool(request, "placebo_diagnostic")
+    _require_bool(request, "phase_diagnostic")
+    _require_bool(request, "signal_48h_diagnostic")
+    _require_bool(request, "bootstrap_ci_diagnostic")
+    _require_bool(request, "reference_books_diagnostic")
+    _require_bool(request, "patient_reference_diagnostic")
     if not (0.0 <= request.trend_sleeve_gross <= 1.0):
         raise ValueError("trend_sleeve_gross must be in [0.0, 1.0]")
     if request.trend_sleeve_gross > 0.0 and not request.trend_sleeve:

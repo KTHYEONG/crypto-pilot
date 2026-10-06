@@ -91,19 +91,11 @@ def resolve_cli_request(explicit: Mapping[str, Any]) -> MhsDiagnosticRequest:
             raise ValueError(f"{rule.flag} is inert unless {rule.requirement}")
 
     if _active("committee_member_set"):
-        member_set = (
-            cast(str, explicit["committee_member_set"])
-            if "committee_member_set" in explicit
-            else cast(str, defaults["committee_member_set"])
-        )
+        member_set = cast(str, _get("committee_member_set"))
     else:
         member_set = COMMITTEE_MEMBER_SET_INERT
     if _active("committee_tranche_count"):
-        tranche_count = (
-            cast(int, explicit["committee_tranche_count"])
-            if "committee_tranche_count" in explicit
-            else cast(int, defaults["committee_tranche_count"])
-        )
+        tranche_count = cast(int, _get("committee_tranche_count"))
     else:
         tranche_count = cast(
             int,
@@ -113,29 +105,9 @@ def resolve_cli_request(explicit: Mapping[str, Any]) -> MhsDiagnosticRequest:
                 if rule.field == "committee_tranche_count"
             ),
         )
-    if committee_capital:
-        if "committee_target_gross" in explicit:
-            target_gross = cast(float | None, explicit["committee_target_gross"])
-        else:
-            target_gross = cast(float | None, defaults["committee_target_gross"])
-    else:
-        target_gross = None
-    if _active("funding_carry_weight"):
-        carry_weight = (
-            cast(float, explicit["funding_carry_weight"])
-            if "funding_carry_weight" in explicit
-            else cast(float, defaults["funding_carry_weight"])
-        )
-    else:
-        carry_weight = 0.0
-    if _active("trend_sleeve_gross"):
-        sleeve_gross = (
-            cast(float, explicit["trend_sleeve_gross"])
-            if "trend_sleeve_gross" in explicit
-            else cast(float, defaults["trend_sleeve_gross"])
-        )
-    else:
-        sleeve_gross = 0.0
+    target_gross = cast(float | None, _get("committee_target_gross")) if committee_capital else None
+    carry_weight = cast(float, _get("funding_carry_weight")) if _active("funding_carry_weight") else 0.0
+    sleeve_gross = cast(float, _get("trend_sleeve_gross")) if _active("trend_sleeve_gross") else 0.0
 
     return MhsDiagnosticRequest(
         start=_get("start"),

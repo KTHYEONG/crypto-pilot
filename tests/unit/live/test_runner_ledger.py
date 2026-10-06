@@ -611,7 +611,7 @@ def test_paper_cycle_trade_tax_rows_equal_fills_rows(tmp_path, monkeypatch) -> N
     """Paper TRADE tax records correspond one-to-one to the written fills."""
     import src.live.runner as runner_mod
     from src.live.fills import load_fills
-    from src.live.tax_ledger import load_tax_records
+    from src.live.tax_ledger import read_tax_ledger
     from tests.unit.live._runner_stubs import DECISION_TIME, NOW
 
     runner_mod, settings, weights_path = _paper_cycle_harness(tmp_path, monkeypatch)
@@ -634,14 +634,14 @@ def test_paper_cycle_trade_tax_rows_equal_fills_rows(tmp_path, monkeypatch) -> N
     assert report.status == "COMPLETE"
     fills = load_fills(tmp_path / "fills")
     assert len(fills) == 2
-    tax = load_tax_records(tmp_path / "tax", year=2026)
-    trades = tax[tax["kind"] == "TRADE"]
+    tax = read_tax_ledger(tmp_path / "tax")
+    trades = [r for r in tax if r.kind == "TRADE"]
     assert len(trades) == len(fills)
     for _, fill in fills.iterrows():
-        match = trades[trades["symbol"] == fill["symbol"]]
+        match = [r for r in trades if r.symbol == fill["symbol"]]
         assert len(match) == 1
-        assert abs(float(match.iloc[0].quantity)) == abs(fill["quantity_delta"])
-        assert float(match.iloc[0].price) == fill["fill_price"]
+        assert abs(float(match[0].quantity)) == abs(fill["quantity_delta"])
+        assert float(match[0].price) == fill["fill_price"]
     assert append_calls
     assert len(tax_calls) == len(append_calls)
     for append_events, (tax_events, mode) in zip(append_calls, tax_calls, strict=True):
@@ -902,7 +902,7 @@ def test_recorded_watermark_failure_is_retried_without_duplicate_evidence(tmp_pa
     already-executed rerun re-emits the same fills idempotently (fill_id / record_id) and advances the watermark."""
     from src.live.fills import load_fills
     from src.live.ledger import load_ledger
-    from src.live.tax_ledger import load_tax_records
+    from src.live.tax_ledger import read_tax_ledger
     from tests.unit.live._runner_stubs import DECISION_TIME, NOW
 
     runner_mod, settings, weights_path = _paper_cycle_harness(tmp_path, monkeypatch)
@@ -925,8 +925,8 @@ def test_recorded_watermark_failure_is_retried_without_duplicate_evidence(tmp_pa
     healed = load_ledger(tmp_path / "ledger.json")
     assert healed.journal_recorded_fill_seq == healed.journal_applied_fill_seq
     assert len(load_fills(tmp_path / "fills")) == 2
-    tax = load_tax_records(tmp_path / "tax", year=2026)
-    assert len(tax[tax["kind"] == "TRADE"]) == 2
+    tax = read_tax_ledger(tmp_path / "tax")
+    assert len([r for r in tax if r.kind == "TRADE"]) == 2
 
 
 def test_already_executed_flush_failure_still_skips_cycle(tmp_path, monkeypatch) -> None:

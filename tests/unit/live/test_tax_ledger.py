@@ -22,11 +22,10 @@ from src.live.tax_ledger import (
     classify_income_type,
     collect_and_persist_live_tax,
     collect_tax_records,
-    load_tax_records,
     load_tax_watermark,
+    read_tax_ledger,
     save_tax_watermark,
     simulated_tax_records,
-    summarize_tax_year,
 )
 
 NOW = pd.Timestamp("2026-01-01 00:00:00", tz="UTC")
@@ -191,53 +190,7 @@ def test_collect_trades_watermark_idempotent(tmp_path: Path):
     append_tax_records(records1, ledger_dir)
     append_tax_records(records2, ledger_dir)
     append_tax_records(records1, ledger_dir)
-    assert len(load_tax_records(ledger_dir)) == 3
-
-
-def test_summarize_rejects_mixed_sources(tmp_path: Path):
-    ledger_dir = tmp_path / "tax2"
-    venue_rec = _tax_record(
-        "venue:TRADE:1",
-        when="2027-01-15 00:00",
-        symbol="BTCUSDT",
-        source="venue",
-        mode="live_testnet",
-        venue_id=1,
-        position_side="BOTH",
-    )
-    sim_rec = _tax_record("simulated:TRADE:journal:1", when="2027-06-15 00:00", symbol="BTCUSDT", venue_id=1)
-    append_tax_records([venue_rec, sim_rec], ledger_dir)
-    with pytest.raises(DataIntegrityError):
-        summarize_tax_year(2027, ledger_dir, source="venue")
-    ledger_dir2 = tmp_path / "tax3"
-    append_tax_records([sim_rec], ledger_dir2)
-    summary = summarize_tax_year(2027, ledger_dir2, source="simulated")
-    assert summary["source"] == "simulated"
-
-
-def test_summarize_moving_average_and_fifo_cost_basis(tmp_path: Path):
-    ledger_dir = tmp_path / "tax4"
-    recs = [
-        _tax_record("venue:TRADE:1", when="2027-01-10 00:00", symbol="BTCUSDT", source="venue",
-                    mode="live_testnet", venue_id=1, fee=Decimal("0"), position_side="BOTH"),
-        _tax_record("venue:TRADE:2", when="2027-02-10 00:00", symbol="BTCUSDT", source="venue",
-                    mode="live_testnet", venue_id=2, price=Decimal("200"), quote_qty=Decimal("200"),
-                    fee=Decimal("0"), position_side="BOTH"),
-        _tax_record("venue:TRADE:3", when="2027-03-10 00:00", symbol="BTCUSDT", source="venue",
-                    mode="live_testnet", venue_id=3, side="SELL", price=Decimal("300"),
-                    quote_qty=Decimal("300"), fee=Decimal("0"), position_side="BOTH"),
-    ]
-    append_tax_records(recs, ledger_dir)
-    summ_ma = summarize_tax_year(2027, ledger_dir, cost_basis="moving_average", source="venue")
-    assert summ_ma["per_symbol"]["BTCUSDT"]["acquisition_cost"] == pytest.approx(300.0)
-    assert summ_ma["per_symbol"]["BTCUSDT"]["disposal_proceeds"] == pytest.approx(300.0)
-    assert summ_ma["per_symbol"]["BTCUSDT"]["closing_quantity"] == pytest.approx(1.0)
-    assert summ_ma["per_symbol"]["BTCUSDT"]["closing_cost_basis"] == pytest.approx(150.0)
-    summ_fifo = summarize_tax_year(2027, ledger_dir, cost_basis="fifo", source="venue")
-    assert summ_fifo["per_symbol"]["BTCUSDT"]["closing_cost_basis"] == pytest.approx(200.0)
-    for k in ("tax_rate", "income_type", "deduction"):
-        assert k not in summ_ma
-        assert k not in summ_fifo
+    assert len(read_tax_ledger(ledger_dir)) == 3
 
 
 def test_funding_tax_record_ids_are_deterministic(tmp_path: Path) -> None:
@@ -334,7 +287,7 @@ def test_append_tax_records_rejects_shard_line_without_record_id(tmp_path: Path)
         append_tax_records([_tax_record("Y")], ledger_dir)
     # The loader also fails closed instead of silently skipping the bad line.
     with pytest.raises(TaxLedgerCorruptError):
-        load_tax_records(ledger_dir)
+        read_tax_ledger(ledger_dir)
 
 
 def test_append_tax_records_month_routing_preserved(tmp_path: Path) -> None:
@@ -434,11 +387,11 @@ def test_simulated_tax_records_unique_id_across_cycles(tmp_path: Path) -> None:
         recs = simulated_tax_records(fills, "paper")
         append_tax_records(recs, ledger_dir)
 
-    loaded = load_tax_records(ledger_dir, year=2026)
+    loaded = read_tax_ledger(ledger_dir)
     # 3 cycles x 2 symbols = 6 distinct records, none dropped by record_id dedup
     assert len(loaded) == 6
-    assert loaded["record_id"].nunique() == 6
-    assert sorted(loaded["event_time"].dt.strftime("%Y-%m-%d").unique().tolist()) == [
+    assert len({r.record_id for r in loaded}) == 6
+    assert sorted({r.event_time.strftime("%Y-%m-%d") for r in loaded}) == [
         "2026-03-01", "2026-03-02", "2026-03-03",
     ]
 
@@ -457,7 +410,7 @@ def test_persist_writes_records_before_watermark(tmp_path: Path, monkeypatch: py
     with pytest.raises(RuntimeError, match="crash before watermark save"):
         collect_and_persist_live_tax(client, ["BTCUSDT"], tax_dir, "live_testnet", now=NOW,
                                      settings=_default_settings())
-    assert len(load_tax_records(tax_dir)) == 3
+    assert len(read_tax_ledger(tax_dir)) == 3
     assert not (tax_dir / "watermark.json").exists()
     monkeypatch.undo()
 
@@ -465,7 +418,7 @@ def test_persist_writes_records_before_watermark(tmp_path: Path, monkeypatch: py
                                                     settings=_default_settings())
     assert new_rows == 0
     assert issues == ()
-    assert len(load_tax_records(tax_dir)) == 3
+    assert len(read_tax_ledger(tax_dir)) == 3
     saved = json.loads((tax_dir / "watermark.json").read_text(encoding="utf-8"))
     assert saved["last_trade_id"] == {"BTCUSDT": 3}
 
@@ -567,7 +520,7 @@ def test_persist_absent_watermark_starts_empty(tmp_path: Path) -> None:
                                                     settings=_default_settings())
     assert new_rows == 1
     assert issues == ()
-    assert len(load_tax_records(tax_dir)) == 1
+    assert len(read_tax_ledger(tax_dir)) == 1
     saved = json.loads((tax_dir / "watermark.json").read_text(encoding="utf-8"))
     assert saved["last_trade_id"] == {"BTCUSDT": 1}
 
@@ -585,7 +538,7 @@ def test_persist_honors_settings_page_limits(tmp_path: Path) -> None:
                                                     settings=settings)
     assert new_rows == 3
     assert issues == ()
-    assert len(load_tax_records(tax_dir)) == 3
+    assert len(read_tax_ledger(tax_dir)) == 3
 
 
 def test_watermark_round_trips_atomically(tmp_path: Path) -> None:
@@ -610,7 +563,7 @@ def test_persist_refetched_records_are_deduplicated(tmp_path: Path) -> None:
     second_rows, _ = collect_and_persist_live_tax(client, ["BTCUSDT"], tax_dir, "live_testnet", now=NOW,
                                                   settings=_default_settings())
     assert second_rows == 0
-    assert len(load_tax_records(tax_dir)) == 2
+    assert len(read_tax_ledger(tax_dir)) == 2
 
 
 class _TypeErrorClient:
@@ -769,7 +722,7 @@ def test_loader_raises_on_midfile_corruption(tmp_path: Path) -> None:
     shard = ledger_dir / "tax_ledger_202609.jsonl"
     shard.write_bytes(b'{"record_id": "K"}\nnot json\n')
     with pytest.raises(TaxLedgerCorruptError):
-        load_tax_records(ledger_dir)
+        read_tax_ledger(ledger_dir)
 
 
 def test_loader_ignores_torn_tail_without_mutation(tmp_path: Path) -> None:
@@ -778,8 +731,8 @@ def test_loader_ignores_torn_tail_without_mutation(tmp_path: Path) -> None:
     shard = ledger_dir / "tax_ledger_202609.jsonl"
     shard.write_bytes(shard.read_bytes() + b'{"record_id": "TORN')
     before = shard.read_bytes()
-    df = load_tax_records(ledger_dir)
-    assert sorted(df["record_id"].tolist()) == ["A", "B"]
+    rows = read_tax_ledger(ledger_dir)
+    assert sorted(r.record_id for r in rows) == ["A", "B"]
     assert shard.read_bytes() == before
 
 
@@ -889,9 +842,9 @@ def test_collect_cross_type_tranid_stored_once_each(tmp_path: Path) -> None:
     append_tax_records(first, ledger_dir)
     second, _wm2, _ = _collect(client, [], wm1)
     append_tax_records(second, ledger_dir)
-    df = load_tax_records(ledger_dir)
-    assert len(df) == 2
-    assert sorted(df["record_id"].tolist()) == ["venue:FUNDING_FEE:500", "venue:TRANSFER:900"]
+    rows = read_tax_ledger(ledger_dir)
+    assert len(rows) == 2
+    assert sorted(r.record_id for r in rows) == ["venue:FUNDING_FEE:500", "venue:TRANSFER:900"]
 
 
 def test_collect_unknown_income_type_preserved_with_classify_issue() -> None:
@@ -931,38 +884,6 @@ def test_classify_income_type_table() -> None:
     }
     with pytest.raises(DataIntegrityError):
         classify_income_type("")
-
-
-def test_summarize_delivery_settlement_counts_as_realized(tmp_path: Path) -> None:
-    """DELIVERED_SETTELMENT rows land in realized_pnl, not in unclassified_income."""
-    ts = _ms(NOW - pd.Timedelta(days=10))
-    client = WindowedFakeClient({}, incomes=[_venue_income(3, income="12.5", sym="BTCUSDT", ts=ts,
-                                                            itype="DELIVERED_SETTELMENT")])
-    records, _, _ = _collect(client, [], TaxWatermark(last_trade_id={}, last_collected_at=None))
-    assert records[0].kind == "REALIZED_PNL"
-    ledger_dir = tmp_path / "tax"
-    append_tax_records(records, ledger_dir)
-    summary = summarize_tax_year(2025, ledger_dir, source="venue")
-    assert summary["total"]["realized_pnl"] == pytest.approx(12.5)
-    assert "DELIVERED_SETTELMENT" not in summary["unclassified_income"]
-
-
-def test_summarize_unclassified_income_itemised_by_raw_type(tmp_path: Path) -> None:
-    """TRANSFER/UNCLASSIFIED rows are broken out per raw income_type."""
-    ts = _ms(NOW - pd.Timedelta(days=10))
-    client = WindowedFakeClient(
-        {},
-        incomes=[
-            _venue_income(1, income="3.0", sym="", ts=ts, itype="INSURANCE_CLEAR"),
-            _venue_income(2, income="1.0", sym="", ts=ts + 1, itype="COMMISSION_REBATE"),
-        ],
-    )
-    records, _, _ = _collect(client, [], TaxWatermark(last_trade_id={}, last_collected_at=None))
-    ledger_dir = tmp_path / "tax"
-    append_tax_records(records, ledger_dir)
-    summary = summarize_tax_year(2025, ledger_dir, source="venue")
-    assert summary["unclassified_income"] == {"INSURANCE_CLEAR": pytest.approx(3.0),
-                                              "COMMISSION_REBATE": pytest.approx(1.0)}
 
 
 def test_collect_income_fetch_failure_keeps_time_watermark() -> None:
@@ -1006,9 +927,9 @@ def test_collect_page_budget_resumes_over_two_calls(tmp_path: Path) -> None:
         assert current.last_collected_at is not None
         assert nxt.last_collected_at >= current.last_collected_at
         current = nxt
-    df = load_tax_records(ledger_dir)
-    assert len(df) == 1500
-    assert df["record_id"].nunique() == 1500
+    rows = read_tax_ledger(ledger_dir)
+    assert len(rows) == 1500
+    assert len({r.record_id for r in rows}) == 1500
 
 
 def test_collect_stalled_page_detected() -> None:
@@ -1082,7 +1003,7 @@ def test_collect_legacy_funding_id_deduplicates(tmp_path: Path) -> None:
     records, _, _ = _collect(client, [], TaxWatermark(last_trade_id={}, last_collected_at=None))
     assert [r.record_id for r in records] == ["venue:FUNDING_FEE:42"]
     assert append_tax_records(records, ledger_dir) == []
-    assert len(load_tax_records(ledger_dir)) == 1
+    assert len(read_tax_ledger(ledger_dir)) == 1
 
 
 # --- simulated fill identity ---------------------------------------------------
@@ -1102,7 +1023,7 @@ def test_simulated_tax_records_use_fill_identity(tmp_path: Path) -> None:
     ledger_dir = tmp_path / "tax"
     append_tax_records(first, ledger_dir)
     append_tax_records(second, ledger_dir)
-    assert len(load_tax_records(ledger_dir)) == 2
+    assert len(read_tax_ledger(ledger_dir)) == 2
 
 
 def test_simulated_tax_records_rededup_after_crash(tmp_path: Path) -> None:
@@ -1114,7 +1035,7 @@ def test_simulated_tax_records_rededup_after_crash(tmp_path: Path) -> None:
     before = (ledger_dir / "tax_ledger_202603.jsonl").read_bytes()
     append_tax_records(simulated_tax_records(fills, "paper"), ledger_dir)
     assert (ledger_dir / "tax_ledger_202603.jsonl").read_bytes() == before
-    assert len(load_tax_records(ledger_dir)) == 1
+    assert len(read_tax_ledger(ledger_dir)) == 1
 
 
 def test_simulated_tax_records_nan_price_fails_closed() -> None:
@@ -1296,40 +1217,4 @@ def test_non_utf8_shard_line_is_corruption(tmp_path: Path) -> None:
     (ledger_dir / "tax_ledger_202609.jsonl").write_bytes(b"\xff\xfe\n")
 
     with pytest.raises(DataIntegrityError, match="line 1"):
-        load_tax_records(ledger_dir)
-
-
-def test_load_tax_records_first_seen_wins_and_legacy_income_type(tmp_path: Path) -> None:
-    """A record_id duplicated across shards loads once; legacy rows without income_type load as ''."""
-    ledger_dir = tmp_path / "tax"
-    ledger_dir.mkdir()
-    row = {"record_id": "L1", "kind": "TRADE", "event_time": "2026-09-15T00:00:00+00:00", "realized_pnl": 0.0}
-    (ledger_dir / "tax_ledger_202609.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
-    other_year = {**row, "record_id": "L0", "event_time": "2025-12-31T23:00:00+00:00"}
-    (ledger_dir / "tax_ledger_202610.jsonl").write_text(
-        json.dumps({**row, "realized_pnl": 9.0}) + "\n" + json.dumps(other_year) + "\n", encoding="utf-8"
-    )
-
-    df = load_tax_records(ledger_dir, year=2026)
-
-    assert df["record_id"].tolist() == ["L1"]
-    assert df["realized_pnl"].tolist() == [0.0]
-    assert df["income_type"].tolist() == [""]
-
-
-def test_year_filter_rejects_record_without_parseable_time(tmp_path: Path) -> None:
-    """A record whose year cannot be determined fails closed instead of silently leaving the yearly total."""
-    ledger_dir = tmp_path / "tax"
-    ledger_dir.mkdir()
-    (ledger_dir / "tax_ledger_202609.jsonl").write_text(
-        json.dumps({"record_id": "B1", "kind": "TRADE", "event_time": "garbage"}) + "\n"
-        + json.dumps({"record_id": "B2", "kind": "TRADE"}) + "\n",
-        encoding="utf-8",
-    )
-    with pytest.raises(DataIntegrityError, match="line 1"):
-        load_tax_records(ledger_dir, year=2026)
-    (ledger_dir / "tax_ledger_202609.jsonl").write_text(
-        json.dumps({"record_id": "B2", "kind": "TRADE"}) + "\n", encoding="utf-8"
-    )
-    with pytest.raises(DataIntegrityError, match="line 1"):
-        load_tax_records(ledger_dir, year=2026)
+        read_tax_ledger(ledger_dir)
