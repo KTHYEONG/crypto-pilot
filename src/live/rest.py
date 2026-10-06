@@ -39,7 +39,8 @@ SHADOW_ALLOWED_MUTATIONS: frozenset[str] = frozenset()
 
 _RETRY_BACKOFF_SECONDS = 1.0
 _RETRY_BACKOFF_LONG_SECONDS = 10.0
-_MAX_ATTEMPTS = 3
+#: A mutation is sent at most twice: once, plus one resend after a ``-1021`` clock resync.
+_MUTATION_MAX_SENDS: int = 2
 _HTTP_TIMEOUT_SECONDS = 30.0
 
 _GET_RETRY_BACKOFF_SECONDS: tuple[float, ...] = (0.5, 1.0, 2.0)
@@ -347,6 +348,119 @@ class BinanceFuturesRestClient:
                 return None
         return None
 
+    def _build_url_headers(
+        self, path: str, base_params: Mapping[str, Any], *, signed: bool
+    ) -> tuple[str, dict[str, str]]:
+        """Build the request URL and headers for one send attempt.
+
+        Signed queries are re-signed on every call so each attempt carries a fresh
+        timestamp and the clock offset learned from the latest resync; callers must never
+        reuse a URL across attempts. Only the API key travels in headers; the secret only
+        contributes the HMAC signature.
+        """
+        query = (
+            self._signed_query(base_params)
+            if signed
+            else (urllib.parse.urlencode(base_params) if base_params else "")
+        )
+        url = f"{self._base_url}{path}" + (f"?{query}" if query else "")
+        headers: dict[str, str] = {}
+        if self._api_key is not None:
+            headers["X-MBX-APIKEY"] = self._api_key.get_secret_value()
+        return url, headers
+
+    @staticmethod
+    def _decode_body(raw: bytes) -> tuple[Any, bool]:
+        """Decode a response body as JSON.
+
+        Returns:
+            ``(payload, decoded_ok)``. An empty body is ``(None, True)``; a body that is not
+            UTF-8 JSON is ``(None, False)`` so idempotent reads can treat it as transient.
+        """
+        if not raw:
+            return None, True
+        try:
+            return json.loads(raw.decode("utf-8")), True
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return None, False
+
+    @staticmethod
+    def _body_digest(response: HttpResponse) -> str:
+        """Digest of the raw response body for error evidence; the body itself is never kept."""
+        return payload_digest(
+            response.body.decode("utf-8", errors="replace") if response.body else ""
+        )
+
+    @staticmethod
+    def _raise_for_action(
+        action: ErrorAction,
+        *,
+        method: str,
+        path: str,
+        response: HttpResponse,
+        error_code: int | None,
+    ) -> None:
+        """Raise the terminal exception for a registry action shared by reads and mutations.
+
+        Scoped rejections, fail-closed codes, intent obsolescence and post-only reprice
+        signals end the request identically for every method. The actions whose handling
+        differs by method — BENIGN (return the body), RESYNC_CLOCK (one resync) and
+        RETRY_BACKOFF / RETRY_BACKOFF_LONG (reads retry, mutations never resend) — return
+        without raising so the calling loop applies its own policy.
+
+        Raises:
+            VenueError: INTENT_REJECT, MARGIN_WAIT, RISK_INCREASE_FREEZE, FAIL_CLOSED,
+                RESYNC_THEN_DECIDE, BENIGN_REPRICE, and any action not listed as
+                loop-handled (fail-closed default for future registry actions).
+            OrderObsolete: BENIGN_ABORT.
+        """
+        if action in (
+            ErrorAction.INTENT_REJECT,
+            ErrorAction.MARGIN_WAIT,
+            ErrorAction.RISK_INCREASE_FREEZE,
+        ):
+            raise VenueError(
+                f"venue rejected {method} {path} with scoped code {error_code}; not retried",
+                code=error_code,
+                http_status=response.status_code,
+                path=path,
+                payload_digest=BinanceFuturesRestClient._body_digest(response),
+            )
+        if action is ErrorAction.FAIL_CLOSED or action is ErrorAction.RESYNC_THEN_DECIDE:
+            raise VenueError(
+                f"venue rejected request at {path}",
+                code=error_code,
+                http_status=response.status_code,
+                path=path,
+                payload_digest=BinanceFuturesRestClient._body_digest(response),
+            )
+        if action is ErrorAction.BENIGN_ABORT:
+            raise OrderObsolete(
+                f"venue reports intent is obsolete at {path} (code={error_code})"
+            )
+        if action is ErrorAction.BENIGN_REPRICE:
+            raise VenueError(
+                "post-only rejection (reprice signal)",
+                code=error_code,
+                http_status=response.status_code,
+                path=path,
+                payload_digest=BinanceFuturesRestClient._body_digest(response),
+            )
+        if action in (
+            ErrorAction.BENIGN,
+            ErrorAction.RESYNC_CLOCK,
+            ErrorAction.RETRY_BACKOFF,
+            ErrorAction.RETRY_BACKOFF_LONG,
+        ):
+            return None
+        raise VenueError(
+            f"venue rejected request at {path}",
+            code=error_code,
+            http_status=response.status_code,
+            path=path,
+            payload_digest=BinanceFuturesRestClient._body_digest(response),
+        )
+
     # ------------------------------------------------------------------ request
 
     def request(
@@ -393,15 +507,8 @@ class BinanceFuturesRestClient:
         self, method: str, path: str, base_params: dict[str, Any], *, signed: bool
     ) -> Any:
         resynced_clock = False
-        last_error: VenueError | None = None
-        for _attempt in range(1, _MAX_ATTEMPTS + 1):
-            query = self._signed_query(base_params) if signed else (
-                urllib.parse.urlencode(base_params) if base_params else ""
-            )
-            url = f"{self._base_url}{path}" + (f"?{query}" if query else "")
-            headers: dict[str, str] = {}
-            if self._api_key is not None:
-                headers["X-MBX-APIKEY"] = self._api_key.get_secret_value()
+        for _send in range(_MUTATION_MAX_SENDS):
+            url, headers = self._build_url_headers(path, base_params, signed=signed)
 
             try:
                 response = self._transport.call(method, url, headers)
@@ -414,12 +521,7 @@ class BinanceFuturesRestClient:
                 ) from exc
             self._update_rate_state(response.headers)
 
-            body: Any = None
-            if response.body:
-                try:
-                    body = json.loads(response.body.decode("utf-8"))
-                except (json.JSONDecodeError, UnicodeDecodeError):
-                    body = None
+            body, _ = self._decode_body(response.body)
 
             if response.status_code == 418:
                 raise LiveTradingError(f"IP ban received at {path}; halting")
@@ -429,7 +531,7 @@ class BinanceFuturesRestClient:
                     code=None,
                     http_status=429,
                     path=path,
-                    payload_digest=payload_digest(response.body.decode("utf-8", errors="replace")),
+                    payload_digest=self._body_digest(response),
                 )
 
             error_code = self._error_code(body)
@@ -447,69 +549,24 @@ class BinanceFuturesRestClient:
                 )
 
             action = resolve_error_action(error_code)
-            if action in (
-                ErrorAction.INTENT_REJECT,
-                ErrorAction.MARGIN_WAIT,
-                ErrorAction.RISK_INCREASE_FREEZE,
-            ):
-                raise VenueError(
-                    f"venue rejected {method} {path} with scoped code {error_code}; not retried",
-                    code=error_code,
-                    http_status=response.status_code,
-                    path=path,
-                    payload_digest=payload_digest(
-                        response.body.decode("utf-8", errors="replace") if response.body else ""
-                    ),
-                )
-            if action is ErrorAction.FAIL_CLOSED or action is ErrorAction.RESYNC_THEN_DECIDE:
-                raise VenueError(
-                    f"venue rejected request at {path}",
-                    code=error_code,
-                    http_status=response.status_code,
-                    path=path,
-                    payload_digest=payload_digest(
-                        response.body.decode("utf-8", errors="replace") if response.body else ""
-                    ),
-                )
+            self._raise_for_action(action, method=method, path=path, response=response, error_code=error_code)
             if action is ErrorAction.BENIGN:
                 return body
-            if action is ErrorAction.BENIGN_ABORT:
-                raise OrderObsolete(
-                    f"venue reports intent is obsolete at {path} (code={error_code})"
-                )
-            if action is ErrorAction.BENIGN_REPRICE:
-                raise VenueError(
-                    "post-only rejection (reprice signal)",
-                    code=error_code,
-                    http_status=response.status_code,
-                    path=path,
-                    payload_digest=payload_digest(
-                        response.body.decode("utf-8", errors="replace") if response.body else ""
-                    ),
-                )
             if action in (ErrorAction.RETRY_BACKOFF, ErrorAction.RETRY_BACKOFF_LONG):
                 raise VenueError(
                     f"venue rejected {method} {path}; mutation not retried",
                     code=error_code,
                     http_status=response.status_code,
                     path=path,
-                    payload_digest=payload_digest(
-                        response.body.decode("utf-8", errors="replace") if response.body else ""
-                    ),
+                    payload_digest=self._body_digest(response),
                 )
             if action is ErrorAction.RESYNC_CLOCK:
                 if resynced_clock:
                     break
                 resynced_clock = True
                 self.sync_server_time()
-                continue
-            time.sleep(
-                _RETRY_BACKOFF_LONG_SECONDS
-                if action is ErrorAction.RETRY_BACKOFF_LONG
-                else _RETRY_BACKOFF_SECONDS
-            )
 
-        raise last_error or VenueError(
+        raise VenueError(
             f"request to {path} exhausted retries",
             code=None,
             http_status=0,
@@ -522,13 +579,7 @@ class BinanceFuturesRestClient:
         resynced_clock = False
         last_error: VenueError | None = None
         for attempt in range(1, budget + 1):
-            query = self._signed_query(base_params) if signed else (
-                urllib.parse.urlencode(base_params) if base_params else ""
-            )
-            url = f"{self._base_url}{path}" + (f"?{query}" if query else "")
-            headers: dict[str, str] = {}
-            if self._api_key is not None:
-                headers["X-MBX-APIKEY"] = self._api_key.get_secret_value()
+            url, headers = self._build_url_headers(path, base_params, signed=signed)
 
             try:
                 response = self._transport.call("GET", url, headers)
@@ -548,17 +599,7 @@ class BinanceFuturesRestClient:
                 continue
             self._update_rate_state(response.headers)
 
-            body: Any = None
-            decoded_ok = False
-            if response.body:
-                try:
-                    body = json.loads(response.body.decode("utf-8"))
-                    decoded_ok = True
-                except (json.JSONDecodeError, UnicodeDecodeError):
-                    body = None
-                    decoded_ok = False
-            else:
-                decoded_ok = True
+            body, decoded_ok = self._decode_body(response.body)
 
             if response.status_code == 418:
                 raise LiveTradingError(f"IP ban received at {path}; halting")
@@ -575,7 +616,7 @@ class BinanceFuturesRestClient:
                 time.sleep(float(retry_after) if retry_after else _RETRY_BACKOFF_SECONDS)
                 last_error = VenueError(
                     "rate limited", code=None, http_status=429, path=path,
-                    payload_digest=payload_digest(response.body.decode("utf-8", errors="replace")),
+                    payload_digest=self._body_digest(response),
                 )
                 self._audit.record(
                     "venue_read_retry", path=path, http_status=429, code=None, attempt=attempt
@@ -627,46 +668,9 @@ class BinanceFuturesRestClient:
                 continue
 
             action = resolve_error_action(error_code)
-            if action in (
-                ErrorAction.INTENT_REJECT,
-                ErrorAction.MARGIN_WAIT,
-                ErrorAction.RISK_INCREASE_FREEZE,
-            ):
-                raise VenueError(
-                    f'venue rejected GET {path} with scoped code {error_code}; not retried',
-                    code=error_code,
-                    http_status=response.status_code,
-                    path=path,
-                    payload_digest=payload_digest(
-                        response.body.decode("utf-8", errors="replace") if response.body else ""
-                    ),
-                )
-            if action is ErrorAction.FAIL_CLOSED or action is ErrorAction.RESYNC_THEN_DECIDE:
-                raise VenueError(
-                    f"venue rejected request at {path}",
-                    code=error_code,
-                    http_status=response.status_code,
-                    path=path,
-                    payload_digest=payload_digest(
-                        response.body.decode("utf-8", errors="replace") if response.body else ""
-                    ),
-                )
+            self._raise_for_action(action, method="GET", path=path, response=response, error_code=error_code)
             if action is ErrorAction.BENIGN:
                 return body
-            if action is ErrorAction.BENIGN_ABORT:
-                raise OrderObsolete(
-                    f"venue reports intent is obsolete at {path} (code={error_code})"
-                )
-            if action is ErrorAction.BENIGN_REPRICE:
-                raise VenueError(
-                    "post-only rejection (reprice signal)",
-                    code=error_code,
-                    http_status=response.status_code,
-                    path=path,
-                    payload_digest=payload_digest(
-                        response.body.decode("utf-8", errors="replace") if response.body else ""
-                    ),
-                )
             if action is ErrorAction.RESYNC_CLOCK:
                 if resynced_clock:
                     break
@@ -696,15 +700,6 @@ class BinanceFuturesRestClient:
                     else _GET_RETRY_BACKOFF_SECONDS[attempt - 1]
                 )
                 continue
-            raise VenueError(  # pragma: no cover - registry is a closed set
-                f"venue rejected request at {path}",
-                code=error_code,
-                http_status=response.status_code,
-                path=path,
-                payload_digest=payload_digest(
-                    response.body.decode("utf-8", errors="replace") if response.body else ""
-                ),
-            )
 
         raise last_error or VenueError(
             f"request to {path} exhausted retries",
