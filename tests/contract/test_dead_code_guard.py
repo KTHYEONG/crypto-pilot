@@ -136,6 +136,7 @@ RETIRED_SYMBOLS: Final[tuple[tuple[str, str], ...]] = (
     ("src.market_data.services.mhs_execution", "assert_relevant_mark_price_coverage"),
     ("src.market_data.services.mhs_execution", "refresh_mhs_execution_manifest"),
     ("src.market_data.streams.liquidations", "BinanceForceOrderFeed"),
+    ("src.market_data.streams.liquidations", "_normalize_symbol"),
     ("src.market_data.streams.liquidations", "load_liquidation_events"),
     ("src.market_data.streams.liquidations", "run_liquidation_stream"),
     ("src.mhs.evaluation.integrity", "_assert_cache_required_marks"),

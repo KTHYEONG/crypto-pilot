@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -29,15 +30,7 @@ class LiquidationEvent:
     last_filled_qty: float
     filled_accum_qty: float
     raw_order_json: str | None = None
-    """`raw_order_json`: the venue order object (`o`) serialized as compact, key-sorted JSON (`separators=(",", ":")`, `ensure_ascii=False`). The forceOrder stream has no archive, so fields unknown today (e.g. `ps`, `st`) are preserved verbatim for later research. `None` when the event came through the unified fallback without a raw order object."""
-
-
-def _normalize_symbol(symbol: Any) -> str:
-    raw = str(symbol).strip()
-    if "/" in raw or ":" in raw:
-        raw = raw.replace("/", "")
-        raw = raw.split(":")[0]
-    return raw
+    """`raw_order_json`: the venue order object (`o`) serialized as compact, key-sorted JSON (`separators=(",", ":")`, `ensure_ascii=False`). The forceOrder stream has no archive, so fields unknown today (e.g. `ps`, `st`) are preserved verbatim for later research. `None` on rows persisted before the column existed, or when the order object holds a non-JSON value."""
 
 
 def _serialize_raw_order(o: Mapping[str, Any]) -> str | None:
@@ -47,164 +40,139 @@ def _serialize_raw_order(o: Mapping[str, Any]) -> str | None:
         return None
 
 
+def _reject(reason: str, field: str) -> LiquidationEvent | None:
+    _logger.debug("[DATA] stage=parse_liquidation status=REJECTED reason=%s field=%s", reason, field)
+    return None
+
+
+def _parse_num(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (str, int, float)):
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+    else:
+        return None
+    if not math.isfinite(parsed):
+        return None
+    return parsed
+
+
 def parse_liquidation(
     msg: Mapping[str, Any],
     *,
     ingested_at: pd.Timestamp,
 ) -> LiquidationEvent | None:
+    """Parse one decoded raw Binance USD-M ``forceOrder`` frame into a liquidation event.
+
+    Accepts only the raw stream shape ``{"e": "forceOrder", "E": <ms>, "o": {...}}``
+    journaled by the capture service; ccxt-normalized shapes are not production inputs
+    and are rejected. Every rejection returns ``None`` so the normalizer counts it in
+    ``parse_failures`` (heartbeat ``force_order.parse_failures_total``); no field is ever
+    defaulted, because a fabricated quantity or price would be persisted
+    indistinguishably from venue data.
+
+    Field contract on ``msg["o"]`` (all keys required):
+        s, S, o, f, X: non-empty ``str`` without surrounding whitespace; ``S`` is
+            ``"BUY"`` or ``"SELL"``.
+        q, p: decimal ``str`` or real number (not ``bool``), finite and > 0.
+        ap, l, z: decimal ``str`` or real number (not ``bool``), finite and >= 0.
+            Zero is legitimate: a snapshot of an order without fills carries
+            ``ap = l = z = 0``.
+        T: order trade time in integer epoch milliseconds, as ``int`` (not ``bool``)
+            or an ASCII-digit ``str``; > 0 and representable as a pandas Timestamp
+            at nanosecond resolution for persisted storage.
+
+    Args:
+        msg: JSON-decoded frame. Envelope keys ``e``/``E`` and unknown order keys
+            (e.g. ``ps``, ``st``) are not validated; the order object is preserved
+            verbatim in ``raw_order_json``.
+        ingested_at: Local receipt time (capture ``recv_ns``); converted to UTC.
+
+    Returns:
+        ``LiquidationEvent`` with ``event_time`` = ``T`` (UTC, ms resolution),
+        ``symbol`` = ``s`` verbatim, quantities/prices as ``float``; or ``None`` when
+        the shape or any field violates the contract or ``ingested_at`` is NaT.
+
+    Raises:
+        Never raises for JSON-decoded input: a poison frame must not crash or stall the
+        normalizer checkpoint loop.
+    """
+    if not isinstance(msg, Mapping):
+        return _reject("shape", "-")
+    o = msg.get("o")
+    if not isinstance(o, Mapping):
+        return _reject("shape", "-")
+    ingested = pd.to_datetime(ingested_at, utc=True)
+    if pd.isna(ingested):
+        return _reject("ingested_at", "-")
+    for key in ("s", "S", "o", "f", "q", "p", "ap", "X", "l", "z", "T"):
+        if key not in o or o[key] is None:
+            return _reject("missing", key)
+    for key in ("s", "S", "o", "f", "X"):
+        value = o[key]
+        if not isinstance(value, str) or not value or value != value.strip():
+            return _reject("type", key)
+    if o["S"] not in ("BUY", "SELL"):
+        return _reject("side", "S")
+    parsed: dict[str, float] = {}
+    for key in ("q", "p", "ap", "l", "z"):
+        value = _parse_num(o[key])
+        if value is None:
+            raw = o[key]
+            if isinstance(raw, bool) or not isinstance(raw, (str, int, float)):
+                return _reject("type", key)
+            try:
+                float(raw)
+            except (TypeError, ValueError, OverflowError):
+                return _reject("type", key)
+            return _reject("non_finite", key)
+        parsed[key] = value
+    if parsed["q"] <= 0 or parsed["p"] <= 0:
+        bad = "q" if parsed["q"] <= 0 else "p"
+        return _reject("non_positive", bad)
+    for key in ("ap", "l", "z"):
+        if parsed[key] < 0:
+            return _reject("negative", key)
+    t_raw = o["T"]
+    t_int: int | None = None
+    if isinstance(t_raw, bool):
+        return _reject("timestamp", "T")
+    if isinstance(t_raw, int):
+        t_int = t_raw
+    elif isinstance(t_raw, str):
+        if not t_raw or not t_raw.isascii() or not t_raw.isdigit():
+            return _reject("timestamp", "T")
+        try:
+            t_int = int(t_raw)
+        except (TypeError, ValueError, OverflowError):
+            return _reject("timestamp", "T")
+    else:
+        return _reject("timestamp", "T")
+    if t_int is None or t_int <= 0:
+        return _reject("timestamp", "T")
     try:
-        if not isinstance(msg, Mapping):
-            return None
-        ingested = pd.to_datetime(ingested_at, utc=True)
-        if pd.isna(ingested):
-            return None
-
-        # 원시 forceOrder 주문 오브젝트 우선. 현행 ccxt(binanceusdm)는 이를 info 로
-        # 평탄화해 전달하고(info.s/q/z/T ...), 과거 스키마는 info.o 로 중첩했다.
-        info = msg.get("info") if isinstance(msg.get("info"), Mapping) else None
-        o: Mapping[str, Any] | None = None
-        if isinstance(info, Mapping) and isinstance(info.get("o"), Mapping):
-            o = info["o"]
-        elif isinstance(info, Mapping) and "s" in info and "T" in info:
-            o = info
-        elif isinstance(msg.get("o"), Mapping):
-            o = msg["o"]
-
-        if o is not None:
-            s = o.get("s")
-            side_raw = o.get("S")
-            otype = o.get("o")
-            f = o.get("f")
-            q = o.get("q")
-            p = o.get("p")
-            ap = o.get("ap")
-            status_raw = o.get("X")
-            l_val = o.get("l")
-            z_val = o.get("z")
-            t_raw = o.get("T")
-            if s is None or t_raw is None:
-                return None
-            symbol = _normalize_symbol(s)
-            side = str(side_raw) if side_raw is not None else ""
-            order_type = str(otype) if otype is not None else ""
-            tif = str(f) if f is not None else ""
-            try:
-                orig_qty = float(q) if q is not None else 0.0
-                price = float(p) if p is not None else 0.0
-                avg_price = float(ap) if ap is not None else price
-                last_filled = float(l_val) if l_val is not None else 0.0
-                filled_accum = float(z_val) if z_val is not None else 0.0
-            except (TypeError, ValueError):
-                return None
-            try:
-                event_time = pd.to_datetime(int(float(str(t_raw))), unit="ms", utc=True)
-            except Exception:
-                return None
-            status = str(status_raw) if status_raw is not None else ""
-            return LiquidationEvent(
-                symbol=symbol,
-                event_time=event_time,
-                ingested_at=ingested,
-                side=side,
-                order_type=order_type,
-                time_in_force=tif,
-                orig_qty=float(orig_qty),
-                price=float(price),
-                avg_price=float(avg_price),
-                status=status,
-                last_filled_qty=float(last_filled),
-                filled_accum_qty=float(filled_accum),
-                raw_order_json=_serialize_raw_order(o),
-            )
-
-        # Unified fallback
-        symbol_raw = msg.get("symbol")
-        ts = msg.get("timestamp")
-        if ts is None:
-            ts = msg.get("T")
-        if symbol_raw is None or ts is None:
-            return None
-        symbol = _normalize_symbol(symbol_raw)
-        price_raw = msg.get("price")
-        if price_raw is None:
-            price_raw = msg.get("markPrice")
-        if price_raw is None:
-            # try p
-            price_raw = msg.get("p")
-        if price_raw is None:
-            return None
-        qty_raw = msg.get("baseValue")
-        if qty_raw is None:
-            qty_raw = msg.get("amount")
-        if qty_raw is None:
-            qty_raw = msg.get("orig_qty")
-        if qty_raw is None:
-            qty_raw = msg.get("q")
-        if qty_raw is None:
-            # try to derive from quoteValue / price ?
-            qv = msg.get("quoteValue")
-            if qv is not None:
-                try:
-                    qty_raw = float(qv) / float(price_raw) if float(price_raw) != 0 else None
-                except Exception:
-                    qty_raw = None
-            if qty_raw is None:
-                return None
-        try:
-            price = float(price_raw)
-            orig_qty = float(qty_raw)
-        except (TypeError, ValueError):
-            return None
-        # avg price fallback
-        ap_raw = msg.get("avg_price")
-        if ap_raw is None:
-            ap_raw = msg.get("ap")
-        if ap_raw is None:
-            ap_raw = msg.get("average")
-        avg_price = float(ap_raw) if ap_raw is not None else price
-        try:
-            avg_price = float(avg_price)
-        except (TypeError, ValueError):
-            avg_price = price
-        side = str(msg.get("side", msg.get("S", "")) or "")
-        order_type = str(msg.get("order_type", msg.get("o", "")) or "")
-        tif = str(msg.get("time_in_force", msg.get("f", "")) or "")
-        status = str(msg.get("status", msg.get("X", "")) or "")
-        # last filled / accum
-        l_raw = msg.get("last_filled_qty")
-        if l_raw is None:
-            l_raw = msg.get("l")
-        z_raw = msg.get("filled_accum_qty")
-        if z_raw is None:
-            z_raw = msg.get("z")
-        try:
-            last_filled = float(l_raw) if l_raw is not None else orig_qty
-        except (TypeError, ValueError):
-            last_filled = orig_qty
-        try:
-            filled_accum = float(z_raw) if z_raw is not None else orig_qty
-        except (TypeError, ValueError):
-            filled_accum = orig_qty
-        try:
-            event_time = pd.to_datetime(int(float(str(ts))), unit="ms", utc=True)
-        except Exception:
-            return None
-        return LiquidationEvent(
-            symbol=symbol,
-            event_time=event_time,
-            ingested_at=ingested,
-            side=side,
-            order_type=order_type,
-            time_in_force=tif,
-            orig_qty=float(orig_qty),
-            price=float(price),
-            avg_price=float(avg_price),
-            status=status,
-            last_filled_qty=float(last_filled),
-            filled_accum_qty=float(filled_accum),
-        )
-    except Exception:
-        return None
+        event_time = pd.Timestamp(t_int, unit="ms", tz="UTC")
+        event_time.as_unit("ns")
+    except (TypeError, ValueError, OverflowError):
+        return _reject("timestamp", "T")
+    return LiquidationEvent(
+        symbol=o["s"],
+        event_time=event_time,
+        ingested_at=ingested,
+        side=o["S"],
+        order_type=o["o"],
+        time_in_force=o["f"],
+        orig_qty=float(parsed["q"]),
+        price=float(parsed["p"]),
+        avg_price=float(parsed["ap"]),
+        status=o["X"],
+        last_filled_qty=float(parsed["l"]),
+        filled_accum_qty=float(parsed["z"]),
+        raw_order_json=_serialize_raw_order(o),
+    )
 
 
 def _events_to_frame(events: Sequence[LiquidationEvent]) -> pd.DataFrame:
@@ -350,5 +318,3 @@ def _earliest_ingest_merge(
 
 def default_liquidations_dir() -> Path:
     return DATA_DIR / "futures" / "liquidations"
-
-
