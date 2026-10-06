@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import contextlib
 import logging
-import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal
@@ -13,6 +12,7 @@ from typing import Any
 
 import pandas as pd
 
+from src.common.durable_io import durable_write_bytes
 from src.common.errors import DataIntegrityError
 from src.live.account import (
     RECONCILE_QTY_TOLERANCE_FRACTION,
@@ -189,18 +189,7 @@ def run_ledger_resync(
         stamp = now_ts.strftime("%Y%m%dT%H%M%SZ")
         backup_path = backup_dir / f"live_position_ledger.{stamp}.json"
         raw = ledger_path.read_bytes() if ledger_path.exists() else b"{}"
-        tmp_backup = backup_path.with_suffix(backup_path.suffix + ".tmp")
-        tmp_backup.write_bytes(raw)
-        with tmp_backup.open("rb") as handle:
-            os.fsync(handle.fileno())
-        os.replace(tmp_backup, backup_path)
-        # 디렉터리 fsync 를 지원하지 않는 파일시스템에서도 백업 파일 자체는 이미 fsync 되었다.
-        with contextlib.suppress(OSError):
-            dir_fd = os.open(backup_dir, os.O_RDONLY)
-            try:
-                os.fsync(dir_fd)
-            finally:
-                os.close(dir_fd)
+        durable_write_bytes(backup_path, raw)
         marks = _marks_from_tickers(market_client, sorted({b.symbol for b in breaches})).marks
         unpriced = sorted(b.symbol for b in breaches if not (marks.get(b.symbol) or Decimal(0)) > 0)
         if unpriced:

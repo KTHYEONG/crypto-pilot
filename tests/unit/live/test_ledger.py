@@ -1047,3 +1047,29 @@ def test_derisk_entry_keeps_first_timestamp_and_unions_reasons(tmp_path) -> None
 def test_evolve_rejects_unknown_state_field() -> None:
     with pytest.raises(TypeError):
         _evolve(_fully_populated_state(), not_a_field=1)
+
+
+def test_save_ledger_fsyncs_file_and_directory(tmp_path, monkeypatch) -> None:
+    """Durable save fsyncs the temp file before replace and the directory after."""
+    import os
+
+    from src.live.ledger import LedgerState, load_ledger, save_ledger
+
+    real_fsync = os.fsync
+    file_fsyncs: list[str] = []
+    dir_fsyncs: list[str] = []
+
+    def _spy(fd: int) -> None:
+        try:
+            target = os.readlink(f"/proc/self/fd/{fd}")
+        except OSError:
+            target = str(fd)
+        (dir_fsyncs if Path(target).is_dir() else file_fsyncs).append(target)
+        real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", _spy)
+    path = tmp_path / "ledger_durable.json"
+    save_ledger(path, LedgerState(positions={"AAAUSDT": Decimal("2")}))
+    assert len(file_fsyncs) >= 1
+    assert len(dir_fsyncs) >= 1
+    assert load_ledger(path).positions == {"AAAUSDT": Decimal("2")}

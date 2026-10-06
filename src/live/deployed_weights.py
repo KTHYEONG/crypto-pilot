@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import io
-import os
 from pathlib import Path
 
 import pandas as pd
 from pydantic import SecretStr
 
+from src.common.durable_io import durable_replace, durable_write_bytes
 from src.common.errors import DataIntegrityError
 from src.common.paths import DATA_DIR
 from src.live.errors import ArtifactSealError, StaleSignalError
@@ -65,14 +65,10 @@ def _write_parquet(frame: pd.DataFrame, path: Path, artifact_key: SecretStr | No
             raise DataIntegrityError(f"sealed artifact path requires a key: {dest}")
         sealed = seal_bytes(buffer.getvalue(), derive_key(artifact_key))
         dest.parent.mkdir(parents=True, exist_ok=True)
-        tmp = dest.with_suffix(dest.suffix + ".tmp")
-        tmp.write_bytes(sealed)
-        os.replace(tmp, dest)
+        durable_write_bytes(dest, sealed)
         return
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    frame.to_parquet(tmp, index=True)
-    os.replace(tmp, path)
+    durable_replace(path, lambda tmp: frame.to_parquet(tmp, index=True))
 
 
 def load_weights_frame(path: Path, *, artifact_key: SecretStr | None = None) -> pd.DataFrame:
