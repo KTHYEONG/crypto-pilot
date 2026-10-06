@@ -173,7 +173,7 @@ def run_preflight(
         from src.live.account import RECONCILE_QTY_TOLERANCE_FRACTION, assert_suppressed_venue_flat, reconcile_or_halt
         from src.live.ledger import default_ledger_path, load_ledger
 
-        ledger_path = Path(settings.ledger_path) if settings.ledger_path else default_ledger_path()
+        ledger_path = settings.resolved_ledger_path(default_ledger_path)
         ledger_state = load_ledger(ledger_path)
         ledger_positions = ledger_state.positions
         if settings.mode.suppresses_mutations:

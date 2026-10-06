@@ -611,3 +611,70 @@ def test_repeg_interval_inert_for_other_policies() -> None:
     """An out-of-range repeg interval is ignored unless strict_passive_repeg is set."""
     ok = LiveSettings(execution_policy="taker_parity", repeg_interval_s=60.0)
     assert ok.execution_policy == "taker_parity"
+
+
+def test_resolved_path_uses_configured_value_without_calling_default(tmp_path) -> None:
+    from src.live.settings import LiveSettings
+
+    target = tmp_path / "l.json"
+    settings = LiveSettings(ledger_path=str(target))
+
+    def _boom():  # pragma: no cover - must never be called
+        raise AssertionError("default must not be called")
+
+    assert settings.resolved_ledger_path(_boom) == target
+
+
+@pytest.mark.parametrize("value", [None, ""])
+def test_resolved_path_treats_empty_string_as_unset(tmp_path, value) -> None:
+    from src.live.settings import LiveSettings
+
+    settings = LiveSettings(fills_dir=value, record_run_id=None)
+    calls = []
+
+    def default():
+        calls.append(tmp_path / "d")
+        return tmp_path / "d"
+
+    assert settings.resolved_fills_dir(default) == tmp_path / "d"
+    assert calls == [tmp_path / "d"]
+
+
+def test_resolved_path_resolves_default_lazily_per_call(tmp_path) -> None:
+    from src.live.settings import LiveSettings
+
+    settings = LiveSettings(tax_ledger_dir=None, record_run_id=None)
+    holder = [tmp_path / "a"]
+    first = settings.resolved_tax_ledger_dir(lambda: holder[0])
+    holder[0] = tmp_path / "b"
+    second = settings.resolved_tax_ledger_dir(lambda: holder[0])
+    assert first == tmp_path / "a"
+    assert second == tmp_path / "b"
+
+
+def test_resolved_path_honours_record_run_derivation() -> None:
+    from src.common.paths import DATA_DIR
+    from src.live.settings import LiveSettings
+
+    settings = LiveSettings(record_run_id="r1abcdef")
+    root = DATA_DIR / "state" / "runs" / "r1abcdef"
+
+    def _boom():  # pragma: no cover - must never be called
+        raise AssertionError("default must not be called")
+
+    assert settings.resolved_ledger_path(_boom) == root / "position_ledger.json"
+    assert settings.resolved_order_journal_path(_boom) == root / "order_journal.jsonl"
+    assert settings.resolved_fills_dir(_boom) == root / "fills"
+    assert settings.resolved_tax_ledger_dir(_boom) == root / "tax_ledger"
+    assert settings.resolved_execution_quality_dir(_boom) == root / "execution_quality"
+    assert settings.resolved_portfolio_state_dir(_boom) == root / "portfolio_state"
+    assert settings.resolved_microstructure_dir(_boom) == root / "microstructure"
+
+
+def test_resolved_accessors_are_not_model_fields() -> None:
+    from src.live.settings import LiveSettings
+
+    settings = LiveSettings()
+    dumped = settings.model_dump()
+    assert not any(key.startswith("resolved_") for key in dumped)
+    assert not any(name.startswith("resolved_") for name in LiveSettings.model_fields)
