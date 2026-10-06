@@ -15,6 +15,7 @@ import numpy as np
 import pandas as pd
 from scipy.stats import norm
 
+from src.mhs.bootstrap import iter_stationary_bootstrap_index_chunks, stationary_bootstrap_max_blocks
 from src.mhs.execution import mhs_ledger_pnl
 from src.mhs.params import (
     DEFAULT_SELECTION_WINDOW,
@@ -1020,7 +1021,7 @@ def _stationary_block_bootstrap_paths(
     (PERF_OPT_003 precedent): block lengths are ``geometric(p_block)`` and
     block starts are uniform, matching the scalar length law.  A 6x block-count
     safety margin makes running short effectively impossible; any shortfall
-    still falls back to the scalar replicate path.
+    still falls back to the scalar replicate path in ``src.mhs.bootstrap``.
     """
     if n_replicates <= 0:
         raise ValueError(f"n_replicates must be > 0, got {n_replicates}")
@@ -1032,63 +1033,34 @@ def _stationary_block_bootstrap_paths(
         return np.ones(n_replicates)
     p_block = 1.0 / mean_block if mean_block > 0 else 0.0
     if p_block <= 0.0:
-        # Degenerate mean_block == 0: every block is a single element (the
-        # scalar ``while length < n and rng.random() > 0`` never advances).
+        # Preserved degenerate mean_block == 0 behaviour (F1): a single
+        # integers draw of length n_replicates reduced over axis 0, yielding a
+        # 0-d array rather than one path per replicate.
         starts = rng.integers(0, n, size=n_replicates)
         return np.asarray(np.prod(1.0 + net_returns[starts], axis=0), dtype="float64")
     outcomes = np.empty(n_replicates, dtype="float64")
     chunk = _bootstrap_chunk_size(n)
-    for r0 in range(0, n_replicates, chunk):
-        r1 = min(r0 + chunk, n_replicates)
-        k = r1 - r0
-        max_blocks = min(n, int(np.ceil(n * 6.0 / mean_block)) + 16)
-        lengths = rng.geometric(p_block, size=(k, max_blocks))
-        starts = rng.integers(0, n, size=(k, max_blocks))
-        ends = np.cumsum(lengths, axis=1)
-        short = ends[:, -1] < n
-        for r in np.flatnonzero(short).tolist():
-            outcomes[r0 + r] = _block_bootstrap_replicate_wealth(
-                net_returns, n, p_block, rng,
-            )
-        valid = ~short
-        if valid.any():
-            ends_trunc = np.minimum(ends, n)
-            used = ends_trunc - np.concatenate(
-                [np.zeros((k, 1), dtype=np.int64), ends_trunc[:, :-1]], axis=1,
-            )
-            u = used[valid].ravel()
-            s = starts[valid].ravel()
-            keep = u > 0
-            u = u[keep]
-            s = s[keep]
-            block_start = np.cumsum(u) - u
-            offsets = np.arange(int(u.sum()), dtype=np.int64) - np.repeat(block_start, u)
-            arr_idx = (np.repeat(s, u) + offsets) % n
-            sample = net_returns[arr_idx].reshape(int(valid.sum()), n)
-            outcomes[r0 + np.flatnonzero(valid)] = np.prod(1.0 + sample, axis=1)
+    max_blocks = stationary_bootstrap_max_blocks(n, mean_block)
+    for index_chunk in iter_stationary_bootstrap_index_chunks(
+        rng, source_len=n, path_len=n, n_replicates=n_replicates, mean_block=mean_block,
+        chunk_size=chunk, max_blocks=max_blocks,
+    ):
+        rows = index_chunk.indices.shape[0]
+        sample = net_returns[index_chunk.indices]
+        outcomes[index_chunk.row_start : index_chunk.row_start + rows] = np.prod(1.0 + sample, axis=1)
     return outcomes
-
-
-def _block_bootstrap_replicate_wealth(
-    arr: np.ndarray, n: int, p_block: float, rng: np.random.Generator,
-) -> float:
-    """Wealth multiplier of one scalar block-bootstrap replicate (fallback)."""
-    blocks: list[float] = []
-    while len(blocks) < n:
-        start = int(rng.integers(0, n))
-        length = 1
-        while length < n and rng.random() > p_block:
-            length += 1
-        length = min(length, n - len(blocks))
-        blocks.extend(arr[start : start + length].tolist())
-    path = np.array(blocks[:n], dtype="float64")
-    return float(np.prod(1.0 + path))
 
 
 def _bootstrap_mdd_paths(
     net_returns: np.ndarray, n_replicates: int, mean_block: int, seed: int,
 ) -> np.ndarray:
-    """Per-replicate max drawdown of the block-bootstrap equity path, vectorized."""
+    """Per-replicate max drawdown of the block-bootstrap equity path, vectorized.
+
+    Seeded with ``seed + 1``; the degenerate ``mean_block == 0`` branch preserves
+    the historical 0-d output (one path of length ``n_replicates`` reduced over
+    axis 0, see F1), and shortfalls fall back to the scalar replicate path in
+    ``src.mhs.bootstrap``.
+    """
     if n_replicates <= 0:
         raise ValueError(f"n_replicates must be > 0, got {n_replicates}")
     if mean_block < 0:
@@ -1105,56 +1077,18 @@ def _bootstrap_mdd_paths(
         return np.asarray((equity / running_max - 1.0).min(axis=0), dtype="float64")
     mdd = np.empty(n_replicates, dtype="float64")
     chunk = _bootstrap_chunk_size(n)
-    for r0 in range(0, n_replicates, chunk):
-        r1 = min(r0 + chunk, n_replicates)
-        k = r1 - r0
-        max_blocks = min(n, int(np.ceil(n * 6.0 / mean_block)) + 16)
-        lengths = rng.geometric(p_block, size=(k, max_blocks))
-        starts = rng.integers(0, n, size=(k, max_blocks))
-        ends = np.cumsum(lengths, axis=1)
-        short = ends[:, -1] < n
-        for r in np.flatnonzero(short).tolist():
-            mdd[r0 + r] = _block_bootstrap_replicate_mdd(
-                net_returns, n, p_block, rng,
-            )
-        valid = ~short
-        if valid.any():
-            ends_trunc = np.minimum(ends, n)
-            used = ends_trunc - np.concatenate(
-                [np.zeros((k, 1), dtype=np.int64), ends_trunc[:, :-1]], axis=1,
-            )
-            u = used[valid].ravel()
-            s = starts[valid].ravel()
-            keep = u > 0
-            u = u[keep]
-            s = s[keep]
-            block_start = np.cumsum(u) - u
-            offsets = np.arange(int(u.sum()), dtype=np.int64) - np.repeat(block_start, u)
-            arr_idx = (np.repeat(s, u) + offsets) % n
-            sample = net_returns[arr_idx].reshape(int(valid.sum()), n)
-            sample += 1.0
-            np.cumprod(sample, axis=1, out=sample)
-            running_max = np.maximum.accumulate(sample, axis=1)
-            mdd[r0 + np.flatnonzero(valid)] = (sample / running_max - 1.0).min(axis=1)
+    max_blocks = stationary_bootstrap_max_blocks(n, mean_block)
+    for index_chunk in iter_stationary_bootstrap_index_chunks(
+        rng, source_len=n, path_len=n, n_replicates=n_replicates, mean_block=mean_block,
+        chunk_size=chunk, max_blocks=max_blocks,
+    ):
+        rows = index_chunk.indices.shape[0]
+        sample = net_returns[index_chunk.indices]
+        sample += 1.0
+        np.cumprod(sample, axis=1, out=sample)
+        running_max = np.maximum.accumulate(sample, axis=1)
+        mdd[index_chunk.row_start : index_chunk.row_start + rows] = (sample / running_max - 1.0).min(axis=1)
     return mdd
-
-
-def _block_bootstrap_replicate_mdd(
-    arr: np.ndarray, n: int, p_block: float, rng: np.random.Generator,
-) -> float:
-    """Max drawdown of one scalar block-bootstrap replicate (fallback)."""
-    blocks: list[float] = []
-    while len(blocks) < n:
-        start = int(rng.integers(0, n))
-        length = 1
-        while length < n and rng.random() > p_block:
-            length += 1
-        length = min(length, n - len(blocks))
-        blocks.extend(arr[start : start + length].tolist())
-    path = np.array(blocks[:n], dtype="float64")
-    equity = np.cumprod(1.0 + path)
-    running_max = np.maximum.accumulate(equity)
-    return float((equity / running_max - 1.0).min())
 
 
 def compute_deployment_readiness(

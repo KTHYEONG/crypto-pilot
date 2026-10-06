@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from src.mhs import statistics
 
@@ -203,3 +204,28 @@ def test_bootstrap_ci_bounds_are_ordered_and_finite() -> None:
     assert np.isfinite(lo)
     assert np.isfinite(hi)
     assert lo <= hi
+
+
+def _fx(n: int) -> np.ndarray:
+    return np.random.default_rng(7).normal(0.001, 0.01, n)
+
+
+def test_bootstrap_ci_single_chunk_golden() -> None:
+    """Single-chunk CI reproduces the pinned pre-refactor bounds."""
+    lo, hi = statistics._bootstrap_ci(pd.Series(_fx(300)), n_replicates=50, mean_block=20, seed=7)
+    assert (lo, hi) == pytest.approx((-0.001201823119893336, 0.0006337078737512587), rel=1e-12)
+
+
+def test_bootstrap_ci_multi_chunk_golden() -> None:
+    """Multi-chunk CI crosses 128-row boundaries with pinned bounds."""
+    lo, hi = statistics._bootstrap_ci(
+        pd.Series(np.random.default_rng(7).normal(0.001, 0.01, 400)),
+        n_replicates=300, mean_block=24, seed=20260807,
+    )
+    assert (lo, hi) == pytest.approx((-0.0008882299615972765, 0.0008800856300388793), rel=1e-12)
+
+
+def test_bootstrap_ci_degenerate_block_golden() -> None:
+    """Degenerate mean_block=0 uses the scalar full-length-block law."""
+    lo, hi = statistics._bootstrap_ci(pd.Series(_fx(30)), n_replicates=7, mean_block=0, seed=1)
+    assert (lo, hi) == pytest.approx((-0.0058631929292499215, -0.002692599542392581), rel=1e-12)

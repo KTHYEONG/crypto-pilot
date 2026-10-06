@@ -17,6 +17,8 @@ from scipy.stats import norm
 from src.mhs.evidence import (
     MIN_TRIAL_SHARPE_OUTCOMES,
     TRIAL_SHARPE_DEDUP_DECIMALS,
+    _bootstrap_mdd_paths,
+    _stationary_block_bootstrap_paths,
     causal_regime_labels,
     deflated_sharpe_decomposition,
     deflated_sharpe_ratio,
@@ -471,3 +473,64 @@ def test_parameter_oos_split_input_unchanged() -> None:
     parameter_oos_split_evidence(equity, boundary=equity.index[200], min_days=90)
 
     pd.testing.assert_series_equal(equity, snapshot)
+
+
+def _ev_fx(n: int) -> np.ndarray:
+    return np.random.default_rng(7).normal(0.001, 0.01, n)
+
+
+def test_wealth_paths_single_chunk_golden() -> None:
+    """Single-chunk wealth multipliers reproduce the pinned pre-refactor vector."""
+    result = _stationary_block_bootstrap_paths(_ev_fx(300), 12, 20, 7)
+    assert result.shape == (12,)
+    assert result.tolist() == pytest.approx(
+        [0.8618710419156667, 0.9129638387322616, 0.9485037618214962, 0.7558510207499505,
+         0.9127218661208945, 0.7239625987005693, 1.0907766777885224, 0.6758610672480545,
+         1.005944638295651, 0.9179743215725977, 0.7599517430391223, 0.8695746669289384],
+        rel=1e-12,
+    )
+
+
+def test_mdd_paths_single_chunk_golden_uses_seed_plus_one() -> None:
+    """Single-chunk MDD path reproduces the pinned pre-refactor vector."""
+    result = _bootstrap_mdd_paths(_ev_fx(300), 12, 20, 7)
+    assert result.tolist() == pytest.approx(
+        [-0.2826269272044004, -0.1600731554867808, -0.2604159784531458, -0.21046553555858194,
+         -0.185278095397296, -0.32984749393890345, -0.16134652921255188, -0.2060396019563029,
+         -0.1464319429206985, -0.19607607969647278, -0.34408002393044756, -0.2458224615859741],
+        rel=1e-12,
+    )
+
+
+def test_wealth_paths_multi_chunk_golden() -> None:
+    """520 replicates span the 500/20 chunk boundary with a pinned digest."""
+    result = _stationary_block_bootstrap_paths(
+        np.random.default_rng(7).normal(0.001, 0.01, 50), 520, 5, 3,
+    )
+    assert [float(result[i]) for i in (0, 499, 500, 519)] == pytest.approx(
+        [1.0009836898459892, 0.9112671416806092, 0.9966386601557157, 0.9789647296219758],
+        rel=1e-12,
+    )
+    assert float(result.sum()) == pytest.approx(473.60125922483536, rel=1e-12)
+
+
+def test_mdd_paths_multi_chunk_golden() -> None:
+    """520 MDD replicates span the chunk boundary with a pinned digest."""
+    result = _bootstrap_mdd_paths(
+        np.random.default_rng(7).normal(0.001, 0.01, 50), 520, 5, 3,
+    )
+    assert [float(result[i]) for i in (0, 499, 500, 519)] == pytest.approx(
+        [-0.06342728578713386, -0.1305293733731382, -0.10770453781144751, -0.047161116731396446],
+        rel=1e-12,
+    )
+    assert float(result.sum()) == pytest.approx(-60.58867860535501, rel=1e-12)
+
+
+def test_degenerate_block_preserves_historical_zero_d_output() -> None:
+    """mean_block=0 keeps the historical 0-d output so a later fix is deliberate."""
+    wealth = _stationary_block_bootstrap_paths(_ev_fx(30), 7, 0, 1)
+    mdd = _bootstrap_mdd_paths(_ev_fx(30), 7, 0, 1)
+    assert np.shape(wealth) == ()
+    assert np.shape(mdd) == ()
+    assert float(wealth) == pytest.approx(1.0003913276366363, rel=1e-12)
+    assert float(mdd) == pytest.approx(-0.01546931459159806, rel=1e-12)
