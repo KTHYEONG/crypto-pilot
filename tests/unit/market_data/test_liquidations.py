@@ -1,12 +1,13 @@
 """Contract coverage for the liquidation WebSocket stream collector.
 
-Covers: parse_liquidation (raw forceOrder + ccxt unified), compact daily
-partition persistence + dedup, and the resilient native
-forceOrder stream loop (flush/shutdown + reconnect + attested liveness).
+Covers: parse_liquidation (strict raw forceOrder), compact hourly
+partition persistence and deduplication.
 """
 
 from __future__ import annotations
 
+import logging
+import math
 from typing import Any
 
 import pandas as pd
@@ -19,22 +20,24 @@ from src.market_data.streams.liquidations import (
 )
 
 _RAW_MSG = {
-    "info": {
-        "o": {
-            "s": "BTCUSDT",
-            "S": "SELL",
-            "o": "LIMIT",
-            "f": "IOC",
-            "q": "0.014",
-            "p": "9910",
-            "ap": "9910",
-            "X": "FILLED",
-            "l": "0.014",
-            "z": "0.014",
-            "T": 1568014460893,
-        }
-    }
+    "e": "forceOrder",
+    "E": 1568014460900,
+    "o": {
+        "s": "BTCUSDT",
+        "S": "SELL",
+        "o": "LIMIT",
+        "f": "IOC",
+        "q": "0.014",
+        "p": "9910",
+        "ap": "9910",
+        "X": "FILLED",
+        "l": "0.014",
+        "z": "0.014",
+        "T": 1568014460893,
+    },
 }
+
+_REQUIRED_KEYS = ("s", "S", "o", "f", "q", "p", "ap", "X", "l", "z", "T")
 
 
 def _raw(symbol: str, ms: int) -> dict[str, Any]:
@@ -57,6 +60,29 @@ def _raw(symbol: str, ms: int) -> dict[str, Any]:
     }
 
 
+def _base_order() -> dict[str, Any]:
+    return {
+        "s": "BTCUSDT",
+        "S": "SELL",
+        "o": "LIMIT",
+        "f": "IOC",
+        "q": "0.014",
+        "p": "9910",
+        "ap": "9910",
+        "X": "FILLED",
+        "l": "0.014",
+        "z": "0.014",
+        "T": 1568014460893,
+    }
+
+
+def _frame_with(order: dict[str, Any]) -> dict[str, Any]:
+    return {"e": "forceOrder", "E": 1568014460900, "o": order}
+
+
+_INGESTED = pd.Timestamp("2026-09-01T00:00:00Z")
+
+
 def test_parse_liquidation_from_raw_force_order_payload() -> None:
     ingested = pd.Timestamp("2026-09-01T00:00:00Z")
     ev = parse_liquidation(_RAW_MSG, ingested_at=ingested)
@@ -69,57 +95,254 @@ def test_parse_liquidation_from_raw_force_order_payload() -> None:
     assert ev.price == pytest.approx(9910.0)
     assert ev.avg_price == pytest.approx(9910.0)
     assert ev.status == "FILLED"
+    assert ev.last_filled_qty == pytest.approx(0.014)
     assert ev.filled_accum_qty == pytest.approx(0.014)
     assert ev.event_time == pd.Timestamp(1568014460893, unit="ms", tz="UTC")
+    assert ev.event_time != pd.Timestamp(1568014460900, unit="ms", tz="UTC")
     assert ev.ingested_at == ingested
+    import json as _json
+
+    assert _json.loads(ev.raw_order_json or "") == _RAW_MSG["o"]
 
 
-#: 현행 ccxt(binanceusdm) watch_liquidations_for_symbols 가 실제로 내보내는 형태:
-#: 주문 오브젝트가 info 로 평탄화되고 quoteValue/baseValue 는 None 이다.
-_CCXT_FLAT_INFO_MSG = {
-    "info": {
-        "s": "BLESSUSDT", "S": "SELL", "o": "LIMIT", "f": "IOC",
-        "q": "31180", "p": "0.0107580", "ap": "0.0109660", "X": "FILLED",
-        "l": "6249", "z": "31180", "T": 1788092214457, "ps": "BLESSUSDT", "st": 1,
-    },
-    "symbol": "BLESS/USDT:USDT",
-    "contracts": 6249.0,
-    "price": 0.010966,
-    "side": "sell",
-    "baseValue": None,
-    "quoteValue": None,
-    "timestamp": 1788092214457,
-}
+@pytest.mark.parametrize("key", list(_REQUIRED_KEYS))
+def test_parse_liquidation_missing_key_rejects(key: str) -> None:
+    order = _base_order()
+    del order[key]
+    assert parse_liquidation(_frame_with(order), ingested_at=_INGESTED) is None
 
 
-def test_parse_liquidation_from_ccxt_flat_info_payload() -> None:
-    ev = parse_liquidation(_CCXT_FLAT_INFO_MSG, ingested_at=pd.Timestamp("2026-09-01T00:00:00Z"))
+@pytest.mark.parametrize("key", list(_REQUIRED_KEYS))
+def test_parse_liquidation_none_key_rejects(key: str) -> None:
+    order = _base_order()
+    order[key] = None
+    assert parse_liquidation(_frame_with(order), ingested_at=_INGESTED) is None
+
+
+@pytest.mark.parametrize("key", ["q", "p", "ap", "l", "z"])
+@pytest.mark.parametrize("value", ["NaN", "nan", "Infinity", "-inf", "1e400", float("nan")])
+def test_parse_liquidation_non_finite_rejects(key: str, value: Any) -> None:
+    order = _base_order()
+    order[key] = value
+    assert parse_liquidation(_frame_with(order), ingested_at=_INGESTED) is None
+
+
+def test_parse_liquidation_inf_float_rejects() -> None:
+    order = _base_order()
+    order["q"] = float("inf")
+    assert parse_liquidation(_frame_with(order), ingested_at=_INGESTED) is None
+
+
+@pytest.mark.parametrize("key", ["q", "p"])
+@pytest.mark.parametrize("value", ["0", "0.0", "-0", "-1"])
+def test_parse_liquidation_non_positive_qty_price_rejects(key: str, value: str) -> None:
+    order = _base_order()
+    order[key] = value
+    assert parse_liquidation(_frame_with(order), ingested_at=_INGESTED) is None
+
+
+def test_parse_liquidation_legitimate_zero_fills_preserved() -> None:
+    order = _base_order()
+    order.update({"X": "EXPIRED", "ap": "0", "l": "0", "z": "0", "p": "60000"})
+    ev = parse_liquidation(_frame_with(order), ingested_at=_INGESTED)
     assert ev is not None
-    assert ev.symbol == "BLESSUSDT"
-    assert ev.side == "SELL"
-    assert ev.order_type == "LIMIT"
-    assert ev.orig_qty == pytest.approx(31180.0)
-    assert ev.avg_price == pytest.approx(0.010966)
-    assert ev.status == "FILLED"
-    assert ev.event_time == pd.Timestamp(1788092214457, unit="ms", tz="UTC")
+    assert ev.avg_price == 0.0
+    assert ev.last_filled_qty == 0.0
+    assert ev.filled_accum_qty == 0.0
+    assert ev.price == pytest.approx(60000.0)
 
 
-def test_parse_liquidation_from_ccxt_unified_dict() -> None:
-    unified = {
-        "symbol": "ETH/USDT:USDT",
-        "timestamp": 1568014460893,
-        "price": 1600.0,
-        "baseValue": 3.2,
-        "info": {},
-    }
-    ev = parse_liquidation(unified, ingested_at=pd.Timestamp("2026-09-01T00:00:00Z"))
+def test_parse_liquidation_negative_zero_float_accepted() -> None:
+    order = _base_order()
+    order.update({"ap": -0.0, "l": -0.0, "z": -0.0})
+    ev = parse_liquidation(_frame_with(order), ingested_at=_INGESTED)
     assert ev is not None
-    assert ev.symbol == "ETHUSDT"
-    assert ev.price == pytest.approx(1600.0)
-    assert ev.orig_qty == pytest.approx(3.2)
+    assert ev.avg_price == 0.0
+
+
+@pytest.mark.parametrize("key", ["ap", "l", "z"])
+def test_parse_liquidation_negative_fill_rejects(key: str) -> None:
+    order = _base_order()
+    order[key] = "-0.001"
+    assert parse_liquidation(_frame_with(order), ingested_at=_INGESTED) is None
+
+
+@pytest.mark.parametrize("key", ["q", "p", "ap", "l", "z"])
+def test_parse_liquidation_bool_numeric_rejects(key: str) -> None:
+    order = _base_order()
+    order[key] = True
+    assert parse_liquidation(_frame_with(order), ingested_at=_INGESTED) is None
+
+
+def test_parse_liquidation_bad_T_rejects() -> None:
+    bad_values: list[Any] = [True, 1568014460893.0, "1.5e12", "-5", 0, 10**20, "NONCE", "", " 123", [1], {"a": 1}, None]
+    for value in bad_values:
+        order = _base_order()
+        order["T"] = value
+        assert parse_liquidation(_frame_with(order), ingested_at=_INGESTED) is None, value
+
+
+def test_parse_liquidation_digit_string_T_accepted() -> None:
+    order = _base_order()
+    order["T"] = "1568014460893"
+    ev = parse_liquidation(_frame_with(order), ingested_at=_INGESTED)
+    assert ev is not None
     assert ev.event_time == pd.Timestamp(1568014460893, unit="ms", tz="UTC")
-    # Malformed message -> None, never raises.
-    assert parse_liquidation({}, ingested_at=pd.Timestamp("2026-09-01T00:00:00Z")) is None
+
+
+@pytest.mark.parametrize("key", ["q", "p", "ap", "l", "z"])
+def test_parse_liquidation_oversized_json_integer_rejects(key: str, caplog: pytest.LogCaptureFixture) -> None:
+    import json
+
+    order = _base_order()
+    order[key] = 10**400
+    frame = json.loads(json.dumps(_frame_with(order)))
+    with caplog.at_level(logging.DEBUG, logger="src.market_data.streams.liquidations"):
+        assert parse_liquidation(frame, ingested_at=_INGESTED) is None
+    records = [record for record in caplog.records if record.name == "src.market_data.streams.liquidations"]
+    assert len(records) == 1
+    assert records[0].getMessage() == f"[DATA] stage=parse_liquidation status=REJECTED reason=type field={key}"
+
+
+def test_parse_liquidation_timestamp_digit_limit_rejects() -> None:
+    order = _base_order()
+    order["T"] = "1" * 5000
+    assert parse_liquidation(_frame_with(order), ingested_at=_INGESTED) is None
+
+
+@pytest.mark.parametrize("timestamp", [10**14, "100000000000000", 9223372036855])
+def test_parse_liquidation_timestamp_outside_storage_range_rejects(timestamp: Any) -> None:
+    order = _base_order()
+    order["T"] = timestamp
+    assert parse_liquidation(_frame_with(order), ingested_at=_INGESTED) is None
+
+
+def test_parse_liquidation_last_storage_millisecond_persists(tmp_path) -> None:
+    order = _base_order()
+    order["T"] = 9223372036854
+    event = parse_liquidation(_frame_with(order), ingested_at=_INGESTED)
+    assert event is not None
+    paths = append_liquidation_events([event], tmp_path)
+    persisted = pd.read_parquet(paths[0])
+    assert len(persisted) == 1
+    assert persisted.iloc[0]["event_time_ms"] == order["T"]
+    assert persisted.iloc[0]["event_time"] == event.event_time
+
+
+@pytest.mark.parametrize("key", ["s", "S", "o", "f", "X"])
+@pytest.mark.parametrize("value", [123, "", " BTCUSDT", "SELL ", 4.5, ["x"], {"a": 1}, True, None])
+def test_parse_liquidation_bad_string_field_rejects(key: str, value: Any) -> None:
+    order = _base_order()
+    order[key] = value
+    assert parse_liquidation(_frame_with(order), ingested_at=_INGESTED) is None
+
+
+@pytest.mark.parametrize("side", ["sell", "LONG", "Buy", ""])
+def test_parse_liquidation_side_outside_enum_rejects(side: str) -> None:
+    order = _base_order()
+    order["S"] = side
+    assert parse_liquidation(_frame_with(order), ingested_at=_INGESTED) is None
+
+
+def test_parse_liquidation_buy_side_parses() -> None:
+    order = _base_order()
+    order["S"] = "BUY"
+    ev = parse_liquidation(_frame_with(order), ingested_at=_INGESTED)
+    assert ev is not None
+    assert ev.side == "BUY"
+
+
+def test_parse_liquidation_legacy_ccxt_shapes_reject() -> None:
+    valid_order = _base_order()
+    flat_info = dict(valid_order, ps="BLESSUSDT", st=1)
+    legacy: list[Any] = [
+        {"info": {"o": dict(valid_order)}},
+        {"info": dict(flat_info), "symbol": "BLESS/USDT:USDT", "timestamp": 1788092214457},
+        {"symbol": "ETH/USDT:USDT", "timestamp": 1568014460893, "price": 1600.0, "baseValue": 3.2, "info": {}},
+        {"symbol": "ETH/USDT:USDT", "timestamp": 1568014460893, "price": 1600.0, "amount": 3.2},
+        {},
+        [],
+    ]
+    for msg in legacy:
+        assert parse_liquidation(msg, ingested_at=_INGESTED) is None  # type: ignore[arg-type]
+
+
+def test_parse_liquidation_shape_rejects() -> None:
+    assert parse_liquidation("x", ingested_at=_INGESTED) is None  # type: ignore[arg-type]
+    assert parse_liquidation({"e": "forceOrder", "o": [1]}, ingested_at=_INGESTED) is None
+    assert parse_liquidation({"e": "forceOrder"}, ingested_at=_INGESTED) is None
+
+
+def test_parse_liquidation_nat_ingestion_rejects() -> None:
+    assert parse_liquidation(_frame_with(_base_order()), ingested_at=pd.NaT) is None
+
+
+def test_parse_liquidation_never_raises_on_arbitrary_json_values() -> None:
+    grid: list[Any] = [None, True, 0, -1, 1.5, float("inf"), "", "x", "1e400", [], {}, [1], {"a": 1}]
+    for key in _REQUIRED_KEYS:
+        for value in grid:
+            order = _base_order()
+            order[key] = value
+            ev = parse_liquidation(_frame_with(order), ingested_at=_INGESTED)
+            assert ev is None or isinstance(ev, LiquidationEvent)
+            if ev is not None:
+                assert ev.price > 0
+                assert ev.orig_qty > 0
+                for v in (ev.orig_qty, ev.price, ev.avg_price, ev.last_filled_qty, ev.filled_accum_qty):
+                    assert math.isfinite(v)
+    for value in grid:
+        ev = parse_liquidation({"e": "forceOrder", "E": 1, "o": value}, ingested_at=_INGESTED)  # type: ignore[dict-item]
+        assert ev is None or isinstance(ev, LiquidationEvent)
+
+
+def test_parse_liquidation_rejection_logs_structured_debug(caplog: pytest.LogCaptureFixture) -> None:
+    order = _base_order()
+    order["q"] = "0"
+    with caplog.at_level(logging.DEBUG, logger="src.market_data.streams.liquidations"):
+        result = parse_liquidation(_frame_with(order), ingested_at=_INGESTED)
+    assert result is None
+    records = [r for r in caplog.records if r.name == "src.market_data.streams.liquidations"]
+    assert len(records) == 1
+    assert records[0].levelno == logging.DEBUG
+    text = records[0].getMessage()
+    assert "[DATA] stage=parse_liquidation status=REJECTED reason=non_positive field=q" in text
+    assert "BTCUSDT" not in text
+    assert "0.014" not in text
+    assert "raw_order" not in text
+
+
+def test_parse_liquidation_persisted_schema_unchanged(tmp_path) -> None:
+    ms1 = pd.Timestamp("2026-09-24T05:00:00Z").value // 1_000_000
+    ms2 = pd.Timestamp("2026-09-24T05:00:30Z").value // 1_000_000
+    ev1 = parse_liquidation(_raw("BTCUSDT", ms1), ingested_at=pd.Timestamp("2026-09-24T05:00:00Z"))
+    ev2 = parse_liquidation(_raw("ETHUSDT", ms2), ingested_at=pd.Timestamp("2026-09-24T05:00:01Z"))
+    assert ev1 is not None
+    assert ev2 is not None
+    append_liquidation_events([ev1, ev2], tmp_path)
+    df = pd.read_parquet(tmp_path / "liquidations_20260924_05.parquet")
+    assert list(df.columns) == [
+        "symbol", "event_time", "ingested_at", "side", "order_type", "time_in_force",
+        "orig_qty", "price", "avg_price", "status", "last_filled_qty",
+        "filled_accum_qty", "event_time_ms", "raw_order_json",
+    ]
+    assert df["price"].dtype == "float64"
+    assert df["avg_price"].dtype == "float64"
+    assert df["orig_qty"].dtype == "float32"
+    assert df["last_filled_qty"].dtype == "float32"
+    assert df["filled_accum_qty"].dtype == "float32"
+    for col in ("side", "status", "order_type", "time_in_force"):
+        assert isinstance(df[col].dtype, pd.CategoricalDtype)
+    assert str(df["raw_order_json"].dtype) == "string"
+    assert str(df["event_time"].dt.tz) == "UTC"
+    assert str(df["ingested_at"].dt.tz) == "UTC"
+
+
+def test_parse_liquidation_deterministic() -> None:
+    first = parse_liquidation(_RAW_MSG, ingested_at=_INGESTED)
+    second = parse_liquidation(_RAW_MSG, ingested_at=_INGESTED)
+    assert first is not None
+    assert second is not None
+    assert first == second
 
 
 def _event(symbol: str, ms: int, price: float, qty: float, accum: float) -> LiquidationEvent:
@@ -251,19 +474,6 @@ def test_parse_liquidation_preserves_raw_order_with_unknown_fields() -> None:
     assert _json.loads(ev.raw_order_json) == first["o"]
     assert _json.loads(ev.raw_order_json)["ps"] == "QNTUSDT"
     assert _json.loads(ev.raw_order_json)["st"] == 1
-
-
-def test_parse_liquidation_unified_fallback_has_no_raw_payload() -> None:
-    """Events without a raw order object carry no raw payload."""
-    unified = {
-        "symbol": "ETH/USDT:USDT",
-        "timestamp": 1568014460893,
-        "price": 1600.0,
-        "amount": 3.2,
-    }
-    ev = parse_liquidation(unified, ingested_at=pd.Timestamp("2026-09-01T00:00:00Z"))
-    assert ev is not None
-    assert ev.raw_order_json is None
 
 
 def test_append_liquidation_events_merges_legacy_hour_without_raw_column(tmp_path) -> None:
