@@ -184,6 +184,7 @@ def golden_report_lease(mhs_report_cache, request):
     ids=GOLDEN_MATRIX_NAMES,
     indirect=["matrix_market", "matrix_golden"],
 )
+@pytest.mark.e2e_heavy
 def test_golden_identity_matrix(name, matrix_market, matrix_golden, golden_report_lease):
     """SCENARIO_MHS_PERF_P0_01_GOLDEN_GATE_LIVE: each named golden matches the
     decomposed pipeline bit-exactly under the sha256 digest gate."""
@@ -205,6 +206,7 @@ def test_golden_identity_matrix(name, matrix_market, matrix_golden, golden_repor
     indirect=["matrix_market", "matrix_golden"],
 )
 @pytest.mark.xdist_group(MHS_GOLDEN_BASELINE_GROUP)
+@pytest.mark.e2e_heavy
 def test_golden_identity(name, matrix_market, matrix_golden, golden_report_lease):
     """SCENARIO_ANALYSIS_ARCHITECTURE_04: full pipeline on the synthetic market
     yields the baseline golden bit-exactly (digest + row-count summary)."""
@@ -226,6 +228,7 @@ def test_golden_identity(name, matrix_market, matrix_golden, golden_report_lease
     indirect=["matrix_market", "matrix_golden"],
 )
 @pytest.mark.xdist_group(MHS_GOLDEN_BASELINE_GROUP)
+@pytest.mark.e2e_heavy
 def test_run_mhs_diagnostic_entry_point_matches_golden(name, matrix_market, matrix_golden, golden_report_lease):
     """The CLI entry point reproduces the baseline golden bit-identically
     (I-ENTRY-EQUIV): the no-arg CLI request with the research opt-outs equals

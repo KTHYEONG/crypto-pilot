@@ -124,6 +124,8 @@ addopts = "-ra -q -m \"not slow\" --import-mode=importlib"
 pythonpath = ["."]
 markers = [
     "slow: full-pipeline integration tests (growth engine, baseline replication, funding screening) that run real backtests over multi-year data. Excluded from the default run via `-m \"not slow\"`; run explicitly with `uv run pytest -m slow`.",
+    "e2e_heavy: full MHS diagnostic integration tests (minutes each; never also slow). Outside default testpaths; tools/verify.py defers and lists them (include with --run-heavy). Periodic gate: uv run pytest tests/integration -m e2e_heavy -n 8 --dist loadgroup",
+    "mhs_parallel_parity: exempts an MHS integration test from the xdist fork-worker cap so it exercises real concurrent fork pools.",
 ]
 filterwarnings = [
     "ignore::RuntimeWarning:numpy.*",

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 from tests.fixtures.mhs_requests import research_baseline
 import pandas as pd
 from collections.abc import Iterator
@@ -18,6 +20,7 @@ from tests.integration.mhs._report_cache import (
     DiagnosticRunSpec,
     report_cache_group_violations,
 )
+from tests.integration.mhs._tiers import fork_worker_cap, heavy_tier_violations
 
 
 def _load_horizon_diagnostic_helpers():
@@ -36,12 +39,14 @@ from unittest.mock import patch
 import psutil
 import pytest
 
-# fork-admission 게이트(assert_fork_admission/plan_worker_count)는 실측
-# psutil.virtual_memory()를 참조한다. 기본값을 넉넉하게 고정해 xdist 동시
-# 워커의 메모리 경합에 따라 게이트가 우연히 발동하는 것을 막는다(테스트
-# 로직이 아니라 동시 실행 중인 다른 워커의 부하에 결과가 좌우되는 플레이키를
-# 방지). RAM 가드 자체를 검증하는 테스트는 자신의 monkeypatch로 이 기본값을
-# 이후에 덮어써 정상적으로 오버라이드한다.
+# The fork-admission gate (assert_fork_admission/plan_worker_count) reads the live
+# psutil.virtual_memory(). Pinning a generous default keeps the gate independent of
+# ambient host RAM so concurrent xdist workers cannot trip it incidentally (flaky
+# DataIntegrityError driven by other workers' load rather than test logic). The pin
+# values stay at real production scale: WORKER_PEAK_RSS_BYTES/MHS_AVAILABLE_FLOOR_BYTES
+# would reject even a single worker on a 17 GiB host, so a realistic clamp is not
+# restored. Tests asserting the RAM guard override this default with their own
+# monkeypatch.
 _AMPLE_MEMORY = SimpleNamespace(total=64 * 2**30, available=60 * 2**30)
 
 
@@ -55,6 +60,25 @@ def _mhs_module_ample_virtual_memory() -> None:
     """Keep module-scoped diagnostic fixtures independent of host RAM load."""
     with patch("src.mhs.parallel.psutil.virtual_memory", return_value=_AMPLE_MEMORY):
         yield
+
+
+_HOST_CPU_COUNT = psutil.cpu_count  # captured at import, before any patch
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _mhs_module_xdist_fork_worker_cap() -> Iterator[None]:
+    cap = fork_worker_cap(os.environ)
+    if cap is None:
+        yield
+        return
+    with patch("src.mhs.parallel.psutil.cpu_count", return_value=cap):
+        yield
+
+
+@pytest.fixture(autouse=True)
+def _mhs_parallel_parity_uncap(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    if request.node.get_closest_marker("mhs_parallel_parity") is not None:
+        monkeypatch.setattr(psutil, "cpu_count", _HOST_CPU_COUNT)
 
 
 @pytest.fixture(scope="module")
@@ -138,5 +162,6 @@ def calibrated_report(canonical_report_run):
 
 def pytest_collection_modifyitems(config, items):
     violations = report_cache_group_violations(items, Path(__file__).parent)
+    violations += heavy_tier_violations(items, Path(__file__).parent)
     if violations:
         raise pytest.UsageError("MHS report-cache xdist groups:\n" + "\n".join(violations))

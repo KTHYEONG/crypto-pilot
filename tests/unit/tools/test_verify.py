@@ -14,10 +14,15 @@ import psutil
 import pytest
 
 from tools.verify import (
+    _HEAVY_TIMEOUT_SECONDS,
     _check_diff_coverage,
+    _collect_deferred_heavy,
     _coverage_args,
+    _deferral_lines,
     _find_test_files,
     _integration_targets,
+    _is_integration_target,
+    _marker_expression,
     _test_node_targets,
     run_cmd,
 )
@@ -217,3 +222,329 @@ def test_report_keys_match_repo_relative_posix_paths(
     assert len(diags) == 1
     assert diags[0]["file"] == "src/mhs/execution/accumulator.py"
     assert "[10]" in diags[0]["error"]
+
+
+@pytest.mark.parametrize(
+    ("run_slow", "include_heavy", "expected"),
+    [
+        (False, False, "not slow and not e2e_heavy"),
+        (False, True, "not slow"),
+        (True, False, "slow"),
+        (True, True, "slow"),
+    ],
+)
+def test_marker_expression_defers_heavy_unless_included(
+    run_slow: bool, include_heavy: bool, expected: str
+) -> None:
+    assert _marker_expression(run_slow=run_slow, include_heavy=include_heavy) == expected
+
+
+def test_integration_target_detection() -> None:
+    assert _is_integration_target("tests/integration/mhs/test_x.py::T::t") is True
+    assert _is_integration_target("/abs/repo/tests/integration/test_y.py") is True
+    assert _is_integration_target("tests/unit/test_z.py") is False
+
+
+def test_no_collection_without_integration_targets(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _fail(cmd: list[str], timeout: int = 120, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise AssertionError(f"run_cmd must not be called for {cmd}")
+
+    monkeypatch.setattr("tools.verify.run_cmd", _fail)
+    assert _collect_deferred_heavy(["tests/unit/test_z.py"]) == []
+
+
+def test_collected_heavy_ids_are_parsed_exactly(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    def _fake(cmd: list[str], timeout: int = 120, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        captured["cmd"] = cmd
+        stdout = (
+            "tests/integration/mhs/test_h.py::Test::test_a[param id]\n"
+            "tests/integration/mhs/test_h.py::Test::test_b\n"
+            "tests/integration/mhs/test_h.py::Test::test_a[param id]\n"
+            "\n"
+            "2/40 tests collected (38 deselected) in 3.1s\n"
+        )
+        return subprocess.CompletedProcess(cmd, 0, stdout, "")
+
+    monkeypatch.setattr("tools.verify.run_cmd", _fake)
+    ids = _collect_deferred_heavy(["tests/integration/mhs/test_h.py"])
+    assert ids == [
+        "tests/integration/mhs/test_h.py::Test::test_a[param id]",
+        "tests/integration/mhs/test_h.py::Test::test_b",
+    ]
+    cmd = captured["cmd"]
+    assert isinstance(cmd, list)
+    assert "--collect-only" in cmd
+    m_indices = [i for i, x in enumerate(cmd) if x == "-m"]
+    assert cmd[m_indices[-1] + 1] == "not slow and e2e_heavy"
+    assert "-q" not in cmd
+
+
+def test_nothing_heavy_selected_is_not_an_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _fake(cmd: list[str], timeout: int = 120, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(cmd, 5, "", "")
+
+    monkeypatch.setattr("tools.verify.run_cmd", _fake)
+    assert _collect_deferred_heavy(["tests/integration/mhs/test_h.py"]) == []
+
+
+@pytest.mark.parametrize("exit_code", [2, 124])
+def test_collection_failure_fails_closed(monkeypatch: pytest.MonkeyPatch, exit_code: int) -> None:
+    def _fake(cmd: list[str], timeout: int = 120, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(cmd, exit_code, "first output line\nsecond\n", "err\n")
+
+    monkeypatch.setattr("tools.verify.run_cmd", _fake)
+    with pytest.raises(RuntimeError, match="first output line"):
+        _collect_deferred_heavy(["tests/integration/mhs/test_h.py"])
+
+
+def test_real_collection_lists_only_the_heavy_node(tmp_path: Path) -> None:
+    probe = tmp_path / "tests" / "integration" / "test_tier_probe.py"
+    probe.parent.mkdir(parents=True)
+    probe.write_text(
+        "import pytest\n"
+        "def test_plain():\n    assert True\n"
+        "@pytest.mark.e2e_heavy\n"
+        "def test_heavy():\n    assert True\n"
+        "@pytest.mark.slow\n"
+        "def test_slow_only():\n    assert True\n",
+        encoding="utf-8",
+    )
+    ids = _collect_deferred_heavy([str(probe)])
+    assert len(ids) == 1
+    assert ids[0].endswith("test_tier_probe.py::test_heavy")
+
+
+def _run_main_with_fake(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    argv: list[str],
+    collect_ids: list[str],
+    pytest_exit: int,
+    *,
+    env_workers: str | None = None,
+) -> tuple[dict[str, object], list[list[str]]]:
+    import tools.verify as verify_mod
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("LEAN_CHECK_WORKERS", raising=False)
+    if env_workers is not None:
+        monkeypatch.setenv("LEAN_CHECK_WORKERS", env_workers)
+    monkeypatch.setattr(sys, "argv", argv)
+    monkeypatch.setattr(verify_mod, "_available_memory_gb", lambda: 8.0)
+    monkeypatch.setattr(verify_mod.os, "cpu_count", lambda: 4)
+    calls: list[list[str]] = []
+    timeouts: dict[str, object] = {}
+
+    def _fake(cmd: list[str], timeout: int = 120, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(list(cmd))
+        if "--collect-only" in cmd:
+            timeouts["collect"] = timeout
+            stdout = "".join(f"{nodeid}\n" for nodeid in collect_ids)
+            return subprocess.CompletedProcess(cmd, 0 if collect_ids else 5, stdout, "")
+        timeouts["pytest"] = timeout
+        if pytest_exit == 0:
+            return subprocess.CompletedProcess(cmd, 0, "1 passed in 0.1s\n", "")
+        if pytest_exit == 5:
+            return subprocess.CompletedProcess(cmd, 5, "no tests ran\n", "")
+        return subprocess.CompletedProcess(cmd, pytest_exit, "FAIL some test\nAssertionError: boom\n", "")
+
+    monkeypatch.setattr(verify_mod, "run_cmd", _fake)
+    return timeouts, calls
+
+
+def test_default_run_defers_and_lists_heavy_tests(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import json as _json
+
+    ids = [
+        "tests/integration/mhs/test_h.py::Test::test_one",
+        "tests/integration/mhs/test_h.py::Test::test_two",
+    ]
+    timeouts, calls = _run_main_with_fake(
+        monkeypatch, tmp_path,
+        ["verify", "--files", "tests/integration/mhs/test_h.py", "--skip-lint", "--skip-mypy", "--no-cov"],
+        ids, 5,
+    )
+    import tools.verify as verify_mod
+
+    verify_mod.main()
+    out, err = capsys.readouterr()
+    from tools.verify import PERIODIC_HEAVY_GATE
+
+    assert PERIODIC_HEAVY_GATE in out
+    for nodeid in ids:
+        assert f"DEFERRED | {nodeid}" in out
+    pytest_cmds = [c for c in calls if "--collect-only" not in c]
+    assert len(pytest_cmds) == 1
+    m_indices = [i for i, x in enumerate(pytest_cmds[0]) if x == "-m"]
+    assert pytest_cmds[0][m_indices[-1] + 1] == "not slow and not e2e_heavy"
+    payload = _json.loads(err.strip().splitlines()[-1])
+    assert payload["status"] == "PASS"
+    assert len([d for d in payload["diagnostics"] if "deferred e2e_heavy:" in d["error"]]) == 2
+
+
+@pytest.mark.parametrize("pytest_exit", [1, 124])
+def test_failure_still_lists_deferred_tests(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], pytest_exit: int
+) -> None:
+    ids = ["tests/integration/mhs/test_h.py::Test::test_one"]
+    _timeouts, _calls = _run_main_with_fake(
+        monkeypatch, tmp_path,
+        ["verify", "--files", "tests/integration/mhs/test_h.py", "--skip-lint", "--skip-mypy", "--no-cov"],
+        ids, pytest_exit,
+    )
+    import tools.verify as verify_mod
+
+    with pytest.raises(SystemExit) as exc:
+        verify_mod.main()
+    assert exc.value.code == 1
+    out, _ = capsys.readouterr()
+    assert f"DEFERRED | {ids[0]}" in out
+    assert out.index(f"DEFERRED | {ids[0]}") < out.index("FAIL |")
+
+
+def test_run_heavy_includes_tier_without_collection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import tools.verify as verify_mod
+
+    timeouts, calls = _run_main_with_fake(
+        monkeypatch, tmp_path,
+        ["verify", "--files", "tests/integration/mhs/test_h.py", "--skip-lint", "--skip-mypy", "--no-cov", "--run-heavy"],
+        [], 0,
+    )
+    verify_mod.main()
+    assert not any("--collect-only" in c for c in calls)
+    pytest_cmds = [c for c in calls if "--collect-only" not in c]
+    m_indices = [i for i, x in enumerate(pytest_cmds[0]) if x == "-m"]
+    assert pytest_cmds[0][m_indices[-1] + 1] == "not slow"
+    assert timeouts["pytest"] == _HEAVY_TIMEOUT_SECONDS
+
+
+def test_run_heavy_respects_explicit_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import tools.verify as verify_mod
+
+    timeouts, _ = _run_main_with_fake(
+        monkeypatch, tmp_path,
+        ["verify", "--files", "tests/integration/mhs/test_h.py", "--skip-lint", "--skip-mypy", "--no-cov",
+         "--run-heavy", "--timeout", "30"],
+        [], 0,
+    )
+    verify_mod.main()
+    assert timeouts["pytest"] == 30
+
+
+def test_parallel_runs_keep_groups_together(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import tools.verify as verify_mod
+
+    _, calls = _run_main_with_fake(
+        monkeypatch, tmp_path,
+        ["verify", "--files", "tests/unit/test_a.py", "tests/unit/test_b.py",
+         "--skip-lint", "--skip-mypy", "--no-cov"],
+        [], 0, env_workers="2",
+    )
+    (tmp_path / "tests" / "unit").mkdir(parents=True, exist_ok=True)
+    for name in ("test_a.py", "test_b.py"):
+        (tmp_path / "tests" / "unit" / name).write_text("def test_x():\n    assert True\n", encoding="utf-8")
+    verify_mod.main()
+    pytest_cmds = [c for c in calls if "--collect-only" not in c]
+    assert pytest_cmds
+    cmd = pytest_cmds[0]
+    assert "--dist" in cmd
+    assert cmd[cmd.index("--dist") + 1] == "loadgroup"
+
+
+def test_serial_run_has_no_dist_flag(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import tools.verify as verify_mod
+
+    _, calls = _run_main_with_fake(
+        monkeypatch, tmp_path,
+        ["verify", "--files", "tests/unit/test_a.py", "--skip-lint", "--skip-mypy", "--no-cov"],
+        [], 0,
+    )
+    (tmp_path / "tests" / "unit").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "tests" / "unit" / "test_a.py").write_text("def test_x():\n    assert True\n", encoding="utf-8")
+    verify_mod.main()
+    pytest_cmds = [c for c in calls if "--collect-only" not in c]
+    assert pytest_cmds
+    assert "--dist" not in pytest_cmds[0]
+
+
+def test_deferral_lines_contract() -> None:
+    lines, diags = _deferral_lines([])
+    assert lines == []
+    assert diags == []
+    nodeid = "tests/integration/mhs/test_h.py::Test::test_one"
+    lines, diags = _deferral_lines([nodeid])
+    assert lines[0].startswith("DEFERRED | 1 e2e_heavy test(s) not run;")
+    assert lines[1] == f"DEFERRED | {nodeid}"
+    assert diags[0]["file"] == "tests/integration/mhs/test_h.py"
+    assert diags[0]["error"] == f"deferred e2e_heavy: {nodeid}"
+
+
+def test_coverage_failure_still_lists_deferred_tests(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import tools.verify as verify_mod
+
+    nodeid = "tests/integration/mhs/test_h.py::test_heavy"
+    _run_main_with_fake(
+        monkeypatch, tmp_path,
+        ["verify", "--files", "src/example.py", "tests/integration/mhs/test_h.py",
+         "--skip-lint", "--skip-mypy"],
+        [nodeid], 0,
+    )
+    with pytest.raises(SystemExit) as exc:
+        verify_mod.main()
+    assert exc.value.code == 1
+    out, err = capsys.readouterr()
+    assert out.index(f"DEFERRED | {nodeid}") < out.index("FAIL | Diff Coverage")
+    assert json.loads(err)["phase"] == "coverage"
+
+
+def test_exit_five_without_deferred_tests_remains_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import tools.verify as verify_mod
+
+    _run_main_with_fake(
+        monkeypatch, tmp_path,
+        ["verify", "--files", "tests/integration/mhs/test_h.py",
+         "--skip-lint", "--skip-mypy", "--no-cov"],
+        [], 5,
+    )
+    with pytest.raises(SystemExit) as exc:
+        verify_mod.main()
+    assert exc.value.code == 1
+    out, err = capsys.readouterr()
+    assert "DEFERRED |" not in out
+    assert json.loads(err)["status"] == "FAIL"
+
+
+@pytest.mark.parametrize("exit_code", [2, 124])
+def test_main_collection_error_stops_before_test_execution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], exit_code: int
+) -> None:
+    import tools.verify as verify_mod
+
+    _run_main_with_fake(
+        monkeypatch, tmp_path,
+        ["verify", "--files", "tests/integration/mhs/test_h.py",
+         "--skip-lint", "--skip-mypy", "--no-cov"],
+        [], 0,
+    )
+
+    def failed_collection(cmd: list[str], timeout: int = 120) -> subprocess.CompletedProcess[str]:
+        assert "--collect-only" in cmd
+        return subprocess.CompletedProcess(cmd, exit_code, "invalid tier marking", "")
+
+    monkeypatch.setattr(verify_mod, "run_cmd", failed_collection)
+    with pytest.raises(SystemExit) as exc:
+        verify_mod.main()
+    assert exc.value.code == 1
+    out, err = capsys.readouterr()
+    assert "invalid tier marking" in out
+    assert json.loads(err)["phase"] == "pytest-collect"
