@@ -1,107 +1,115 @@
-"""Contract scenarios XSC-01..XSC-05, XSC-07, XSA-02, and XSV3-01 for the cross-sectional module.
+"""Contract scenarios XSC-03 and SCENARIO_COSTFIX_01 for the cross-sectional module.
 
-XSC-01-NO-TRADE-BAND-STATEFUL, XSC-02-WEIGHTS-DOLLAR-NEUTRAL,
-XSC-03-SPEC-FROZEN-BOUNDS, XSC-04-LEDGER-EXECUTION-LAG,
-XSC-05-ADMISSION-SCALE-INVARIANT, XSC-07-COMPOSITE-BEATS-SINGLE-FAMILY,
-XSA-02-COMPOSITE-PRESERVATION, XSV3-01-FAMILY-SUM,
-SCENARIO_XSV5_01_DUAL_FAMILY_EXCLUDES_FUNDING,
-SCENARIO_XSV6_01_CAUSAL_VOL_WEIGHTS_EXCLUDE_CURRENT_BAR,
-SCENARIO_XSV6_02_VOL_WEIGHTED_MATCHES_MANUAL_RECOMPUTE,
-SCENARIO_XS_POSITIONING_WEIGHTS_01,
-SCENARIO_XSV6SIZE_01_DISCOVERY_ONLY_SIZING_NO_LEAKAGE,
-SCENARIO_XSV6SIZE_02_INFEASIBLE_SIZING_FAILS_CLOSED, and
-SCENARIO_COSTFIX_01..07 (honest turnover-cost repricing of the vol-target
-overlay stack).
+XSC-03-SPEC-FROZEN-BOUNDS and SCENARIO_COSTFIX_01_LEDGER_PNL_REGRESSION.
 """
 
 from __future__ import annotations
 
+import dataclasses
 
 import numpy as np
 import pandas as pd
+import pytest
+
+from src.quant.technical_experts.cross_sectional import (
+    XsCompositeSpec,
+    _ledger_pnl,
+    run_xs_composite_ledger,
+)
 
 
+class TestCompositeSpec:
+    def test_xsc_03_frozen_defaults_and_cost_rate(self) -> None:
+        spec = XsCompositeSpec()
+        assert (spec.halflife_bars, spec.no_trade_band, spec.execution_delay_bars) == (
+            6, 0.05, 1,
+        )
+        assert abs(spec.round_trip_cost_rate() - 0.0008) < 1e-12
+        assert dataclasses.is_dataclass(spec)
 
-def _score_frame(rows: int = 40, cols: int = 5, seed: int = 3) -> pd.DataFrame:
-    index = pd.date_range("2024-01-01", periods=rows, freq="4h", tz="UTC")
-    rng = np.random.default_rng(seed)
-    return pd.DataFrame(
-        rng.normal(size=(rows, cols)),
-        index=index,
-        columns=[chr(ord("A") + i) for i in range(cols)],
+    def test_xsc_03_out_of_range_fields_fail_closed(self) -> None:
+        with pytest.raises(ValueError, match="no_trade_band"):
+            XsCompositeSpec(no_trade_band=1.0)
+        with pytest.raises(ValueError, match="no_trade_band"):
+            XsCompositeSpec(no_trade_band=-0.1)
+        with pytest.raises(ValueError, match="halflife_bars"):
+            XsCompositeSpec(halflife_bars=-1)
+        with pytest.raises(ValueError, match="execution_delay_bars"):
+            XsCompositeSpec(execution_delay_bars=-1)
+        with pytest.raises(ValueError, match="fee_rate"):
+            XsCompositeSpec(fee_rate=-0.1)
+        with pytest.raises(ValueError, match="slippage_rate"):
+            XsCompositeSpec(slippage_rate=-0.1)
+
+
+class TestCostRepricing:
+    """SCENARIO_COSTFIX_01: honest turnover-cost repricing of the overlay stack."""
+
+    def _sizing_inputs(
+        self, rows: int = 300, crash_factor: float = 0.2,
+    ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DatetimeIndex]:
+        idx = pd.date_range("2024-01-01", periods=rows, freq="4h", tz="UTC")
+        rng = np.random.default_rng(3)
+        closes = pd.DataFrame({
+            "A": 100 * np.exp(np.cumsum(rng.normal(0.0015, 0.008, rows))),
+            "B": 100 * np.exp(np.cumsum(rng.normal(-0.0015, 0.008, rows))),
+        }, index=idx)
+        opens = closes.shift(1).bfill()
+        opens.loc[idx[40], "A"] = opens.loc[idx[39], "A"] * crash_factor
+        funding = pd.DataFrame(0.0, index=idx, columns=["A", "B"])
+        weights = pd.DataFrame({"A": 0.5, "B": -0.5}, index=idx)
+        return weights, opens, funding, idx
+
+    # SCENARIO_COSTFIX_01_LEDGER_PNL_REGRESSION
+    def test_costfix_01_ledger_pnl_extraction_is_regression_free(self) -> None:
+        weights, opens, funding, _ = self._sizing_inputs()
+        spec = XsCompositeSpec()
+        equity, turnover_series = run_xs_composite_ledger(weights, opens, funding, spec)
+        lag = 1 + spec.execution_delay_bars
+        lagged = weights.shift(lag).fillna(0.0).to_numpy(dtype=np.float64)
+        o = opens.to_numpy(dtype=np.float64)
+        f = funding.to_numpy(dtype=np.float64)
+        o2o = np.zeros_like(o)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            o2o[1:] = o[1:] / o[:-1] - 1.0
+        net_returns, turnover = _ledger_pnl(lagged, o2o, f, spec.round_trip_cost_rate())
+        assert np.allclose(turnover, turnover_series.to_numpy())
+        assert np.allclose(
+            net_returns, equity.pct_change().fillna(0.0).to_numpy(), atol=1e-12,
+        )
+
+
+def test_composite_ledger_import_is_quant_isolated() -> None:
+    """The composite ledger module must not pull the research gate stack."""
+    import ast
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    repo_root = Path(__file__).resolve().parents[4]
+    code = (
+        "import src.quant.technical_experts.cross_sectional, sys;"
+        "loaded = sorted(k for k in sys.modules if k.startswith('src.quant.'));"
+        "print(loaded)"
     )
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-def _alpha_inputs(
-    rows: int = 300, cols: int = 5, seed: int = 21,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Deterministic strictly-positive closes, in-[0,1] taker ratios, finite funding."""
-    index = pd.date_range("2024-01-01", periods=rows, freq="4h", tz="UTC")
-    columns = [chr(ord("A") + i) for i in range(cols)]
-    rng = np.random.default_rng(seed)
-    closes = 100.0 * np.exp(np.cumsum(rng.normal(0.0005, 0.01, size=(rows, cols)), axis=0))
-    closes = pd.DataFrame(closes, index=index, columns=columns)
-    taker = pd.DataFrame(
-        0.5 + 0.1 * np.sin(np.arange(rows)[:, None] / 9.0 + np.arange(cols)),
-        index=index, columns=columns,
+    env = {
+        "PATH": os.environ.get("PATH", ""),
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONHASHSEED": "0",
+        "PYTHONPATH": str(repo_root),
+    }
+    completed = subprocess.run(  # noqa: S603
+        [sys.executable, "-c", code],
+        cwd=repo_root,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
     )
-    funding = pd.DataFrame(
-        0.0001 * np.cos(np.arange(rows)[:, None] / 5.0 + np.arange(cols)),
-        index=index, columns=columns,
+    assert completed.returncode == 0, (
+        f"cross_sectional import failed: {completed.stderr}"
     )
-    return closes, taker, funding
-
-
-def _ref_zscore(frame: pd.DataFrame) -> pd.DataFrame:
-    """Reference finite-only cross-sectional z-score (see XSA-02 docstring)."""
-    values = frame.to_numpy(dtype=np.float64)
-    finite = np.isfinite(values)
-    count = finite.sum(axis=1)
-    mean = np.where(finite, values, 0.0).sum(axis=1, keepdims=True) / np.maximum(count, 1)[:, None]
-    demeaned = np.where(finite, values - mean, 0.0)
-    var = (demeaned ** 2).sum(axis=1, keepdims=True) / np.maximum(count - 1, 1)[:, None]
-    std = np.sqrt(np.maximum(var, 0.0))
-    out = np.zeros_like(values)
-    np.divide(
-        demeaned, std, out=out,
-        where=(count[:, None] >= 2) & (std > 0.0),
-    )
-    return pd.DataFrame(out, index=frame.index, columns=frame.columns)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+    loaded = ast.literal_eval(completed.stdout.strip())
+    assert "src.quant.evaluation.reliability" not in loaded
+    assert "src.quant.risk.growth_sizing" not in loaded

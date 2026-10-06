@@ -37,18 +37,15 @@ def test_compose_mounts_state_dir_on_every_service() -> None:
     assert "capture-green:" in compose
     assert service_blocks  # compose parsed into indented blocks
 
-def test_discovery_start_names_are_unambiguous() -> None:
-    """Two different discovery windows must not share one constant name."""
+def test_discovery_window_constants_are_ordered() -> None:
+    """Discovery window constants must be strictly ordered."""
     import pandas as pd
 
     from src.mhs.params import DISCOVERY_START
-    from src.quant.technical_experts.trend_screen_catalog import (
-        TREND_SCREEN_DISCOVERY_START,
-    )
+    from src.quant.evaluation.policy import DISCOVERY_END, HOLDOUT_CUTOFF
 
     assert DISCOVERY_START == pd.Timestamp("2021-01-01", tz="UTC")
-    assert TREND_SCREEN_DISCOVERY_START == pd.Timestamp("2022-04-01", tz="UTC")
-    assert DISCOVERY_START != TREND_SCREEN_DISCOVERY_START
+    assert DISCOVERY_START < DISCOVERY_END < HOLDOUT_CUTOFF
 
 def test_log_dir_declared_once() -> None:
     """telemetry reuses the common LOG_DIR object rather than redeclaring it."""

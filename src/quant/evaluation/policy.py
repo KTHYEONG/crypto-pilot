@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import pandas as pd
 
-# End of the observation window (spec section 3.2). Note the 23:59:59 boundary:
-# load_ohlcv_4h filters "index <= end", and a bare "2025-12-31" parses to
-# 00:00:00, which would drop the last 5 bars of that day.
+# Inclusive 23:59:59 window ends: panel slicing filters "index <= end", and a bare date parses to 00:00:00, which would drop that day's final bars.
 HOLDOUT_CUTOFF = pd.Timestamp("2025-12-31 23:59:59", tz="UTC")
+DISCOVERY_END: pd.Timestamp = pd.Timestamp("2023-12-31 23:59:59", tz="UTC")
+"""Inclusive end of the horizon-discovery window; qualification runs (DISCOVERY_END, HOLDOUT_CUTOFF]."""
 
 
 def resolve_evaluation_end(

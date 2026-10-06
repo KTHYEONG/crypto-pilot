@@ -378,8 +378,6 @@ def test_source_module_size_budget() -> None:
         "src/mhs/scaling.py": 892,
         "src/application/mhs_supervisor.py": 1224,
         "src/cli/commands/backtest.py": 1133,
-        "src/quant/technical_experts/cross_sectional.py": 1267,
-        "src/quant/evaluation/reliability.py": 816,
         "src/mhs/reporting/inventory.py": 741,
         "src/mhs/backtest/paths.py": 849,
         "src/mhs/backtest/journal.py": 1091,

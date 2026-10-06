@@ -11,7 +11,6 @@ import numpy as np
 import pandas as pd
 
 from src.common.errors import DataIntegrityError
-from src.quant.baseline.backtest import _align_funding_rates
 
 from . import _ExecutionBound, _ExecutionGapCode, _MarkSource
 
@@ -24,6 +23,53 @@ def _utc_epoch_ns(index: pd.Index) -> np.ndarray:
         utc = index.tz_convert("UTC") if index.tz is not None else index.tz_localize("UTC")
         return np.asarray(utc.as_unit("ns").asi8, dtype="int64")
     return np.asarray(pd.DatetimeIndex(pd.to_datetime(index, utc=True)), dtype="datetime64[ns]").astype("int64")
+
+
+def _align_funding_rates(
+    funding_rates: pd.Series,
+    bar_index: pd.DatetimeIndex,
+) -> np.ndarray:
+    """Map a published-funding series onto per-bar accrued rates.
+
+    Returns a float64 array aligned to ``bar_index`` where each entry is the sum
+    of funding rates published inside that bar's ``[bar_open, next_bar_open)``
+    window; bars without a publication carry exactly ``0.0``. Duplicate
+    publication timestamps keep the last value. The bar period is inferred from
+    the first two bars of ``bar_index``.
+
+    Raises:
+        DataIntegrityError: ``bar_index`` is not a DatetimeIndex of length >= 2;
+            the funding index is not parseable as datetimes; any rate is
+            non-finite; the funding index is not monotonic; or any publication
+            lies outside the bar window. Missing funding is never a zero-cost
+            assumption -- callers decide how to treat an unalignable series.
+    """
+    if not isinstance(bar_index, pd.DatetimeIndex) or len(bar_index) < 2:
+        raise DataIntegrityError("bar index must be a DatetimeIndex of length >= 2")
+    ts = pd.DatetimeIndex(pd.to_datetime(funding_rates.index, utc=True, errors="coerce"))
+    if ts.hasnans:
+        raise DataIntegrityError("funding_rates index must contain datetimes")
+    rates = pd.to_numeric(funding_rates, errors="coerce").to_numpy(dtype=np.float64)
+    if not np.isfinite(rates).all():
+        raise DataIntegrityError("funding_rates must be finite")
+    if not ts.is_monotonic_increasing:
+        raise DataIntegrityError("funding_rates must be monotonic in time")
+
+    series = pd.Series(rates, index=ts)
+    series = series[~series.index.duplicated(keep="last")].sort_index()
+
+    bar_period = bar_index[1] - bar_index[0]
+    window_end = bar_index[-1] + bar_period
+    inside = (series.index >= bar_index[0]) & (series.index < window_end)
+    if not inside.all():
+        raise DataIntegrityError(
+            "funding_rates timestamps are not aligned with the bar window"
+        )
+
+    pos = bar_index.searchsorted(series.index, side="right") - 1
+    bar_funding = np.zeros(len(bar_index), dtype=np.float64)
+    np.add.at(bar_funding, pos, series.to_numpy(dtype=np.float64))
+    return bar_funding
 
 
 @dataclass(frozen=True, slots=True)
