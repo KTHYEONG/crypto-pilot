@@ -156,7 +156,7 @@ def test_mhs_fast_book_mode_default_is_identity(mhs_market, monkeypatch) -> None
     request = research_baseline(
         start=str(_START), end=str(end), data_root=str(root),
         execution_timeframe="3m", log_run=False,
-        execution_universe_size=8,
+        execution_universe_size=8, reference_books_diagnostic=True,
     )
     report = run_mhs_horizon_diagnostic(request)
     assert report.status == "COMPLETE"
@@ -195,7 +195,7 @@ def test_mhs_fast_book_mode_ensemble_produces_different_executed_book(mhs_market
     base = {
         "start": str(_START), "end": str(end), "data_root": str(root),
         "execution_timeframe": "3m", "log_run": False,
-        "execution_universe_size": 8,
+        "execution_universe_size": 8, "reference_books_diagnostic": True,
     }
     report_default = run_mhs_horizon_diagnostic(research_baseline(**base))
     report_ensemble = run_mhs_horizon_diagnostic(

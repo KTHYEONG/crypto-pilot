@@ -121,10 +121,10 @@ def test_build_committee_reaches_seam_functions(monkeypatch: pytest.MonkeyPatch)
     committee_stage.build_committee(ctx, StageTelemetry(log_run=False))
 
     assert calls == [
-        "_phase_diagnostics", "_phase_diagnostics", "_active_blend_book_and_grid", "_phase_diagnostics",
+        "_active_blend_book_and_grid", "_phase_diagnostics",
     ]
-    assert ctx.phase_fast == "phase-result"
-    assert ctx.phase_slow == "phase-result"
+    assert ctx.phase_fast is None
+    assert ctx.phase_slow is None
     assert ctx.phase_blend == "phase-result"
     assert ctx.committee_execution_book is None
 
@@ -345,7 +345,7 @@ def test_default_run_computes_no_report_only_panel_diagnostics() -> None:
 def test_opt_in_reproduces_panel_diagnostics() -> None:
     from src.mhs.evidence import PhaseDiagnosticResult
 
-    ctx = _numeric_context(phase_diagnostic=True, signal_48h_diagnostic=True)
+    ctx = _numeric_context(phase_diagnostic=True, signal_48h_diagnostic=True, reference_books_diagnostic=True)
     log_close = ctx.log_close
     signal = committee_stage.horizon_log_return(log_close, 48)
     expected_phases = [
@@ -368,3 +368,35 @@ def test_placebo_alone_materializes_48h_signal_only() -> None:
     committee_stage.build_committee(ctx, StageTelemetry(log_run=False))
     assert not ctx.signal_48h.empty
     assert ctx.xs_ic == {}
+
+
+def test_reference_book_phases_follow_the_replay_set() -> None:
+    ctx = _numeric_context(
+        phase_diagnostic=True, reference_books_diagnostic=False, committee_member_attribution=False,
+    )
+    committee_stage.build_committee(ctx, StageTelemetry(log_run=False))
+    assert ctx.phase_blend is not None
+    assert ctx.phase_fast is None
+    assert ctx.phase_slow is None
+
+    ctx_attr = _numeric_context(
+        phase_diagnostic=True, reference_books_diagnostic=False, committee_member_attribution=True,
+    )
+    committee_stage.build_committee(ctx_attr, StageTelemetry(log_run=False))
+    assert ctx_attr.phase_fast is None
+    assert ctx_attr.phase_slow is not None
+
+    ctx_ref = _numeric_context(phase_diagnostic=True, reference_books_diagnostic=True)
+    ref_frames = (
+        ctx_ref.log_close, ctx_ref.eligible, ctx_ref.opens, ctx_ref.bar_funding, ctx_ref.grid_1h,
+        ctx_ref.fast, ctx_ref.slow, ctx_ref.fast_grid, ctx_ref.slow_grid,
+    )
+    committee_stage.build_committee(ctx_ref, StageTelemetry(log_run=False))
+    assert ctx_ref.phase_blend is not None
+    assert ctx_ref.phase_fast is not None
+    assert ctx_ref.phase_slow is not None
+    (log_close, eligible, opens, bar_funding, grid_1h, fast, slow, fast_grid, slow_grid) = ref_frames
+    assert ctx_ref.phase_blend == diagnostics_mod._phase_diagnostics(
+        log_close, eligible, opens, bar_funding, grid_1h,
+        books_mod._active_blend_book_and_grid(fast, slow, fast_grid, slow_grid)[0],
+    )

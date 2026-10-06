@@ -291,6 +291,8 @@ _REPORT_ONLY_FLAGS = (
     "phase_diagnostic",
     "signal_48h_diagnostic",
     "bootstrap_ci_diagnostic",
+    "reference_books_diagnostic",
+    "patient_reference_diagnostic",
 )
 
 

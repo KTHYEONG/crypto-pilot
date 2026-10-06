@@ -223,11 +223,13 @@ def test_scenario_mhs_selection_exec_default_unchanged_01() -> None:
     assert bare["forward_execution_quality_dir"] is None
     assert bare["forward_strategy_digest"] is None
     assert bare["name_drift_trim"] is False
-    assert set(bare) == pre_spec_fields | {"final_oos_2026h1", "data_policy", "input_manifest_path", "forward_execution_quality_dir", "forward_strategy_digest", "forward_registration_digest", "name_drift_trim", "committee_tranche_count", "placebo_diagnostic", "phase_diagnostic", "signal_48h_diagnostic", "bootstrap_ci_diagnostic"}
+    assert set(bare) == pre_spec_fields | {"final_oos_2026h1", "data_policy", "input_manifest_path", "forward_execution_quality_dir", "forward_strategy_digest", "forward_registration_digest", "name_drift_trim", "committee_tranche_count", "placebo_diagnostic", "phase_diagnostic", "signal_48h_diagnostic", "bootstrap_ci_diagnostic", "reference_books_diagnostic", "patient_reference_diagnostic"}
     assert bare["placebo_diagnostic"] is False
     assert bare["phase_diagnostic"] is False
     assert bare["signal_48h_diagnostic"] is False
     assert bare["bootstrap_ci_diagnostic"] is False
+    assert bare["reference_books_diagnostic"] is False
+    assert bare["patient_reference_diagnostic"] is False
 
 
 def test_mhs_run_config_data_policy_defaults_legacy_and_cli_flag() -> None:

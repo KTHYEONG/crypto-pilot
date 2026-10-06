@@ -68,3 +68,106 @@ def test_post_diag_deploy_readiness_independent_of_report_only_flags(mhs_market,
         concurrency._run_post_diag_deploy(
             **kwargs, signal_48h=signal, request=research_baseline(placebo_diagnostic=True),
         )
+
+
+class _SynchronousFuture:
+    def __init__(self, result: object) -> None:
+        self._result = result
+
+    def result(self, timeout: object = None) -> object:
+        return self._result
+
+
+def _micro_books_args(**overrides: object) -> dict[str, object]:
+    from src.mhs.types import BOOK_SPECS
+
+    grid_1h = pd.date_range("2021-01-01", periods=48, freq="1h", tz="UTC")
+    frame = pd.DataFrame(0.01, index=grid_1h, columns=["AAA", "BBB"])
+    return {
+        "root": "/nonexistent",
+        "request": research_baseline(**overrides),
+        "n_symbols": 2,
+        "grid_1h": grid_1h,
+        "fast": BOOK_SPECS["fast_reversal"],
+        "slow": BOOK_SPECS["slow_momentum"],
+        "fast_grid": grid_1h[::6],
+        "slow_grid": grid_1h[::24],
+        "w_fast": frame,
+        "w_slow": frame,
+        "w_fast_execution": frame,
+        "w_slow_execution": frame,
+        "opens": frame,
+        "bar_funding": frame,
+        "phase_fast": None,
+        "phase_slow": None,
+        "phase_blend": None,
+        "start": grid_1h[0],
+        "end": grid_1h[-1],
+        "funding_by_symbol": {},
+        "blend_1h": frame,
+        "execution_mask": pd.DataFrame(True, index=grid_1h, columns=["AAA", "BBB"]),
+        "initial_equity": 1.0,
+    }
+
+
+def test_run_books_concurrent_gates_reference_books(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Reference-book replay set follows ``reference_books_diagnostic``: the
+    default run submits only the blend and returns ``None`` for the standalone
+    books; the opted-in run submits all three in declared order."""
+    from types import SimpleNamespace
+
+    import src.mhs.evaluation.concurrency as concurrency_mod
+    from src.mhs.contracts import MhsResourceMeasurement
+    from src.mhs.resources import _StageRecorder
+
+    submitted: list[str] = []
+
+    def _stub_worker(name: str, *args: object, **kwargs: object) -> tuple:
+        measurement = MhsResourceMeasurement(stage=f"replay_{name}", elapsed_ms=0, rss_bytes=1)
+        return SimpleNamespace(name=name, failure=None), (measurement,), {}
+
+    class _SynchronousExecutor:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> _SynchronousExecutor:
+            return self
+
+        def __exit__(self, *exc: object) -> bool:
+            return False
+
+        def submit(self, fn: object, *args: object, **kwargs: object):
+            submitted.append(args[0])
+            return _SynchronousFuture(fn(*args, **kwargs))
+
+    monkeypatch.setattr(concurrency_mod, "ProcessPoolExecutor", _SynchronousExecutor, raising=False)
+    monkeypatch.setattr(concurrency_mod.windows, "_book_outcome_worker", _stub_worker)
+
+    off_recorder = _StageRecorder(log_run=False)
+    fast, slow, blend, traces, members = concurrency_mod._run_books_concurrent(
+        **_micro_books_args(), telemetry=off_recorder,
+    )
+    assert submitted == ["blend"]
+    assert fast is None
+    assert slow is None
+    assert blend is not None
+    assert blend.name == "blend"
+    assert traces == {}
+    assert members is None
+    assert [m.stage for m in off_recorder.records] == ["replay_blend"]
+
+    submitted.clear()
+    on_recorder = _StageRecorder(log_run=False)
+    fast, slow, blend, traces, members = concurrency_mod._run_books_concurrent(
+        **_micro_books_args(reference_books_diagnostic=True), telemetry=on_recorder,
+    )
+    assert submitted == ["fast_reversal", "slow_momentum", "blend"]
+    assert fast is not None
+    assert fast.name == "fast_reversal"
+    assert slow is not None
+    assert slow.name == "slow_momentum"
+    assert blend is not None
+    assert blend.name == "blend"
+    assert [m.stage for m in on_recorder.records] == [
+        "replay_fast_reversal", "replay_slow_momentum", "replay_blend",
+    ]

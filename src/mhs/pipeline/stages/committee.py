@@ -77,11 +77,18 @@ def _report_only_panel_diagnostics(ctx: PipelineContext) -> None:
     Phase robustness (``phase_diagnostic``) and the 48h raw-return statistics
     (``signal_48h_diagnostic``) never feed a weight, a replay or a gate; ``signal_48h`` is
     materialized only when the 48h statistics or the placebo (``placebo_diagnostic``) consume it,
-    so the default run keeps no extra T x N panel alive.
+    so the default run keeps no extra T x N panel alive. Reference-book phases are computed only
+    for books that will be replayed.
     """
     if ctx.config.phase_diagnostic:
-        ctx.phase_fast = diagnostics._phase_diagnostics(ctx.log_close, ctx.eligible, ctx.opens, ctx.bar_funding, ctx.grid_1h, ctx.fast)
-        ctx.phase_slow = diagnostics._phase_diagnostics(ctx.log_close, ctx.eligible, ctx.opens, ctx.bar_funding, ctx.grid_1h, ctx.slow)
+        if ctx.config.reference_books_diagnostic:
+            ctx.phase_fast = diagnostics._phase_diagnostics(ctx.log_close, ctx.eligible, ctx.opens, ctx.bar_funding, ctx.grid_1h, ctx.fast)
+        else:
+            ctx.phase_fast = None
+        if ctx.config.reference_books_diagnostic or ctx.config.committee_member_attribution:
+            ctx.phase_slow = diagnostics._phase_diagnostics(ctx.log_close, ctx.eligible, ctx.opens, ctx.bar_funding, ctx.grid_1h, ctx.slow)
+        else:
+            ctx.phase_slow = None
         _blend_spec, _blend_grid = books._active_blend_book_and_grid(ctx.fast, ctx.slow, ctx.fast_grid, ctx.slow_grid)
         del _blend_grid
         ctx.phase_blend = diagnostics._phase_diagnostics(ctx.log_close, ctx.eligible, ctx.opens, ctx.bar_funding, ctx.grid_1h, _blend_spec)

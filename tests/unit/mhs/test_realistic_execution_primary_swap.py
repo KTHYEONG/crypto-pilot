@@ -210,7 +210,14 @@ def test_stress_cost_execution_spec_triples_cost_fields() -> None:
 
 def test_toplevel_book_primary_is_immediate_taker(mhs_market) -> None:
     """SCENARIO_MHS_REALISTIC_EXECUTION_TOPLEVEL_PRIMARY_IS_IMMEDIATE_TAKER_02."""
-    report, _ = _book_outcome(**_build_book_outcome_args(mhs_market))
+    import dataclasses
+
+    outcome_args = _build_book_outcome_args(mhs_market)
+    outcome_args = {
+        **outcome_args,
+        "request": dataclasses.replace(outcome_args["request"], patient_reference_diagnostic=True),
+    }
+    report, _ = _book_outcome(**outcome_args)
     assert report.primary is not None
     assert report.stress is not None
     assert report.primary.fill_source == "OHLCV_IMMEDIATE_TAKER"

@@ -131,7 +131,7 @@ def test_bounds_helper_gone() -> None:
     assert not hasattr(validation, "_validate_field_bounds")
 
 
-@pytest.mark.parametrize("field", ["placebo_diagnostic", "phase_diagnostic", "signal_48h_diagnostic", "bootstrap_ci_diagnostic"])
+@pytest.mark.parametrize("field", ["placebo_diagnostic", "phase_diagnostic", "signal_48h_diagnostic", "bootstrap_ci_diagnostic", "reference_books_diagnostic", "patient_reference_diagnostic"])
 def test_non_bool_report_flag_rejected(field: str) -> None:
     with pytest.raises(ValueError, match=f"{field} must be a bool"):
         research_baseline(**{field: 1})  # type: ignore[arg-type]

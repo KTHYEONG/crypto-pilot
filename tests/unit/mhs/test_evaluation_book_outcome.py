@@ -228,6 +228,72 @@ def test_book_outcome_existing_primary_metrics_unchanged(mhs_market) -> None:
 
 
 @pytest.mark.slow
+def test_patient_bound_off_leaves_primary_and_stress_bit_identical(mhs_market) -> None:
+    """SCENARIO_MHS_PATIENT_BOUND_OFF_LEAVES_PRIMARY_AND_STRESS_BIT_IDENTICAL: the
+    opt-in patient strict-proxy bound is report-only -- with it off the report
+    carries no patient reference, and every capital-carrying metric is exactly
+    equal to the opted-in run."""
+    from tests.fixtures.golden.digest import LEDGER_SERIES
+
+    args = _build_book_outcome_args(mhs_market)
+    base = {**args, "name": "blend"}
+    off, _ = _book_outcome(**base)
+    assert off.failure is None
+    assert off.patient_reference is None
+    assert off.patient_reference_naive_sharpe is None
+    on_request = dataclasses.replace(base["request"], patient_reference_diagnostic=True)
+    on, _ = _book_outcome(**{**base, "request": on_request})
+    assert on.failure is None
+    assert on.patient_reference is not None
+    assert off.primary is not None
+    assert on.primary is not None
+    assert off.stress is not None
+    assert on.stress is not None
+    for series in LEDGER_SERIES:
+        pd.testing.assert_series_equal(
+            getattr(off.primary.ledger, series), getattr(on.primary.ledger, series), check_exact=True,
+        )
+        pd.testing.assert_series_equal(
+            getattr(off.stress.ledger, series), getattr(on.stress.ledger, series), check_exact=True,
+        )
+    assert off.primary_naive_sharpe == on.primary_naive_sharpe
+    assert off.stress_naive_sharpe == on.stress_naive_sharpe
+    assert (off.exposure_scale is None) == (on.exposure_scale is None)
+    if off.exposure_scale is not None:
+        assert on.exposure_scale is not None
+        pd.testing.assert_series_equal(off.exposure_scale, on.exposure_scale, check_exact=True)
+    assert (off.target_weights is None) == (on.target_weights is None)
+    if off.target_weights is not None:
+        assert on.target_weights is not None
+        pd.testing.assert_frame_equal(off.target_weights, on.target_weights, check_exact=True)
+
+
+@pytest.mark.slow
+def test_optional_bound_indices_stay_explicit(mhs_market) -> None:
+    """SCENARIO_MHS_OPTIONAL_BOUND_INDICES_STAY_EXPLICIT: the touch diagnostic
+    binds to its own result index whether or not the patient bound is present,
+    so inserting the patient bound cannot misbind a later bound."""
+    args = _build_book_outcome_args(mhs_market)
+    touch_request = dataclasses.replace(args["request"], touch_diagnostic=True)
+    off, _ = _book_outcome(**{**args, "name": "blend", "request": touch_request})
+    assert off.failure is None
+    on_request = dataclasses.replace(touch_request, patient_reference_diagnostic=True)
+    on, _ = _book_outcome(**{**args, "name": "blend", "request": on_request})
+    assert on.failure is None
+    assert off.touch is not None
+    assert on.touch is not None
+    assert off.touch.fill_source == "OHLCV_TOUCH_PROXY"
+    assert on.touch.fill_source == "OHLCV_TOUCH_PROXY"
+    from tests.fixtures.golden.digest import LEDGER_SERIES
+
+    for series in LEDGER_SERIES:
+        pd.testing.assert_series_equal(
+            getattr(off.touch.ledger, series), getattr(on.touch.ledger, series), check_exact=True,
+        )
+    assert off.touch_naive_sharpe == on.touch_naive_sharpe
+
+
+@pytest.mark.slow
 def test_book_outcome_blend_exposes_exposure_scale_series_constant_risk(mhs_market) -> None:
     # SCENARIO_MHS_BLEND_REPORT_EXPOSES_EXPOSURE_SCALE_SERIES: under
     # constant_risk the two-pass blend book carries the pnl_vol_target_scale it

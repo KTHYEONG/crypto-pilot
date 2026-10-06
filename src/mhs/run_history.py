@@ -57,6 +57,8 @@ RESEARCH_NEUTRAL_FLAGS: frozenset[str] = frozenset[str]({
     "phase_diagnostic",
     "signal_48h_diagnostic",
     "bootstrap_ci_diagnostic",
+    "reference_books_diagnostic",
+    "patient_reference_diagnostic",
 })
 
 # Pool-window admissibility for recorded trial outcomes: derived from the
@@ -348,6 +350,8 @@ TRIAL_IDENTITY_BASELINE: Final[Mapping[str, object]] = MappingProxyType(
         "phase_diagnostic": True,
         "signal_48h_diagnostic": True,
         "bootstrap_ci_diagnostic": True,
+        "reference_books_diagnostic": True,
+        "patient_reference_diagnostic": True,
     }
 )
 

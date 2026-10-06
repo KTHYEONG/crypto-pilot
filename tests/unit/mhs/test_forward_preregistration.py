@@ -164,15 +164,19 @@ def test_procedure_digest_invariant_to_report_only_flags() -> None:
     from src.mhs.contracts import MhsDiagnosticRequest
 
     default_base = procedure_identity_digest(MhsDiagnosticRequest())
-    for field in ("placebo_diagnostic", "phase_diagnostic", "signal_48h_diagnostic", "bootstrap_ci_diagnostic"):
+    for field in ("placebo_diagnostic", "phase_diagnostic", "signal_48h_diagnostic", "bootstrap_ci_diagnostic", "reference_books_diagnostic", "patient_reference_diagnostic"):
         assert procedure_identity_digest(research_baseline(**{field: True})) == base
         assert field not in procedure_payload(research_baseline(**{field: True}))
         assert procedure_identity_digest(MhsDiagnosticRequest(**{field: True})) == default_base
         assert field not in procedure_payload(MhsDiagnosticRequest(**{field: True}))
     assert procedure_identity_digest(
+        research_baseline(reference_books_diagnostic=True, patient_reference_diagnostic=True)
+    ) == base
+    assert procedure_identity_digest(
         research_baseline(
             placebo_diagnostic=True, phase_diagnostic=True,
             signal_48h_diagnostic=True, bootstrap_ci_diagnostic=True,
+            reference_books_diagnostic=True, patient_reference_diagnostic=True,
         )
     ) == base
 

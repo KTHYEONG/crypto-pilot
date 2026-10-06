@@ -107,3 +107,94 @@ def test_run_replays_reaches_seam_functions(monkeypatch: pytest.MonkeyPatch) -> 
     assert ctx.blend_report is blend_report
     assert ctx.committee_member_attribution is None
     assert ctx._terminal_report is None
+
+
+def _stubbed_run(monkeypatch: pytest.MonkeyPatch, result: tuple) -> PipelineContext:
+    import src.mhs.pipeline.stages.replay as replay_stage
+
+    monkeypatch.setattr(replay_stage.os.path, "exists", lambda _p: True)
+
+    def _fake_guard_stage_or_breach(*_a: object, **_k: object) -> None:
+        return None
+
+    def _fake_run_books_concurrent(*_a: object, **_k: object):
+        return result
+
+    monkeypatch.setattr(replay_stage, "_guard_stage_or_breach", _fake_guard_stage_or_breach, raising=False)
+    monkeypatch.setattr(guards_mod, "_guard_stage_or_breach", _fake_guard_stage_or_breach, raising=False)
+    monkeypatch.setattr(replay_stage, "_run_books_concurrent", _fake_run_books_concurrent, raising=False)
+    monkeypatch.setattr(concurrency_mod, "_run_books_concurrent", _fake_run_books_concurrent, raising=False)
+
+    ctx = _bare_context()
+    ctx.recorder = type("_R", (), {"record": lambda self, *a, **k: None})()
+    replay_stage.run_replays(ctx, StageTelemetry(log_run=False))
+    return ctx
+
+
+def test_default_run_replays_the_blend_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    blend_ok = _FakeBookReport("blend")
+    ctx = _stubbed_run(monkeypatch, (None, None, blend_ok, {}, None))
+    assert ctx.books == {}
+    assert ctx.blend_report is blend_ok
+    assert ctx.book_reasons == ()
+
+    symbols_default = list(ctx.execution_symbols)
+    fast_report = _FakeBookReport("fast")
+    slow_report = _FakeBookReport("slow")
+    ctx_on = _bare_context()
+    ctx_on.config = dataclasses.replace(ctx_on.config, reference_books_diagnostic=True)
+    ctx_on.recorder = type("_R", (), {"record": lambda self, *a, **k: None})()
+    import src.mhs.pipeline.stages.replay as replay_stage
+
+    monkeypatch.setattr(replay_stage.os.path, "exists", lambda _p: True)
+    monkeypatch.setattr(replay_stage, "_guard_stage_or_breach", lambda *_a, **_k: None, raising=False)
+    monkeypatch.setattr(guards_mod, "_guard_stage_or_breach", lambda *_a, **_k: None, raising=False)
+    monkeypatch.setattr(
+        replay_stage, "_run_books_concurrent",
+        lambda *_a, **_k: (fast_report, slow_report, blend_ok, {}, None), raising=False,
+    )
+    monkeypatch.setattr(
+        concurrency_mod, "_run_books_concurrent",
+        lambda *_a, **_k: (fast_report, slow_report, blend_ok, {}, None), raising=False,
+    )
+    replay_stage.run_replays(ctx_on, StageTelemetry(log_run=False))
+    assert ctx_on.books == {"fast_reversal": fast_report, "slow_momentum": slow_report}
+    assert list(ctx_on.execution_symbols) == symbols_default
+
+
+def test_reference_book_failure_never_blocks(monkeypatch: pytest.MonkeyPatch) -> None:
+    from types import SimpleNamespace
+
+    fast_bad = _FakeBookReport("fast")
+    fast_bad.failure = SimpleNamespace(reason="CAPITAL_INVARIANT_BREACH")
+    slow_ok = _FakeBookReport("slow")
+    blend_ok = _FakeBookReport("blend")
+    ctx = _bare_context()
+    ctx.config = dataclasses.replace(ctx.config, reference_books_diagnostic=True)
+    ctx.recorder = type("_R", (), {"record": lambda self, *a, **k: None})()
+    import src.mhs.pipeline.stages.replay as replay_stage
+
+    monkeypatch.setattr(replay_stage.os.path, "exists", lambda _p: True)
+    monkeypatch.setattr(replay_stage, "_guard_stage_or_breach", lambda *_a, **_k: None, raising=False)
+    monkeypatch.setattr(guards_mod, "_guard_stage_or_breach", lambda *_a, **_k: None, raising=False)
+    monkeypatch.setattr(
+        replay_stage, "_run_books_concurrent",
+        lambda *_a, **_k: (fast_bad, slow_ok, blend_ok, {}, None), raising=False,
+    )
+    monkeypatch.setattr(
+        concurrency_mod, "_run_books_concurrent",
+        lambda *_a, **_k: (fast_bad, slow_ok, blend_ok, {}, None), raising=False,
+    )
+    replay_stage.run_replays(ctx, StageTelemetry(log_run=False))
+    assert ctx.books == {"fast_reversal": fast_bad, "slow_momentum": slow_ok}
+    assert ctx.books["fast_reversal"].failure.reason == "CAPITAL_INVARIANT_BREACH"
+    assert ctx.book_reasons == ()
+
+
+def test_blend_failure_still_blocks(monkeypatch: pytest.MonkeyPatch) -> None:
+    from types import SimpleNamespace
+
+    blend_bad = _FakeBookReport("blend")
+    blend_bad.failure = SimpleNamespace(reason="RELEVANT_EXECUTION_DATA_GAP")
+    ctx = _stubbed_run(monkeypatch, (None, None, blend_bad, {}, None))
+    assert ctx.book_reasons == ("RELEVANT_EXECUTION_DATA_GAP",)
