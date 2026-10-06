@@ -19,7 +19,6 @@ from src.mhs.evaluation.books import _active_blend_book_and_grid
 from src.mhs.evaluation.concurrency import _run_books_concurrent
 from src.mhs.evaluation.folds import _run_anchored_fold
 from src.mhs.evaluation.integrity import (
-    _assert_cache_required_marks,
     _truncate_replayable_decisions,
 )
 from src.mhs.evaluation.windows import _book_outcome
@@ -40,7 +39,6 @@ from src.mhs.params import (
     MEASURED_EXECUTION_COST_TIERS_BPS,
     PNL_VOL_TARGET_SCALE_FLOOR,
 )
-from src.common.errors import DataIntegrityError
 from src.mhs.types import ExecutionSpec
 from src.quant.universe.pit_universe import symbol_partition
 from tests.unit.mhs.test_evaluation_appresearch import (  # noqa: F401
@@ -108,17 +106,6 @@ def test_truncate_replayable_decisions_requires_exact_timeout_bar() -> None:
     # the 01:01 submit, so the decision is censored as a terminal event.
     assert censored == 1
     assert retained.empty
-
-def test_cache_required_marks_raise_structured_provenance() -> None:
-    # MHS-STRICT-FAIL-CLOSED
-    grid = pd.date_range("2021-01-01", periods=31, freq="1min", tz="UTC")
-    weights = pd.DataFrame({"A": [1.0]}, index=[pd.Timestamp("2021-01-01 00:00", tz="UTC")])
-    signals = pd.DatetimeIndex([pd.Timestamp("2021-01-01 01:00", tz="UTC")])
-    marks = pd.DataFrame({"A": np.nan}, index=grid)
-    with pytest.raises(DataIntegrityError, match="MISSING_DECISION_MARK") as excinfo:
-        _assert_cache_required_marks("fold", weights, signals, marks)
-    assert "symbol=A" in str(excinfo.value)
-    assert "decision=2021-01-01 00:00:00+00:00" in str(excinfo.value)
 
 def test_iter_mhs_execution_windows_preserves_columns_and_active_roster(tmp_path) -> None:
     start = pd.Timestamp("2021-01-01", tz="UTC")

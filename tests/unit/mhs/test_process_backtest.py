@@ -374,18 +374,6 @@ def test_load_process_market_data_from_synthetic_lake(tmp_path, monkeypatch) -> 
     monkeypatch.setattr(bt_market, "_load_funding_series",
         lambda syms: ({s: funding[s] for s in syms if s in funding}, {}),
     )
-    mark_dir = tmp_path / "markPriceKlines" / "1h"
-    mark_dir.mkdir(parents=True)
-    for sym in symbols:
-        pd.DataFrame({"timestamp": ms, "datetime": grid, "close": 100.0}).to_parquet(
-            mark_dir / f"{sym}.parquet", index=False
-        )
-    import src.market_data.services.futures_collection as fc
-
-    monkeypatch.setattr(
-        fc, "_mark_price_path",
-        lambda symbol, timeframe: mark_dir / f"{symbol}.parquet",
-    )
     data = bt_market.load_process_market_data(start, end, data_root=str(tmp_path / "ohlcv"))
     expected_keys = list(PROCESS_FEATURE_CANDIDATES) + [
         f"funding_carry_{h}h" for h in PROCESS_FUNDING_CARRY_CANDIDATES_HOURS
@@ -1718,18 +1706,6 @@ def test_process_mask_preblocks_3m_missing_symbol(tmp_path, monkeypatch) -> None
     monkeypatch.setattr(bt_market, "_load_funding_series",
         lambda syms: ({s: funding[s] for s in syms if s in funding}, {}),
     )
-    mark_dir = tmp_path / "markPriceKlines" / "1h"
-    mark_dir.mkdir(parents=True)
-    for sym in symbols:
-        pd.DataFrame({"timestamp": ms, "datetime": grid, "close": 100.0}).to_parquet(
-            mark_dir / f"{sym}.parquet", index=False
-        )
-    import src.market_data.services.futures_collection as fc
-
-    monkeypatch.setattr(
-        fc, "_mark_price_path",
-        lambda symbol, timeframe: mark_dir / f"{symbol}.parquet",
-    )
     data = bt_market.load_process_market_data(start, end, data_root=str(tmp_path / "ohlcv"))
     assert bool((~data.execution_mask[missing]).all())
     assert bool(data.execution_mask.drop(columns=[missing]).to_numpy().any())
@@ -2769,14 +2745,11 @@ def test_process_decision_ignores_mark_gap(tmp_path, monkeypatch) -> None:
     end = pd.Timestamp("2021-02-15", tz="UTC")
     grid, _ = _write_process_lake(tmp_path, symbols, start, end)
     _mock_process_funding(monkeypatch, grid, symbols)
-    import src.market_data.services.futures_collection as fc
-
     mark_dir = tmp_path / "markPriceKlines" / "1h"
     mark_dir.mkdir(parents=True)
     ms = ((grid - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta(milliseconds=1)).to_numpy(dtype="int64")
     for sym in symbols:
         pd.DataFrame({"timestamp": ms, "datetime": grid, "close": 100.0}).to_parquet(mark_dir / f"{sym}.parquet", index=False)
-    monkeypatch.setattr(fc, "_mark_price_path", lambda symbol, timeframe: mark_dir / f"{symbol}.parquet")
     before = bt_market.load_process_market_data(start, end, data_root=str(tmp_path / "ohlcv"))
     for sym in symbols:
         (mark_dir / f"{sym}.parquet").unlink()

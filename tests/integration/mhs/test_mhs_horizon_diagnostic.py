@@ -36,13 +36,11 @@ def _write_mhs_market(
     three_dir = root / "3m"
     five_dir = root / "5m"
     funding_dir = root / "funding"
-    mark_dir = root / "markPriceKlines" / "1h"
     hour_dir.mkdir(parents=True, exist_ok=True)
     minute_dir.mkdir(parents=True, exist_ok=True)
     three_dir.mkdir(parents=True, exist_ok=True)
     five_dir.mkdir(parents=True, exist_ok=True)
     funding_dir.mkdir(parents=True, exist_ok=True)
-    mark_dir.mkdir(parents=True, exist_ok=True)
 
     n = len(hourly)
     minute_idx = pd.date_range(START, end, freq="1min", tz="UTC")
@@ -146,24 +144,6 @@ def _write_mhs_market(
                 "datetime": sym_hourly,
             },
         ).to_parquet(funding_dir / f"{sym}.parquet")
-
-        mark_hourly = (
-            pd.Series(minute_prices, index=sym_minute)
-            .resample("1h")
-            .last()
-            .reindex(sym_hourly)
-            .to_numpy()
-        )
-        pd.DataFrame(
-            {
-                "timestamp": sym_epoch,
-                "open": mark_hourly,
-                "high": mark_hourly,
-                "low": mark_hourly,
-                "close": mark_hourly,
-                "datetime": sym_hourly,
-            },
-        ).to_parquet(mark_dir / f"{sym}.parquet")
     return end
 
 
@@ -227,7 +207,6 @@ import json, sys
 sys.path.insert(0, sys.argv[1])
 from pathlib import Path
 import pandas as pd
-import src.market_data.services.futures_collection as fc
 import src.mhs.marks as marks
 import src.mhs.statistics as statistics
 from src.mhs.contracts import MhsDiagnosticRequest
@@ -237,7 +216,6 @@ from src.mhs.report.persist import persist_mhs_horizon_diagnostic_report
 root = Path(sys.argv[2])
 out = Path(sys.argv[3])
 marks.funding_path = lambda sym: root / "funding" / f"{sym}.parquet"
-fc._mark_price_path = lambda symbol, timeframe: root / "markPriceKlines" / timeframe / f"{symbol}.parquet"
 statistics._BOOTSTRAP_REPLICATES = 20
 statistics._BOOTSTRAP_MEAN_BLOCK = 24
 statistics._BOOTSTRAP_SEED = 20260807

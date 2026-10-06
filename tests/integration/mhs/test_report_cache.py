@@ -135,7 +135,6 @@ def test_profile_change_is_new_key(tmp_path: Path, monkeypatch: pytest.MonkeyPat
 
 
 def test_module_globals_patched_only_during_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    import src.market_data.services.futures_collection as fc
     import src.mhs.marks as marks
     import src.mhs.pipeline.stages.fold as fold_stage
     import src.mhs.statistics as statistics
@@ -144,7 +143,6 @@ def test_module_globals_patched_only_during_run(tmp_path: Path, monkeypatch: pyt
     root = _write_market(tmp_path / "mkt")
     before = {
         "funding": marks.funding_path,
-        "mark": fc._mark_price_path,
         "rep": statistics._BOOTSTRAP_REPLICATES,
         "block": statistics._BOOTSTRAP_MEAN_BLOCK,
         "seed": statistics._BOOTSTRAP_SEED,
@@ -154,7 +152,6 @@ def test_module_globals_patched_only_during_run(tmp_path: Path, monkeypatch: pyt
 
     def _fake(request: Any) -> Any:
         recorded["funding"] = marks.funding_path("X")
-        recorded["mark"] = fc._mark_price_path("X", "1h")
         recorded["rep"] = statistics._BOOTSTRAP_REPLICATES
         recorded["block"] = statistics._BOOTSTRAP_MEAN_BLOCK
         recorded["seed"] = statistics._BOOTSTRAP_SEED
@@ -166,11 +163,9 @@ def test_module_globals_patched_only_during_run(tmp_path: Path, monkeypatch: pyt
     with cache.lease(_spec(root, GOLDEN_PROFILE), consumer="a"):
         pass
     assert str(recorded["funding"]).startswith(str(root))
-    assert str(recorded["mark"]).startswith(str(root))
     assert (recorded["rep"], recorded["block"], recorded["seed"]) == (20, 24, 20260807)
     assert recorded["trials"] == (80, "constant_plus_ledger")
     assert marks.funding_path is before["funding"]
-    assert fc._mark_price_path is before["mark"]
     assert statistics._BOOTSTRAP_REPLICATES is before["rep"]
     assert statistics._BOOTSTRAP_MEAN_BLOCK is before["block"]
     assert statistics._BOOTSTRAP_SEED is before["seed"]
@@ -178,13 +173,12 @@ def test_module_globals_patched_only_during_run(tmp_path: Path, monkeypatch: pyt
 
 
 def test_patches_restored_when_run_raises_and_failure_memoised(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    import src.market_data.services.futures_collection as fc
     import src.mhs.marks as marks
     import src.mhs.statistics as statistics
     from src.mhs.pipeline import orchestrator
 
     root = _write_market(tmp_path / "mkt")
-    before = (marks.funding_path, fc._mark_price_path, statistics._BOOTSTRAP_REPLICATES)
+    before = (marks.funding_path, statistics._BOOTSTRAP_REPLICATES)
     calls: dict[str, int] = {}
     boom = ValueError("boom")
 
@@ -202,8 +196,7 @@ def test_patches_restored_when_run_raises_and_failure_memoised(tmp_path: Path, m
     assert error.value.__cause__ is boom
     assert calls["n"] == 1
     assert marks.funding_path is before[0]
-    assert fc._mark_price_path is before[1]
-    assert statistics._BOOTSTRAP_REPLICATES is before[2]
+    assert statistics._BOOTSTRAP_REPLICATES is before[1]
 
 
 def test_consumer_mutation_detected_and_evicted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -447,20 +440,19 @@ def test_deep_state_is_not_silently_truncated():
 
 
 def test_missing_patch_target_leaves_globals_untouched(tmp_path, monkeypatch):
-    import src.market_data.services.futures_collection as fc
     import src.mhs.marks as marks
     import src.mhs.pipeline.stages.fold as fold_stage
     import src.mhs.statistics as statistics
 
     root = _write_market(tmp_path / "market")
-    originals = (marks.funding_path, fc._mark_price_path, statistics._BOOTSTRAP_REPLICATES,
+    originals = (marks.funding_path, statistics._BOOTSTRAP_REPLICATES,
                  statistics._BOOTSTRAP_MEAN_BLOCK, statistics._BOOTSTRAP_SEED)
     monkeypatch.delattr(fold_stage, "derive_trials_attempted")
     with pytest.raises(AttributeError, match="derive_trials_attempted"), DiagnosticReportCache().lease(
         _spec(root, GOLDEN_PROFILE), consumer="missing-target"
     ):
         pass
-    current = (marks.funding_path, fc._mark_price_path, statistics._BOOTSTRAP_REPLICATES,
+    current = (marks.funding_path, statistics._BOOTSTRAP_REPLICATES,
                statistics._BOOTSTRAP_MEAN_BLOCK, statistics._BOOTSTRAP_SEED)
     assert all(a is b for a, b in zip(current, originals, strict=True))
 

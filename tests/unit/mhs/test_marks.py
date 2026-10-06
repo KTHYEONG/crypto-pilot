@@ -35,14 +35,8 @@ def test_pit_execution_mask_no_eligible_never_holds() -> None:
     assert not mask["A"].any()
 
 
-def test_replay_window_reads_no_historical_mark(tmp_path, monkeypatch) -> None:
+def test_replay_window_reads_no_historical_mark(tmp_path) -> None:
     """A replay window load opens no Mark file."""
-    import src.market_data.services.futures_collection as fc
-
-    def _boom(symbol: str, timeframe: str):
-        raise AssertionError("no Mark file may be read")
-
-    monkeypatch.setattr(fc, "_mark_price_path", _boom)
     assert not hasattr(marks, "_contemporaneous_mark_close_panel")
     assert not hasattr(marks, "_fill_mark_parity_eligibility")
     grid = pd.date_range("2022-01-01", periods=4, freq="3min", tz="UTC")

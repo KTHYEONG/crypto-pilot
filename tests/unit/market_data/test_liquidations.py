@@ -1,7 +1,7 @@
 """Contract coverage for the liquidation WebSocket stream collector.
 
 Covers: parse_liquidation (raw forceOrder + ccxt unified), compact daily
-partition persistence + dedup, research loader, and the resilient native
+partition persistence + dedup, and the resilient native
 forceOrder stream loop (flush/shutdown + reconnect + attested liveness).
 """
 
@@ -15,7 +15,6 @@ import pytest
 from src.market_data.streams.liquidations import (
     LiquidationEvent,
     append_liquidation_events,
-    load_liquidation_events,
     parse_liquidation,
 )
 
@@ -194,16 +193,6 @@ def test_append_liquidation_events_leaves_legacy_daily_file_untouched(tmp_path) 
     assert len(pd.read_parquet(tmp_path / "liquidations_20260924_06.parquet")) == 1
 
 
-def test_load_liquidation_events_deduplicates_across_layouts(tmp_path) -> None:
-    ms = pd.Timestamp("2026-09-24T05:00:00Z").value // 1_000_000
-    append_liquidation_events([_event("BTCUSDT", ms, 100.0, 1.0, 1.0)], tmp_path)
-    hourly = tmp_path / "liquidations_20260924_05.parquet"
-    legacy = tmp_path / "liquidations_20260924.parquet"
-    legacy.write_bytes(hourly.read_bytes())
-    loaded = load_liquidation_events(tmp_path)
-    assert len(loaded) == 1
-
-
 def test_append_liquidation_events_quarantines_corrupt_hour(tmp_path) -> None:
     ms = pd.Timestamp("2026-09-24T05:00:00Z").value // 1_000_000
     append_liquidation_events([_event("BTCUSDT", ms, 100.0, 1.0, 1.0)], tmp_path)
@@ -219,17 +208,13 @@ def test_append_liquidation_events_quarantines_corrupt_hour(tmp_path) -> None:
     assert quarantined[0].read_bytes() == raw[: len(raw) // 2]
 
 
-def test_load_liquidation_events_roundtrip_and_missing_dir(tmp_path) -> None:
-    missing = tmp_path / "nope"
-    assert load_liquidation_events(missing).empty
-
+def test_append_liquidation_events_writes_utc_event_time(tmp_path) -> None:
+    """One appended event lands in the UTC-hour file with tz-aware event time."""
     ms = pd.Timestamp("2026-09-03T01:00:00Z").value // 1_000_000
     append_liquidation_events([_event("BTCUSDT", ms, 100.0, 1.0, 1.0)], tmp_path)
-    loaded = load_liquidation_events(tmp_path)
-    assert len(loaded) == 1
-    assert str(loaded["event_time"].dt.tz) == "UTC"
-    after = pd.Timestamp("2026-09-04T00:00:00Z")
-    assert load_liquidation_events(tmp_path, since=after).empty
+    df = pd.read_parquet(tmp_path / "liquidations_20260903_01.parquet")
+    assert len(df) == 1
+    assert str(df["event_time"].dt.tz) == "UTC"
 
 
 def test_append_liquidation_events_backfills_legacy_hour_missing_event_time_ms(tmp_path) -> None:
@@ -303,28 +288,6 @@ def test_append_liquidation_events_merges_legacy_hour_without_raw_column(tmp_pat
     fresh = merged[merged["symbol"] == "ETHUSDT"].iloc[0]
     assert isinstance(fresh["raw_order_json"], str)
     assert fresh["raw_order_json"]
-
-
-def test_load_liquidation_events_reads_mixed_layouts(tmp_path) -> None:
-    """Legacy files without the column still load alongside new files."""
-    ms = pd.Timestamp("2026-09-24T05:00:00Z").value // 1_000_000
-    append_liquidation_events([_event("BTCUSDT", ms, 100.0, 1.0, 1.0)], tmp_path)
-    hourly = tmp_path / "liquidations_20260924_05.parquet"
-    legacy = tmp_path / "liquidations_20260924.parquet"
-    legacy_frame = pd.read_parquet(hourly).drop(columns=["raw_order_json"])
-    legacy_frame.to_parquet(legacy, index=False, compression="zstd")
-    hourly.unlink()
-    ms2 = pd.Timestamp("2026-09-24T06:00:00Z").value // 1_000_000
-    ev2 = parse_liquidation(
-        _raw("ETHUSDT", ms2), ingested_at=pd.Timestamp("2026-09-24T06:01:00Z")
-    )
-    assert ev2 is not None
-    append_liquidation_events([ev2], tmp_path)
-    loaded = load_liquidation_events(tmp_path)
-    assert len(loaded) == 2
-    assert "raw_order_json" in loaded.columns
-    assert loaded[loaded["symbol"] == "BTCUSDT"]["raw_order_json"].isna().all()
-    assert loaded[loaded["symbol"] == "ETHUSDT"]["raw_order_json"].notna().all()
 
 
 def test_parse_liquidation_raw_serialization_failure_keeps_event() -> None:

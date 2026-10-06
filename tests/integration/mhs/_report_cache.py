@@ -452,9 +452,7 @@ class DiagnosticReportCache:
         On a miss the run executes ``src.mhs.pipeline.orchestrator.run_mhs_diagnostic``
         (resolved at call time) with these module globals set for exactly the duration of
         the run and restored in ``finally``: ``src.mhs.marks.funding_path`` ->
-        ``<data_root>/funding/<SYM>.parquet``,
-        ``src.market_data.services.futures_collection._mark_price_path`` ->
-        ``<data_root>/markPriceKlines/<tf>/<SYM>.parquet``, the three
+        ``<data_root>/funding/<SYM>.parquet``, the three
         ``src.mhs.statistics._BOOTSTRAP_*`` constants, the optional
         ``derive_trials_attempted`` pin, and the wiring spies when observed.
 
@@ -530,14 +528,12 @@ class DiagnosticReportCache:
                 raise AssertionError(f"MHS report cache: entry mutated by {consumer}")
 
     def _execute(self, spec: DiagnosticRunSpec) -> tuple[MhsHorizonDiagnosticReport, WiringObservations | None]:
-        import src.market_data.services.futures_collection as fc
         import src.mhs.marks as marks
         import src.mhs.statistics as statistics
 
         root_str = str(spec.request.data_root)
         targets = [
             (marks, "funding_path", lambda sym: Path(root_str) / "funding" / f"{sym}.parquet"),
-            (fc, "_mark_price_path", lambda symbol, timeframe: Path(root_str) / "markPriceKlines" / timeframe / f"{symbol}.parquet"),
             (statistics, "_BOOTSTRAP_REPLICATES", spec.profile.bootstrap_replicates),
             (statistics, "_BOOTSTRAP_MEAN_BLOCK", spec.profile.bootstrap_mean_block),
             (statistics, "_BOOTSTRAP_SEED", spec.profile.bootstrap_seed),

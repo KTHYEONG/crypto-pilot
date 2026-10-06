@@ -8,16 +8,13 @@ import dataclasses
 import numpy as np
 import pandas as pd
 import pytest
-from src.market_data.services import mhs_execution as mec
 import src.mhs.evaluation.concurrency as concurrency_mod
 from src.mhs.diagnostic_run import run_mhs_horizon_diagnostic
 import src.mhs.marks as marks
 import src.mhs.pipeline.stages.book as book_stage
 import src.mhs.statistics as statistics
 from src.mhs.discovery import DiscoveryQualificationResult
-from src.mhs.execution.window_stream import _iter_mhs_execution_windows
 from src.mhs.marks import _load_funding_series
-from src.common.errors import DataIntegrityError
 from src.quant.universe.pit_universe import symbol_partition
 from tests.unit.mhs.test_evaluation_appresearch import (  # noqa: F401
     _FOLD,
@@ -193,9 +190,7 @@ def test_mhs_execution_coverage_gate_on_fails_closed_early(mhs_market, monkeypat
 def test_mhs_diagnostic_relevance_gate_passes_where_full_scope_blocked(mhs_market, monkeypatch) -> None:
     # SCENARIO_MHS_DIAGNOSTIC_RELEVANCE_GATE_PASSES_WHERE_FULL_SCOPE_BLOCKED:
     # with execution_coverage_gate=True, a fixture whose NON-roster symbol has
-    # an internal 3m data gap completes normally (status COMPLETE), whereas the
-    # same fixture blocks under the old full-universe gate -- reproducing the
-    # measured 36/36 false-positive the relevance scope removes.
+    # an internal 3m data gap completes normally (status COMPLETE).
     root, end = mhs_market
     symbols = [
         s for s in ("MHSAUSDT", "MHSBUSDT", "MHSCUSDT", "MHSDUSDT", "MHSEUSDT",
@@ -230,140 +225,8 @@ def test_mhs_diagnostic_relevance_gate_passes_where_full_scope_blocked(mhs_marke
         )
         report = run_mhs_horizon_diagnostic(request)
         assert report.status == "COMPLETE"
-
-        # The same fixture blocks under the old full-universe scope (the gapped
-        # symbol is funded, so it was part of the Cartesian product gate).
-        with pytest.raises(DataIntegrityError, match=gap_symbol):
-            mec.assert_execution_data_coverage(
-                symbols, "3m", str(_START), str(end), root=str(root),
-            )
     finally:
         gap_path.write_bytes(original_bytes)
-
-@pytest.mark.slow
-def test_mhs_diagnostic_mark_gate_fails_before_replay(mhs_market, monkeypatch) -> None:
-    # SCENARIO_MHS_DIAGNOSTIC_MARK_GATE_FAILS_BEFORE_REPLAY: with
-    # execution_coverage_gate=True, a fixture where a roster symbol's mark data
-    # starts after its first roster hour raises DataIntegrityError naming that
-    # symbol, and raises before any execution replay window is materialized.
-    # The missing span is kept well under DYNAMIC_GAP_EXCLUSION_HOURS (720h)
-    # so the default dynamic gap exclusion (spec
-    # mhs_data_integrity_relevance_scoping.md §3) leaves this symbol in the
-    # mask and the strict opt-in gate is the one that catches it -- see
-    # test_mhs_diagnostic_large_gap_auto_excluded_not_raised for the >=720h case.
-    root, end = mhs_market
-    symbols = [
-        s for s in ("MHSAUSDT", "MHSBUSDT", "MHSCUSDT", "MHSDUSDT", "MHSEUSDT",
-                    "MHSGUSDT", "MHSHUSDT", "MHSIUSDT", "MHSJUSDT", "MHSLUSDT")
-        if symbol_partition(s) == "dev"
-    ]
-    late_symbol = symbols[0]
-    hourly = pd.date_range(_START, end, freq="1h", tz="UTC")
-    late_idx = pd.date_range(hourly[100], end, freq="1h", tz="UTC")
-    epoch = pd.Timestamp("1970-01-01", tz="UTC")
-    mdir = root / "markPriceKlines" / "1h"
-    mdir.mkdir(parents=True, exist_ok=True)
-    mark_path = mdir / f"{late_symbol}.parquet"
-    # ``mhs_market`` is a module-scoped shared root: overwriting the mark file
-    # in place would permanently truncate this symbol's schema for every later
-    # test in the module, so the original bytes (or absence) are restored.
-    original_mark_bytes = mark_path.read_bytes() if mark_path.exists() else None
-    try:
-        pd.DataFrame(
-            {
-                "timestamp": (late_idx - epoch) // pd.Timedelta("1ms"),
-                "datetime": late_idx,
-                "close": 100.0,
-            }
-        ).to_parquet(mark_path)
-
-        def _all_roster(quote_vol, eligible, universe_size):
-            mask = pd.DataFrame(True, index=quote_vol.index, columns=quote_vol.columns)
-            mask.iloc[0] = False
-            return mask
-
-        monkeypatch.setattr(book_stage, "_pit_execution_mask", _all_roster)
-        window_calls = {"n": 0}
-        original_windows = _iter_mhs_execution_windows
-
-        def counting(*args, **kwargs):
-            window_calls["n"] += 1
-            return original_windows(*args, **kwargs)
-
-        import src.mhs.evaluation.windows as windows_mod
-
-        monkeypatch.setattr(windows_mod, "_iter_mhs_execution_windows", counting)
-        request = research_baseline(
-            start=str(_START), end=str(end), data_root=str(root),
-            execution_timeframe="3m", log_run=False,
-            execution_universe_size=8, execution_coverage_gate=True,
-        )
-        with pytest.raises(DataIntegrityError) as exc_info:
-            run_mhs_horizon_diagnostic(request)
-        assert late_symbol in str(exc_info.value)
-        assert window_calls["n"] == 0
-    finally:
-        if original_mark_bytes is None:
-            mark_path.unlink(missing_ok=True)
-        else:
-            mark_path.write_bytes(original_mark_bytes)
-
-@pytest.mark.slow
-def test_mhs_diagnostic_large_gap_auto_excluded_not_raised(mhs_market, monkeypatch) -> None:
-    # SCENARIO_MHS_DYNAMIC_GAP_EXCLUSION_LARGE_GAP_NO_RAISE: a roster symbol
-    # whose mark data is missing for >= DYNAMIC_GAP_EXCLUSION_HOURS (720h)
-    # is silently excluded from the execution mask by the default (always-on)
-    # apply_dynamic_mark_gap_exclusion instead of raising -- even with
-    # execution_coverage_gate=True, since that gate runs AFTER dynamic
-    # exclusion and only ever sees what remains in the mask. Companion to
-    # test_mhs_diagnostic_mark_gate_fails_before_replay (sub-threshold case).
-    root, end = mhs_market
-    symbols = [
-        s for s in ("MHSAUSDT", "MHSBUSDT", "MHSCUSDT", "MHSDUSDT", "MHSEUSDT",
-                    "MHSGUSDT", "MHSHUSDT", "MHSIUSDT", "MHSJUSDT", "MHSLUSDT")
-        if symbol_partition(s) == "dev"
-    ]
-    late_symbol = symbols[0]
-    hourly = pd.date_range(_START, end, freq="1h", tz="UTC")
-    late_idx = pd.date_range(hourly[len(hourly) // 2], end, freq="1h", tz="UTC")
-    epoch = pd.Timestamp("1970-01-01", tz="UTC")
-    mdir = root / "markPriceKlines" / "1h"
-    mdir.mkdir(parents=True, exist_ok=True)
-    mark_path = mdir / f"{late_symbol}.parquet"
-    # ``mhs_market`` is a module-scoped shared root: overwriting the mark file
-    # in place would permanently truncate this symbol's data for every later
-    # test in the module, so the original bytes (or absence) are restored.
-    original_mark_bytes = mark_path.read_bytes() if mark_path.exists() else None
-    try:
-        pd.DataFrame(
-            {
-                "timestamp": (late_idx - epoch) // pd.Timedelta("1ms"),
-                "datetime": late_idx,
-                "open": 100.0,
-                "high": 100.0,
-                "low": 100.0,
-                "close": 100.0,
-            }
-        ).to_parquet(mark_path)
-
-        def _all_roster(quote_vol, eligible, universe_size):
-            mask = pd.DataFrame(True, index=quote_vol.index, columns=quote_vol.columns)
-            mask.iloc[0] = False
-            return mask
-
-        monkeypatch.setattr(book_stage, "_pit_execution_mask", _all_roster)
-        request = research_baseline(
-            start=str(_START), end=str(end), data_root=str(root),
-            execution_timeframe="3m", log_run=False,
-            execution_universe_size=8, execution_coverage_gate=True,
-        )
-        report = run_mhs_horizon_diagnostic(request)
-        assert report.status == "COMPLETE"
-    finally:
-        if original_mark_bytes is None:
-            mark_path.unlink(missing_ok=True)
-        else:
-            mark_path.write_bytes(original_mark_bytes)
 
 def test_mhs_funding_load_reports_dropped_symbols(tmp_path, monkeypatch) -> None:
     # SCENARIO_MHS_FUNDING_LOAD_REPORTS_DROPPED_SYMBOLS: _load_funding_series

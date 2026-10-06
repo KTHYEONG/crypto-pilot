@@ -25,8 +25,7 @@ def _write_mhs_market(root: Path, symbols: list[str], n_hours: int = N_HOURS) ->
     minute_dir = root / "1m"
     five_dir = root / "5m"
     funding_dir = root / "funding"
-    mark_dir = root / "markPriceKlines" / "1h"
-    for d in (hour_dir, minute_dir, five_dir, funding_dir, mark_dir):
+    for d in (hour_dir, minute_dir, five_dir, funding_dir):
         d.mkdir(parents=True, exist_ok=True)
 
     n = len(hourly)
@@ -47,9 +46,6 @@ def _write_mhs_market(root: Path, symbols: list[str], n_hours: int = N_HOURS) ->
         pd.DataFrame({"timestamp": (five_frame.index - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta("1ms"), "open": five_frame["open"].to_numpy(), "high": five_frame["high"].to_numpy(), "low": five_frame["low"].to_numpy(), "close": five_frame["close"].to_numpy(), "quote_vol": np.full(len(five_frame), 5000.0)}).to_parquet(five_dir / f"{sym}.parquet")
 
         pd.DataFrame({"timestamp": epoch, "funding_rate": [0.00005] * n, "datetime": hourly}).to_parquet(funding_dir / f"{sym}.parquet")
-
-        mark_hourly = pd.Series(minute_prices, index=minute_idx).resample("1h").last().reindex(hourly).to_numpy()
-        pd.DataFrame({"timestamp": epoch, "open": mark_hourly, "high": mark_hourly, "low": mark_hourly, "close": mark_hourly, "datetime": hourly}).to_parquet(mark_dir / f"{sym}.parquet")
     return end
 
 

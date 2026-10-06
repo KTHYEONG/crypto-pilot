@@ -157,46 +157,6 @@ def _truncate_replayable_decisions(
     return target_weights.loc[replayable], signal_available_at[replayable], censored
 
 
-def _assert_cache_required_marks(
-    name: str,
-    target_replay: pd.DataFrame,
-    signal_available_at: pd.DatetimeIndex,
-    minute_marks: pd.DataFrame,
-) -> None:
-    """Fail closed when a replay symbol lacks a finite positive mark at a decision point.
-
-    A mark is required at every decision time where the target weight is
-    non-zero. ``minute_marks`` is exactly aligned to the minute closes; a
-    missing/non-positive mark at a required decision point raises
-    ``DataIntegrityError`` carrying the stable provenance rather than silently
-    falling back to OHLCV closes.
-    """
-    grid_set = set(minute_marks.index)
-    for i, decision_time in enumerate(target_replay.index):
-        signal_time = signal_available_at[i]
-        for sym in target_replay.columns:
-            weight = float(target_replay.loc[decision_time, sym])
-            if not np.isfinite(weight) or weight == 0.0:
-                continue
-            mark = float("nan")
-            if decision_time in grid_set:
-                mark = float(minute_marks.loc[decision_time, sym])
-            if not (np.isfinite(mark) and mark > 0):
-                prior = minute_marks.index[(minute_marks.index <= signal_time)]
-                if len(prior):
-                    mark = float(minute_marks.loc[prior[-1], sym])
-            if not (np.isfinite(mark) and mark > 0):
-                after = minute_marks.index[minute_marks.index > signal_time]
-                if len(after):
-                    mark = float(minute_marks.loc[after[0], sym])
-            if not (np.isfinite(mark) and mark > 0):
-                raise DataIntegrityError(
-                    "cache_required: no finite positive mark (MISSING_DECISION_MARK) "
-                    f"symbol={sym} decision={decision_time} signal={signal_time} "
-                    f"for {name}"
-                )
-
-
 def _assert_train_reference_ledger_certified(
     replay: StrategyExecutionReplayResult,
     fold_index: int,

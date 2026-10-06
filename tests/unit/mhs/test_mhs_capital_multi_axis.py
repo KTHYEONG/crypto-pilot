@@ -7,7 +7,6 @@ import numpy as np
 import pandas as pd
 import pytest
 
-import src.market_data.services.futures_collection as fc
 import src.mhs.marks as marks
 from src.mhs.evaluation import committee as committee_evaluation
 from src.mhs.evaluation import fold_weights
@@ -50,7 +49,6 @@ def mhs_market_with_taker_buy_quote(tmp_path, monkeypatch):
         bars.insert(0, "timestamp", (bars.index - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta("1ms"))
         bars.to_parquet(execution_dir / source.name, index=False)
     monkeypatch.setattr(marks, "funding_path", lambda sym: root / "funding" / f"{sym}.parquet")
-    monkeypatch.setattr(fc, "_mark_price_path", lambda symbol, timeframe: root / "markPriceKlines" / timeframe / f"{symbol}.parquet")
     # Retained loaders are stateless; the shared invalidation entry point
     # keeps runs isolated when fixtures redirect data roots between tests.
     marks.clear_mhs_market_data_caches()
