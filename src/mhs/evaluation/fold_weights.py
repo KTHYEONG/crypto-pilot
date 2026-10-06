@@ -64,6 +64,26 @@ def _resolve_effective_fold_window(
     return effective_start, effective_end
 
 
+def _rebalance_fold_weights(
+    weights: pd.DataFrame,
+    regime_scale: pd.Series,
+    request: MhsDiagnosticRequest,
+    apply_deadband: bool,
+    seed_row: pd.Series | None,
+) -> pd.DataFrame:
+    """Apply turnover controls with the regime scale in the existing causal order."""
+    if request.rebalance_filter == "portfolio_trigger":
+        if seed_row is not None:
+            raise ValueError("deadband_seed_row requires rebalance_filter='per_symbol_deadband'")
+        return portfolio_rebalance_trigger(
+            weights, REBALANCE_TRACKING_ERROR_THRESHOLD,
+        ).mul(regime_scale, axis=0)
+    scaled = weights.mul(regime_scale, axis=0)
+    if apply_deadband is False:
+        return scaled
+    return _scaling._apply_rebalance_deadband(scaled, seed_row=seed_row)
+
+
 def _build_fold_target_weights(
     root: str,
     fold: AnchoredPurgedFold,
@@ -259,19 +279,9 @@ def _build_fold_target_weights(
     regime_scale = _scaling.regime_cash_scale_1h(log_close, execution_mask, grid_1h, fast.horizon_hours, request.trend_efficiency_overlay).reindex(decision_grid).fillna(1.0)
     del execution_mask
     del log_close
-    if request.rebalance_filter == "portfolio_trigger":
-        if deadband_seed_row is not None:
-            raise ValueError("deadband_seed_row requires rebalance_filter='per_symbol_deadband'")
-        # Gate the unscaled book, then apply gross scale to preserve de-risking dynamics.
-        target_weights = portfolio_rebalance_trigger(
-            target_weights, REBALANCE_TRACKING_ERROR_THRESHOLD,
-        ).mul(regime_scale, axis=0)
-    elif apply_rebalance_deadband is False:
-        target_weights = target_weights.mul(regime_scale, axis=0)
-    else:
-        target_weights = _scaling._apply_rebalance_deadband(
-            target_weights.mul(regime_scale, axis=0), seed_row=deadband_seed_row,
-        )
+    target_weights = _rebalance_fold_weights(
+        target_weights, regime_scale, request, apply_rebalance_deadband, deadband_seed_row,
+    )
 
     if target_weights.empty:
         raise RuntimeError("fold decision grid is empty")

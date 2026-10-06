@@ -281,16 +281,60 @@ def _run_tax_collect(args: argparse.Namespace) -> None:
     logger.info("[EVAL] tax_collect records=%d", written)
 
 
-def _run_tax_summary(args: argparse.Namespace) -> None:
-    from src.common.errors import DataIntegrityError
-    from src.live.tax_ledger import summarize_tax_year
+def _load_boundary_marks(path: Path) -> dict[str, Any]:
+    import json
+    from decimal import Decimal
 
+    from src.live.tax_schema import (
+        BOUNDARY_MARK_SOURCE_OPERATOR,
+        BoundaryMark,
+        parse_tax_decimal,
+    )
+
+    raw = json.loads(Path(path).read_text(encoding="utf-8"), parse_float=Decimal)
+    if not isinstance(raw, dict):
+        raise ValueError(f"boundary marks must be a JSON object: {path}")
+    out: dict[str, Any] = {}
+    for symbol, value in raw.items():
+        amount = parse_tax_decimal(value, field=f"boundary_marks.{symbol}")
+        out[str(symbol)] = BoundaryMark(price=amount, source=BOUNDARY_MARK_SOURCE_OPERATOR)
+    return out
+
+
+def _run_tax_summary(args: argparse.Namespace) -> None:
+    from pathlib import Path as _Path
+
+    from src.common.errors import DataIntegrityError
+    from src.live.tax_boundary_marks import derive_ohlcv_boundary_marks
+    from src.live.tax_ledger import default_tax_ledger_dir
+    from src.live.tax_summary import (
+        TaxSummaryConfig,
+        summarize_tax_year,
+        tax_source_for_mode,
+        write_tax_summary,
+    )
+
+    settings = _settings_with_mode(args)
+    ledger_dir = _Path(args.ledger_dir) if args.ledger_dir else settings.resolved_tax_ledger_dir(default_tax_ledger_dir)
+    source = args.source or tax_source_for_mode(settings.mode)
     try:
-        summary = summarize_tax_year(args.year)
-    except DataIntegrityError as exc:
-        logger.error("[EVAL] tax_summary status=FAILED reason=%s", exc)
+        marks = _load_boundary_marks(_Path(args.boundary_marks)) if args.boundary_marks else None
+        summary = summarize_tax_year(
+            args.year, ledger_dir, source=source, config=TaxSummaryConfig.from_settings(settings),
+            coverage=None, boundary_marks=marks,
+            derive_boundary_marks=None if marks is not None else derive_ohlcv_boundary_marks,
+        )
+        output = _Path(args.output) if args.output else ledger_dir / "summaries" / f"tax_summary_{args.year}_{source}.json"
+        write_tax_summary(summary, output)
+    except (DataIntegrityError, ValueError, OSError) as exc:
+        logger.error("[PORTFOLIO] tax_summary status=FAILED year=%d source=%s ledger_dir=%s reason=%s", args.year, source, ledger_dir, exc)
         raise SystemExit(1) from exc
-    logger.info("[EVAL] tax_summary %s", summary)
+    status = summary["reconciliation"]["status"]
+    logger.info("[PORTFOLIO] tax_summary year=%d source=%s mode=%s status=%s output=%s", args.year, source, summary["mode"], status, output)
+    if status == "incomplete":
+        codes = sorted({issue["code"] for issue in summary["reconciliation"]["issues"]})
+        logger.warning("[DATA] tax_summary incomplete year=%d issues=%s", args.year, ",".join(codes))
+    print(str(output))  # noqa: T201 -- prints only the finalized summary path
 
 
 def _run_orderbook_capture(args: argparse.Namespace) -> None:
@@ -427,8 +471,13 @@ def add_live_commands(live_parser: argparse.ArgumentParser) -> None:
     tax_collect = subparsers.add_parser("tax-collect", help="Collect tax ledger from venue")
     tax_collect.set_defaults(handler=_run_tax_collect)
 
-    tax_summary = subparsers.add_parser("tax-summary", help="Summarize tax year")
-    tax_summary.add_argument('--year', type=int, required=True, help='Tax year to aggregate (UTC calendar year)')
+    tax_summary = subparsers.add_parser("tax-summary", help="Summarize one tax year (local calendar year of LIVE_TAX_TIMEZONE)")
+    tax_summary.add_argument("--year", type=int, required=True, help="Tax year in LIVE_TAX_TIMEZONE (default Asia/Seoul)")
+    tax_summary.add_argument("--mode", choices=["shadow", "paper", "live_testnet", "live_mainnet"], default=None, help="Override LIVE_MODE (selects ledger dir and source)")
+    tax_summary.add_argument("--ledger-dir", type=str, default=None, help="Override the ledger directory resolved from settings")
+    tax_summary.add_argument("--source", choices=["venue", "simulated"], default=None, help="Override the source derived from mode")
+    tax_summary.add_argument("--boundary-marks", type=str, default=None, help="JSON object {symbol: decimal string} of regime-boundary market values; omitted = close of the 1h OHLCV bar ending at the regime boundary from the local lake (null with reason when unavailable)")
+    tax_summary.add_argument("--output", type=str, default=None, help="Summary JSON path (default <ledger-dir>/summaries/tax_summary_<year>_<source>.json)")
     tax_summary.set_defaults(handler=_run_tax_summary)
 
     ob = subparsers.add_parser("orderbook-capture", help="Capture order book snapshots")

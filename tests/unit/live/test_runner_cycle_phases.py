@@ -18,7 +18,7 @@ from src.live.audit import AuditLog
 from src.live.delisting_settlement import DelistingSettlement
 from src.live.ledger import LedgerState
 from src.live.ledger import append_position_snapshot, load_ledger, save_ledger
-from src.live.tax_ledger import load_tax_records
+from src.live.tax_ledger import read_tax_ledger
 from src.live.order_journal import OrderJournal
 from src.live.runner import (
     _collect_live_tax_fail_soft,
@@ -500,7 +500,7 @@ def test_paper_delisted_full_path(monkeypatch, tmp_path, evidence) -> None:
     persisted = load_ledger(ledger_path)
     assert persisted.cash_usdt == Decimal("1000")
     assert persisted.positions == {"AAAUSDT": Decimal("1")}
-    assert load_tax_records(Path(settings.tax_ledger_dir)).empty
+    assert read_tax_ledger(Path(settings.tax_ledger_dir)) == ()
     records = [json.loads(line) for line in audit.path.read_text().splitlines()]
     assert [record["event"] for record in records] == ["paper_delisted_unresolved"]
     assert [alert["event"] for alert in alerts] == ["paper_delisted_unresolved"]
@@ -568,10 +568,10 @@ def test_paper_delisted_evidence_and_tax_records(monkeypatch, tmp_path, quantity
         Decimal("100"), Decimal("1"), Decimal("0.1"),
     )
     assert record.event_time == delivery
-    tax_frame = load_tax_records(Path(settings.tax_ledger_dir))
-    assert tax_frame["record_id"].tolist() == [record.record_id]
-    assert [Decimal(str(v)) for v in tax_frame["fee"].tolist()] == [record.fee]
-    assert tax_frame["side"].tolist() == [record.side]
+    tax_rows = read_tax_ledger(Path(settings.tax_ledger_dir))
+    assert [r.record_id for r in tax_rows] == [record.record_id]
+    assert [r.fee for r in tax_rows] == [record.fee]
+    assert [r.side for r in tax_rows] == [record.side]
     retry = _settle_paper_funding_and_delistings(
         settings,
         audit,
@@ -584,7 +584,7 @@ def test_paper_delisted_evidence_and_tax_records(monkeypatch, tmp_path, quantity
     )
     assert retry.ledger_state.cash_usdt == expected_cash
     assert retry.settlement_records == ()
-    pd.testing.assert_frame_equal(load_tax_records(Path(settings.tax_ledger_dir)), tax_frame)
+    assert read_tax_ledger(Path(settings.tax_ledger_dir)) == tax_rows
 
 
 def test_paper_no_delisted_success(monkeypatch, tmp_path) -> None:
@@ -621,9 +621,9 @@ def test_paper_no_delisted_success(monkeypatch, tmp_path) -> None:
     assert load_ledger(ledger_path).cash_usdt == Decimal("999.9")
     assert len(out.funding_records) == 1
     assert out.funding_records[0].realized_pnl == Decimal("-0.1")
-    tax_frame = load_tax_records(Path(settings.tax_ledger_dir))
-    assert tax_frame["record_id"].tolist() == [out.funding_records[0].record_id]
-    assert [Decimal(str(v)) for v in tax_frame["realized_pnl"].tolist()] == [Decimal("-0.1")]
+    tax_rows = read_tax_ledger(Path(settings.tax_ledger_dir))
+    assert [r.record_id for r in tax_rows] == [out.funding_records[0].record_id]
+    assert [r.realized_pnl for r in tax_rows] == [Decimal("-0.1")]
 
 
 def test_portfolio_fail_soft_success_and_failure(monkeypatch, tmp_path) -> None:

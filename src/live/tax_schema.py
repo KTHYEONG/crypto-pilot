@@ -394,3 +394,95 @@ def tax_event_sort_key(record: TaxRecord) -> tuple[pd.Timestamp, int, str]:
     order; lexical record_id order would place "venue:TRADE:10" before "venue:TRADE:9".
     """
     return (record.event_time, record.venue_id, record.record_id)
+
+
+@dataclass(frozen=True, slots=True)
+class TaxCoverage:
+    """Venue collection coverage facts needed to decide whether a ledger period is complete.
+
+    genesis_at: instant of the venue position snapshot taken with the first collection into this
+        ledger directory; the fold is anchored there. None when never recorded.
+    genesis_positions: nonzero venue positions at genesis_at. Only a flat genesis anchors the
+        fold, because the ledger holds no entry price for a position opened before collection.
+    income_covered_from: earliest instant from which venue income was collected contiguously
+        (apart from income_gaps). None when unknown (legacy watermark).
+    collected_through: income is known complete for event times <= this instant (the watermark's
+        last_collected_at).
+    income_gaps: closed UTC intervals of unrecoverable income history (venue income retention
+        exceeded between collections), sorted and de-duplicated.
+
+    All timestamps are tz-aware UTC.
+    """
+
+    genesis_at: pd.Timestamp | None
+    genesis_positions: Mapping[str, Decimal]
+    income_covered_from: pd.Timestamp | None
+    collected_through: pd.Timestamp | None
+    income_gaps: tuple[tuple[pd.Timestamp, pd.Timestamp], ...]
+
+    def __post_init__(self) -> None:
+        for name in ("genesis_at", "income_covered_from", "collected_through"):
+            value = getattr(self, name)
+            if value is not None:
+                _require_coverage_timestamp(value, name)
+        for symbol, quantity in self.genesis_positions.items():
+            if not isinstance(symbol, str) or not symbol:
+                raise ValueError("genesis_positions must name each symbol")
+            if not isinstance(quantity, Decimal) or not quantity.is_finite() or quantity == 0:
+                raise ValueError(f"genesis_positions[{symbol!r}] must be a finite nonzero Decimal")
+        for start, end in self.income_gaps:
+            _require_coverage_timestamp(start, "income_gaps.start")
+            _require_coverage_timestamp(end, "income_gaps.end")
+            if start > end:
+                raise ValueError("income_gaps must contain ordered closed intervals")
+        if self.income_gaps != tuple(sorted(set(self.income_gaps))):
+            raise ValueError("income_gaps must be sorted and de-duplicated")
+
+
+def _require_coverage_timestamp(value: object, field: str) -> None:
+    if not isinstance(value, pd.Timestamp) or pd.isna(value) or value.tzinfo is None:
+        raise ValueError(f"{field} must be a finite tz-aware UTC Timestamp")
+    if value.utcoffset() != pd.Timedelta(0):
+        raise ValueError(f"{field} must be a UTC Timestamp")
+
+
+BOUNDARY_MARK_SOURCE_OPERATOR: Final[str] = "operator_supplied"
+BOUNDARY_MARK_SOURCE_OHLCV_1H_CLOSE: Final[str] = "ohlcv_1h_close"
+BOUNDARY_MARK_SOURCES: Final[frozenset[str]] = frozenset(
+    {BOUNDARY_MARK_SOURCE_OPERATOR, BOUNDARY_MARK_SOURCE_OHLCV_1H_CLOSE}
+)
+BOUNDARY_MARK_NOT_SUPPLIED: Final[str] = "not_supplied"
+
+
+@dataclass(frozen=True, slots=True)
+class BoundaryMark:
+    """Regime-boundary reference price of one symbol, with its provenance.
+
+    price: market value per unit at the local regime boundary, or None when it could not be
+        established; never estimated.
+    source: BOUNDARY_MARK_SOURCE_OPERATOR (supplied via --boundary-marks) or
+        BOUNDARY_MARK_SOURCE_OHLCV_1H_CLOSE (close of the 1h bar ending at the boundary, read from
+        the local OHLCV lake).
+    unavailable_reason: why price is None (e.g. "ohlcv_file_missing", "ohlcv_bar_missing");
+        None iff price is set.
+
+    Raises:
+        ValueError: unknown source; price and unavailable_reason both set or both None; price not
+            a finite Decimal > 0; operator source without a price.
+    """
+
+    price: Decimal | None
+    source: str
+    unavailable_reason: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.source not in BOUNDARY_MARK_SOURCES:
+            raise ValueError(f"unknown boundary mark source: {self.source!r}")
+        if (self.price is None) == (self.unavailable_reason is None):
+            raise ValueError("price and unavailable_reason must be set exclusively")
+        if self.price is not None and (
+            not isinstance(self.price, Decimal) or not self.price.is_finite() or self.price <= 0
+        ):
+            raise ValueError(f"boundary mark price must be a finite Decimal > 0: {self.price!r}")
+        if self.source == BOUNDARY_MARK_SOURCE_OPERATOR and self.price is None:
+            raise ValueError("operator boundary mark requires a price")

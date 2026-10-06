@@ -678,3 +678,24 @@ def test_resolved_accessors_are_not_model_fields() -> None:
     dumped = settings.model_dump()
     assert not any(key.startswith("resolved_") for key in dumped)
     assert not any(name.startswith("resolved_") for name in LiveSettings.model_fields)
+
+
+def test_tax_summary_settings_validated() -> None:
+    from decimal import Decimal
+
+    from src.live.settings import LiveSettings
+
+    defaults = LiveSettings()
+    assert defaults.tax_timezone == "Asia/Seoul"
+    assert str(defaults.tax_regime_start) == "2027-01-01"
+    assert defaults.tax_settlement_asset == "USDT"
+    with pytest.raises(ValueError, match="tax_timezone"):
+        LiveSettings(tax_timezone="Mars/Olympus")
+    with pytest.raises(ValueError, match="tax_reconcile_abs_tolerance"):
+        LiveSettings(tax_reconcile_abs_tolerance=Decimal("-1"))
+    with pytest.raises(ValueError, match="tax_settlement_asset"):
+        LiveSettings(tax_settlement_asset="")
+    with pytest.raises(ValueError, match="tax_settlement_asset"):
+        LiveSettings(tax_settlement_asset="usdt")
+    with pytest.raises(ValueError, match="tax_timezone"):
+        LiveSettings(tax_timezone="Mars/Olympus")

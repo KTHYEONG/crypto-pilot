@@ -584,3 +584,37 @@ def test_append_rejects_non_string_fields_before_touching_shard(tmp_path: Path, 
 
     assert shard.read_bytes() == before
     assert [record.record_id for record in read_tax_ledger(ledger_dir)] == ["existing"]
+
+
+@pytest.mark.parametrize("field", ["genesis_at", "income_covered_from", "collected_through"])
+@pytest.mark.parametrize("value", [pd.NaT, pd.Timestamp("2027-01-01"), pd.Timestamp("2027-01-01", tz="Asia/Seoul")])
+def test_coverage_rejects_invalid_timestamp(field, value):
+    from dataclasses import replace
+
+    from src.live.tax_schema import TaxCoverage
+
+    coverage = TaxCoverage(None, {}, None, None, ())
+    with pytest.raises(ValueError, match=field):
+        replace(coverage, **{field: value})
+
+
+@pytest.mark.parametrize("positions", [{"": Decimal("1")}, {"BTCUSDT": Decimal("NaN")},
+                                       {"BTCUSDT": Decimal("0")}, {"BTCUSDT": 1}])
+def test_coverage_rejects_invalid_genesis_positions(positions):
+    from src.live.tax_schema import TaxCoverage
+
+    with pytest.raises(ValueError, match="genesis_positions"):
+        TaxCoverage(None, positions, None, None, ())
+
+
+def test_coverage_validates_gap_intervals():
+    from src.live.tax_schema import TaxCoverage
+
+    start = pd.Timestamp("2027-01-01T00:00Z")
+    end = pd.Timestamp("2027-01-02T00:00Z")
+    for gaps in [((pd.NaT, end),), ((start, pd.NaT),), ((end, start),),
+                 ((start, end), (start, end)), ((end, end), (start, start))]:
+        with pytest.raises(ValueError, match="income_gaps"):
+            TaxCoverage(None, {}, None, None, gaps)
+    coverage = TaxCoverage(start, {"BTCUSDT": Decimal("-1")}, start, end, ((start, end),))
+    assert coverage.income_gaps == ((start, end),)
