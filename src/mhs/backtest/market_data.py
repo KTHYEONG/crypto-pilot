@@ -32,6 +32,8 @@ from src.mhs.params import (
     PROCESS_FEATURE_CANDIDATES,
     PROCESS_FUNDING_CARRY_CANDIDATES_HOURS,
     PROCESS_MIN_SYMBOLS,
+    UNIVERSE_ELIGIBILITY_LOOKBACK_BARS,
+    UNIVERSE_ELIGIBILITY_MIN_HISTORY_BARS,
 )
 from src.mhs.process_features import PROCESS_FEATURE_COLUMN_BLOCK_SIZE, build_process_feature_grid
 from src.mhs.regime import beta_neutralize_weights, causal_market_beta
@@ -243,7 +245,11 @@ def load_process_market_data(
         f"funding_unknown:{','.join(unknown_symbols) if unknown_symbols else 'none'}",
     )
     _logger.info("[DATA] stage=funding_alignment bars=%d symbols=%d", len(grid_1h), len(aligned))
-    eligible = liquid_half_eligibility(quote_vol, PANEL_MIN_HISTORY_BARS, PANEL_MIN_HISTORY_BARS)
+    eligible = liquid_half_eligibility(
+        quote_vol,
+        lookback_bars=UNIVERSE_ELIGIBILITY_LOOKBACK_BARS,
+        min_history_bars=UNIVERSE_ELIGIBILITY_MIN_HISTORY_BARS,
+    )
     eligible = eligible & history_mask & funding_known_1h
     mask = _pit_execution_mask(quote_vol, eligible, CLI_EXECUTION_UNIVERSE_SIZE_DEFAULT)
     decision_grid = pd.date_range(start, end, freq="24h", tz="UTC")
