@@ -396,7 +396,7 @@ def test_source_module_size_budget() -> None:
         "src/market_data/streams/normalizer.py": 1112,
         # LiveSettings resolved path accessors (spec 20) stay on the settings model
         # so call-site default seams keep resolving lazily at call time.
-        "src/live/settings.py": 711,
+        "src/live/settings.py": 750,
     }
     measured = {
         str(path): len(path.read_text(encoding="utf-8").splitlines())

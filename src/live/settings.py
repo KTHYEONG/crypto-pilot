@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable
+from datetime import date
+from decimal import Decimal
 from enum import Enum
 from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo
 
 from pydantic import AliasChoices, Field, SecretStr, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -143,6 +146,16 @@ class LiveSettings(BaseSettings):
     tax_income_overlap_s: float = 21600.0
     tax_income_retention_days: int = 90
     tax_max_pages_per_cycle: int = 200
+    tax_timezone: str = "Asia/Seoul"
+    # Korean tax year is the Asia/Seoul calendar year; events stay UTC, only bucketing uses this zone.
+    tax_regime_start: date = date(2027, 1, 1)
+    # First day of Korean virtual-asset income taxation; earlier-opened positions are flagged for deemed-acquisition review.
+    tax_settlement_asset: str = "USDT"
+    # USDT-M settles P&L, funding and fees in USDT; other assets are reported per asset, never summed.
+    tax_reconcile_abs_tolerance: Decimal = Decimal("0.01")
+    # Provisional per-symbol slack for fold vs venue average-entry precision; calibrated on the first testnet run.
+    tax_reconcile_per_fill_tolerance: Decimal = Decimal("0.00000001")
+    # Venue amounts are 8-decimal strings: allow one unit of rounding per aggregated fill.
     alert_webhook_url: str | None = None
     alert_gmail_user: str | None = None
     alert_gmail_app_password: SecretStr | None = None
@@ -413,6 +426,32 @@ class LiveSettings(BaseSettings):
         if value <= 0:
             raise ValueError("tax_income_overlap_s must be > 0")
         return value
+
+    @field_validator("tax_timezone")
+    @classmethod
+    def _valid_tax_timezone(cls, value: str) -> str:
+        try:
+            ZoneInfo(value)
+        except (KeyError, ValueError) as exc:
+            raise ValueError(f"tax_timezone is unknown: {value!r}") from exc
+        return value
+
+    @field_validator("tax_settlement_asset")
+    @classmethod
+    def _valid_tax_settlement_asset(cls, value: str) -> str:
+        if not isinstance(value, str) or not value:
+            raise ValueError("tax_settlement_asset must be non-empty")
+        if value != value.upper() or any(ch.isspace() for ch in value):
+            raise ValueError(f"tax_settlement_asset must be upper-case without whitespace: {value!r}")
+        return value
+
+    @field_validator("tax_reconcile_abs_tolerance", "tax_reconcile_per_fill_tolerance")
+    @classmethod
+    def _valid_tax_tolerance(cls, value: Decimal, info: ValidationInfo) -> Decimal:
+        amount = value if isinstance(value, Decimal) else Decimal(str(value))
+        if not amount.is_finite() or amount < 0:
+            raise ValueError(f"{info.field_name} must be a finite, non-negative Decimal")
+        return amount
 
     @field_validator("data_retention_days")
     @classmethod

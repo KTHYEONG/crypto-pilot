@@ -106,7 +106,7 @@ def test_SCENARIO_REC_12_cli_tax_subcommands(monkeypatch) -> None:
     with pytest.raises(SystemExit):
         parser.parse_args(["tax-summary"])
     # summary failure handling
-    monkeypatch.setattr("src.live.tax_ledger.summarize_tax_year", lambda *a, **k: (_ for _ in ()).throw(__import__("src.common.errors", fromlist=["DataIntegrityError"]).DataIntegrityError("mixed")))
+    monkeypatch.setattr("src.live.tax_summary.summarize_tax_year", lambda *a, **k: (_ for _ in ()).throw(__import__("src.common.errors", fromlist=["DataIntegrityError"]).DataIntegrityError("mixed")))
     with pytest.raises(SystemExit) as exc:
         _run_tax_summary(args)
     assert exc.value.code == 1

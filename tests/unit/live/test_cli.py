@@ -591,3 +591,151 @@ def test_tax_collect_cli_uses_durable_collect_path_and_audits_issues(monkeypatch
     events = [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()]
     issue = next(e for e in events if e["event"] == "tax_collect_issue")
     assert (issue["stream"], issue["stage"]) == ("income", "page_cap")
+
+
+def test_tax_summary_resolves_run_ledger_and_source_from_mode(tmp_path, monkeypatch) -> None:
+    import argparse
+    from decimal import Decimal
+
+    import pandas as pd
+
+    import src.cli.commands.live as live_mod
+    from src.live.settings import LiveSettings
+    from src.live.tax_ledger import append_tax_records
+    from src.live.tax_schema import TaxRecord
+
+    run_id = "taxcli2026test01"
+    monkeypatch.setenv("LIVE_RECORD_RUN_ID", run_id)
+    monkeypatch.setenv("LIVE_MODE", "paper")
+    import src.common.paths as paths_mod
+
+    monkeypatch.setattr(paths_mod, "DATA_DIR", tmp_path)
+    import src.live.settings as settings_mod
+
+    monkeypatch.setattr(settings_mod, "DATA_DIR", tmp_path)
+    monkeypatch.setattr("src.common.paths.ohlcv_path", lambda s, tf: tmp_path / "lake" / f"{s}.parquet")
+    settings = LiveSettings()
+    ledger_dir = tmp_path / "state" / "runs" / run_id / "tax_ledger"
+    recs = [
+        TaxRecord(record_id="simulated:TRADE:journal:1", kind="TRADE", event_time=pd.Timestamp("2026-12-20 00:00", tz="UTC"), symbol="BTCUSDT", side="BUY", quantity=Decimal(1), price=Decimal(100), quote_qty=Decimal(100), fee=Decimal(0), fee_asset="USDT", realized_pnl=Decimal(0), income_asset="USDT", is_maker=False, venue_id=1, source="simulated", mode="paper"),
+        TaxRecord(record_id="simulated:TRADE:journal:2", kind="TRADE", event_time=pd.Timestamp("2027-01-05 00:00", tz="UTC"), symbol="BTCUSDT", side="SELL", quantity=Decimal(1), price=Decimal(120), quote_qty=Decimal(120), fee=Decimal(0), fee_asset="USDT", realized_pnl=Decimal(0), income_asset="USDT", is_maker=False, venue_id=2, source="simulated", mode="paper"),
+    ]
+    append_tax_records(recs, ledger_dir)
+    args = argparse.Namespace(year=2027, mode=None, ledger_dir=None, source=None, boundary_marks=None, output=None)
+    import io
+    from contextlib import redirect_stdout
+
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        live_mod._run_tax_summary(args)
+    out_path = __import__("pathlib").Path(buf.getvalue().strip())
+    assert out_path == ledger_dir / "summaries" / "tax_summary_2027_simulated.json"
+    assert out_path.exists()
+    import json
+
+    summary = json.loads(out_path.read_text())
+    assert summary["source"] == "simulated"
+    assert summary["totals"]["trading_pnl"] == "20"
+    opening = summary["opening_inventory"]["BTCUSDT"]
+    assert opening["boundary_mark"] is None
+    assert opening["boundary_mark_source"] == "ohlcv_1h_close"
+    assert opening["boundary_mark_unavailable_reason"] == "ohlcv_file_missing"
+
+
+def test_tax_summary_overrides(tmp_path, monkeypatch) -> None:
+    import argparse
+
+    import src.cli.commands.live as live_mod
+    import src.live.tax_boundary_marks as marks_mod
+
+    seen: dict = {}
+
+    def _fake(year, ledger_dir, *, source, config, coverage=None, boundary_marks=None, derive_boundary_marks=None):
+        seen.update(ledger_dir=ledger_dir, source=source, boundary_marks=boundary_marks, derive=derive_boundary_marks)
+        return {"reconciliation": {"status": "not_applicable", "issues": []}, "mode": "paper"}
+
+    monkeypatch.setattr("src.live.tax_summary.summarize_tax_year", _fake)
+    monkeypatch.setattr("src.live.tax_summary.write_tax_summary", lambda summary, path: seen.__setitem__("written", path))
+    args = argparse.Namespace(year=2027, mode=None, ledger_dir=str(tmp_path / "X"), source="venue", boundary_marks=None, output=str(tmp_path / "Y.json"))
+    live_mod._run_tax_summary(args)
+    from pathlib import Path as _Path
+
+    assert seen["ledger_dir"] == _Path(str(tmp_path / "X"))
+    assert seen["source"] == "venue"
+    assert seen["boundary_marks"] is None
+    assert seen["derive"] is marks_mod.derive_ohlcv_boundary_marks
+    assert str(seen["written"]) == str(tmp_path / "Y.json")
+
+
+def test_operator_marks_disable_auto_derivation(tmp_path, monkeypatch) -> None:
+    import argparse
+    import json
+
+    import src.cli.commands.live as live_mod
+
+    marks_path = tmp_path / "marks.json"
+    marks_path.write_text(json.dumps({"BTCUSDT": "105"}))
+    seen: dict = {}
+
+    def _fake(year, ledger_dir, *, source, config, coverage=None, boundary_marks=None, derive_boundary_marks=None):
+        seen.update(boundary_marks=boundary_marks, derive=derive_boundary_marks)
+        return {"reconciliation": {"status": "not_applicable", "issues": []}, "mode": "paper"}
+
+    monkeypatch.setattr("src.live.tax_summary.summarize_tax_year", _fake)
+    monkeypatch.setattr("src.live.tax_summary.write_tax_summary", lambda summary, path: None)
+    args = argparse.Namespace(year=2027, mode=None, ledger_dir=str(tmp_path), source="simulated", boundary_marks=str(marks_path), output=str(tmp_path / "o.json"))
+    live_mod._run_tax_summary(args)
+    from decimal import Decimal as _D
+
+    assert seen["derive"] is None
+    assert seen["boundary_marks"]["BTCUSDT"].price == _D("105")
+    assert seen["boundary_marks"]["BTCUSDT"].source == "operator_supplied"
+
+
+def test_tax_summary_fails_closed(tmp_path, monkeypatch) -> None:
+    import argparse
+
+    import pytest
+
+    import src.cli.commands.live as live_mod
+
+    ledger_dir = tmp_path / "tax"
+    ledger_dir.mkdir()
+    (ledger_dir / "tax_ledger_202701.jsonl").write_text("not json\n")
+    args = argparse.Namespace(year=2027, mode=None, ledger_dir=str(ledger_dir), source="simulated", boundary_marks=None, output=str(tmp_path / "o.json"))
+    with pytest.raises(SystemExit) as exc:
+        live_mod._run_tax_summary(args)
+    assert exc.value.code == 1
+    assert not (tmp_path / "o.json").exists()
+
+
+def test_tax_summary_non_object_marks_fails_closed(tmp_path, monkeypatch) -> None:
+    import argparse
+
+    import pytest
+
+    import src.cli.commands.live as live_mod
+
+    marks_path = tmp_path / "marks.json"
+    marks_path.write_text("[1, 2]")
+    args = argparse.Namespace(year=2027, mode=None, ledger_dir=str(tmp_path), source="simulated", boundary_marks=str(marks_path), output=str(tmp_path / "o.json"))
+    with pytest.raises(SystemExit) as exc:
+        live_mod._run_tax_summary(args)
+    assert exc.value.code == 1
+
+
+def test_tax_summary_incomplete_warns(tmp_path, monkeypatch, caplog) -> None:
+    import argparse
+    import logging
+
+    import src.cli.commands.live as live_mod
+
+    def _fake(year, ledger_dir, *, source, config, coverage=None, boundary_marks=None, derive_boundary_marks=None):
+        return {"reconciliation": {"status": "incomplete", "issues": [{"code": "coverage_unknown", "symbol": None, "detail": "x"}]}, "mode": "paper"}
+
+    monkeypatch.setattr("src.live.tax_summary.summarize_tax_year", _fake)
+    monkeypatch.setattr("src.live.tax_summary.write_tax_summary", lambda summary, path: None)
+    args = argparse.Namespace(year=2027, mode=None, ledger_dir=str(tmp_path), source="venue", boundary_marks=None, output=str(tmp_path / "o.json"))
+    with caplog.at_level(logging.WARNING, logger="LiveCli"):
+        live_mod._run_tax_summary(args)
+    assert "coverage_unknown" in caplog.text
