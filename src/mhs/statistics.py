@@ -16,6 +16,11 @@ import pandas as pd
 
 from src.common.errors import DataIntegrityError
 from src.mhs.books import phase_tranche_book, rank_weight_book
+from src.mhs.bootstrap import (
+    iter_stationary_bootstrap_index_chunks,
+    stationary_bootstrap_max_blocks,
+    stationary_bootstrap_scalar_indices,
+)
 from src.mhs.contracts import MhsBookReport, MhsFoldReport
 from src.mhs.evidence import (
     TRIAL_SHARPE_DEDUP_DECIMALS,
@@ -35,6 +40,7 @@ _logger = logging.getLogger(__name__)
 _BOOTSTRAP_SEED = 20260807
 _BOOTSTRAP_REPLICATES = 2000
 _BOOTSTRAP_MEAN_BLOCK = 168
+_BOOTSTRAP_CI_CHUNK_REPLICATES: int = 128
 
 # Lag-window sensitivity disclosure: one holding horizon = 168h. Report-only
 # alternative reading of the effective sample size (the registered max_lag
@@ -151,28 +157,18 @@ def _date_clustered_ols(
         "n": n, "n_dates": len(daily_scores), "past_beta": float(beta[1]),
         "past_t": float(t_beta), "forward_bars": forward_bars,
     }
-def _block_bootstrap_replicate_mean(
-    arr: np.ndarray, n: int, p_block: float, rng: np.random.Generator,
-) -> float:
-    """Mean of one block-bootstrap replicate (scalar fallback path).
-
-    Mirrors the original geometric block composition: block starts are uniform,
-    block lengths grow while ``rng.random() > p_block``, blocks are truncated at
-    the array end and again to the remaining sample length.  Only used for the
-    degenerate ``mean_block <= 0`` configuration and for the astronomically
-    rare vectorized shortfall, where a replicate's drawn blocks did not reach
-    length ``n``.
-    """
-    blocks: list[float] = []
-    while len(blocks) < n:
-        start = int(rng.integers(0, n))
-        length = 1
-        while length < n and rng.random() > p_block:
-            length += 1
-        length = min(length, n - len(blocks))
-        blocks.extend(arr[start : start + length].tolist())
-    return float(np.mean(blocks[:n]))
 def _bootstrap_ci(net: pd.Series, n_replicates: int, mean_block: int, seed: int) -> tuple[float, float]:
+    """Percentile (2.5, 97.5) CI of the mean net return under a stationary block bootstrap.
+
+    Seeded and bit-reproducible: the draw protocol is the shared
+    ``src.mhs.bootstrap`` kernel with a fixed 128-replicate chunk, which is part of
+    the seeded stream and must not change. ``mean_block <= 0`` uses the scalar
+    full-length-block law for every replicate.
+
+    Returns:
+        ``(nan, nan)`` for an empty series, ``(x, x)`` for a single observation,
+        otherwise the lower/upper percentile of the replicate means.
+    """
     rng = np.random.default_rng(seed)
     arr = net.to_numpy(dtype="float64")
     n = len(arr)
@@ -185,41 +181,17 @@ def _bootstrap_ci(net: pd.Series, n_replicates: int, mean_block: int, seed: int)
     if p_block <= 0.0:
         means = np.empty(n_replicates, dtype=np.float64)
         for r in range(n_replicates):
-            means[r] = _block_bootstrap_replicate_mean(arr, n, p_block, rng)
+            means[r] = arr[stationary_bootstrap_scalar_indices(rng, n, 0.0)].mean()
         return float(np.percentile(means, 2.5)), float(np.percentile(means, 97.5))
 
-    # Vectorized block bootstrap: block lengths are ``geometric(p_block)`` --
-    # the same length law as the scalar ``while`` loop -- and block starts are
-    # uniform.  A 6x block-count safety margin makes running short effectively
-    # impossible; any shortfall still falls back to the scalar replicate path.
-    max_blocks = min(n, int(np.ceil(n * 6.0 / mean_block)) + 16)
+    max_blocks = stationary_bootstrap_max_blocks(n, mean_block)
     means = np.empty(n_replicates, dtype=np.float64)
-    chunk = 128
-    for r0 in range(0, n_replicates, chunk):
-        r1 = min(r0 + chunk, n_replicates)
-        k = r1 - r0
-        lengths = rng.geometric(p_block, size=(k, max_blocks))
-        starts = rng.integers(0, n, size=(k, max_blocks))
-        ends = np.cumsum(lengths, axis=1)
-        short = ends[:, -1] < n
-        for r in np.flatnonzero(short).tolist():
-            means[r0 + r] = _block_bootstrap_replicate_mean(arr, n, p_block, rng)
-        valid = ~short
-        if valid.any():
-            ends_trunc = np.minimum(ends, n)
-            used = ends_trunc - np.concatenate(
-                [np.zeros((k, 1), dtype=np.int64), ends_trunc[:, :-1]], axis=1,
-            )
-            u = used[valid].ravel()
-            s = starts[valid].ravel()
-            keep = u > 0
-            u = u[keep]
-            s = s[keep]
-            block_start = np.cumsum(u) - u
-            offsets = np.arange(int(u.sum()), dtype=np.int64) - np.repeat(block_start, u)
-            arr_idx = (np.repeat(s, u) + offsets) % n
-            sample = arr[arr_idx].reshape(int(valid.sum()), n)
-            means[r0 + np.flatnonzero(valid)] = sample.mean(axis=1)
+    for chunk in iter_stationary_bootstrap_index_chunks(
+        rng, source_len=n, path_len=n, n_replicates=n_replicates, mean_block=mean_block,
+        chunk_size=_BOOTSTRAP_CI_CHUNK_REPLICATES, max_blocks=max_blocks,
+    ):
+        rows = chunk.indices.shape[0]
+        means[chunk.row_start : chunk.row_start + rows] = arr[chunk.indices].mean(axis=1)
 
     return float(np.percentile(means, 2.5)), float(np.percentile(means, 97.5))
 def _placebo_sharpe_percentile(
