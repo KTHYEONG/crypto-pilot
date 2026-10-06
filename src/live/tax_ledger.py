@@ -4,12 +4,11 @@ from __future__ import annotations
 
 import contextlib
 import json
-import math
 import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from dataclasses import replace as _replace
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -20,10 +19,24 @@ from src.common.errors import DataIntegrityError
 from src.common.paths import DATA_DIR
 from src.live.order_journal import truncate_durably
 
+# Re-exported so `from src.live.tax_ledger import TaxRecord` keeps working.
+from src.live.tax_schema import (
+    ONE_WAY_POSITION_SIDE,
+    parse_tax_decimal,
+    tax_event_sort_key,
+    tax_record_from_row,
+    tax_record_to_row,
+    validate_tax_record,
+)
+from src.live.tax_schema import (
+    TAX_RECORD_KINDS as TAX_RECORD_KINDS,
+)
+from src.live.tax_schema import (
+    TaxRecord as TaxRecord,
+)
+
 if TYPE_CHECKING:
     from src.live.fills import FillEvent
-
-TAX_RECORD_KINDS: frozenset[str] = frozenset({"TRADE", "REALIZED_PNL", "FUNDING_FEE", "COMMISSION", "TRANSFER", "UNCLASSIFIED"})
 
 INCOME_TYPE_KIND: Mapping[str, str] = {
     "REALIZED_PNL": "REALIZED_PNL",
@@ -76,28 +89,6 @@ class TaxLedgerCorruptError(DataIntegrityError):
 
 
 @dataclass(frozen=True, slots=True)
-class TaxRecord:
-    record_id: str
-    kind: str
-    event_time: pd.Timestamp
-    symbol: str
-    side: str
-    quantity: float
-    price: float
-    quote_qty: float
-    fee: float
-    fee_asset: str
-    realized_pnl: float
-    income_asset: str
-    is_maker: bool
-    venue_id: int
-    source: str
-    mode: str
-    income_type: str = ""
-    """Raw venue incomeType for source="venue" income rows ("" for trades and simulated rows)."""
-
-
-@dataclass(frozen=True, slots=True)
 class TaxWatermark:
     last_trade_id: dict[str, int]
     last_collected_at: pd.Timestamp | None
@@ -132,9 +123,7 @@ def classify_income_type(income_type: str) -> tuple[str, bool]:
     return "UNCLASSIFIED", False
 
 
-def _report_issue(
-    issues: list[TaxCollectionIssue] | None, stream: str, stage: str, detail: str
-) -> None:
+def _report_issue(issues: list[TaxCollectionIssue] | None, stream: str, stage: str, detail: str) -> None:
     if issues is not None:
         issues.append(TaxCollectionIssue(stream=stream, stage=stage, detail=detail))
 
@@ -162,15 +151,14 @@ def _venue_int(entry: dict[str, Any], key: str, what: str) -> int:
         raise DataIntegrityError(f"{what} entry has unparseable {key}: {entry!r}") from exc
 
 
-def _venue_float(entry: dict[str, Any], key: str, what: str) -> float:
-    raw = _venue_field(entry, key, what)
+def _venue_decimal(entry: dict[str, Any], key: str, what: str) -> Decimal:
+    raw = entry.get(key)
+    if isinstance(raw, bool) or not isinstance(raw, (str, int)):
+        raise DataIntegrityError(f"{what} entry has unparseable {key}: {entry!r}")
     try:
-        value = float(raw)
-    except (TypeError, ValueError) as exc:
+        return parse_tax_decimal(raw, field=f"{what}.{key}")
+    except DataIntegrityError as exc:
         raise DataIntegrityError(f"{what} entry has unparseable {key}: {entry!r}") from exc
-    if not math.isfinite(value):
-        raise DataIntegrityError(f"{what} entry has non-finite {key}: {entry!r}")
-    return value
 
 
 def _parse_trade_row(entry: Any, sym: str) -> tuple[TaxRecord, int, str]:
@@ -182,17 +170,25 @@ def _parse_trade_row(entry: Any, sym: str) -> tuple[TaxRecord, int, str]:
     if not isinstance(entry, dict):
         raise DataIntegrityError(f"trade entry is not an object: {entry!r}")
     venue_id = _venue_int(entry, "id", "trade")
-    price = _venue_float(entry, "price", "trade")
-    qty = _venue_float(entry, "qty", "trade")
-    quote_qty = _venue_float(entry, "quoteQty", "trade")
-    fee = _venue_float(entry, "commission", "trade")
-    realized_pnl = _venue_float(entry, "realizedPnl", "trade")
+    price = _venue_decimal(entry, "price", "trade")
+    qty = _venue_decimal(entry, "qty", "trade")
+    quote_qty = _venue_decimal(entry, "quoteQty", "trade")
+    fee = _venue_decimal(entry, "commission", "trade")
+    realized_pnl = _venue_decimal(entry, "realizedPnl", "trade")
     event_time = pd.Timestamp(_venue_int(entry, "time", "trade"), unit="ms", tz="UTC")
     is_buyer = _venue_field(entry, "buyer", "trade")
     if not isinstance(is_buyer, bool):
         raise DataIntegrityError(f"trade entry has non-boolean buyer: {entry!r}")
     side = "BUY" if is_buyer else "SELL"
-    fee_asset = str(entry.get("commissionAsset") or "")
+    fee_asset = entry.get("commissionAsset")
+    if not isinstance(fee_asset, str) or not fee_asset:
+        raise DataIntegrityError(f"trade entry lacks commissionAsset: {entry!r}")
+    position_side = entry.get("positionSide")
+    if not isinstance(position_side, str) or position_side != ONE_WAY_POSITION_SIDE:
+        raise DataIntegrityError(
+            f"trade entry positionSide {position_side!r} is not one-way "
+            f"(expected {ONE_WAY_POSITION_SIDE!r}): {entry!r}"
+        )
     symbol = str(entry.get("symbol") or sym)
     is_maker = bool(entry.get("maker", False))
     income_asset = fee_asset or "USDT"
@@ -214,15 +210,14 @@ def _parse_trade_row(entry: Any, sym: str) -> tuple[TaxRecord, int, str]:
             venue_id=venue_id,
             source="venue",
             mode="",
+            position_side=ONE_WAY_POSITION_SIDE,
         ),
         venue_id,
         symbol,
     )
 
 
-def _parse_income_row(
-    entry: Any, issues: list[TaxCollectionIssue] | None
-) -> tuple[TaxRecord, int, pd.Timestamp]:
+def _parse_income_row(entry: Any, issues: list[TaxCollectionIssue] | None) -> tuple[TaxRecord, int, pd.Timestamp]:
     """Convert one ``/fapi/v1/income`` entry; returns (record, tran_id, event_time).
 
     ``tranId``, ``incomeType``, ``income`` and ``time`` are required; ``symbol`` is legitimately
@@ -241,7 +236,7 @@ def _parse_income_row(
             )
         )
     raw_upper = raw_type.upper()
-    inc = _venue_float(entry, "income", "income")
+    inc = _venue_decimal(entry, "income", "income")
     event_time = pd.Timestamp(_venue_int(entry, "time", "income"), unit="ms", tz="UTC")
     asset = str(entry.get("asset") or "")
     symbol = str(entry.get("symbol") or "")
@@ -252,10 +247,10 @@ def _parse_income_row(
             event_time=event_time,
             symbol=symbol,
             side="",
-            quantity=0.0,
-            price=0.0,
-            quote_qty=0.0,
-            fee=0.0,
+            quantity=Decimal(0),
+            price=Decimal(0),
+            quote_qty=Decimal(0),
+            fee=Decimal(0),
             fee_asset="",
             realized_pnl=inc,
             income_asset=asset,
@@ -353,7 +348,7 @@ def _collect_income(
     """
     records: list[TaxRecord] = []
     # 창 겹침 재조회에서 같은 record_id 가 다시 오므로 내용 서명으로 중복/충돌을 가른다.
-    seen_ids: dict[str, tuple[str, float, str, str]] = {}
+    seen_ids: dict[str, tuple[str, Decimal, str, str]] = {}
     retention_floor = now_ts - income_retention
     if watermark.last_collected_at is not None:
         start0 = _as_utc(watermark.last_collected_at) - income_overlap
@@ -512,9 +507,17 @@ def collect_tax_records(
     return tuple(records_sorted), new_watermark
 
 
-def simulated_tax_records(
-    fill_events: Sequence[FillEvent], mode: str
-) -> tuple[TaxRecord, ...]:
+def _sim_decimal(value: Any, fill_id: str, what: str) -> Decimal:
+    """Exact Decimal for a simulated fill amount; a float would inject binary rounding."""
+    if isinstance(value, bool) or not isinstance(value, (Decimal, int)):
+        raise DataIntegrityError(f"simulated fill {fill_id} has non-decimal {what}: {value!r}")
+    amount = value if isinstance(value, Decimal) else Decimal(value)
+    if not amount.is_finite():
+        raise DataIntegrityError(f"simulated fill {fill_id} has non-finite {what}")
+    return amount
+
+
+def simulated_tax_records(fill_events: Sequence[FillEvent], mode: str) -> tuple[TaxRecord, ...]:
     """Build PAPER/SHADOW simulated TRADE tax records from persisted fill events.
 
     The record identity is the fill's durable journal identity, so a retried attempt of the same
@@ -522,13 +525,15 @@ def simulated_tax_records(
     and re-emitting a journal range after a crash is deduplicated instead of double-booked.
 
     Args:
-        fill_events: Fill events carrying ``fill_id`` (``journal:<fill_seq>``), signed
-            ``quantity_delta``, positive finite ``fill_price``, ``fee_bps`` and a tz-aware
+        fill_events: Fill events carrying ``fill_id`` (``journal:<fill_seq>``), Decimal signed
+            ``quantity_delta``, Decimal positive finite ``fill_price``, ``fee_bps`` and a tz-aware
             ``timestamp``.
         mode: Execution mode label stored on each record.
 
     Returns:
-        One TRADE record per fill event with a nonzero quantity delta, sorted by event time.
+        One TRADE record per fill event with a nonzero quantity delta, sorted by event time. The
+        fee is ``quantity * price * Decimal(str(fee_bps)) / 10000``, the exact formula of the paper
+        cash ledger, so the per-batch cash reconciliation of these records has zero difference.
 
     Raises:
         DataIntegrityError: a fill lacks ``fill_id``, or its price is not finite and positive, its
@@ -539,17 +544,18 @@ def simulated_tax_records(
         fill_id = getattr(ev, "fill_id", None)
         if not isinstance(fill_id, str) or not fill_id.startswith("journal:") or not fill_id[8:].isdigit():
             raise DataIntegrityError(f"simulated fill lacks a journal fill_id: {ev!r}")
-        qty_delta = float(ev.quantity_delta)
-        if not math.isfinite(qty_delta):
-            raise DataIntegrityError(f"simulated fill {fill_id} has non-finite quantity delta")
+        qty_delta = _sim_decimal(ev.quantity_delta, fill_id, "quantity delta")
         if qty_delta == 0:
             continue
-        price = float(ev.fill_price)
-        if not math.isfinite(price) or price <= 0:
+        price = _sim_decimal(ev.fill_price, fill_id, "price")
+        if price <= 0:
             raise DataIntegrityError(f"simulated fill {fill_id} has non-positive price {price!r}")
-        fee_bps = float(ev.fee_bps)
-        if not math.isfinite(fee_bps) or fee_bps < 0:
-            raise DataIntegrityError(f"simulated fill {fill_id} has invalid fee_bps {fee_bps!r}")
+        try:
+            fee_rate = Decimal(str(ev.fee_bps))
+        except (InvalidOperation, ValueError, TypeError) as exc:
+            raise DataIntegrityError(f"simulated fill {fill_id} has invalid fee_bps {ev.fee_bps!r}") from exc
+        if not fee_rate.is_finite() or fee_rate < 0:
+            raise DataIntegrityError(f"simulated fill {fill_id} has invalid fee_bps {ev.fee_bps!r}")
         # NaT(누락)·naive 모두 tzinfo 가 없어 여기서 거부된다.
         event_time = pd.Timestamp(ev.timestamp)
         if event_time.tzinfo is None:
@@ -558,7 +564,7 @@ def simulated_tax_records(
         quantity = abs(qty_delta)
         side = "BUY" if qty_delta > 0 else "SELL"
         quote_qty = quantity * price
-        fee = quote_qty * fee_bps / 10_000
+        fee = quote_qty * fee_rate / Decimal(10_000)
         fee_asset = "USDT"
         symbol = str(ev.symbol)
         is_maker = str(ev.liquidity) == "maker"
@@ -574,7 +580,7 @@ def simulated_tax_records(
             quote_qty=quote_qty,
             fee=fee,
             fee_asset=fee_asset,
-            realized_pnl=0.0,
+            realized_pnl=Decimal(0),
             income_asset=fee_asset,
             is_maker=is_maker,
             venue_id=venue_id,
@@ -586,9 +592,7 @@ def simulated_tax_records(
     return tuple(records)
 
 
-def funding_tax_records(
-    events: Sequence[Any], *, run_id: str, mode: str
-) -> tuple[TaxRecord, ...]:
+def funding_tax_records(events: Sequence[Any], *, run_id: str, mode: str) -> tuple[TaxRecord, ...]:
     """Map paper funding events to simulated FUNDING_FEE tax records with deterministic ids.
 
     The id is "simulated:FUNDING_FEE:<run_id>:<symbol>:<epoch_ms>". A settlement accrues at most once
@@ -599,8 +603,9 @@ def funding_tax_records(
         epoch = pd.Timestamp(ev.epoch)
         epoch = epoch.tz_localize("UTC") if epoch.tzinfo is None else epoch.tz_convert("UTC")
         epoch_ms = int(epoch.timestamp() * 1000)
-        quantity = float(ev.quantity)
-        price = float(ev.price)
+        quantity = _sim_decimal(ev.quantity, str(ev.symbol), "quantity")
+        price = _sim_decimal(ev.price, str(ev.symbol), "price")
+        amount = _sim_decimal(ev.amount, str(ev.symbol), "amount")
         records.append(
             TaxRecord(
                 record_id=f"simulated:FUNDING_FEE:{run_id}:{ev.symbol}:{epoch_ms}",
@@ -610,10 +615,10 @@ def funding_tax_records(
                 side="",
                 quantity=quantity,
                 price=price,
-                quote_qty=float(ev.quantity * ev.price),
-                fee=0.0,
+                quote_qty=quantity * price,
+                fee=Decimal(0),
                 fee_asset="USDT",
-                realized_pnl=float(ev.amount),
+                realized_pnl=amount,
                 income_asset="USDT",
                 is_maker=False,
                 venue_id=0,
@@ -638,7 +643,8 @@ def _read_shard_lines(shard: Path) -> tuple[list[tuple[int, dict[str, Any]]], by
     A line counts as torn only if it is the last line and the file does not end with ``\\n``.
 
     Raises:
-        TaxLedgerCorruptError: a complete line is not valid JSON or lacks record_id.
+        TaxLedgerCorruptError: a complete line is not valid JSON, holds a non-finite JSON
+            constant, or lacks record_id.
     """
     raw = shard.read_bytes() if shard.exists() else b""
     if not raw:
@@ -650,6 +656,10 @@ def _read_shard_lines(shard: Path) -> tuple[list[tuple[int, dict[str, Any]]], by
         torn_prefix = tail
         body = head + (b"\n" if head else b"")
     rows: list[tuple[int, dict[str, Any]]] = []
+
+    def _reject(value: str) -> Any:
+        raise ValueError(f"non-finite JSON constant: {value}")
+
     for lineno, line in enumerate(body.split(b"\n")[:-1] if body else [], start=1):
         if not line.strip():
             continue
@@ -658,18 +668,17 @@ def _read_shard_lines(shard: Path) -> tuple[list[tuple[int, dict[str, Any]]], by
         except UnicodeDecodeError as exc:
             raise TaxLedgerCorruptError(shard, lineno, "not utf-8") from exc
         try:
-            obj = json.loads(text)
-        except json.JSONDecodeError as exc:
-            raise TaxLedgerCorruptError(shard, lineno, "not valid JSON") from exc
+            obj = json.loads(text, parse_float=Decimal, parse_constant=_reject)
+        except ValueError as exc:
+            reason = "non-finite JSON constant" if "non-finite JSON constant" in str(exc) else "not valid JSON"
+            raise TaxLedgerCorruptError(shard, lineno, reason) from exc
         if not isinstance(obj, dict) or not obj.get("record_id"):
             raise TaxLedgerCorruptError(shard, lineno, "lacks record_id")
         rows.append((lineno, obj))
     return rows, torn_prefix
 
 
-def _partition_fresh_tax_records(
-    records: Sequence[TaxRecord], directory: Path
-) -> dict[Path, list[TaxRecord]]:
+def _partition_fresh_tax_records(records: Sequence[TaxRecord], directory: Path) -> dict[Path, list[TaxRecord]]:
     """Bucket records by destination shard and drop ids already present (verified first).
 
     An unterminated final line is a torn tail, not data: it is ignored here and truncated by
@@ -705,29 +714,6 @@ def _partition_fresh_tax_records(
     return fresh
 
 
-def _record_to_row(r: TaxRecord) -> dict[str, Any]:
-    event_time = r.event_time.isoformat() if isinstance(r.event_time, pd.Timestamp) else str(r.event_time)
-    return {
-        "record_id": r.record_id,
-        "kind": r.kind,
-        "event_time": event_time,
-        "symbol": r.symbol,
-        "side": r.side,
-        "quantity": r.quantity,
-        "price": r.price,
-        "quote_qty": r.quote_qty,
-        "fee": r.fee,
-        "fee_asset": r.fee_asset,
-        "realized_pnl": r.realized_pnl,
-        "income_asset": r.income_asset,
-        "is_maker": r.is_maker,
-        "venue_id": r.venue_id,
-        "source": r.source,
-        "mode": r.mode,
-        "income_type": r.income_type,
-    }
-
-
 def _fsync_dir(dir_path: Path) -> None:
     fd = os.open(str(dir_path), os.O_RDONLY)
     try:
@@ -736,9 +722,7 @@ def _fsync_dir(dir_path: Path) -> None:
         os.close(fd)
 
 
-def append_tax_records(
-    records: Sequence[TaxRecord], ledger_dir: Path
-) -> list[Path]:
+def append_tax_records(records: Sequence[TaxRecord], ledger_dir: Path) -> list[Path]:
     """Append tax records to monthly JSONL shards, skipping record_ids already present.
 
     Idempotent by record_id. An unterminated final line (a write torn by a kill, ENOSPC or a backup
@@ -749,15 +733,21 @@ def append_tax_records(
     rows are written, flushed and fsynced before the function moves on; a newly created shard also
     fsyncs its directory entry.
 
+    Every record is validated with ``validate_tax_record`` before any shard is read or written;
+    a single invalid record aborts the whole call with nothing written.
+
     Returns:
         Shard paths that received at least one new row.
 
     Raises:
+        DataIntegrityError: a record fails ``validate_tax_record``.
         TaxLedgerCorruptError: a complete (newline-terminated) line, or a non-final line, is not
             valid JSON or lacks record_id. Nothing is appended to any shard in that case.
     """
     if not records:
         return []
+    for record in records:
+        validate_tax_record(record)
     directory = Path(ledger_dir)
     directory.mkdir(parents=True, exist_ok=True)
     fresh = _partition_fresh_tax_records(records, directory)
@@ -769,10 +759,7 @@ def append_tax_records(
     written: list[Path] = []
     for shard in sorted(fresh):
         is_new = not shard.exists()
-        payload = "".join(
-            json.dumps(_record_to_row(r), ensure_ascii=False, default=str) + "\n"
-            for r in fresh[shard]
-        )
+        payload = "".join(json.dumps(tax_record_to_row(r), ensure_ascii=False) + "\n" for r in fresh[shard])
         with shard.open("a", encoding="utf-8") as f:
             f.write(payload)
             f.flush()
@@ -781,6 +768,54 @@ def append_tax_records(
             _fsync_dir(shard.parent)
         written.append(shard)
     return sorted(written)
+
+
+def read_tax_ledger(ledger_dir: Path | str) -> tuple[TaxRecord, ...]:
+    """Load every tax record in ``ledger_dir`` as validated, Decimal-typed records.
+
+    The yearly summary folds positions from inception, so this always loads all shards; there is
+    no year filter. Read-only: an unterminated final line (torn tail) is ignored, never
+    truncated. Only ``tax_ledger_YYYYMM.jsonl`` shards are read.
+
+    A record_id present more than once with byte-identical rebuilt content is kept once; the same
+    record_id with different content is corruption, because append is idempotent by record_id and
+    a second, different row can only come from tampering or a producer bug.
+
+    Args:
+        ledger_dir: Ledger directory. Required: callers resolve it from settings so that a summary
+            can never silently read a default directory that belongs to another run.
+
+    Returns:
+        Records sorted by ``tax_event_sort_key``. Empty tuple when the directory is absent or has
+        no shards.
+
+    Raises:
+        TaxLedgerCorruptError: a complete line is not valid JSON, lacks record_id, holds a
+            non-finite constant, fails ``tax_record_from_row`` (detail carries the reason), or
+            conflicts with an earlier row of the same record_id. ``path``/``line_number`` point at
+            the offending line.
+    """
+    dir_path = Path(ledger_dir)
+    if not dir_path.exists():
+        return ()
+    shards = sorted(dir_path.glob("tax_ledger_*.jsonl"))
+    if not shards:
+        return ()
+    seen: dict[str, TaxRecord] = {}
+    for shard in shards:
+        rows, _torn = _read_shard_lines(shard)
+        for lineno, obj in rows:
+            rid = str(obj["record_id"])
+            try:
+                record = tax_record_from_row(obj)
+            except DataIntegrityError as exc:
+                raise TaxLedgerCorruptError(shard, lineno, str(exc)) from exc
+            if rid in seen:
+                if tax_record_to_row(seen[rid]) != tax_record_to_row(record):
+                    raise TaxLedgerCorruptError(shard, lineno, f"conflicting duplicate record_id {rid!r}")
+                continue
+            seen[rid] = record
+    return tuple(sorted(seen.values(), key=tax_event_sort_key))
 
 
 def load_tax_watermark(path: Path) -> TaxWatermark:
@@ -899,12 +934,12 @@ def reconcile_cycle_cash(
     for r in funding_records:
         if r.kind != "FUNDING_FEE":
             raise ValueError(f"funding_records must all be FUNDING_FEE, got {r.kind!r}")
-        expected += Decimal(str(float(r.realized_pnl)))
+        expected += r.realized_pnl
     for r in trade_records:
         if r.kind != "TRADE":
             raise ValueError(f"trade_records must all be TRADE, got {r.kind!r}")
-        quote = Decimal(str(float(r.quote_qty)))
-        fee = Decimal(str(float(r.fee)))
+        quote = r.quote_qty
+        fee = r.fee
         if r.side == "BUY":
             expected += -quote - fee
         elif r.side == "SELL":
@@ -923,9 +958,7 @@ def reconcile_cycle_cash(
     )
 
 
-def load_tax_records(
-    ledger_dir: Path | str | None = None, *, year: int | None = None
-) -> pd.DataFrame:
+def load_tax_records(ledger_dir: Path | str | None = None, *, year: int | None = None) -> pd.DataFrame:
     """Load all shards, first-seen record_id wins.
 
     Read-only: an unterminated final line is ignored but never truncated here.
@@ -939,7 +972,6 @@ def load_tax_records(
         return pd.DataFrame()
     shards = sorted(dir_path.glob("tax_ledger_*.jsonl"))
     if not shards:
-        # fallback glob
         shards = sorted(dir_path.glob("*.jsonl"))
     rows: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -971,10 +1003,8 @@ def load_tax_records(
         df["income_type"] = ""
     else:
         df["income_type"] = df["income_type"].fillna("")
-    # ensure event_time dtype
     if "event_time" in df.columns:
         df["event_time"] = pd.to_datetime(df["event_time"], utc=True, errors="coerce")
-    # deduplicate by record_id first-seen already
     return df
 
 
@@ -1001,16 +1031,11 @@ def summarize_tax_year(
             "unclassified_income": {},
             "asset": "USDT",
         }
-    # source purity check
     if "source" in df.columns:
         unique_sources = set(df["source"].dropna().unique())
-        # if any row source != requested source -> fail closed
         mixed = any(s != source for s in unique_sources)
         if mixed:
             raise DataIntegrityError(f"mixed sources in year {year}: {unique_sources} vs requested {source}")
-    # Prepare per_symbol aggregation
-    # For cost basis, need to process TRADE rows chronologically per symbol
-    # Filter to TRADE kind for cost basis
     trades = df[df["kind"] == "TRADE"].copy() if "kind" in df.columns else pd.DataFrame()
     if not trades.empty and "event_time" in trades.columns:
         trades = trades.sort_values("event_time")
@@ -1020,35 +1045,29 @@ def summarize_tax_year(
     total_fees = 0.0
     total_funding = 0.0
     total_realized = 0.0
-    # compute fees/funding totals across all rows
     if "fee" in df.columns:
         try:
             total_fees = float(pd.to_numeric(df["fee"], errors="coerce").fillna(0).sum())
         except Exception:
             total_fees = 0.0
-    # funding = sum of FUNDING_FEE realized_pnl
     if "kind" in df.columns and "realized_pnl" in df.columns:
         try:
             funding_mask = df["kind"] == "FUNDING_FEE"
             total_funding = float(pd.to_numeric(df.loc[funding_mask, "realized_pnl"], errors="coerce").fillna(0).sum())
         except Exception:
             total_funding = 0.0
-    # Map symbol -> list of trades
     symbol_groups: dict[str, pd.DataFrame] = {}
     if not trades.empty:
         for sym, grp in trades.groupby("symbol"):
             symbol_groups[str(sym)] = grp.sort_values("event_time")
     else:
         symbol_groups = {}
-    # Ensure all symbols from dataframe accounted even if only funding? collect symbols
     all_symbols: set[str] = set()
     if "symbol" in df.columns:
         all_symbols.update(str(s) for s in df["symbol"].dropna().unique() if str(s))
     for sym in sorted(all_symbols):
         grp = symbol_groups.get(sym, pd.DataFrame())
-        # compute cost basis for this symbol
         if grp.empty:
-            # no trades, but may have funding etc.
             per_symbol[sym] = {
                 "acquisition_cost": 0.0,
                 "disposal_proceeds": 0.0,
@@ -1065,9 +1084,7 @@ def summarize_tax_year(
         n_trades = len(grp)
         qty_held = 0.0
         avg_cost = 0.0
-        # fifo queue
         fifo_lots: list[list[float]] = []  # [qty, price]
-        # for moving average, track total cost = avg*qty
         for _, row in grp.iterrows():
             try:
                 qty = float(row.get("quantity", 0) or 0)
@@ -1078,7 +1095,6 @@ def summarize_tax_year(
             if side == "BUY":
                 acq += qty * price
                 if cost_basis == "moving_average":
-                    # update avg
                     total_cost_before = avg_cost * qty_held
                     qty_held += qty
                     avg_cost = (total_cost_before + qty * price) / qty_held if qty_held != 0 else 0.0
@@ -1093,7 +1109,6 @@ def summarize_tax_year(
                         qty_held = 0
                         avg_cost = 0.0
                 else:
-                    # fifo consume
                     remaining = qty
                     while remaining > 0 and fifo_lots:
                         lot_qty, _lot_price = fifo_lots[0]
@@ -1106,10 +1121,8 @@ def summarize_tax_year(
                             qty_held -= remaining
                             remaining = 0
                     if not fifo_lots and remaining > 0:
-                        # sell more than held? goes negative? just subtract
                         qty_held -= remaining
             else:
-                # unknown side skip
                 continue
         if cost_basis == "moving_average":
             closing_qty = qty_held
@@ -1117,8 +1130,6 @@ def summarize_tax_year(
         else:
             closing_qty = qty_held
             closing_basis = sum(q * p for q, p in fifo_lots)
-            # if moving average still need qty_held for closing
-        # fees/funding per symbol
         try:
             sym_fees = float(pd.to_numeric(df[df["symbol"]==sym]["fee"], errors="coerce").fillna(0).sum()) if "fee" in df.columns else 0.0
         except Exception:
@@ -1143,11 +1154,6 @@ def summarize_tax_year(
         }
         total_acq += acq
         total_disp += disp
-        # total_fees already summed, but use per-symbol sum? avoid double count
-    # if per_symbol was empty due to no trades but total_fees etc already computed
-    # Fix total_fees/funding/realized recalc via sum of per_symbol? For simplicity keep totals from full df
-    # total fees already computed above includes all symbols; total acq/disp summed above.
-    # For consistency, compute total realized as sum
     try:
         total_realized = float(pd.to_numeric(df["realized_pnl"], errors="coerce").fillna(0).sum()) if "realized_pnl" in df.columns else 0.0
     except Exception:
@@ -1167,7 +1173,6 @@ def summarize_tax_year(
                 unclassified[key] = unclassified.get(key, 0.0) + float(amounts[idx])
         except Exception:  # noqa: S110 - 개별 레코드 파싱 실패는 건너뛰고 수집 지속
             pass
-    # asset inference
     asset = "USDT"
     if "income_asset" in df.columns:
         try:
@@ -1176,7 +1181,6 @@ def summarize_tax_year(
                 asset = str(vals[0])
         except Exception:  # noqa: S110 - 개별 레코드 파싱 실패는 건너뛰고 수집 지속
             pass
-    # mode inference
     mode_val = None
     if "mode" in df.columns:
         try:

@@ -96,6 +96,7 @@ def _venue_trade(tid: int, price: str = "100", sym: str = "BTCUSDT", ts: int = 1
         "time": ts,
         "buyer": True,
         "maker": False,
+        "positionSide": "BOTH",
     }
 
 
@@ -141,12 +142,12 @@ def _tax_record(rid: str, when: str = "2026-09-15 00:00", **over) -> TaxRecord:
         "event_time": pd.Timestamp(when, tz="UTC"),
         "symbol": "AAAUSDT",
         "side": "BUY",
-        "quantity": 1.0,
-        "price": 100.0,
-        "quote_qty": 100.0,
-        "fee": 0.0,
+        "quantity": Decimal("1"),
+        "price": Decimal("100"),
+        "quote_qty": Decimal("100"),
+        "fee": Decimal("0"),
         "fee_asset": "USDT",
-        "realized_pnl": 0.0,
+        "realized_pnl": Decimal("0"),
         "income_asset": "USDT",
         "is_maker": False,
         "venue_id": 1,
@@ -202,6 +203,7 @@ def test_summarize_rejects_mixed_sources(tmp_path: Path):
         source="venue",
         mode="live_testnet",
         venue_id=1,
+        position_side="BOTH",
     )
     sim_rec = _tax_record("simulated:TRADE:journal:1", when="2027-06-15 00:00", symbol="BTCUSDT", venue_id=1)
     append_tax_records([venue_rec, sim_rec], ledger_dir)
@@ -217,11 +219,13 @@ def test_summarize_moving_average_and_fifo_cost_basis(tmp_path: Path):
     ledger_dir = tmp_path / "tax4"
     recs = [
         _tax_record("venue:TRADE:1", when="2027-01-10 00:00", symbol="BTCUSDT", source="venue",
-                    mode="live_testnet", venue_id=1, fee=0.0),
+                    mode="live_testnet", venue_id=1, fee=Decimal("0"), position_side="BOTH"),
         _tax_record("venue:TRADE:2", when="2027-02-10 00:00", symbol="BTCUSDT", source="venue",
-                    mode="live_testnet", venue_id=2, price=200.0, quote_qty=200.0, fee=0.0),
+                    mode="live_testnet", venue_id=2, price=Decimal("200"), quote_qty=Decimal("200"),
+                    fee=Decimal("0"), position_side="BOTH"),
         _tax_record("venue:TRADE:3", when="2027-03-10 00:00", symbol="BTCUSDT", source="venue",
-                    mode="live_testnet", venue_id=3, side="SELL", price=300.0, quote_qty=300.0, fee=0.0),
+                    mode="live_testnet", venue_id=3, side="SELL", price=Decimal("300"),
+                    quote_qty=Decimal("300"), fee=Decimal("0"), position_side="BOTH"),
     ]
     append_tax_records(recs, ledger_dir)
     summ_ma = summarize_tax_year(2027, ledger_dir, cost_basis="moving_average", source="venue")
@@ -259,8 +263,8 @@ def test_funding_tax_record_ids_are_deterministic(tmp_path: Path) -> None:
     assert [r.record_id for r in first] == [f"simulated:FUNDING_FEE:run1:AAAUSDT:{epoch_ms}"]
     assert [r.record_id for r in second] == [r.record_id for r in first]
     assert first[0].kind == "FUNDING_FEE"
-    assert first[0].realized_pnl == float(Decimal("-0.2"))
-    assert first[0].fee == 0.0
+    assert first[0].realized_pnl == Decimal("-0.2")
+    assert first[0].fee == Decimal("0")
 
 
 def test_append_tax_records_skips_ids_already_in_shard(tmp_path: Path) -> None:
@@ -344,10 +348,10 @@ def test_append_tax_records_month_routing_preserved(tmp_path: Path) -> None:
 def test_reconcile_cycle_cash_matches_trades_fees_and_funding() -> None:
     from src.live.tax_ledger import reconcile_cycle_cash
 
-    def _trade(rid: str, side: str, quote: float, fee: float) -> TaxRecord:
+    def _trade(rid: str, side: str, quote: Decimal, fee: Decimal) -> TaxRecord:
         return _tax_record(rid, side=side, price=quote, quote_qty=quote, fee=fee)
 
-    def _funding(rid: str, pnl: float) -> TaxRecord:
+    def _funding(rid: str, pnl: Decimal) -> TaxRecord:
         return _tax_record(rid, when="2026-09-15 08:00", kind="FUNDING_FEE", side="", realized_pnl=pnl, venue_id=0)
 
     cash_before = Decimal("2100")
@@ -355,8 +359,8 @@ def test_reconcile_cycle_cash_matches_trades_fees_and_funding() -> None:
     result = reconcile_cycle_cash(
         cash_before,
         cash_after,
-        [_trade("T1", "BUY", 100.0, 0.02), _trade("T2", "SELL", 50.0, 0.01)],
-        [_funding("F1", -0.5)],
+        [_trade("T1", "BUY", Decimal("100"), Decimal("0.02")), _trade("T2", "SELL", Decimal("50"), Decimal("0.01"))],
+        [_funding("F1", Decimal("-0.5"))],
         tolerance_usdt=Decimal("0.01"),
     )
     assert result.within_tolerance is True
@@ -366,7 +370,7 @@ def test_reconcile_cycle_cash_matches_trades_fees_and_funding() -> None:
 def test_reconcile_cycle_cash_flags_unexplained_cash() -> None:
     from src.live.tax_ledger import reconcile_cycle_cash
 
-    trade = _tax_record("T1", fee=0.02)
+    trade = _tax_record("T1", fee=Decimal("0.02"))
     result = reconcile_cycle_cash(
         Decimal("2100"),
         Decimal("2100") - Decimal("100") - Decimal("0.02") - Decimal("0.53"),
@@ -382,13 +386,13 @@ def test_reconcile_cycle_cash_rejects_wrong_record_kinds() -> None:
     from src.live.tax_ledger import reconcile_cycle_cash
 
     funding = _tax_record("F1", when="2026-09-15 08:00", kind="FUNDING_FEE", side="",
-                          realized_pnl=-0.5, venue_id=0)
+                          realized_pnl=Decimal("-0.5"), venue_id=0)
     with pytest.raises(ValueError, match="TRADE"):
         reconcile_cycle_cash(Decimal("2100"), Decimal("2100"), [funding], [], tolerance_usdt=Decimal("0.01"))
-    trade = _tax_record("T1", fee=0.02)
+    trade = _tax_record("T1", fee=Decimal("0.02"))
     with pytest.raises(ValueError, match="FUNDING_FEE"):
         reconcile_cycle_cash(Decimal("2100"), Decimal("2100"), [], [trade], tolerance_usdt=Decimal("0.01"))
-    bad_side = _tax_record("T9", side="HOLD", fee=0.02, venue_id=9)
+    bad_side = _tax_record("T9", side="HOLD", fee=Decimal("0.02"), venue_id=9)
     with pytest.raises(ValueError, match="BUY or SELL"):
         reconcile_cycle_cash(Decimal("2100"), Decimal("2100"), [bad_side], [], tolerance_usdt=Decimal("0.01"))
 
@@ -397,7 +401,7 @@ def test_reconcile_cycle_cash_tolerates_empty_side_zero_quote() -> None:
     """A zero-quantity fill maps to side "" with zero quote; only its fee counts."""
     from src.live.tax_ledger import reconcile_cycle_cash
 
-    flat = _tax_record("T0", side="", quantity=0.0, quote_qty=0.0, fee=0.0, venue_id=0)
+    flat = _tax_record("T0", side="", quantity=Decimal("0"), quote_qty=Decimal("0"), fee=Decimal("0"), venue_id=0)
     result = reconcile_cycle_cash(
         Decimal("2100"), Decimal("2100"), [flat], [], tolerance_usdt=Decimal("0.01")
     )
@@ -573,7 +577,7 @@ def test_persist_honors_settings_page_limits(tmp_path: Path) -> None:
     from src.live.settings import LiveSettings
 
     base = NOW - pd.Timedelta(days=2)
-    incomes = [_venue_income(i, sym="", ts=_ms(base + pd.Timedelta(hours=i))) for i in range(3)]
+    incomes = [_venue_income(i, sym="BTCUSDT", ts=_ms(base + pd.Timedelta(hours=i))) for i in range(3)]
     client = WindowedFakeClient({}, incomes=incomes)
     tax_dir = tmp_path / "tax"
     settings = LiveSettings(tax_income_page_limit=2, tax_trades_page_limit=2)
@@ -709,14 +713,14 @@ def test_append_torn_tail_truncated_and_new_rows_added(tmp_path: Path) -> None:
 
 def test_append_torn_replay_written_once(tmp_path: Path) -> None:
     """A torn tail that is a prefix of R is regenerated exactly once on replay."""
-    from src.live.tax_ledger import _record_to_row
+    from src.live.tax_schema import tax_record_to_row
 
     ledger_dir = tmp_path / "tax"
     prior = _tax_record("A")
     append_tax_records([prior], ledger_dir)
     shard = ledger_dir / "tax_ledger_202609.jsonl"
     replay = _tax_record("R", venue_id=9)
-    prefix = json.dumps(_record_to_row(replay), ensure_ascii=False)[:30].encode()
+    prefix = json.dumps(tax_record_to_row(replay), ensure_ascii=False)[:30].encode()
     assert not prefix.endswith(b"\n")
     shard.write_bytes(shard.read_bytes() + prefix)
     append_tax_records([replay], ledger_dir)
@@ -875,7 +879,7 @@ def test_collect_cross_type_tranid_stored_once_each(tmp_path: Path) -> None:
     t0, t1 = _ms(NOW - pd.Timedelta(hours=2)), _ms(NOW - pd.Timedelta(hours=1))
     incomes = [
         _venue_income(900, sym="", ts=t0, itype="TRANSFER"),
-        _venue_income(500, sym="", ts=t1, itype="FUNDING_FEE"),
+        _venue_income(500, sym="BTCUSDT", ts=t1, itype="FUNDING_FEE"),
     ]
     client = WindowedFakeClient({}, incomes=incomes)
     wm = TaxWatermark(last_trade_id={}, last_collected_at=None)
@@ -932,7 +936,7 @@ def test_classify_income_type_table() -> None:
 def test_summarize_delivery_settlement_counts_as_realized(tmp_path: Path) -> None:
     """DELIVERED_SETTELMENT rows land in realized_pnl, not in unclassified_income."""
     ts = _ms(NOW - pd.Timedelta(days=10))
-    client = WindowedFakeClient({}, incomes=[_venue_income(3, income="12.5", sym="", ts=ts,
+    client = WindowedFakeClient({}, incomes=[_venue_income(3, income="12.5", sym="BTCUSDT", ts=ts,
                                                             itype="DELIVERED_SETTELMENT")])
     records, _, _ = _collect(client, [], TaxWatermark(last_trade_id={}, last_collected_at=None))
     assert records[0].kind == "REALIZED_PNL"
@@ -981,7 +985,7 @@ def test_collect_page_budget_resumes_over_two_calls(tmp_path: Path) -> None:
     """max_pages=1 with 1,500 rows: first call page_caps, two appends store 1,500 once."""
     base = NOW - pd.Timedelta(days=3)
     incomes = [
-        _venue_income(i, sym="", ts=_ms(base + pd.Timedelta(seconds=100 * i))) for i in range(1500)
+        _venue_income(i, sym="BTCUSDT", ts=_ms(base + pd.Timedelta(seconds=100 * i))) for i in range(1500)
     ]
     client = WindowedFakeClient({}, incomes=incomes)
     wm = TaxWatermark(last_trade_id={}, last_collected_at=base - pd.Timedelta(hours=1))
@@ -1058,7 +1062,7 @@ def test_collect_conflicting_duplicate_id_reported() -> None:
     records, new_wm, found = _collect(client, [], TaxWatermark(last_trade_id={}, last_collected_at=None))
     assert len(records) == 1
     assert records[0].record_id == "venue:FUNDING_FEE:5"
-    assert records[0].realized_pnl == pytest.approx(1.0)
+    assert records[0].realized_pnl == Decimal("1")
     assert [(i.stream, i.stage) for i in found] == [("income", "id_conflict")]
     assert new_wm.last_collected_at == pd.Timestamp(ts, unit="ms", tz="UTC")
 
@@ -1068,12 +1072,13 @@ def test_collect_legacy_funding_id_deduplicates(tmp_path: Path) -> None:
     ts = _ms(NOW - pd.Timedelta(days=10))
     legacy = _tax_record(
         "venue:FUNDING_FEE:42", when="2025-12-22 00:00", kind="FUNDING_FEE", side="",
-        quantity=0.0, price=0.0, quote_qty=0.0, realized_pnl=1.5, symbol="",
+        quantity=Decimal("0"), price=Decimal("0"), quote_qty=Decimal("0"), realized_pnl=Decimal("1.5"),
+        symbol="BTCUSDT",
         source="venue", mode="live_testnet", venue_id=42, income_type="FUNDING_FEE",
     )
     ledger_dir = tmp_path / "tax"
     append_tax_records([legacy], ledger_dir)
-    client = WindowedFakeClient({}, incomes=[_venue_income(42, sym="", ts=ts)])
+    client = WindowedFakeClient({}, incomes=[_venue_income(42, sym="BTCUSDT", ts=ts)])
     records, _, _ = _collect(client, [], TaxWatermark(last_trade_id={}, last_collected_at=None))
     assert [r.record_id for r in records] == ["venue:FUNDING_FEE:42"]
     assert append_tax_records(records, ledger_dir) == []
