@@ -79,7 +79,7 @@ flowchart TD
 ### 외부 연동 인터페이스 (External Interfaces)
 1. **Binance Futures FAPI REST**: Klines(`1m/1h`), Funding Rate(`8h`), Leverage Bracket 스냅샷 수집.
 2. **Binance Vision S3 Archive**: 과거 Klines·Funding Rate 월별 `.zip` 백필. 아카이브 `.CHECKSUM` 검증은 수행하지 않으며, 무결성은 스키마 정규화·결손 감사(`verify-source-gaps`, `sync-execution-coverage`)와 `seal-mhs-inputs` SHA-256 입력 매니페스트로 확보.
-3. **Binance WebSocket (`forceOrder`)**: forceOrder frames are journaled raw before interpretation.
+3. **Binance WebSocket (`forceOrder`)**: forceOrder frames are journaled raw before interpretation; the normalizer accepts only the raw `{"e","E","o"}` shape with all order fields present, finite, and `q, p > 0` (`ap, l, z >= 0`). Rejected frames are counted in heartbeat `force_order.parse_failures_total` and never defaulted.
 4. **Google Drive Storage**: 호스트 레벨 `flock` 파일 잠금 기반 rclone 원격 백업.
 
 ---

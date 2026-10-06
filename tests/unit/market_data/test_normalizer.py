@@ -617,6 +617,37 @@ def test_ws_branch_rejections(tmp_path: Path) -> None:
     assert not list((tmp_path / "liq").rglob("*.parquet"))
 
 
+def test_ws_strict_rejection_isolated_and_counted(tmp_path: Path) -> None:
+    """Invalid quantity, missing price and out-of-storage time cannot stall valid persistence."""
+    import json as _json
+
+    zero_q = FRAME_TEXT.replace('"q":"1.0"', '"q":"0"')
+    assert zero_q != FRAME_TEXT
+    decoded = _json.loads(FRAME_TEXT)
+    del decoded["o"]["ap"]
+    missing_ap = _json.dumps(decoded, separators=(",", ":"))
+    assert missing_ap != FRAME_TEXT
+    outside_storage = json.loads(FRAME_TEXT)
+    outside_storage["o"]["T"] = 10**14
+    _journal(tmp_path, "force_order", "blue", [
+        _ws_open("blue", _ns(10, 0, 1)),
+        _frame("blue", _ns(10, 0, 2)),
+        _frame("blue", _ns(10, 0, 3), text=zero_q),
+        _frame("blue", _ns(10, 0, 4), text=missing_ap),
+        _frame("blue", _ns(10, 0, 5), text=json.dumps(outside_storage)),
+        _ws_close("blue", _ns(10, 0, 6)),
+    ])
+    checkpoint, report = _cycle(tmp_path, tmp_path / "liq", _empty())
+    assert report.parse_failures == 3
+    assert report.rows_written["force_order"] == 1
+    rows = _parquet_rows(tmp_path / "liq", "")
+    assert len(rows) == 1
+    assert rows.iloc[0]["price"] == pytest.approx(70000.0)
+    _, replay = _cycle(tmp_path, tmp_path / "liq", checkpoint)
+    assert replay.parse_failures == 0
+    assert replay.rows_written.get("force_order", 0) == 0
+
+
 def test_final_flags_and_pending_bytes(tmp_path: Path) -> None:
     """FINAL flags refresh per cycle; pending bytes count only complete backlog."""
     import os as _os
