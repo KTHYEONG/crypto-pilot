@@ -359,7 +359,18 @@ EXPOSURE_DRAWDOWN_BRAKE_K: float = 2.0
 # 하한 fail-closed 경계(0.1/0.2 실측 동일 결과 -- 튜닝값이 아닌 구속 하한).
 EXPOSURE_DRAWDOWN_BRAKE_FLOOR: float = 0.2
 
-FOLD_PANEL_WARMUP_HOURS: int = 720 + 168 + 24
+# Trailing quote-volume window (1h bars) of the liquid-half universe rule. The research
+# folds, top-level selection, process backtest and execution-data plan must share one
+# value: a divergence lets research validate a universe that production never trades.
+# The execution roster ranks this same trailing mean, so the rank window is bound here too.
+UNIVERSE_ELIGIBILITY_LOOKBACK_BARS: int = 720
+# Observed 1h bars required before a symbol can be liquidity-eligible; missing history is
+# ineligible, never zero-filled. Must satisfy 1 <= value <= UNIVERSE_ELIGIBILITY_LOOKBACK_BARS.
+UNIVERSE_ELIGIBILITY_MIN_HISTORY_BARS: int = 720
+
+# Fold panel warm-up: eligibility lookback + 168h slow horizon + one-day boundary buffer, so
+# eligibility and signals are fully formed at the first fold decision.
+FOLD_PANEL_WARMUP_HOURS: int = UNIVERSE_ELIGIBILITY_LOOKBACK_BARS + 168 + 24
 
 TRAIN_REFERENCE_PREFIX_TARGET_ATOL: float = 1e-12
 """Max absolute difference between a fold's own train-window target weight and the shared
@@ -378,8 +389,9 @@ CAUSAL_BETA_MIN_PERIODS: int = 360
 
 
 SIGNAL_PANEL_WINDOW_DAYS: int = 400
-# PANEL_MIN_HISTORY_BARS는 liquid_half_eligibility min_history_bars와 동일(720) — 패널 내 제외 심볼은 eligibility 불가.
-PANEL_MIN_HISTORY_BARS: int = 720
+# A symbol dropped by the panel history filter can never become eligible, so the panel
+# filter is bound to the eligibility history requirement rather than tuned separately.
+PANEL_MIN_HISTORY_BARS: int = UNIVERSE_ELIGIBILITY_MIN_HISTORY_BARS
 SIGNAL_REPLAY_WARMUP_DAYS: int = 30
 SIGNAL_RETURN_TAIL_DAYS: int = 400
 SIGNAL_OVERLAP_TOLERANCE: float = 1e-9

@@ -44,6 +44,7 @@ from src.mhs.execution.specs import _stress_cost_execution_spec
 from src.mhs.marks import _load_funding_series, _pit_execution_mask
 from src.mhs.panel import liquid_half_eligibility, load_base_panel
 from src.mhs.params import GO_PRIMARY_SHARPE_FLOOR, STRESS_COST_MULTIPLIER
+from src.mhs.params import UNIVERSE_ELIGIBILITY_LOOKBACK_BARS, UNIVERSE_ELIGIBILITY_MIN_HISTORY_BARS
 from src.mhs.report.persist import persist_mhs_horizon_diagnostic_report
 from src.mhs.report.schema import MhsHorizonDiagnosticReport
 from src.mhs.research_go import GO_REASON_PRIMARY_SHARPE, GO_REASON_STRESS_SHARPE
@@ -159,7 +160,7 @@ def _build_book_outcome_args(mhs_market) -> dict[str, object]:
     quote_vol = quote_vol[aligned]
     bar_funding = bar_funding[aligned]
     funding_by_symbol = {s: funding_by_symbol[s] for s in aligned}
-    eligible = liquid_half_eligibility(quote_vol, lookback_bars=720, min_history_bars=720)
+    eligible = liquid_half_eligibility(quote_vol, lookback_bars=UNIVERSE_ELIGIBILITY_LOOKBACK_BARS, min_history_bars=UNIVERSE_ELIGIBILITY_MIN_HISTORY_BARS)
     log_close = np.log(close)
     fast = BOOK_SPECS["fast_reversal"]
     fast_grid = pd.date_range(_START, end, freq="6h", tz="UTC")

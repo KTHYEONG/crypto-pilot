@@ -13,7 +13,11 @@ import pyarrow.parquet as pq
 
 from src.common.paths import funding_path
 from src.market_data.storage.loaders import load_funding_rates
-from src.mhs.params import EXECUTION_ROSTER_EXIT_MULTIPLIER
+from src.mhs.params import (
+    EXECUTION_ROSTER_EXIT_MULTIPLIER,
+    UNIVERSE_ELIGIBILITY_LOOKBACK_BARS,
+    UNIVERSE_ELIGIBILITY_MIN_HISTORY_BARS,
+)
 
 _logger = logging.getLogger("MhsHorizonDiagnostic")
 
@@ -68,7 +72,9 @@ def _pit_execution_mask(
     when the signal itself has not changed.
     """
     exit_size = universe_size * EXECUTION_ROSTER_EXIT_MULTIPLIER
-    trailing = quote_volume.rolling(720, min_periods=720).mean()
+    trailing = quote_volume.rolling(
+        UNIVERSE_ELIGIBILITY_LOOKBACK_BARS, min_periods=UNIVERSE_ELIGIBILITY_MIN_HISTORY_BARS
+    ).mean()
     ranked = trailing.where(eligible).rank(axis=1, ascending=False, method="first")
     enter = ranked.le(universe_size).fillna(False).to_numpy()
     keep = ranked.le(exit_size).fillna(False).to_numpy()

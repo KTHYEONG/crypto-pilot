@@ -19,10 +19,12 @@ from src.market_data.services.label_arrays import decode_ms_labels_ns, sorted_un
 from src.mhs.books import phase_tranche_book, rank_weight_book
 from src.mhs.horizons import horizon_log_return
 from src.mhs.panel import liquid_half_eligibility, load_base_panel
+from src.mhs.params import UNIVERSE_ELIGIBILITY_LOOKBACK_BARS, UNIVERSE_ELIGIBILITY_MIN_HISTORY_BARS
 from src.mhs.types import BOOK_SPECS
 
-# 유동성 순위(720봉)와 모멘텀 신호가 창 시작 시점에 이미 완성돼 있어야 PIT 계획이 성립하므로
-# 창 앞쪽 2000봉을 워밍업으로 읽고, 선택 자체는 창 안 결정 그리드에서만 한다.
+# Liquidity rank (UNIVERSE_ELIGIBILITY_LOOKBACK_BARS) and momentum signals must already be
+# complete at the window start for a PIT plan, so the planner reads a warm-up prefix and
+# selects only on decision grids inside the window.
 MHS_EXECUTION_PLAN_WARMUP_HOURS: int = 2000
 
 
@@ -75,8 +77,14 @@ def build_mhs_execution_plan(
     if not symbols:
         raise RuntimeError("no funded dev symbols available for MHS execution plan")
     quote_volume = panel["quote_vol"][symbols]
-    eligible = liquid_half_eligibility(quote_volume, lookback_bars=720, min_history_bars=720)
-    trailing = quote_volume.rolling(720, min_periods=720).mean()
+    eligible = liquid_half_eligibility(
+        quote_volume,
+        lookback_bars=UNIVERSE_ELIGIBILITY_LOOKBACK_BARS,
+        min_history_bars=UNIVERSE_ELIGIBILITY_MIN_HISTORY_BARS,
+    )
+    trailing = quote_volume.rolling(
+        UNIVERSE_ELIGIBILITY_LOOKBACK_BARS, min_periods=UNIVERSE_ELIGIBILITY_MIN_HISTORY_BARS
+    ).mean()
     ranked = trailing.where(eligible).rank(axis=1, ascending=False, method="first")
     top = ranked.le(execution_universe_size).fillna(False)
     log_close = np.log(panel["close"][symbols].where(panel["close"][symbols] > 0))
@@ -207,17 +215,12 @@ def assert_relevant_execution_data_coverage(
         )
 
 
-# Dynamic gap-exclusion threshold: reuses the SAME 720h invariant
-# ``liquid_half_eligibility(min_history_bars=720)`` already requires for a
-# symbol to become liquidity-eligible at all (src/mhs/panel.py). A contiguous
-# gap at or above this bound already structurally breaks that trailing-history
-# requirement through the gap, so exclusion at this threshold is not a policy
-# choice layered on top of a separate magic number -- it is the same bound the
-# eligibility computation already enforces. Not a hardcoded symbol list: this
-# is recomputed from the live cache and the live roster mask on every call, so
-# a symbol excluded today is automatically re-admitted once its gap is
-# backfilled, and a symbol excluded tomorrow if its cache degrades.
-DYNAMIC_GAP_EXCLUSION_HOURS = 720.0
+# Dynamic gap-exclusion threshold: the same bound as UNIVERSE_ELIGIBILITY_MIN_HISTORY_BARS
+# (1h bars, hence hours). A contiguous gap at or above it already breaks the trailing-history
+# requirement of liquidity eligibility, so exclusion here is not a separate policy threshold.
+# Recomputed from the live cache and roster mask on every call: a symbol is re-admitted once
+# its gap is backfilled and excluded again if its cache degrades.
+DYNAMIC_GAP_EXCLUSION_HOURS = float(UNIVERSE_ELIGIBILITY_MIN_HISTORY_BARS)
 
 _OHLCV_BAR_STEP_MINUTES = {"3m": 3, "1h": 60}
 

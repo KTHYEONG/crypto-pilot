@@ -34,6 +34,7 @@ from src.mhs.evaluation.folds import (
 from src.mhs.evaluation.windows import _rescaled_windows
 from src.mhs.execution.window_stream import _iter_mhs_execution_windows
 from src.mhs.marks import _load_window_minute_frames
+from src.mhs.params import UNIVERSE_ELIGIBILITY_LOOKBACK_BARS, UNIVERSE_ELIGIBILITY_MIN_HISTORY_BARS
 from src.common.errors import DataIntegrityError
 from src.mhs.types import BOOK_SPECS, ExecutionSpec
 from src.mhs.evidence import phase_1_anchored_purged_folds
@@ -405,7 +406,7 @@ def _build_books_args_from_market(root: Path, n_hours: int) -> dict[str, object]
     quote_vol = quote_vol[aligned]
     funding_by_symbol = {s: funding_by_symbol[s] for s in aligned}
     eligible = liquid_half_eligibility(
-        quote_vol, lookback_bars=720, min_history_bars=720,
+        quote_vol, lookback_bars=UNIVERSE_ELIGIBILITY_LOOKBACK_BARS, min_history_bars=UNIVERSE_ELIGIBILITY_MIN_HISTORY_BARS,
     )
     log_close = np.log(close)
     fast = BOOK_SPECS["fast_reversal"]

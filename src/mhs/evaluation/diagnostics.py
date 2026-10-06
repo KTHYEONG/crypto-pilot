@@ -198,7 +198,7 @@ def _load_feature_panels(
     panels: dict[str, pd.DataFrame] = {}
     if available:
         loaded = load_base_panel(
-            root, "1h", available, start, end, partition="dev", min_bars=PANEL_MIN_HISTORY_BARS, data_policy=data_policy,  # liquid_half_eligibility min_history_bars와 동일(720)
+            root, "1h", available, start, end, partition="dev", min_bars=PANEL_MIN_HISTORY_BARS, data_policy=data_policy,
         )
         for column in available:
             panels[column] = loaded[column].reindex(index=grid_1h, columns=aligned_symbols)

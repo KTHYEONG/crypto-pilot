@@ -26,6 +26,8 @@ from src.mhs.evidence import TailSensitivityResult as _TailSensitivityResult
 from src.mhs.params import BOOK_BLEND_WEIGHTS as _BOOK_BLEND_WEIGHTS
 from src.mhs.params import COMMITTEE_OOS_START as _COMMITTEE_OOS_START
 from src.mhs.params import PERIODS_PER_YEAR_1H as _PERIODS_PER_YEAR_1H
+from src.mhs.params import UNIVERSE_ELIGIBILITY_LOOKBACK_BARS as _UNIVERSE_ELIGIBILITY_LOOKBACK_BARS
+from src.mhs.params import UNIVERSE_ELIGIBILITY_MIN_HISTORY_BARS as _UNIVERSE_ELIGIBILITY_MIN_HISTORY_BARS
 from src.mhs.report.schema import MhsHorizonDiagnosticReport as _MhsHorizonDiagnosticReport
 from src.mhs.types import BOOK_SPECS as _BOOK_SPECS
 
@@ -54,6 +56,8 @@ ev = _types.SimpleNamespace(
     inverse_realized_vol_tilt=_books.inverse_realized_vol_tilt,
     liquid_half_eligibility=_panel.liquid_half_eligibility,
     load_base_panel=_panel.load_base_panel,
+    UNIVERSE_ELIGIBILITY_LOOKBACK_BARS=_UNIVERSE_ELIGIBILITY_LOOKBACK_BARS,
+    UNIVERSE_ELIGIBILITY_MIN_HISTORY_BARS=_UNIVERSE_ELIGIBILITY_MIN_HISTORY_BARS,
     phase_tranche_book=_books.phase_tranche_book,
     rank_weight_book=_books.rank_weight_book,
     realized_vol=_horizons.realized_vol,
@@ -323,7 +327,7 @@ def _build_book_outcome_args(mhs_market) -> dict[str, object]:
     quote_vol = quote_vol[aligned]
     bar_funding = bar_funding[aligned]
     funding_by_symbol = {s: funding_by_symbol[s] for s in aligned}
-    eligible = ev.liquid_half_eligibility(quote_vol, lookback_bars=720, min_history_bars=720)
+    eligible = ev.liquid_half_eligibility(quote_vol, lookback_bars=ev.UNIVERSE_ELIGIBILITY_LOOKBACK_BARS, min_history_bars=ev.UNIVERSE_ELIGIBILITY_MIN_HISTORY_BARS)
     log_close = np.log(close)
     fast = ev.BOOK_SPECS["fast_reversal"]
     fast_grid = pd.date_range(_START, end, freq="6h", tz="UTC")
@@ -389,7 +393,7 @@ def _roster_mask_panel_inputs(
     aligned = list(bar_funding.columns)
     close = close[aligned]
     quote_vol = quote_vol[aligned]
-    eligible = ev.liquid_half_eligibility(quote_vol, lookback_bars=720, min_history_bars=720)
+    eligible = ev.liquid_half_eligibility(quote_vol, lookback_bars=ev.UNIVERSE_ELIGIBILITY_LOOKBACK_BARS, min_history_bars=ev.UNIVERSE_ELIGIBILITY_MIN_HISTORY_BARS)
     log_close = np.log(close)
     execution_mask = ev._pit_execution_mask(quote_vol, eligible, universe_size)
     return log_close, execution_mask, grid_1h
@@ -652,7 +656,7 @@ def _build_books_concurrent_args(
     quote_vol = quote_vol[aligned]
     bar_funding = bar_funding[aligned]
     funding_by_symbol = {s: funding_by_symbol[s] for s in aligned}
-    eligible = ev.liquid_half_eligibility(quote_vol, lookback_bars=720, min_history_bars=720)
+    eligible = ev.liquid_half_eligibility(quote_vol, lookback_bars=ev.UNIVERSE_ELIGIBILITY_LOOKBACK_BARS, min_history_bars=ev.UNIVERSE_ELIGIBILITY_MIN_HISTORY_BARS)
     log_close = np.log(close)
     fast = ev.BOOK_SPECS["fast_reversal"]
     slow = ev.BOOK_SPECS["slow_momentum"]
@@ -1095,7 +1099,7 @@ def _slow_book_panel_inputs(mhs_market):
     funded = [s for s in close.columns if s in funding_by_symbol]
     close = close[funded]
     quote_vol = quote_vol[funded]
-    eligible = ev.liquid_half_eligibility(quote_vol, lookback_bars=720, min_history_bars=720)
+    eligible = ev.liquid_half_eligibility(quote_vol, lookback_bars=ev.UNIVERSE_ELIGIBILITY_LOOKBACK_BARS, min_history_bars=ev.UNIVERSE_ELIGIBILITY_MIN_HISTORY_BARS)
     log_close = np.log(close)
     execution_mask = ev._pit_execution_mask(quote_vol, eligible, request.execution_universe_size)
     return log_close, eligible, execution_mask, request, grid_1h, end
