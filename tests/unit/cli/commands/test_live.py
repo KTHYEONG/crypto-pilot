@@ -157,6 +157,26 @@ def test_capture_subcommand_invokes_capture_and_append(monkeypatch) -> None:
     assert captured.get("append_called") is True
 
 
+def test_tax_collect_resolves_configured_ledger_dir(monkeypatch, tmp_path) -> None:
+    import argparse
+
+    from src.cli.commands.live import _run_tax_collect
+
+    monkeypatch.setenv("LIVE_TAX_LEDGER_DIR", str(tmp_path / "tax"))
+    monkeypatch.setattr(
+        "src.live.audit.default_audit_log_path", lambda *a, **k: tmp_path / "audit.jsonl"
+    )
+    captured: dict = {}
+
+    def fake_collect(client, symbols, ledger_dir, mode, *, now=None, settings=None):
+        captured["ledger_dir"] = ledger_dir
+        return 0, ()
+
+    monkeypatch.setattr("src.live.tax_ledger.collect_and_persist_live_tax", fake_collect)
+    _run_tax_collect(argparse.Namespace())
+    assert captured["ledger_dir"] == tmp_path / "tax"
+
+
 #: 본 모듈이 검증하는 시나리오 ID(lean_check 추적용).
 COVERED_SCENARIOS: tuple[str, ...] = (
     "SCENARIO_LIVE_DAEMON_09_CLI_DAEMON_SUBCOMMAND_REGISTERED",

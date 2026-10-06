@@ -1488,6 +1488,16 @@ def test_run_shadow_cycle_wires_one_order_journal_into_orphan_cleanup_and_execut
         def open_orders(self):
             return []
 
+    from src.live.order_journal import default_order_journal_path as _real_journal_default
+
+    real_journal_path = _real_journal_default()
+
+    def real_journal_snapshot():
+        if not real_journal_path.exists():
+            return None
+        return real_journal_path.read_bytes(), real_journal_path.stat().st_mtime_ns
+
+    real_journal_before = real_journal_snapshot()
     journal_path = tmp_path / "journal" / "live_order_journal.jsonl"
     monkeypatch.setattr(runner_mod, "_market_client", lambda s, dt: MarketClient())
     monkeypatch.setattr(runner_mod, "_order_client", lambda s, dt: OrderClient())
@@ -1524,6 +1534,7 @@ def test_run_shadow_cycle_wires_one_order_journal_into_orphan_cleanup_and_execut
     assert captured["orphan_journal"] is captured["execute_journal"]
     assert captured["orphan_journal"].path == journal_path
     assert captured["prefix"] == "20260824"
+    assert real_journal_snapshot() == real_journal_before
     assert journal_path.exists()
     assert captured["orphan_journal"].fills_after(-1) == ()
 

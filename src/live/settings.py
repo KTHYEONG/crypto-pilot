@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from enum import Enum
 from pathlib import Path
 from typing import Literal
@@ -48,6 +49,17 @@ class ExecutionMode(str, Enum):  # noqa: UP042 - contract pins the (str, Enum) b
 def _venue_host(url: str) -> str:
     """Return the lowercased network location of a venue URL."""
     return urlsplit(url if "://" in url else f"https://{url}").netloc.lower()
+
+
+def _resolve_optional_path(value: str | None, default: Callable[[], Path]) -> Path:
+    """Return ``Path(value)`` when the setting is non-empty, else ``default()``.
+
+    An empty string counts as unset: ``Path("")`` would silently resolve to the process
+    working directory.
+    """
+    if value:
+        return Path(value)
+    return default()
 
 
 class LiveSettings(BaseSettings):
@@ -627,3 +639,73 @@ class LiveSettings(BaseSettings):
         if self.record_run_id is None:
             return None
         return DATA_DIR / "state" / "runs" / self.record_run_id
+
+    def resolved_ledger_path(self, default: Callable[[], Path]) -> Path:
+        """Position ledger location: the configured (or ``record_run_id``-derived) path, else ``default()``.
+
+        ``default`` is the caller's ``default_ledger_path`` reference and is invoked only
+        when the field is unset, at call time. Callers pass their own module-level name
+        instead of this class importing it because those names are the isolation seams
+        tests replace, and because the owning state modules import this module.
+        """
+        return _resolve_optional_path(self.ledger_path, default)
+
+    def resolved_order_journal_path(self, default: Callable[[], Path]) -> Path:
+        """Position order journal location: the configured (or ``record_run_id``-derived) path, else ``default()``.
+
+        ``default`` is the caller's ``default_order_journal_path`` reference and is invoked only
+        when the field is unset, at call time. Callers pass their own module-level name
+        instead of this class importing it because those names are the isolation seams
+        tests replace, and because the owning state modules import this module.
+        """
+        return _resolve_optional_path(self.order_journal_path, default)
+
+    def resolved_fills_dir(self, default: Callable[[], Path]) -> Path:
+        """Position fills directory location: the configured (or ``record_run_id``-derived) path, else ``default()``.
+
+        ``default`` is the caller's ``default_fills_dir`` reference and is invoked only
+        when the field is unset, at call time. Callers pass their own module-level name
+        instead of this class importing it because those names are the isolation seams
+        tests replace, and because the owning state modules import this module.
+        """
+        return _resolve_optional_path(self.fills_dir, default)
+
+    def resolved_tax_ledger_dir(self, default: Callable[[], Path]) -> Path:
+        """Position tax ledger directory location: the configured (or ``record_run_id``-derived) path, else ``default()``.
+
+        ``default`` is the caller's ``default_tax_ledger_dir`` reference and is invoked only
+        when the field is unset, at call time. Callers pass their own module-level name
+        instead of this class importing it because those names are the isolation seams
+        tests replace, and because the owning state modules import this module.
+        """
+        return _resolve_optional_path(self.tax_ledger_dir, default)
+
+    def resolved_execution_quality_dir(self, default: Callable[[], Path]) -> Path:
+        """Position execution-quality directory location: the configured (or ``record_run_id``-derived) path, else ``default()``.
+
+        ``default`` is the caller's ``default_execution_quality_dir`` reference and is invoked only
+        when the field is unset, at call time. Callers pass their own module-level name
+        instead of this class importing it because those names are the isolation seams
+        tests replace, and because the owning state modules import this module.
+        """
+        return _resolve_optional_path(self.execution_quality_dir, default)
+
+    def resolved_portfolio_state_dir(self, default: Callable[[], Path]) -> Path:
+        """Position portfolio-state directory location: the configured (or ``record_run_id``-derived) path, else ``default()``.
+
+        ``default`` is the caller's ``default_portfolio_state_dir`` reference and is invoked only
+        when the field is unset, at call time. Callers pass their own module-level name
+        instead of this class importing it because those names are the isolation seams
+        tests replace, and because the owning state modules import this module.
+        """
+        return _resolve_optional_path(self.portfolio_state_dir, default)
+
+    def resolved_microstructure_dir(self, default: Callable[[], Path]) -> Path:
+        """Position microstructure directory location: the configured (or ``record_run_id``-derived) path, else ``default()``.
+
+        ``default`` is the caller's ``default_microstructure_dir`` reference and is invoked only
+        when the field is unset, at call time. Callers pass their own module-level name
+        instead of this class importing it because those names are the isolation seams
+        tests replace, and because the owning state modules import this module.
+        """
+        return _resolve_optional_path(self.microstructure_dir, default)

@@ -93,12 +93,8 @@ def run_ledger_resync(
         _order_client,
     )
 
-    ledger_path = Path(settings.ledger_path) if settings.ledger_path else default_ledger_path()
-    journal_path = (
-        Path(settings.order_journal_path)
-        if settings.order_journal_path
-        else default_order_journal_path()
-    )
+    ledger_path = settings.resolved_ledger_path(default_ledger_path)
+    journal_path = settings.resolved_order_journal_path(default_order_journal_path)
     if apply:
         try:
             assert_daemon_idle(_resolve_heartbeat_path(settings), now_ts)
