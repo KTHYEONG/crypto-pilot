@@ -31,7 +31,7 @@
 | **Language & Tooling** | `Python 3.11+`, `uv` | 초고속 패키지 관리 및 최신 비동기 런타임 최적화. C 확장 컴파일 시 별도 툴체인 설정 필요 |
 | **Data Engine & Storage** | `Polars`, `Parquet`, `zstd` | SIMD 기반 초고속 벡터 피처 계산 및 90% 이상 디스크 압축. 복잡한 다중 테이블 애드혹 SQL 제약 |
 | **Concurrency & Network** | `asyncio`, `aiohttp`, `ccxt` | 네이티브 forceOrder 청산 웹소켓 직결 및 비동기 REST 펌프. 이벤트 루프 차단 방지 엄격 관리 |
-| **Execution Accounting** | `SimulatedInventoryLedger` | 3분봉 해상도 실시간 마크 가격 시가평가(MTM), 8h 펀딩비 실정산, 30분 앵커 지정가 집행. 연산 비용 증가 |
+| **Execution Accounting** | `SimulatedInventoryLedger` | 3분봉 해상도 체결 종가 기준 시가평가(MTM), 8h 펀딩비 실정산, 30분 앵커 지정가 집행. 연산 비용 증가 |
 | **Risk & Portfolio** | `Bayesian Kelly`, `replay_account` | 사전 $\mu_0=0$ 인과적 모멘트 갱신, 바이낸스 유지증거금(MMR) 사다리 추적. 사전 730일 관측 가중 필요 |
 | **Infra & Security** | `Docker Compose`, `AES-256-GCM` | OCI Ampere A1.Flex 24/7 무인 가동, 배포 전략 아티팩트 암호학적 봉인. 복호화 키 관리 의존성 |
 | **Verification & Quality**| `pytest`, `Python AST` | 패키지 계층 위계 및 모듈 크기·주기성 정적 불변식 기계적 강제. 신규 파일 추가 시 계약 동기화 요구 |
@@ -101,7 +101,7 @@ flowchart TD
 
 ### 1. 목표 가중치(Target Weight) 착시 탈피 & 3분봉 체결 원장
 * 🚨 **문제**: 1시간봉 종가 기준 가상 가중치 곱셈은 8시간 펀딩비 결제, 호가 스프레드, 거래 수수료를 누락하여 수익률을 심각하게 과대평가함.
-* 📐 **원칙**: 매 3분봉마다 `실시간 마크 가격 시가평가(MTM) ➔ 8시간 펀딩비 실정산 ➔ 봉 고저가(High/Low) 관통 체결 검증`의 회계 정산 순서를 엄격히 강제.
+* 📐 **원칙**: 매 3분봉마다 `3분봉 체결 종가 기준 시가평가(MTM) ➔ 8시간 펀딩비 실정산 ➔ 봉 고저가(High/Low) 관통 체결 검증`의 회계 정산 순서를 엄격히 강제.
 * 💡 **해결**: `SimulatedInventoryLedger`를 구축하고 30분 앵커 지정가 대기 후 테이커 전환하는 `strict_passive` 메이커 집행을 도입해 CAGR +10.8%p 개선.
 
 ### 2. 시계열 인과성(Causality) & 생존 편향 원천 차단
@@ -129,7 +129,7 @@ flowchart TD
 ## 5. Verified Performance Matrix (실측 정본 성과)
 
 > **출처**: `data/backtests/index.jsonl` (2021-04-01 ~ 2026-07-01, 5년 3개월 실측)  
-> **조건**: 3분봉 체결 원장, 8시간 펀딩비 실정산, 3-tier 수수료 차감, 실시간 마크 가격 시가평가(MTM).
+> **조건**: 3분봉 체결 원장, 8시간 펀딩비 실정산, 3-tier 수수료 차감, 3분봉 체결 종가 기준 시가평가(MTM).
 
 | 전략 모델 (Strategy Model) | 집행 방식 (Execution) | Geometric CAGR | Max Drawdown | 실계좌 청산 횟수 |
 | :--- | :---: | :---: | :---: | :---: |

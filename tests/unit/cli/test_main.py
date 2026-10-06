@@ -57,14 +57,15 @@ def test_data_collect_futures_ohlcv_parses_and_dispatches(monkeypatch) -> None:
     assert calls[0][3], "end defaults to now and must be non-empty"
 
 
-def test_data_collect_metrics_parses_and_dispatches(monkeypatch) -> None:
-    calls: list[tuple[str, str, str]] = []
-    monkeypatch.setattr(
-        collection, "collect_metrics",
-        lambda symbol, start, end: calls.append((symbol, start, end)),
-    )
-    main([
-        "data", "collect", "metrics", "BTCUSDT",
-        "--start", "2022-04-01", "--end", "2025-01-01",
-    ])
-    assert calls == [("BTCUSDT", "2022-04-01", "2025-01-01")]
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["data", "collect", "metrics", "BTCUSDT", "--end", "2025-01-01"],
+        ["data", "collect", "indicator-klines", "markPriceKlines", "BTCUSDT", "1h"],
+        ["data", "collect", "bookdepth", "BTCUSDT"],
+    ],
+)
+def test_data_collect_retired_collectors_are_rejected(argv: list[str]) -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        build_root_parser().parse_args(argv)
+    assert exc_info.value.code == 2

@@ -227,7 +227,7 @@ files moved to `_versions/<date>` and kept 30 days, serialized by the shared
 | B5 | Run records match | `rclone check data/state gdrive:quant-lake/live/crypto-pilot/data/state --one-way 2>&1 \| tail` | only continuously rewritten files differ (`live_daemon_heartbeat.json`, `live_liveness_state.json`); `$RUN/position_ledger.json` and current-month `fills_*.parquet` match after the 00:15 run |
 | B6 | Live-only captures | `rclone check data/live_capture/raw/archive gdrive:quant-lake/live/crypto-pilot/data/live_capture/raw/archive --one-way` | no missing archives older than one backup cycle |
 | B7 | Version retention | `rclone lsf gdrive:quant-lake/live/crypto-pilot/_versions --dirs-only` | dated folders only, none older than 30 days |
-| B8 | Not backed up (by design) | n/a | re-downloadable `futures/ohlcv`, `funding`, `metrics`; `raw/hot/`; capture heartbeats; `logs/` other than `live/orders`. Note: `logs/live/daemon.log` and `logs/live/shadow_cycle/` are not backed up (the run-dir `audit/` mirror is) |
+| B8 | Not backed up (by design) | n/a | re-downloadable `futures/ohlcv`, `funding` (and retired legacy feed dirs, if any); `raw/hot/`; capture heartbeats; `logs/` other than `live/orders`. Note: `logs/live/daemon.log` and `logs/live/shadow_cycle/` are not backed up (the run-dir `audit/` mirror is) |
 
 ## 10. Known Risks and Open Items
 

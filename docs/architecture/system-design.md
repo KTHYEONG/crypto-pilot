@@ -13,7 +13,7 @@
 * **Point-In-Time (PIT) 유니버스**: 720h 과거 거래대금 중앙값 50% 필터 + Top-60 진입 / 120위 방출 이중 임계값(Schmitt-Trigger 히스테리시스, 미래 참조 0% 차단).
 * **Frozen Top-20 직교 횡단면 알파**: 5개 직교 피처 랭크 결합 및 종목별 5% 가중치 클립. 1h 120일 패널 창 인프로세스 직접 산출.
 * **인과적 베이지안 Kelly**: 사전 기댓값 $\mu_0 = 0$(730일 관측 가중)에서 출발하여 매일 전일까지의 실적만 반영한 사후 모멘트 동적 비중 배분.
-* **3분봉 네이티브 체결 원장**: 실시간 마크 가격 시가평가(MTM), 8시간 펀딩비 실정산, High/Low 관통 검증, 30분 앵커 지정가 메이커/테이커 집행.
+* **3분봉 네이티브 체결 원장**: 3분봉 체결 종가 기준 시가평가(MTM, 외부 마크 가격 피드 미사용), 8시간 펀딩비 실정산, High/Low 관통 검증, 30분 앵커 지정가 메이커/테이커 집행.
 * **거래소 실거래 브래킷 원장**: 바이낸스 Notional 구간별 유지증거금율(MMR) 및 누적 공제액(cum), 최소 주문단위, 강제청산 실시간 판정.
 * **24/7 무인 라이브 데몬**: 23:03 UTC 일별 사이클, 결정 창(22:45~02:00 UTC) 배포 유예 가드, AST 지문 기반 선택적 컨테이너 재생성.
 
@@ -78,7 +78,7 @@ flowchart TD
 
 ### 외부 연동 인터페이스 (External Interfaces)
 1. **Binance Futures FAPI REST**: Klines(`1m/1h`), Funding Rate(`8h`), Leverage Bracket 스냅샷 수집.
-2. **Binance Vision S3 Archive**: 과거 대용량 Klines, 5분 메트릭스(OI, LSR) `.zip` 다운로드 및 SHA-256 체크섬 무결성 검증.
+2. **Binance Vision S3 Archive**: 과거 Klines·Funding Rate 월별 `.zip` 백필. 아카이브 `.CHECKSUM` 검증은 수행하지 않으며, 무결성은 스키마 정규화·결손 감사(`verify-source-gaps`, `sync-execution-coverage`)와 `seal-mhs-inputs` SHA-256 입력 매니페스트로 확보.
 3. **Binance WebSocket (`forceOrder`)**: forceOrder frames are journaled raw before interpretation.
 4. **Google Drive Storage**: 호스트 레벨 `flock` 파일 잠금 기반 rclone 원격 백업.
 
@@ -105,9 +105,7 @@ flowchart TD
 data/
   ├── futures/
   │   ├── ohlcv/ {1m, 3m, 1h}/*.parquet       # 11개 raw 필드 보존 캔들
-  │   ├── markPriceKlines/ 1h/*.parquet       # 실시간 시가평가(MTM) 기준 캔들
-  │   ├── funding/*.parquet                   # 8시간 선물 펀딩비 이력
-  │   └── metrics/*.parquet                   # 5분 메트릭스 (available_at 5분 지연 강제)
+  │   └── funding/*.parquet                   # 8시간 선물 펀딩비 이력
   ├── venue_rules/                            # 바이낸스 유지증거금(MMR/cum) 브래킷 스냅샷
   ├── state/                                  # 24/7 라이브 영속 상태
   │   ├── live_fills/                         # 실제 체결 내역 (월별 파티션)
@@ -118,7 +116,7 @@ data/
 
 ### 4.2 도메인 금융 무결성 배리어 (Financial Invariants)
 1. **3분봉 네이티브 체결 원장 (`SimulatedInventoryLedger`)**:
-   매 3분봉마다 `실시간 마크 가격 시가평가(MTM) ➔ 8시간 펀딩비 실정산 ➔ 테이커/메이커 체결` 정산 순서를 강제합니다. 지정가 매수는 봉 저가($Low < Price$), 매도는 봉 고가($High > Price$) 관통 시에만 체결을 인정합니다.
+   매 3분봉마다 `3분봉 체결 종가 시가평가(MTM) ➔ 8시간 펀딩비 실정산 ➔ 테이커/메이커 체결` 정산 순서를 강제합니다. 지정가 매수는 봉 저가($Low < Price$), 매도는 봉 고가($High > Price$) 관통 시에만 체결을 인정합니다.
 2. **거래소 실거래 브래킷 원장 (`replay_account.py`)**:
    바이낸스 공식 Notional Tier별 유지증거금율($MMR$) 및 누적 공제액($cum$) 사다리를 실시간 추적합니다:
    $$\text{Maintenance Margin} = \text{Position Notional} \times MMR - cum$$
