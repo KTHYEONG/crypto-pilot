@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from typing import Any
 
 import pandas as pd
@@ -256,10 +256,10 @@ def _run_post_book_concurrently(
 ]:
     """Run anchored folds, diagnostics, and deployment readiness concurrently.
 
-    The fold pool is forked while the main process is quiescent (the book
-    workers have joined and no diagnostic thread exists yet), then a single
-    background thread runs the diagnostics + deployment-readiness tail in
-    parallel with the fold workers.  The fold result telemetry is recorded in
+    The fold pool forks at the first phase-V submit while the main process is quiescent (the
+    book workers have joined and no diagnostic thread exists yet), then a single background
+    thread runs the diagnostics + deployment-readiness tail overlapping all three fold phases
+    (validation, shared reference, execution). The fold result telemetry is recorded in
     fold order; ``blend_participation``/``statistical_diagnostics`` telemetry is
     left to the caller so the ordered-stage contract is preserved deterministically.
     """
@@ -288,7 +288,6 @@ def _run_post_book_concurrently(
             termination_counts, fold_reports, deployment,
         )
 
-    reports: dict[int, MhsFoldReport] = {}
     _post_book_reserve = _resolve_ram_budget(request.max_rss_bytes, request.ram_guard)[1]
     max_workers = plan_worker_count(
         min(3, len(fold_list)), WORKER_PEAK_RSS_BYTES, request.ram_guard,
@@ -297,21 +296,13 @@ def _run_post_book_concurrently(
     )
     assert_fork_admission("post_book_folds", max_workers, WORKER_PEAK_RSS_BYTES, _post_book_reserve)
     with (
-        fork_shared_payload({"base_panel": base_panel}),
+        fork_shared_payload({"base_panel": base_panel, "fold_funding": fold_funding}) as token,
         frozen_gc_heap(),
         ProcessPoolExecutor(max_workers=max_workers, mp_context=FORK_CONTEXT) as pool,
     ):
-        futures = {
-            pool.submit(
-                folds._run_anchored_fold,
-                root, fold, worker_request, fold_funding, initial_equity, fold_index, None,
-                (fold_slow_horizons or {}).get(fold_index),
-                (fold_fast_horizons or {}).get(fold_index),
-                (fold_funding_carry or {}).get(fold_index),
-                (fold_committee_weights or {}).get(fold_index),
-            ): fold_index
-            for fold_index, fold in enumerate(fold_list)
-        }
+        validation_futures = folds._submit_fold_validation_phase(
+            pool, token, root, fold_list, worker_request, fold_slow_horizons, fold_committee_weights,
+        )
         # The fold pool is now forked; start the diagnostics/deployment thread.
         with ThreadPoolExecutor(max_workers=1) as tpool:
             post_future = None
@@ -322,15 +313,15 @@ def _run_post_book_concurrently(
                     blend_report, root, request, execution_symbols, minute_grid,
                     signal_48h, eligible, opens, bar_funding, grid_1h, fast,
                 )
-            for future in as_completed(futures):
-                fold_index = futures[future]
-                reports[fold_index] = future.result()
+            fold_reports = folds._complete_anchored_folds(
+                pool, token, validation_futures, root, fold_list, worker_request, initial_equity,
+                fold_slow_horizons, fold_fast_horizons, fold_funding_carry, fold_committee_weights,
+            )
             if post_future is not None:
                 (
                     bootstrap_ci, placebo_percentile, participation,
                     termination_counts, deployment,
                 ) = post_future.result()
-    fold_reports = tuple(reports[idx] for idx in sorted(reports))
     if telemetry is not None:
         for fold_report in fold_reports:
             fill_count = (
