@@ -698,6 +698,22 @@ class MhsDiagnosticRequest:
         default=None,
         metadata=cli_param(flag='--forward-strategy-digest', help='Frozen strategy digest expected in forward observations.'),
     )
+    placebo_diagnostic: bool = field(
+        default=False,
+        metadata=cli_param(flag='--placebo-diagnostic', help='Opt-in report-only placebo: percentile of the blend naive Sharpe among 500 column-shuffled 48h fast-reversal books; not the committee null, never a Research-GO, DSR or deploy-gate input'),
+    )
+    phase_diagnostic: bool = field(
+        default=False,
+        metadata=cli_param(flag='--phase-diagnostic', help='Opt-in report-only phase robustness diagnostic (independently-run decision phases) on every top-level book; never a go/no-go input'),
+    )
+    signal_48h_diagnostic: bool = field(
+        default=False,
+        metadata=cli_param(flag='--signal-48h-diagnostic', help='Opt-in report-only 48h raw-return statistics: cross-sectional rank IC, date-clustered OLS slope, 48h realized-vol and efficiency-ratio means'),
+    )
+    bootstrap_ci_diagnostic: bool = field(
+        default=False,
+        metadata=cli_param(flag='--bootstrap-ci-diagnostic', help='Opt-in report-only stationary block-bootstrap 95%% CI of the blend mean hourly return; deployment-readiness and deploy-gate bootstraps stay mandatory'),
+    )
 
     def __post_init__(self) -> None:
         from src.mhs.validation import validate_request
@@ -723,13 +739,15 @@ class MhsBookFailure:
 
 @dataclass(frozen=True, slots=True)
 class MhsBookReport:
+    """One top-level book replay report; ``phase`` is ``None`` unless the request set ``phase_diagnostic``."""
+
     name: str
     band: str
     horizon_hours: int
     step_hours: int
     tranche_count: int
     n_symbols: int
-    phase: PhaseDiagnosticResult
+    phase: PhaseDiagnosticResult | None
     prescreen: dict[float, CostResponsePoint]
     tail: TailSensitivityResult
     primary: StrategyExecutionReplayResult | None

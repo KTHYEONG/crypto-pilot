@@ -260,6 +260,14 @@ def validate_request(request: MhsDiagnosticRequest) -> None:
         raise ValueError("ram_guard must be a bool")
     if not isinstance(request.committee_member_attribution, bool):
         raise ValueError("committee_member_attribution must be a bool")
+    if not isinstance(request.placebo_diagnostic, bool):
+        raise ValueError("placebo_diagnostic must be a bool")
+    if not isinstance(request.phase_diagnostic, bool):
+        raise ValueError("phase_diagnostic must be a bool")
+    if not isinstance(request.signal_48h_diagnostic, bool):
+        raise ValueError("signal_48h_diagnostic must be a bool")
+    if not isinstance(request.bootstrap_ci_diagnostic, bool):
+        raise ValueError("bootstrap_ci_diagnostic must be a bool")
     if not (0.0 <= request.trend_sleeve_gross <= 1.0):
         raise ValueError("trend_sleeve_gross must be in [0.0, 1.0]")
     if request.trend_sleeve_gross > 0.0 and not request.trend_sleeve:

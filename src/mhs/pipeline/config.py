@@ -192,4 +192,8 @@ def resolve_cli_request(explicit: Mapping[str, Any]) -> MhsDiagnosticRequest:
         input_manifest_path=_get("input_manifest_path"),
         forward_execution_quality_dir=_get("forward_execution_quality_dir"),
         forward_strategy_digest=_get("forward_strategy_digest"),
+        placebo_diagnostic=bool(_get("placebo_diagnostic")),
+        phase_diagnostic=bool(_get("phase_diagnostic")),
+        signal_48h_diagnostic=bool(_get("signal_48h_diagnostic")),
+        bootstrap_ci_diagnostic=bool(_get("bootstrap_ci_diagnostic")),
     )
