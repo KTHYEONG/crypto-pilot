@@ -48,3 +48,45 @@ def test_sibling_artifact_paths_require_weights_token(tmp_path) -> None:
     assert exposure_scale_path(base) == tmp_path / "deployed_exposure_scale.parquet.enc"
     with pytest.raises(DataIntegrityError, match="deployed_target_weights"):
         exposure_scale_path(tmp_path / "w.parquet")
+
+
+def test_weights_write_fsyncs_file_and_directory_plain_and_sealed(tmp_path, monkeypatch) -> None:
+    """Both plain and sealed weight writes fsync the file before replace and the directory after."""
+    import base64
+    import os
+    from pathlib import Path
+
+    import pandas as pd
+    from pydantic import SecretStr
+
+    from src.live.deployed_weights import append_weight_row, load_weights_frame
+
+    real_fsync = os.fsync
+    file_fsyncs: list[str] = []
+    dir_fsyncs: list[str] = []
+
+    def _spy(fd: int) -> None:
+        try:
+            target = os.readlink(f"/proc/self/fd/{fd}")
+        except OSError:
+            target = str(fd)
+        (dir_fsyncs if Path(target).is_dir() else file_fsyncs).append(target)
+        real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", _spy)
+    day = pd.Timestamp("2026-08-24", tz="UTC")
+    row = pd.Series({"BTCUSDT": 0.1})
+    plain = tmp_path / "deployed_target_weights.parquet"
+    assert append_weight_row(plain, day, row) is True
+    assert len(file_fsyncs) == 1
+    assert len(dir_fsyncs) == 1
+    file_fsyncs.clear()
+    dir_fsyncs.clear()
+    key = SecretStr(base64.b64encode(b"0" * 32).decode("ascii"))
+    sealed_base = tmp_path / "sealed_deployed_target_weights.parquet"
+    assert append_weight_row(sealed_base, day, row, artifact_key=key) is True
+    assert len(file_fsyncs) == 1
+    assert len(dir_fsyncs) == 1
+    expected = pd.DataFrame([row], index=pd.DatetimeIndex([day]))
+    pd.testing.assert_frame_equal(load_weights_frame(plain), expected)
+    pd.testing.assert_frame_equal(load_weights_frame(sealed_base, artifact_key=key), expected)

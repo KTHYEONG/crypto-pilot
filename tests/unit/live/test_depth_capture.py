@@ -515,7 +515,7 @@ def test_persisted_rows_exclude_failed_final_flush(
     def _boom(target: Any, source: Any) -> None:
         raise OSError("disk full")
 
-    monkeypatch.setattr("src.live.depth_capture.os.replace", _boom)
+    monkeypatch.setattr("src.common.durable_io.os.replace", _boom)
     with caplog.at_level(logging.ERROR, logger="src.live.depth_capture"):
         rec.start()
         _wait_for(lambda: rec._rows >= 2)

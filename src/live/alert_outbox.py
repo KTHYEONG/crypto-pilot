@@ -13,6 +13,7 @@ from typing import Any, Literal, cast
 
 import pandas as pd
 
+from src.common.durable_io import durable_write_text
 from src.common.paths import DATA_DIR
 
 logger = logging.getLogger("LiveAlertOutbox")
@@ -205,20 +206,7 @@ class AlertOutbox:
         try:
             self._path.parent.mkdir(parents=True, exist_ok=True)
             payload = json.dumps({"records": [_record_to_json(r) for r in records]}, sort_keys=True)
-            tmp_path = self._path.with_name(self._path.name + ".tmp")
-            with open(tmp_path, "w", encoding="utf-8") as handle:
-                handle.write(payload)
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(tmp_path, self._path)
-            try:
-                dir_fd = os.open(str(self._path.parent), os.O_RDONLY)
-            except OSError:
-                return True
-            try:
-                os.fsync(dir_fd)
-            finally:
-                os.close(dir_fd)
+            durable_write_text(self._path, payload)
             return True
         except Exception as exc:  # noqa: BLE001
             logger.error("[SYS] stage=alert_outbox status=WRITE_FAILED error=%s", exc)

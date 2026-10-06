@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import json
 import math
-import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from decimal import Decimal, InvalidOperation
@@ -19,6 +18,7 @@ from typing import TYPE_CHECKING, Any
 
 import pandas as pd
 
+from src.common.durable_io import durable_write_text
 from src.common.errors import DataIntegrityError
 from src.common.paths import DATA_DIR
 
@@ -314,20 +314,7 @@ def save_ledger(path: Path, state: LedgerState) -> None:
     if state.derisk_since is not None:
         payload[_DERISK_SINCE_KEY] = pd.Timestamp(state.derisk_since).tz_convert("UTC").isoformat()
         payload[_DERISK_REASONS_KEY] = sorted(state.derisk_reasons)
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
-    tmp_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
-    with tmp_path.open("rb") as handle:
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(tmp_path, path)
-    try:
-        dir_fd = os.open(path.parent, os.O_RDONLY)
-    except OSError:
-        return
-    try:
-        os.fsync(dir_fd)
-    finally:
-        os.close(dir_fd)
+    durable_write_text(path, json.dumps(payload, sort_keys=True))
 
 
 def _fill_cash_delta(side: str, quantity: Decimal, price: Decimal, fee_bps: float) -> Decimal:

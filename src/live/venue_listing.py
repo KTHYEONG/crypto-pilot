@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import gzip
 import json
-import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from decimal import Decimal
@@ -18,6 +17,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from src.common.durable_io import durable_replace
 from src.common.errors import DataIntegrityError
 
 _REQUIRED_BAR_COLUMNS = ("timestamp", "open", "high", "low", "close", "volume")
@@ -273,10 +273,12 @@ def write_venue_listing_snapshot(snapshot: VenueListingSnapshot, root: Path, *, 
             ):
                 raise DataIntegrityError(f"listing slot {path.name} would move first-seen later for {symbol}")
     payload = json.dumps(_snapshot_to_json(snapshot), separators=(",", ":"))
-    tmp_path = root_path / f".{path.name}.{os.getpid()}.tmp"
-    with gzip.open(tmp_path, "wt", encoding="utf-8") as handle:
-        handle.write(payload)
-    os.replace(tmp_path, path)
+
+    def _write_snapshot(tmp_path: Path) -> None:
+        with gzip.open(tmp_path, "wt", encoding="utf-8") as handle:
+            handle.write(payload)
+
+    durable_replace(path, _write_snapshot)
     return path
 
 

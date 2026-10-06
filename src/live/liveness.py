@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,6 +11,7 @@ from typing import Any
 
 import pandas as pd
 
+from src.common.durable_io import durable_write_text
 from src.common.paths import DATA_DIR
 
 logger = logging.getLogger("LiveLiveness")
@@ -123,9 +123,7 @@ def _read_episode_state(state_path: Path) -> dict[str, Any]:
 
 def _write_episode_state(state_path: Path, payload: dict[str, Any]) -> None:
     state_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = state_path.with_suffix(state_path.suffix + ".tmp")
-    tmp_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
-    os.replace(tmp_path, state_path)
+    durable_write_text(state_path, json.dumps(payload, sort_keys=True))
 
 
 def _read_heartbeat_file(settings: Any) -> Mapping[str, Any] | None:
