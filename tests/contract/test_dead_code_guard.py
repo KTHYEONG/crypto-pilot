@@ -41,35 +41,78 @@ DELETED_MODULES: Final[tuple[str, ...]] = (
     "src.mhs.signal_state",
     "src.mhs.stage_services",
     "src.research",
+    "src.market_data.storage.schemas",
 )
 RETIRED_SYMBOLS: Final[tuple[tuple[str, str], ...]] = (
     ("src.application.mhs_supervisor", "PROCESS_INVENTORY_REPORT_PATH"),
     ("src.application.mhs_supervisor", "PROCESS_POLICY_REPORT_PATH"),
     ("src.application.mhs_supervisor", "PROCESS_REPORT_PATH"),
+    ("src.cli.commands.data", "_bookdepth"),
+    ("src.cli.commands.data", "_indicator_klines"),
+    ("src.cli.commands.data", "_metrics"),
     ("src.cli.commands.data", "_refresh_one_symbol_tail"),
+    ("src.common.paths", "bookdepth_path"),
+    ("src.common.paths", "indicator_kline_path"),
+    ("src.common.paths", "metrics_path"),
     ("src.live.runner", "apply_ruin_guard"),
     ("src.live.scheduler", "_load_last_processed"),
     ("src.live.scheduler", "_save_last_processed"),
     ("src.market_data.binance.futures", "BinanceClient.fetch_futures_data_metric"),
     ("src.market_data.binance.futures", "BinanceClient.fetch_mark_price_klines"),
+    ("src.market_data.binance.vision", "BinanceVisionDownloader._normalize_metrics_frame"),
+    ("src.market_data.binance.vision", "BinanceVisionDownloader.fetch_bookdepth_daily"),
+    ("src.market_data.binance.vision", "BinanceVisionDownloader.fetch_daily_metrics"),
+    ("src.market_data.binance.vision", "BinanceVisionDownloader.fetch_funding_monthly"),
     ("src.market_data.binance.vision", "BinanceVisionDownloader.fetch_indicator_klines_daily"),
+    ("src.market_data.binance.vision", "BinanceVisionDownloader.fetch_indicator_klines_monthly"),
+    ("src.market_data.binance.vision", "BinanceVisionDownloader.fetch_klines_archive"),
+    ("src.market_data.binance.vision", "BinanceVisionDownloader.fetch_metrics_daily"),
+    ("src.market_data.binance.vision", "BinanceVisionDownloader.fetch_premiumindex_daily"),
+    ("src.market_data.binance.vision", "BinanceVisionDownloader.fetch_range_metrics"),
+    ("src.market_data.binance.vision", "BinanceVisionDownloader.verify_checksum"),
+    ("src.market_data.binance.vision", "_OI_ADV_METRICS_START"),
+    ("src.market_data.binance.vision", "fetch_metrics_bulk"),
     ("src.market_data.retention", "MHS_RETIRED_FEEDS"),
     ("src.market_data.retention", "RETIRED_MHS_CLEANUP_SUFFIXES"),
     ("src.market_data.retention", "enumerate_retired_mhs_feed_files"),
     ("src.market_data.retention", "quarantine_retired_mhs_feeds"),
     ("src.market_data.retention", "retired_feed_active_readers"),
+    ("src.market_data.services.collection", "collect_bookdepth"),
+    ("src.market_data.services.collection", "collect_indicator_klines"),
+    ("src.market_data.services.collection", "collect_metrics"),
+    ("src.market_data.services.futures_collection", "DataCollector._bookdepth_coverage_report"),
+    ("src.market_data.services.futures_collection", "DataCollector._load_bookdepth_cache"),
+    ("src.market_data.services.futures_collection", "DataCollector._load_indicator_kline_cache"),
     ("src.market_data.services.futures_collection", "DataCollector._load_mark_price_cache"),
+    ("src.market_data.services.futures_collection", "DataCollector._load_metrics_cache"),
     ("src.market_data.services.futures_collection", "DataCollector._mark_price_coverage"),
+    ("src.market_data.services.futures_collection", "DataCollector._merge_metrics_frames"),
+    ("src.market_data.services.futures_collection", "DataCollector._metrics_coverage_report"),
+    ("src.market_data.services.futures_collection", "DataCollector._normalize_bookdepth_frame"),
+    ("src.market_data.services.futures_collection", "DataCollector._normalize_indicator_kline_frame"),
     ("src.market_data.services.futures_collection", "DataCollector._safe_symbol"),
+    ("src.market_data.services.futures_collection", "DataCollector._save_bookdepth_cache"),
+    ("src.market_data.services.futures_collection", "DataCollector._save_indicator_kline_cache"),
     ("src.market_data.services.futures_collection", "DataCollector._save_mark_price_coverage"),
+    ("src.market_data.services.futures_collection", "DataCollector._save_metrics_cache"),
+    ("src.market_data.services.futures_collection", "DataCollector._validate_bookdepth_frame"),
+    ("src.market_data.services.futures_collection", "DataCollector._validate_metrics_frame"),
+    ("src.market_data.services.futures_collection", "DataCollector.ensure_bookdepth_data"),
+    ("src.market_data.services.futures_collection", "DataCollector.ensure_indicator_kline_data"),
     ("src.market_data.services.futures_collection", "DataCollector.ensure_mark_price_data"),
+    ("src.market_data.services.futures_collection", "DataCollector.ensure_metrics_data"),
     ("src.market_data.services.futures_collection", "DataCollector.ensure_metrics_live_tail"),
     ("src.market_data.services.futures_collection", "DataCollector.load_mark_price_panel"),
     ("src.market_data.services.futures_collection", "DataValidator"),
     ("src.market_data.services.futures_collection", "MarkPriceCoverage"),
+    ("src.market_data.services.futures_collection", "_BOOKDEPTH_CANONICAL_COLUMNS"),
+    ("src.market_data.services.futures_collection", "_INDICATOR_KLINE_CANONICAL_COLUMNS"),
+    ("src.market_data.services.futures_collection", "_METRICS_CANONICAL_COLUMNS"),
     ("src.market_data.services.futures_collection", "_METRICS_MERGE_TOLERANCE"),
     ("src.market_data.services.futures_collection", "_METRICS_NUMERIC_COLUMNS"),
     ("src.market_data.services.futures_collection", "_METRICS_RELEASE_LAG"),
+    ("src.market_data.services.futures_collection", "_empty_bookdepth_frame"),
+    ("src.market_data.services.futures_collection", "_empty_metrics_frame"),
     ("src.market_data.services.futures_collection", "_mark_price_manifest_path"),
     ("src.market_data.services.futures_collection", "_mark_price_path"),
     ("src.market_data.services.mhs_execution", "_MARK_AVAILABILITY_LAG_HOURS"),
@@ -93,6 +136,9 @@ RETIRED_SYMBOLS: Final[tuple[tuple[str, str], ...]] = (
     ("src.mhs.marks", "_get_symbol_mark_frame"),
     ("src.mhs.params", "FOLD_GROWTH_CONCENTRATION_MAX_SHARE"),
     ("src.mhs.report.persist", "mhs_horizon_diagnostic_report_path"),
+)
+RETIRED_LITERALS: Final[tuple[tuple[str, frozenset[str]], ...]] = (
+    ("markPriceKlines", frozenset({"src/application/ops/gdrive_cleanup.py"})),
 )
 CROSS_PACKAGE_PRIVATE_ALLOWLIST: Final[frozenset[tuple[str, str, str]]] = frozenset(
     {
@@ -294,6 +340,33 @@ def test_retired_symbols_stay_absent(owner_attr: tuple[str, str]) -> None:
     assert not hasattr(obj, segments[-1]), (
         f"retired symbol reappeared: {owner}:{dotted}"
     )
+
+
+@pytest.mark.parametrize(
+    ("literal", "allowed"),
+    RETIRED_LITERALS,
+    ids=[literal for literal, _ in RETIRED_LITERALS],
+)
+def test_retired_literals_confined_to_allowlist(
+    literal: str, allowed: frozenset[str],
+) -> None:
+    hits: dict[str, list[int]] = {}
+    for path in _iter_python_files("src"):
+        rel = path.relative_to(REPO_ROOT).as_posix()
+        for lineno, line in enumerate(
+            path.read_text(encoding="utf-8").splitlines(), start=1,
+        ):
+            if literal in line:
+                hits.setdefault(rel, []).append(lineno)
+    offenders = sorted(
+        f"{rel}:{lineno}"
+        for rel, linenos in hits.items()
+        if rel not in allowed
+        for lineno in linenos
+    )
+    assert offenders == [], f"retired literal {literal!r} escaped allowlist: {offenders}"
+    stale = sorted(rel for rel in allowed if rel not in hits)
+    assert stale == [], f"stale literal allowance for {literal!r}: {stale}"
 
 
 def test_no_new_cross_package_private_imports() -> None:
