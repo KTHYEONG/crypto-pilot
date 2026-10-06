@@ -564,12 +564,13 @@ def test_paper_delisted_evidence_and_tax_records(monkeypatch, tmp_path, quantity
     assert len(out.settlement_records) == 1
     record = out.settlement_records[0]
     assert (record.kind, record.side, record.price, record.quantity, record.fee) == (
-        "TRADE", "SELL" if quantity > 0 else "BUY", 100.0, 1.0, 0.1
+        "TRADE", "SELL" if quantity > 0 else "BUY",
+        Decimal("100"), Decimal("1"), Decimal("0.1"),
     )
     assert record.event_time == delivery
     tax_frame = load_tax_records(Path(settings.tax_ledger_dir))
     assert tax_frame["record_id"].tolist() == [record.record_id]
-    assert tax_frame["fee"].tolist() == [0.1]
+    assert [Decimal(str(v)) for v in tax_frame["fee"].tolist()] == [record.fee]
     assert tax_frame["side"].tolist() == [record.side]
     retry = _settle_paper_funding_and_delistings(
         settings,
@@ -619,10 +620,10 @@ def test_paper_no_delisted_success(monkeypatch, tmp_path) -> None:
     assert out.ledger_state.funding_watermarks == {"AAAUSDT": DECISION}
     assert load_ledger(ledger_path).cash_usdt == Decimal("999.9")
     assert len(out.funding_records) == 1
-    assert out.funding_records[0].realized_pnl == -0.1
+    assert out.funding_records[0].realized_pnl == Decimal("-0.1")
     tax_frame = load_tax_records(Path(settings.tax_ledger_dir))
     assert tax_frame["record_id"].tolist() == [out.funding_records[0].record_id]
-    assert tax_frame["realized_pnl"].tolist() == [-0.1]
+    assert [Decimal(str(v)) for v in tax_frame["realized_pnl"].tolist()] == [Decimal("-0.1")]
 
 
 def test_portfolio_fail_soft_success_and_failure(monkeypatch, tmp_path) -> None:

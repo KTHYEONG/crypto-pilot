@@ -19,7 +19,7 @@ from src.live.account import settled_delisting_symbols
 from src.live.filters import is_delisted, parse_delivery_schedule
 from src.live.ledger import LedgerState, append_position_snapshot
 from src.live.settings import ExecutionMode
-from src.live.tax_ledger import TaxRecord
+from src.live.tax_schema import TaxRecord
 from src.live.venue_listing import SettlementEvidence
 
 
@@ -174,12 +174,12 @@ def delisting_settlement_tax_records(
                 event_time=delivery,
                 symbol=settlement.symbol,
                 side="SELL" if settlement.quantity > 0 else "BUY",
-                quantity=float(qty),
-                price=float(price),
-                quote_qty=float(notional),
-                fee=float(settlement.fee),
+                quantity=qty,
+                price=price,
+                quote_qty=notional,
+                fee=settlement.fee,
                 fee_asset="USDT",
-                realized_pnl=0.0,
+                realized_pnl=Decimal(0),
                 income_asset="USDT",
                 is_maker=False,
                 venue_id=0,

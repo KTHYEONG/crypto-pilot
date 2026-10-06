@@ -640,9 +640,9 @@ def test_paper_cycle_trade_tax_rows_equal_fills_rows(tmp_path, monkeypatch) -> N
     for _, fill in fills.iterrows():
         match = trades[trades["symbol"] == fill["symbol"]]
         assert len(match) == 1
-        assert abs(match.iloc[0]["quantity"]) == abs(fill["quantity_delta"])
-        assert match.iloc[0]["price"] == fill["fill_price"]
-    assert append_calls, "fills must be appended"
+        assert abs(float(match.iloc[0].quantity)) == abs(fill["quantity_delta"])
+        assert float(match.iloc[0].price) == fill["fill_price"]
+    assert append_calls
     assert len(tax_calls) == len(append_calls)
     for append_events, (tax_events, mode) in zip(append_calls, tax_calls, strict=True):
         assert tax_events is append_events
@@ -676,7 +676,7 @@ def test_paper_cycle_mismatch_alerts_once_without_halting(tmp_path, monkeypatch)
             phantom = dataclasses.replace(
                 records[0],
                 record_id=records[0].record_id + ":phantom",
-                quote_qty=records[0].quote_qty + 1.0,
+                quote_qty=records[0].quote_qty + Decimal(1),
             )
             return (*records, phantom)
         return records
@@ -1096,10 +1096,8 @@ def test_delisting_paper_long_books_cash_at_evidenced_price() -> None:
     assert record.kind == "TRADE"
     assert record.side == "SELL"
     assert record.source == "delisting_settlement"
-    assert record.quantity == 10.0
-    assert record.price == 2.5
-    assert record.quote_qty == 25.0
-    assert record.fee == 0.0125
+    assert (record.quantity, record.price, record.quote_qty, record.fee) == tuple(
+        map(Decimal, ("10", "2.5", "25", "0.0125")))
 
     reconciliation = reconcile_cycle_cash(
         Decimal("1000"), booked_state.cash_usdt, records, (), tolerance_usdt=Decimal("0.01")
