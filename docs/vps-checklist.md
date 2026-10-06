@@ -192,6 +192,12 @@ Known by-design quirks (do not report as defects):
   position notional, so never sum it as cash.
 - `LIVE_TAX_COLLECTION_ENABLED=false` only disables venue income collection; PAPER
   TRADE/FUNDING rows are still written.
+- Before the first live cycle (account flat) and before 2027-01-01 KST: set
+  `LIVE_TAX_COLLECTION_ENABLED=true`. Venue ledgers are account-scoped
+  (`data/state/tax_ledger/testnet|mainnet`, independent of `LIVE_RECORD_RUN_ID`); mainnet with
+  collection disabled fails preflight `tax_collection_ready` and the daemon refuses to start. A
+  ledger whose first collection saw open positions raises `tax_genesis_not_flat` and its yearly
+  summaries stay `incomplete`.
 
 On mismatch the daemon behaves as follows: a cash reconcile miss raises a
 `ledger_reconcile_mismatch` alert but does not halt; a corrupt ledger, journal gap or

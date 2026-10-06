@@ -33,8 +33,11 @@ COMPLEXITY_CEILINGS: Final[dict[str, int]] = {
     "src/live/preflight.py::run_preflight": 25,
     "src/live/rest.py::_request_get": 24,
     "src/live/runner.py::run_shadow_cycle": 65,
-    "src/live/scheduler.py::run_daemon": 62,
+    # spec 17: mainnet refuse-to-start gate (fail loud before any venue call).
+    "src/live/scheduler.py::run_daemon": 64,
     "src/live/tax_ledger.py::_collect_income": 20,
+    # spec 17: coverage/genesis watermark persistence validates every new key fail-closed.
+    "src/live/tax_ledger.py::load_tax_watermark": 18,
     "src/market_data/binance/futures.py::fetch_funding_rate_history": 22,
     "src/market_data/binance/futures.py::fetch_ohlcv_with_taker": 27,
     "src/market_data/services/futures_collection.py::ensure_funding_data": 21,

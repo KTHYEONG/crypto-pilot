@@ -159,16 +159,38 @@ def test_capture_subcommand_invokes_capture_and_append(monkeypatch) -> None:
 
 def test_tax_collect_resolves_configured_ledger_dir(monkeypatch, tmp_path) -> None:
     import argparse
+    from decimal import Decimal
 
+    import pandas as pd
+
+    import src.live.account as account_mod
+    import src.live.rest as rest_mod
     from src.cli.commands.live import _run_tax_collect
 
+    monkeypatch.setenv("LIVE_MODE", "live_testnet")
+    monkeypatch.setenv("LIVE_ORDER_API_KEY", "test-key")
+    monkeypatch.setenv("LIVE_ORDER_API_SECRET", "test-secret")
     monkeypatch.setenv("LIVE_TAX_LEDGER_DIR", str(tmp_path / "tax"))
     monkeypatch.setattr(
         "src.live.audit.default_audit_log_path", lambda *a, **k: tmp_path / "audit.jsonl"
     )
+    snapshot = account_mod.AccountSnapshot(
+        taken_at=pd.Timestamp("2026-11-01", tz="UTC"), wallet_balance=Decimal("2000"),
+        available_balance=Decimal("2000"), total_maint_margin=Decimal("0"),
+        unrealized_pnl=Decimal("0"), positions={},
+        dual_side_position=False, multi_assets_margin=False,
+    )
+    monkeypatch.setattr(account_mod, "fetch_account_snapshot", lambda client, now=None: snapshot)
+    monkeypatch.setattr(account_mod, "assert_venue_configuration", lambda snap: None)
+
+    class _Client:
+        def sync_server_time(self) -> None:
+            return None
+
+    monkeypatch.setattr(rest_mod, "BinanceFuturesRestClient", lambda *a, **k: _Client())
     captured: dict = {}
 
-    def fake_collect(client, symbols, ledger_dir, mode, *, now=None, settings=None):
+    def fake_collect(client, symbols, ledger_dir, mode, *, now=None, settings=None, venue_snapshot=None):
         captured["ledger_dir"] = ledger_dir
         return 0, ()
 

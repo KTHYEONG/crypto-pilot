@@ -670,7 +670,8 @@ class LiveSettings(BaseSettings):
             self.portfolio_state_dir = str(run_root / "portfolio_state")
         if self.microstructure_dir is None:
             self.microstructure_dir = str(run_root / "microstructure")
-        if self.tax_ledger_dir is None:
+        if self.tax_ledger_dir is None and self.mode.suppresses_mutations:
+            # Venue tax facts are account-level; run ids rotate, so live ledgers resolve to an account-scoped directory (tax_ledger.resolve_tax_ledger_dir).
             self.tax_ledger_dir = str(run_root / "tax_ledger")
         return self
 

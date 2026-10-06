@@ -95,7 +95,7 @@ def test_file_size_budget() -> None:
     budget_bytes = 60 * 1024
     # frozen at measured size; growth fails, shrink requires deleting/lowering the entry.
     frozen_oversized = {
-        "tests/unit/live/test_scheduler.py": 168409,
+        "tests/unit/live/test_scheduler.py": 170554,  # spec 17: mainnet refuse / testnet warn gate tests.
         "tests/unit/live/test_runner_shadow_cycle.py": 99508,
         "tests/unit/live/test_runner_ledger.py": 63891,
         "tests/unit/live/test_executor.py": 193626,
@@ -369,8 +369,10 @@ def test_source_module_size_budget() -> None:
         "src/mhs/execution/accumulator.py": 1897,
         # Cycle phases stay co-located to preserve runtime module-global test seams;
         # explicit phase contracts add lines while reducing orchestration complexity.
-        "src/live/runner.py": 1899,
-        "src/live/scheduler.py": 999,
+        # spec 17: venue snapshot passthrough, disabled-collection audit, genesis alert.
+        "src/live/runner.py": 1916,
+        # spec 17: mainnet refuse-to-start gate (fail loud before any venue call).
+        "src/live/scheduler.py": 1007,
         # Shared post/unknown-submission primitives retain the executor lifecycle and contracts.
         "src/live/executor.py": 1980,
         "src/live/tax_ledger.py": 1209,
@@ -396,7 +398,8 @@ def test_source_module_size_budget() -> None:
         "src/market_data/streams/normalizer.py": 1112,
         # LiveSettings resolved path accessors (spec 20) stay on the settings model
         # so call-site default seams keep resolving lazily at call time.
-        "src/live/settings.py": 750,
+        # spec 17: live modes skip run-scoped tax ledger derivation (account-scoped venue ledger).
+        "src/live/settings.py": 751,
     }
     measured = {
         str(path): len(path.read_text(encoding="utf-8").splitlines())
@@ -467,7 +470,8 @@ def test_no_function_exceeds_length_budget() -> None:
     # frozen at measured size; growth fails, shrink requires deleting/lowering the entry.
     frozen = {
         "src/live/runner.py::run_shadow_cycle": 348,
-        "src/live/scheduler.py::run_daemon": 345,
+        # spec 17: mainnet refuse-to-start gate (fail loud before any venue call).
+        "src/live/scheduler.py::run_daemon": 354,
         "src/live/frozen_signal.py::run_frozen_signal_step": 312,
         "src/mhs/account_ledger.py::replay_account": 308,
         "src/cli/commands/backtest.py::run_frozen_account_command": 284,
