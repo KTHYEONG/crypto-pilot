@@ -2,7 +2,7 @@ import concurrent.futures
 import itertools
 import logging
 import statistics
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
 
 import numpy as np
@@ -23,6 +23,11 @@ FUNDING_SETTLEMENT_GRACE_MS: int = 5 * 60_000  # 정산 직후 게시 지연 유
 FUNDING_TIME_TOLERANCE_MS: int = 60_000  # fundingTime의 ms 단위 지터 허용
 FUNDING_GAP_THRESHOLD_MS: int = FUNDING_DEFAULT_INTERVAL_MS + 30 * 60_000  # 표준 최대 정산 간격(8h)을 넘는 간격만 공백으로 본다 -- 간격 변경(8h->4h->1h)을 공백으로 오탐해 매 사이클 재조회하는 것을 막는다.
 _FUNDING_INTERVAL_SAMPLE: int = 6
+
+# Previous full calendar month must be published on Vision before it is trusted; younger months come from REST.
+_VISION_ARCHIVE_LAG: pd.Timedelta = pd.Timedelta(days=32)
+# Cap concurrent monthly archive downloads per symbol, independent of the downloader's request throttle.
+_VISION_FETCH_MAX_WORKERS: int = 4
 
 
 def infer_funding_interval_ms(timestamps_ms: Iterable[int]) -> int:
@@ -79,6 +84,101 @@ def ohlcv_gap_start_ms(sorted_timestamps_ms: np.ndarray, window_start_ms: int, i
 
 def _utc_now() -> pd.Timestamp:
     return pd.Timestamp.now(tz="UTC")
+
+
+def _vision_months_to_fetch(
+    req_start: pd.Timestamp,
+    req_end: pd.Timestamp,
+    now: pd.Timestamp,
+    cached_span: tuple[pd.Timestamp, pd.Timestamp] | None,
+    interior_gap_start_ms: Callable[[int], int | None],
+) -> list[tuple[int, int]]:
+    """Plan which monthly Vision archives must be (re)downloaded for a request window.
+
+    Vision only publishes complete calendar months, and recently closed months may
+    not be archived yet, so planning stops at ``now``'s month start minus
+    ``_VISION_ARCHIVE_LAG``; anything younger is left to the caller's REST tail.
+    A month is re-planned whenever the cache does not provably cover it: the cache
+    is empty, starts after the month start, ends before the month's last second,
+    or its first interior gap at/after the month start opens before the month end.
+    The gap rule exists because a min/max span check alone permanently misses a
+    month that is entirely absent between two cached months.
+
+    Args:
+        req_start: Inclusive tz-aware UTC request start; floored to its month start.
+        req_end: tz-aware UTC request end; months starting at/after it are not planned.
+        now: tz-aware UTC wall clock used only to derive the archive cutoff. Callers
+            pass the same clock reading they use for the rest of the refresh.
+        cached_span: ``(min datetime, max datetime)`` of the existing cache, or
+            ``None`` when the cache is empty.
+        interior_gap_start_ms: Dataset-specific gap probe. Given a window start in
+            epoch ms, returns the left edge (epoch ms) of the first interior gap whose
+            right edge lies after that start, or ``None``. Must be side-effect free.
+
+    Returns:
+        ``(year, month)`` pairs in strictly ascending chronological order, without
+        duplicates; empty when the planning range is empty.
+    """
+    cutoff = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0) - _VISION_ARCHIVE_LAG
+    bound = min(req_end, cutoff)
+    current = req_start.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    months: list[tuple[int, int]] = []
+    while current < bound:
+        month_end = (current + pd.offsets.MonthEnd(1)).replace(hour=23, minute=59, second=59)
+        if cached_span is None:
+            months.append((current.year, current.month))
+        else:
+            span_min, span_max = cached_span
+            if span_min > current or span_max < month_end:
+                months.append((current.year, current.month))
+            else:
+                month_start_ms = int(current.value // 1_000_000)
+                month_end_ms = int(month_end.value // 1_000_000)
+                gap = interior_gap_start_ms(month_start_ms)
+                if gap is not None and gap < month_end_ms:
+                    months.append((current.year, current.month))
+        current += pd.offsets.MonthBegin(1)
+    return months
+
+
+def _fetch_months_parallel(
+    months: Sequence[tuple[int, int]],
+    fetch_month: Callable[[int, int], pd.DataFrame],
+    on_error: Callable[[int, int, Exception], None],
+) -> list[pd.DataFrame]:
+    """Download planned monthly archives concurrently with per-month failure isolation.
+
+    A single unavailable or corrupt monthly archive must not abort the whole
+    backfill: the REST tail and the next refresh cycle re-plan any month still
+    missing, so per-month failures are reported through ``on_error`` and the
+    remaining months proceed. Concurrency is bounded by
+    ``_VISION_FETCH_MAX_WORKERS`` to cap simultaneous archive downloads per symbol.
+
+    Args:
+        months: ``(year, month)`` pairs, typically from ``_vision_months_to_fetch``.
+        fetch_month: Downloads and normalises one month; returns an empty frame when
+            the archive has no rows. Called at most once per pair, from worker threads.
+        on_error: Invoked on the calling thread once per month whose ``fetch_month``
+            raised an ``Exception``, with ``(year, month, exc)``.
+
+    Returns:
+        Non-empty frames in the order of ``months`` (not completion order), so
+        downstream concatenation is deterministic.
+    """
+    if not months:
+        return []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=_VISION_FETCH_MAX_WORKERS) as executor:
+        futures = [executor.submit(fetch_month, year, month) for year, month in months]
+        parts: list[pd.DataFrame] = []
+        for (year, month), future in zip(months, futures, strict=True):
+            try:
+                frame = future.result()
+            except Exception as exc:
+                on_error(year, month, exc)
+                continue
+            if not frame.empty:
+                parts.append(frame)
+        return parts
 
 
 def _timeframe_ms(timeframe: str) -> int:
@@ -190,27 +290,16 @@ class DataCollector:
         ):
             return
         now = _utc_now()
-        api_cutoff = now.replace(
-            day=1, hour=0, minute=0, second=0, microsecond=0
-        ) - pd.Timedelta(days=32)
-        new_parts: list[pd.DataFrame] = []
         vision_symbol = symbol.replace("/", "")
-        current_month_start = req_start.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-        vision_tasks: list[tuple[int, int]] = []
-        while current_month_start < min(req_end, api_cutoff):
-            month_end = (current_month_start + pd.offsets.MonthEnd(1)).replace(hour=23, minute=59, second=59)
-            month_start_ms = int(current_month_start.value // 1_000_000)
-            month_end_ms = int(month_end.value // 1_000_000)
-            month_gap_ms = ohlcv_gap_start_ms(cache_ts, month_start_ms, interval_ms)
-            if (
-                cache_df.empty
-                or cache_df["datetime"].min() > current_month_start
-                or cache_df["datetime"].max() < month_end
-                or (month_gap_ms is not None and month_gap_ms < month_end_ms)
-            ):
-                vision_tasks.append((current_month_start.year, current_month_start.month))
-            current_month_start += pd.offsets.MonthBegin(1)
-        if vision_tasks:
+        vision_months = _vision_months_to_fetch(
+            req_start,
+            req_end,
+            now,
+            None if cache_df.empty else (cache_df["datetime"].min(), cache_df["datetime"].max()),
+            lambda start_ms: ohlcv_gap_start_ms(cache_ts, start_ms, interval_ms),
+        )
+        new_parts: list[pd.DataFrame] = []
+        if vision_months:
             vision = BinanceVisionDownloader()
 
             def _fetch_month(year: int, month: int) -> pd.DataFrame:
@@ -228,15 +317,11 @@ class DataCollector:
                     return self._normalize_df(v_df)
                 return pd.DataFrame()
 
-            with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-                future_to_task = {executor.submit(_fetch_month, y, m): (y, m) for y, m in vision_tasks}
-                for future in concurrent.futures.as_completed(future_to_task):
-                    try:
-                        res_df = future.result()
-                        if not res_df.empty:
-                            new_parts.append(res_df)
-                    except Exception as e:
-                        self.logger.warning("Error fetching vision data for %s: %s", symbol, e)
+            new_parts = _fetch_months_parallel(
+                vision_months,
+                _fetch_month,
+                lambda _y, _m, exc: self.logger.warning("Error fetching vision data for %s: %s", symbol, exc),
+            )
         latest_cached_dt = cache_df["datetime"].max() if not cache_df.empty else None
         for part in new_parts:
             if part.empty or "datetime" not in part.columns:
@@ -295,29 +380,16 @@ class DataCollector:
             and funding_gap_start_ms(cache_df["timestamp"], req_start_ms) is None
         ):
             return
-        api_cutoff = now.replace(
-            day=1, hour=0, minute=0, second=0, microsecond=0
-        ) - pd.Timedelta(days=32)
-        new_parts: list[pd.DataFrame] = []
         vision_symbol = symbol.replace("/", "")
-        current_month_start = req_start.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-        vision_tasks: list[tuple[int, int]] = []
-        while current_month_start < min(req_end, api_cutoff):
-            month_end = (current_month_start + pd.offsets.MonthEnd(1)).replace(hour=23, minute=59, second=59)
-            month_start_ms = int(current_month_start.value // 1_000_000)
-            month_end_ms = int(month_end.value // 1_000_000)
-            # min/max 스팬만 보면 이 달 앞뒤로 캐시가 있다는 이유로 달 통째 내부공백을
-            # 놓친다: 이 달과 겹치는 첫 내부공백이 있는지 별도로 확인한다.
-            gap_ms = funding_gap_start_ms(cache_df["timestamp"], month_start_ms) if not cache_df.empty else None
-            if (
-                cache_df.empty
-                or cache_df["datetime"].min() > current_month_start
-                or cache_df["datetime"].max() < month_end
-                or (gap_ms is not None and gap_ms < month_end_ms)
-            ):
-                vision_tasks.append((current_month_start.year, current_month_start.month))
-            current_month_start += pd.offsets.MonthBegin(1)
-        if vision_tasks:
+        vision_months = _vision_months_to_fetch(
+            req_start,
+            req_end,
+            now,
+            None if cache_df.empty else (cache_df["datetime"].min(), cache_df["datetime"].max()),
+            lambda start_ms: funding_gap_start_ms(cache_df["timestamp"], start_ms),
+        )
+        new_parts: list[pd.DataFrame] = []
+        if vision_months:
             vision = BinanceVisionDownloader()
 
             def _fetch_month_funding(year: int, month: int) -> pd.DataFrame:
@@ -326,15 +398,11 @@ class DataCollector:
                     return _normalize_funding_frame(v_df)
                 return pd.DataFrame()
 
-            with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-                future_to_task = {executor.submit(_fetch_month_funding, y, m): (y, m) for y, m in vision_tasks}
-                for future in concurrent.futures.as_completed(future_to_task):
-                    try:
-                        res_df = future.result()
-                        if not res_df.empty:
-                            new_parts.append(res_df)
-                    except Exception as e:
-                        self.logger.warning("Error fetching vision funding data for %s: %s", symbol, e)
+            new_parts = _fetch_months_parallel(
+                vision_months,
+                _fetch_month_funding,
+                lambda _y, _m, exc: self.logger.warning("Error fetching vision funding data for %s: %s", symbol, exc),
+            )
         latest_cached_dt = cache_df["datetime"].max() if not cache_df.empty else None
         for part in new_parts:
             if part.empty or "datetime" not in part.columns:
