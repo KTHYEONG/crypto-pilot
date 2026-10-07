@@ -231,8 +231,8 @@ RETIRED_LITERALS: Final[tuple[tuple[str, frozenset[str]], ...]] = (
 )
 CROSS_PACKAGE_PRIVATE_ALLOWLIST: Final[frozenset[tuple[str, str, str]]] = frozenset(
     {
+        ("src/application/mhs_frozen_account.py", "src.mhs.resources", "_current_tree_swap_bytes"),
         ("src/backtests/migration.py", "src.mhs.run_history", "_sparse_identity_key"),
-        ("src/cli/commands/backtest.py", "src.mhs.resources", "_current_tree_swap_bytes"),
         ("src/cli/commands/live.py", "src.live.liveness", "_default_state_path"),
         ("src/cli/commands/live.py", "src.live.scheduler", "_default_frozen_step"),
         ("src/cli/commands/live.py", "src.live.scheduler", "_resolve_heartbeat_path"),
