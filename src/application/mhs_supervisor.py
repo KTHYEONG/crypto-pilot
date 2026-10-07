@@ -295,9 +295,26 @@ def _snapshot_data_tree(root: Path) -> str:
 
 
 def _data_identity(data_root: str | None) -> str:
-    """Resolve the input-data identity root and snapshot it."""
-    root = Path(data_root).resolve() if data_root is not None else FUTURES_DATA_DIR.resolve()
-    return _snapshot_data_tree(root)
+    """Input-data identity covering both the OHLCV root and the funding root.
+
+    The ``data_root`` override selects only the OHLCV tree; funding is never
+    overridable, so an override identity snapshots both consumed trees while
+    the default still snapshots the canonical lake directly.
+    """
+    from src.mhs.data_provenance import resolve_mhs_input_layout
+
+    if data_root is None:
+        return _snapshot_data_tree(FUTURES_DATA_DIR.resolve())
+    layout = resolve_mhs_input_layout(data_root)
+    canonical = json.dumps(
+        {
+            "ohlcv": _snapshot_data_tree(Path(layout.ohlcv_root)),
+            "funding": _snapshot_data_tree(Path(layout.funding_root)),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return "composite:" + hashlib.sha256(canonical).hexdigest()
 
 
 def _registration_request(

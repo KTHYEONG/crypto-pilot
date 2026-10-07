@@ -11,6 +11,7 @@ import pandas as pd
 
 from src.common.errors import DataIntegrityError
 from src.common.paths import FUTURES_DATA_DIR
+from src.mhs.data_provenance import resolve_mhs_input_layout
 from src.mhs.execution import ExecutionReplayWindow, live_required_symbols
 from src.mhs.execution.batch import _LiveAccumulatorSets
 from src.mhs.execution.window_stream import _iter_mhs_execution_windows
@@ -226,7 +227,7 @@ def assert_frozen_execution_coverage(
             that closes its last granted decision. The message names every such symbol with
             its required and available coverage end.
     """
-    root = Path(data_root) if data_root is not None else FUTURES_DATA_DIR
+    root = resolve_mhs_input_layout(data_root).ohlcv_root
     deficient: list[str] = []
     for symbol in roster.columns:
         granted = roster[symbol].to_numpy(dtype=bool)
@@ -237,7 +238,7 @@ def assert_frozen_execution_coverage(
         required = last_true + pd.Timedelta(days=2, hours=int(entry_hour_utc)) + settlement
         if required > execution_end:
             required = execution_end
-        available = _frozen_execution_available_end(root / "ohlcv" / "3m" / f"{symbol}.parquet")
+        available = _frozen_execution_available_end(root / "3m" / f"{symbol}.parquet")
         if isinstance(available, str):
             deficient.append(f"{symbol} (required={required.isoformat()}, available={available})")
         elif required - available > pd.Timedelta(minutes=3):

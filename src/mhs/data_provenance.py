@@ -4,9 +4,10 @@ Collection/refresh seals every consumed parquet once (SHA-256 over bytes plus
 row bounds); hot replay validates only path/size/mtime metadata plus the
 required-path set derived from the configured panel/execution roster, so the
 7.8GB corpus is never rehashed per run (INV-INPUT-SEAL). Manifest entries are
-canonical (data-root-relative POSIX, deduplicated, sorted) and written
+canonical (lake-relative POSIX, deduplicated, sorted) and written
 atomically; a partial write never clobbers the last good manifest
-(INV-MANIFEST-CANONICAL-ATOMIC). Forward live observations are immutable
+(INV-MANIFEST-CANONICAL-ATOMIC). The ``data_root``/``--data-root`` override is
+always the OHLCV root; funding stays canonical. Forward live observations are immutable
 evidence: digest-less or foreign-digest rows are preserved but excluded, and
 forward data can never relabel the frozen strategy (INV-FORWARD-EVIDENCE-IMMUTABILITY).
 """
@@ -25,6 +26,7 @@ from typing import Any, Literal
 import pandas as pd
 import pyarrow.parquet as pq
 
+from src.common.paths import FUTURES_DATA_DIR
 from src.live.execution_quality import EXECUTION_QUALITY_MIN_EVIDENCE_DAYS
 
 
@@ -50,6 +52,72 @@ class MhsInputFileAttestation:
     last_timestamp: str
     data_kind: str
     symbol: str
+
+
+@dataclass(frozen=True, slots=True)
+class MhsInputLayout:
+    """Resolved on-disk roots of every input an MHS run consumes.
+
+    ``ohlcv_root`` holds ``1h/`` and ``3m/`` bars and is the only root an operator may override
+    (CLI ``--data-root``). ``funding_root`` is always the canonical lake funding directory, because
+    funding is never overridable (``marks.funding_path``). ``lake_root`` is the common parent under
+    which both consumed roots live in canonical shape (``<lake>/ohlcv`` and ``<lake>/funding``); it is
+    ``None`` when an override points the OHLCV root outside the canonical lake, in which case the
+    consumed corpus has no single sealable root and provenance must not claim reproducibility.
+    """
+
+    ohlcv_root: Path
+    funding_root: Path
+    lake_root: Path | None
+
+
+def resolve_mhs_input_layout(data_root: str | Path | None) -> MhsInputLayout:
+    """Resolve the input layout for an optional OHLCV-root override.
+
+    Args:
+        data_root: OHLCV root override (the CLI ``--data-root`` value) or ``None`` for the canonical lake.
+    Returns:
+        Default: ``ohlcv_root = FUTURES_DATA_DIR/"ohlcv"``, ``funding_root = FUTURES_DATA_DIR/"funding"``,
+        ``lake_root = FUTURES_DATA_DIR``. Override ``X``: ``ohlcv_root = X``, ``funding_root`` canonical,
+        ``lake_root = X.parent`` only when ``X.name == "ohlcv"`` and ``X.parent/"funding"`` resolves to the
+        canonical ``funding_root``; otherwise ``None``.
+    Raises:
+        TypeError: ``data_root`` is not ``str``, ``Path`` or ``None``.
+    """
+    funding_root = FUTURES_DATA_DIR / "funding"
+    if data_root is None:
+        return MhsInputLayout(
+            ohlcv_root=FUTURES_DATA_DIR / "ohlcv",
+            funding_root=funding_root,
+            lake_root=FUTURES_DATA_DIR,
+        )
+    if isinstance(data_root, str):
+        override = Path(data_root)
+    elif isinstance(data_root, Path):
+        override = data_root
+    else:
+        raise TypeError(f"data_root must be str, Path or None, got {type(data_root).__name__}")
+    if override.name == "ohlcv" and (override.parent / "funding").resolve() == funding_root.resolve():
+        return MhsInputLayout(
+            ohlcv_root=override,
+            funding_root=funding_root,
+            lake_root=override.parent,
+        )
+    return MhsInputLayout(
+        ohlcv_root=override,
+        funding_root=funding_root,
+        lake_root=None,
+    )
+
+
+def mhs_input_layout_for_lake(lake_root: Path) -> MhsInputLayout:
+    """Layout of an explicit lake root for collection-time sealing (``<lake>/ohlcv``, ``<lake>/funding``, ``lake_root=lake``)."""
+    lake = Path(lake_root)
+    return MhsInputLayout(
+        ohlcv_root=lake / "ohlcv",
+        funding_root=lake / "funding",
+        lake_root=lake,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,10 +170,12 @@ def _attest_one(path: Path, data_root: Path) -> MhsInputFileAttestation:
 
 
 def seal_mhs_input_manifest(
-    paths: Sequence[Path], *, data_root: Path, output_path: Path
+    paths: Sequence[Path], *, layout: MhsInputLayout, output_path: Path
 ) -> str:
     """Seal the canonical input manifest; returns its digest (atomic write)."""
-    root = Path(data_root).resolve()
+    if layout.lake_root is None:
+        raise ValueError("cannot seal a corpus without a single lake root")
+    root = Path(layout.lake_root).resolve()
     unique = list(dict.fromkeys(Path(p).resolve() for p in paths))
     attestations = [_attest_one(p, root) for p in unique]
     entries = [
@@ -136,12 +206,16 @@ def seal_mhs_input_manifest(
 
 
 def validate_mhs_input_manifest(
-    manifest_path: Path | None, *, data_root: Path, required_paths: Sequence[Path]
+    manifest_path: Path | None, *, layout: MhsInputLayout, required_paths: Sequence[Path]
 ) -> DataProvenanceResult:
     """Validate sealed provenance without rehashing (metadata-only hot path)."""
-    root = Path(data_root).resolve()
     if manifest_path is None or not Path(manifest_path).exists():
         return DataProvenanceResult(DataEvidenceTier.UNSEALED_ARCHIVE, False, ("MISSING_INPUT_MANIFEST",), None, 0)
+    if layout.lake_root is None:
+        return DataProvenanceResult(
+            DataEvidenceTier.UNSEALED_ARCHIVE, False, ("NONCANONICAL_DATA_ROOT",), None, 0,
+        )
+    root = Path(layout.lake_root).resolve()
     raw = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
     manifest_digest = raw.get("digest")
     attested = {str(entry["relative_path"]): entry for entry in raw.get("files", [])}
@@ -164,16 +238,17 @@ def validate_mhs_input_manifest(
 
 
 def resolve_required_mhs_input_paths(
-    *, data_root: Path, panel_symbols: Sequence[str], execution_symbols: Sequence[str], execution_timeframe: Literal["3m"]
+    *, layout: MhsInputLayout, panel_symbols: Sequence[str], execution_symbols: Sequence[str], execution_timeframe: Literal["3m"]
 ) -> tuple[Path, ...]:
     """Resolve exactly the files consumed by the registered MHS panel and replay: 1h OHLCV for panel symbols, 3m OHLCV for executed symbols, and funding for symbols whose rates affect signals or held cash flow. Missing required files remain missing evidence; mark and daily metrics never enter the input identity."""
     if execution_timeframe != "3m":
         raise ValueError(f"unknown execution_timeframe {execution_timeframe!r}")
-    root = Path(data_root)
+    ohlcv_root = Path(layout.ohlcv_root)
+    funding_root = Path(layout.funding_root)
     paths = [
-        *(root / "ohlcv" / "1h" / f"{symbol}.parquet" for symbol in dict.fromkeys(panel_symbols)),
-        *(root / "ohlcv" / execution_timeframe / f"{symbol}.parquet" for symbol in dict.fromkeys(execution_symbols)),
-        *(root / "funding" / f"{symbol}.parquet" for symbol in dict.fromkeys([*panel_symbols, *execution_symbols])),
+        *(ohlcv_root / "1h" / f"{symbol}.parquet" for symbol in dict.fromkeys(panel_symbols)),
+        *(ohlcv_root / execution_timeframe / f"{symbol}.parquet" for symbol in dict.fromkeys(execution_symbols)),
+        *(funding_root / f"{symbol}.parquet" for symbol in dict.fromkeys([*panel_symbols, *execution_symbols])),
     ]
     ordered = sorted({p.as_posix() for p in paths})
     return tuple(Path(p) for p in ordered)
@@ -208,10 +283,10 @@ def validate_forward_execution_observations(
     return DataProvenanceResult(DataEvidenceTier.FORWARD_OBSERVED, True, (), None, len(usable))
 
 
-def mhs_sealable_input_paths(*, data_root: Path, execution_timeframe: Literal["3m"]) -> tuple[Path, ...]:
+def mhs_sealable_input_paths(*, layout: MhsInputLayout, execution_timeframe: Literal["3m"]) -> tuple[Path, ...]:
     """Enumerate sealable inputs: existing required files for discovered symbols.
 
-    Symbols are discovered from ``<data_root>/ohlcv/1h/*.parquet`` sorted by
+    Symbols are discovered from ``<ohlcv_root>/1h/*.parquet`` sorted by
     stem; the required-path layout comes solely from
     :func:`resolve_required_mhs_input_paths`. Collection-time sealing includes
     only existing files, while evaluation-time validation reports each missing
@@ -219,10 +294,10 @@ def mhs_sealable_input_paths(*, data_root: Path, execution_timeframe: Literal["3
     """
     if execution_timeframe != "3m":
         raise ValueError(f"unknown execution_timeframe {execution_timeframe!r}")
-    root = Path(data_root)
-    symbols = sorted({path.stem for path in (root / "ohlcv" / "1h").glob("*.parquet")})
+    ohlcv_root = Path(layout.ohlcv_root)
+    symbols = sorted({path.stem for path in (ohlcv_root / "1h").glob("*.parquet")})
     required = resolve_required_mhs_input_paths(
-        data_root=root,
+        layout=layout,
         panel_symbols=symbols,
         execution_symbols=symbols,
         execution_timeframe=execution_timeframe,

@@ -546,7 +546,7 @@ def test_assert_frozen_execution_coverage_blocks_deficient_symbol(tmp_path) -> N
     with pytest.raises(DataIntegrityError) as exc_info:
         assert_frozen_execution_coverage(
             roster, execution_end=pd.Timestamp("2022-02-01", tz="UTC"),
-            settlement=_SETTLEMENT, entry_hour_utc=0, data_root=tmp_path,
+            settlement=_SETTLEMENT, entry_hour_utc=0, data_root=tmp_path / "ohlcv",
         )
     message = str(exc_info.value)
     assert "AAA" in message
@@ -562,12 +562,12 @@ def test_assert_frozen_execution_coverage_honours_entry_hour(tmp_path) -> None:
     _write_3m(tmp_path, "AAA", pd.date_range("2022-01-01", "2022-01-10 00:30", freq="3min", tz="UTC"))
     assert_frozen_execution_coverage(
         roster, execution_end=pd.Timestamp("2022-02-01", tz="UTC"),
-        settlement=_SETTLEMENT, entry_hour_utc=0, data_root=tmp_path,
+        settlement=_SETTLEMENT, entry_hour_utc=0, data_root=tmp_path / "ohlcv",
     )
     with pytest.raises(DataIntegrityError) as exc_info:
         assert_frozen_execution_coverage(
             roster, execution_end=pd.Timestamp("2022-02-01", tz="UTC"),
-            settlement=_SETTLEMENT, entry_hour_utc=6, data_root=tmp_path,
+            settlement=_SETTLEMENT, entry_hour_utc=6, data_root=tmp_path / "ohlcv",
         )
     assert "2022-01-10T06:30:00+00:00" in str(exc_info.value)
 
@@ -581,7 +581,7 @@ def test_assert_frozen_execution_coverage_separates_unreadable_from_missing(tmp_
     with pytest.raises(DataIntegrityError) as exc_info:
         assert_frozen_execution_coverage(
             roster, execution_end=pd.Timestamp("2022-02-01", tz="UTC"),
-            settlement=_SETTLEMENT, entry_hour_utc=0, data_root=tmp_path,
+            settlement=_SETTLEMENT, entry_hour_utc=0, data_root=tmp_path / "ohlcv",
         )
     message = str(exc_info.value)
     assert "UNREADABLE" in message
@@ -594,7 +594,7 @@ def test_assert_frozen_execution_coverage_ignores_unselected_symbols(tmp_path) -
     _write_3m(tmp_path, "AAA", pd.date_range("2022-01-01", "2022-02-01", freq="3min", tz="UTC"))
     assert_frozen_execution_coverage(
         roster, execution_end=pd.Timestamp("2022-02-01", tz="UTC"),
-        settlement=_SETTLEMENT, entry_hour_utc=0, data_root=tmp_path,
+        settlement=_SETTLEMENT, entry_hour_utc=0, data_root=tmp_path / "ohlcv",
     )
 
 
@@ -604,7 +604,7 @@ def test_assert_frozen_execution_coverage_passes_delisted_symbol(tmp_path) -> No
     _write_3m(tmp_path, "AAA", pd.date_range("2022-01-01", "2022-01-10T00:30", freq="3min", tz="UTC"))
     assert_frozen_execution_coverage(
         roster, execution_end=pd.Timestamp("2022-06-01", tz="UTC"),
-        settlement=_SETTLEMENT, entry_hour_utc=0, data_root=tmp_path,
+        settlement=_SETTLEMENT, entry_hour_utc=0, data_root=tmp_path / "ohlcv",
     )
 
 
@@ -615,7 +615,7 @@ def test_assert_frozen_execution_coverage_includes_settlement_slack(tmp_path) ->
     with pytest.raises(DataIntegrityError, match="AAA"):
         assert_frozen_execution_coverage(
             roster, execution_end=pd.Timestamp("2022-02-01", tz="UTC"),
-            settlement=_SETTLEMENT, entry_hour_utc=0, data_root=tmp_path,
+            settlement=_SETTLEMENT, entry_hour_utc=0, data_root=tmp_path / "ohlcv",
         )
 
 
@@ -625,7 +625,7 @@ def test_assert_frozen_execution_coverage_tolerates_one_bar(tmp_path) -> None:
     _write_3m(tmp_path, "AAA", pd.date_range("2022-01-01", "2022-01-10T00:27", freq="3min", tz="UTC"))
     assert_frozen_execution_coverage(
         roster, execution_end=pd.Timestamp("2022-02-01", tz="UTC"),
-        settlement=_SETTLEMENT, entry_hour_utc=0, data_root=tmp_path,
+        settlement=_SETTLEMENT, entry_hour_utc=0, data_root=tmp_path / "ohlcv",
     )
 
 
@@ -638,7 +638,7 @@ def test_assert_frozen_execution_coverage_reports_all_deficient_symbols(tmp_path
     with pytest.raises(DataIntegrityError) as exc_info:
         assert_frozen_execution_coverage(
             roster, execution_end=pd.Timestamp("2022-02-01", tz="UTC"),
-            settlement=_SETTLEMENT, entry_hour_utc=0, data_root=tmp_path,
+            settlement=_SETTLEMENT, entry_hour_utc=0, data_root=tmp_path / "ohlcv",
         )
     message = str(exc_info.value)
     assert "3 symbol(s)" in message
@@ -651,7 +651,7 @@ def test_assert_frozen_execution_coverage_caps_requirement_at_fence(tmp_path) ->
     _write_3m(tmp_path, "AAA", pd.date_range("2022-01-01", "2022-01-10", freq="3min", tz="UTC"))
     assert_frozen_execution_coverage(
         roster, execution_end=pd.Timestamp("2022-01-10", tz="UTC"),
-        settlement=_SETTLEMENT, entry_hour_utc=0, data_root=tmp_path,
+        settlement=_SETTLEMENT, entry_hour_utc=0, data_root=tmp_path / "ohlcv",
     )
 
 
@@ -671,7 +671,7 @@ def test_assert_frozen_execution_coverage_treats_unreadable_archives_as_missing(
     with pytest.raises(DataIntegrityError) as exc_info:
         assert_frozen_execution_coverage(
             roster, execution_end=pd.Timestamp("2022-02-01", tz="UTC"),
-            settlement=_SETTLEMENT, entry_hour_utc=0, data_root=tmp_path,
+            settlement=_SETTLEMENT, entry_hour_utc=0, data_root=tmp_path / "ohlcv",
         )
     message = str(exc_info.value)
     assert "4 symbol(s)" in message
@@ -702,7 +702,7 @@ def test_run_frozen_mhs_backtest_blocks_before_candidate_build(
         lambda *a, **k: (called.append("evaluate"), _evidence())[1],
     )
     with pytest.raises(DataIntegrityError, match="AAA"):
-        run_frozen_mhs_backtest(_request(data_root=tmp_path))
+        run_frozen_mhs_backtest(_request(data_root=tmp_path / "ohlcv"))
     assert called == []
 
 
@@ -755,3 +755,27 @@ def test_candidate_builder_matches_runner(monkeypatch: pytest.MonkeyPatch) -> No
     pd.testing.assert_frame_equal(direct.target_weights, run.candidate.target_weights)
     assert bool((direct.signal_available_at == run.candidate.signal_available_at).all())
     assert context.census == run.source_symbols
+
+
+def test_coverage_check_reads_panel_tree_under_override(tmp_path) -> None:
+    days = pd.date_range("2022-01-01", periods=10, freq="D", tz="UTC")
+    roster = _coverage_roster(days, {"BTCUSDT": [pd.Timestamp("2022-01-08", tz="UTC")]})
+    _write_3m(tmp_path, "BTCUSDT", pd.date_range("2022-01-01", "2022-02-01", freq="3min", tz="UTC"))
+    assert_frozen_execution_coverage(
+        roster, execution_end=pd.Timestamp("2022-02-01", tz="UTC"),
+        settlement=_SETTLEMENT, entry_hour_utc=0, data_root=tmp_path / "ohlcv",
+    )
+
+
+def test_coverage_check_under_override_still_fails_closed(tmp_path) -> None:
+    days = pd.date_range("2022-01-01", periods=10, freq="D", tz="UTC")
+    roster = _coverage_roster(days, {"BTCUSDT": [pd.Timestamp("2022-01-08", tz="UTC")]})
+    _write_3m(tmp_path, "BTCUSDT", pd.date_range("2022-01-01", "2022-01-09", freq="3min", tz="UTC"))
+    with pytest.raises(DataIntegrityError) as exc_info:
+        assert_frozen_execution_coverage(
+            roster, execution_end=pd.Timestamp("2022-02-01", tz="UTC"),
+            settlement=_SETTLEMENT, entry_hour_utc=0, data_root=tmp_path / "ohlcv",
+        )
+    assert "BTCUSDT" in str(exc_info.value)
+    assert "MISSING" not in str(exc_info.value)
+    assert "available=2022-01-09T00:00:00+00:00" in str(exc_info.value)
