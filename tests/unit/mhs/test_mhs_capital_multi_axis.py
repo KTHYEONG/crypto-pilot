@@ -135,8 +135,14 @@ def test_fold_path_wires_helper_byte_identical(mhs_market_with_taker_buy_quote, 
         return orig(close, quote_vol, taker_buy_quote, execution_mask, decision_grid, min_symbols, *args, **kwargs)
 
     monkeypatch.setattr(committee_evaluation, "_committee_execution_book", recording_helper)
+    from src.mhs import research_go as _research_go
+    from src.mhs.features import FeatureAdmission
+
     target, _signal, _roster, _grid = fold_weights._build_fold_target_weights(
         str(root), _FOLD, request, funding_by_symbol,
+        committee_admission=FeatureAdmission(
+            _FOLD.train_end, _research_go._resolved_committee_members(request),
+        ),
     )
     assert captured is not None
     close, quote_vol, taker_buy_quote, execution_mask, decision_grid, min_symbols = captured

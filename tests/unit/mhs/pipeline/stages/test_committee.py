@@ -20,6 +20,7 @@ import src.mhs.pipeline.stages.committee as committee_stage
 import src.mhs.evaluation.books as books_mod
 import src.mhs.evaluation.committee as committee_mod
 import src.mhs.evaluation.diagnostics as diagnostics_mod
+from src.mhs.features import FeatureAdmission
 from src.mhs.pipeline.context import PipelineContext
 from src.mhs.telemetry import StageTelemetry
 
@@ -136,22 +137,36 @@ def test_build_committee_broadcasts_top_level_evidence_weights(monkeypatch: pyte
     # is never replicated across folds.
     captured: dict[str, object] = {}
 
-    def _fake_by_boundary(*_a: object, **_k: object) -> dict[str, dict[str, float]]:
-        return {
+    def _fake_by_boundary(
+        *_a: object, **_k: object
+    ) -> tuple[dict[str, FeatureAdmission], dict[str, dict[str, float]]]:
+        weights = {
             "top_level": {"member_a": 0.7, "member_b": 0.3},
             "fold_0": {"member_a": 0.9, "member_b": 0.1},
             "fold_1": {"member_a": 0.5, "member_b": 0.5},
         }
+        train_ends = _k.get("train_ends")
+        if train_ends is None and len(_a) >= 7:
+            train_ends = _a[6]
+        assert isinstance(train_ends, dict)
+        admission = {
+            label: FeatureAdmission(
+                cutoff=train_ends[label], admitted=tuple(w.keys()),
+            )
+            for label, w in weights.items()
+        }
+        return admission, weights
 
     def _fake_committee_execution_book(*_a: object, **_k: object) -> pd.DataFrame:
         captured["member_weights"] = _k.get("member_weights")
         captured["coverage_cutoff"] = _k.get("coverage_cutoff")
+        captured["admission"] = _k.get("admission")
         return pd.DataFrame(0.0, index=_GRID, columns=_SYMS)
 
     monkeypatch.setattr(
-        committee_stage, "_committee_evidence_weights_by_boundary", _fake_by_boundary, raising=False
+        committee_stage, "_committee_boundary_admission_and_weights", _fake_by_boundary, raising=False
     )
-    monkeypatch.setattr(committee_mod, "_committee_evidence_weights_by_boundary", _fake_by_boundary, raising=False)
+    monkeypatch.setattr(committee_mod, "_committee_boundary_admission_and_weights", _fake_by_boundary, raising=False)
     class _FoldStub:
         def __init__(self, train_end: pd.Timestamp) -> None:
             self.train_end = train_end
@@ -209,7 +224,14 @@ def test_build_committee_broadcasts_top_level_evidence_weights(monkeypatch: pyte
     assert captured["member_weights"] == {"member_a": 0.7, "member_b": 0.3}
     # SCENARIO_MHS_COMMITTEE_STAGE_THREADS_COVERAGE_CUTOFF: the deployed book
     # must be admitted under the SAME boundary that fit its member_weights.
-    assert captured["coverage_cutoff"] == committee_stage.COMMITTEE_OOS_START
+    assert captured["admission"].cutoff == committee_stage.COMMITTEE_OOS_START  # type: ignore[union-attr]
+    assert captured["coverage_cutoff"] is None
+    assert list(captured["admission"].admitted) == ["member_a", "member_b"]  # type: ignore[union-attr]
+    # Fold admissions mirror the per-boundary admission (I-FOLD-ADMISSION-PIT).
+    assert ctx._fold_committee_admission is not None
+    assert ctx._fold_committee_admission[0].cutoff == pd.Timestamp("2022-01-01", tz="UTC")
+    assert ctx._fold_committee_admission[1].cutoff == pd.Timestamp("2023-01-01", tz="UTC")
+    assert tuple(ctx._fold_committee_admission[0].admitted) == ("member_a", "member_b")
 
 
 def test_build_committee_threads_beta_neutralize(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -219,14 +241,29 @@ def test_build_committee_threads_beta_neutralize(monkeypatch: pytest.MonkeyPatch
     # on; the default (False) passes beta=None (byte-identical default path).
     captured: dict[str, object] = {}
 
-    def _fake_by_boundary(*_a: object, **_k: object) -> dict[str, dict[str, float]]:
-        return {
+    def _fake_by_boundary(
+        *_a: object, **_k: object
+    ) -> tuple[dict[str, FeatureAdmission], dict[str, dict[str, float]]]:
+        weights = {
             "top_level": {"member_a": 0.7, "member_b": 0.3},
             "fold_0": {"member_a": 0.7, "member_b": 0.3},
         }
+        train_ends = _k.get("train_ends")
+        if train_ends is None and len(_a) >= 7:
+            train_ends = _a[6]
+        assert isinstance(train_ends, dict)
+        admission = {
+            label: FeatureAdmission(
+                cutoff=train_ends[label], admitted=tuple(w.keys()),
+            )
+            for label, w in weights.items()
+        }
+        return admission, weights
 
     def _fake_committee_execution_book(*_a: object, **_k: object) -> pd.DataFrame:
         captured["beta"] = _k.get("beta")
+        captured["admission"] = _k.get("admission")
+        captured["coverage_cutoff"] = _k.get("coverage_cutoff")
         return pd.DataFrame(0.0, index=_GRID, columns=_SYMS)
 
     class _FoldStub:
@@ -234,9 +271,9 @@ def test_build_committee_threads_beta_neutralize(monkeypatch: pytest.MonkeyPatch
             self.train_end = train_end
 
     monkeypatch.setattr(
-        committee_stage, "_committee_evidence_weights_by_boundary", _fake_by_boundary, raising=False
+        committee_stage, "_committee_boundary_admission_and_weights", _fake_by_boundary, raising=False
     )
-    monkeypatch.setattr(committee_mod, "_committee_evidence_weights_by_boundary", _fake_by_boundary, raising=False)
+    monkeypatch.setattr(committee_mod, "_committee_boundary_admission_and_weights", _fake_by_boundary, raising=False)
     monkeypatch.setattr(
         committee_stage, "resolved_anchored_folds",
         lambda _cfg: (_FoldStub(pd.Timestamp("2022-01-01", tz="UTC")),),
@@ -285,6 +322,11 @@ def test_build_committee_threads_beta_neutralize(monkeypatch: pytest.MonkeyPatch
     )
     committee_stage.build_committee(ctx_on, StageTelemetry(log_run=False))
     assert isinstance(captured["beta"], pd.DataFrame)
+    # Admission is always threaded, even without evidence weighting.
+    assert captured["admission"].cutoff == committee_stage.COMMITTEE_OOS_START  # type: ignore[union-attr]
+    assert captured["coverage_cutoff"] is None
+    assert ctx_on._fold_committee_admission is not None
+    assert ctx_on._fold_committee_admission[0].cutoff == pd.Timestamp("2022-01-01", tz="UTC")
 
 
 def test_fold_committee_uses_its_own_boundary_weights(monkeypatch) -> None:
@@ -400,3 +442,189 @@ def test_reference_book_phases_follow_the_replay_set() -> None:
         log_close, eligible, opens, bar_funding, grid_1h,
         books_mod._active_blend_book_and_grid(fast, slow, fast_grid, slow_grid)[0],
     )
+
+
+def _committee_stage_harness(
+    monkeypatch: pytest.MonkeyPatch,
+    by_boundary: object,
+    train_ends: tuple[pd.Timestamp, ...],
+    *,
+    evidence_weighting: bool,
+) -> tuple[dict[str, object], dict[str, object]]:
+    """Install the committee-stage seams for admission wiring tests.
+
+    Returns ``(captured_book_kwargs, captured_boundary_kwargs)``; ``by_boundary``
+    is the stubbed ``_committee_boundary_admission_and_weights`` callable.
+    """
+    captured_book: dict[str, object] = {}
+    captured_boundary: dict[str, object] = {}
+
+    def _fake_committee_execution_book(*_a: object, **_k: object) -> pd.DataFrame:
+        captured_book.update(_k)
+        return pd.DataFrame(0.0, index=_GRID, columns=_SYMS)
+
+    class _FoldStub:
+        def __init__(self, train_end: pd.Timestamp) -> None:
+            self.train_end = train_end
+
+    monkeypatch.setattr(
+        committee_stage, "_committee_boundary_admission_and_weights", by_boundary, raising=False
+    )
+    monkeypatch.setattr(
+        committee_mod, "_committee_boundary_admission_and_weights", by_boundary, raising=False
+    )
+    monkeypatch.setattr(
+        committee_stage, "resolved_anchored_folds",
+        lambda _cfg: tuple(_FoldStub(end) for end in train_ends),
+    )
+    monkeypatch.setattr(
+        committee_stage, "_committee_execution_book", _fake_committee_execution_book, raising=False
+    )
+    monkeypatch.setattr(
+        committee_mod, "_committee_execution_book", _fake_committee_execution_book, raising=False
+    )
+    monkeypatch.setattr(committee_stage, "_phase_diagnostics", lambda *_a, **_k: "phase-result", raising=False)
+    monkeypatch.setattr(diagnostics_mod, "_phase_diagnostics", lambda *_a, **_k: "phase-result", raising=False)
+    monkeypatch.setattr(
+        committee_stage, "_active_blend_book_and_grid",
+        lambda fast, slow, fast_grid, slow_grid: (slow, slow_grid), raising=False
+    )
+    monkeypatch.setattr(books_mod, "_active_blend_book_and_grid", lambda fast, slow, fast_grid, slow_grid: (slow, slow_grid), raising=False)
+    monkeypatch.setattr(
+        committee_stage, "realized_vol",
+        lambda log_close, horizon: pd.DataFrame(0.1, index=log_close.index, columns=log_close.columns),
+    )
+    monkeypatch.setattr(
+        committee_stage, "horizon_log_return",
+        lambda log_close, horizon: pd.DataFrame(0.0, index=log_close.index, columns=log_close.columns),
+    )
+    monkeypatch.setattr(
+        committee_stage, "efficiency_ratio",
+        lambda log_close, horizon: pd.DataFrame(0.5, index=log_close.index, columns=log_close.columns),
+    )
+    monkeypatch.setattr(committee_stage._statistics, "_xs_rank_ic", lambda *_a, **_k: {"mean_ic": 0.0})
+    monkeypatch.setattr(committee_stage._statistics, "_date_clustered_ols", lambda *_a, **_k: {})
+    monkeypatch.setattr(
+        committee_stage._scaling, "_regime_cash_scale",
+        lambda vol_mean: pd.Series(1.0, index=vol_mean.index),
+    )
+    monkeypatch.setattr(
+        committee_stage, "funding_carry_execution_book", lambda *_a, **_k: None,
+    )
+
+    ctx = _bare_context()
+    ctx.config = dataclasses.replace(
+        ctx.config, committee_capital=True, committee_evidence_weighting=evidence_weighting,
+    )
+    committee_stage.build_committee(ctx, StageTelemetry(log_run=False))
+    captured_boundary["ctx"] = ctx
+    return captured_book, captured_boundary
+
+
+def test_fold_admission_populated_without_evidence_weighting(monkeypatch: pytest.MonkeyPatch) -> None:
+    # I-FOLD-ADMISSION-PIT: admission is computed whenever committee_capital is
+    # on, with or without evidence weighting.
+    train_ends = (pd.Timestamp("2022-01-01", tz="UTC"), pd.Timestamp("2022-06-01", tz="UTC"))
+
+    def _fake_by_boundary(*_a: object, **_k: object) -> tuple[dict[str, FeatureAdmission], dict[str, dict[str, float]]]:
+        received = _k.get("train_ends", _a[6] if len(_a) >= 7 else None)
+        assert _k.get("evidence_weighting") is False
+        assert set(received) == {"top_level", "fold_0", "fold_1"}
+        admission = {
+            label: FeatureAdmission(cutoff=received[label], admitted=("member_a", "member_b"))
+            for label in received
+        }
+        return admission, {}
+
+    captured_book, captured = _committee_stage_harness(
+        monkeypatch, _fake_by_boundary, train_ends, evidence_weighting=False,
+    )
+    ctx = captured["ctx"]
+    assert ctx._fold_committee_admission is not None
+    assert set(ctx._fold_committee_admission) == {0, 1}
+    for i, end in enumerate(train_ends):
+        assert ctx._fold_committee_admission[i].cutoff == end
+        assert tuple(ctx._fold_committee_admission[i].admitted) == ("member_a", "member_b")
+    assert ctx._fold_committee_weights is None
+    assert captured_book["member_weights"] is None
+    assert captured_book["admission"].cutoff == committee_stage.COMMITTEE_OOS_START  # type: ignore[union-attr]
+    assert captured_book.get("coverage_cutoff") is None
+
+
+def test_fold_weights_and_admission_come_from_same_boundary(monkeypatch: pytest.MonkeyPatch) -> None:
+    # I-COVERAGE-PIT parity: with evidence weighting the admission is read from
+    # the same build that fits the weights, so the two can never disagree.
+    train_ends = (pd.Timestamp("2022-01-01", tz="UTC"), pd.Timestamp("2022-06-01", tz="UTC"))
+    per_label = {
+        "top_level": ("member_a", "member_b"),
+        "fold_0": ("member_a",),
+        "fold_1": ("member_a", "member_b"),
+    }
+
+    def _fake_by_boundary(*_a: object, **_k: object) -> tuple[dict[str, FeatureAdmission], dict[str, dict[str, float]]]:
+        received = _k.get("train_ends", _a[6] if len(_a) >= 7 else None)
+        assert _k.get("evidence_weighting") is True
+        admission = {
+            label: FeatureAdmission(cutoff=received[label], admitted=per_label[label])
+            for label in received
+        }
+        weights = {label: {name: 1.0 / len(members) for name in members} for label, members in per_label.items()}
+        return admission, weights
+
+    captured_book, captured = _committee_stage_harness(
+        monkeypatch, _fake_by_boundary, train_ends, evidence_weighting=True,
+    )
+    ctx = captured["ctx"]
+    assert ctx._fold_committee_admission is not None
+    assert ctx._fold_committee_weights is not None
+    for i, end in enumerate(train_ends):
+        assert ctx._fold_committee_admission[i].cutoff == end
+        assert set(ctx._fold_committee_weights[i]) == set(ctx._fold_committee_admission[i].admitted)
+    assert set(ctx._fold_committee_weights[0]) == {"member_a"}
+    assert set(ctx._fold_committee_weights[1]) == {"member_a", "member_b"}
+    assert captured_book["admission"].cutoff == committee_stage.COMMITTEE_OOS_START  # type: ignore[union-attr]
+    assert set(captured_book["member_weights"]) == set(captured_book["admission"].admitted)  # type: ignore[union-attr]
+    assert captured_book.get("coverage_cutoff") is None
+
+
+def test_non_committee_run_has_no_admission(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Without committee capital no boundary admission is computed at all.
+    def _forbidden(*_a: object, **_k: object):
+        raise AssertionError("_committee_boundary_admission_and_weights must not run")
+
+    monkeypatch.setattr(
+        committee_stage, "_committee_boundary_admission_and_weights", _forbidden, raising=False
+    )
+    monkeypatch.setattr(
+        committee_mod, "_committee_boundary_admission_and_weights", _forbidden, raising=False
+    )
+    monkeypatch.setattr(committee_stage, "_phase_diagnostics", lambda *_a, **_k: "phase-result", raising=False)
+    monkeypatch.setattr(diagnostics_mod, "_phase_diagnostics", lambda *_a, **_k: "phase-result", raising=False)
+    monkeypatch.setattr(
+        committee_stage, "_active_blend_book_and_grid",
+        lambda fast, slow, fast_grid, slow_grid: (slow, slow_grid), raising=False
+    )
+    monkeypatch.setattr(books_mod, "_active_blend_book_and_grid", lambda fast, slow, fast_grid, slow_grid: (slow, slow_grid), raising=False)
+    monkeypatch.setattr(
+        committee_stage, "realized_vol",
+        lambda log_close, horizon: pd.DataFrame(0.1, index=log_close.index, columns=log_close.columns),
+    )
+    monkeypatch.setattr(
+        committee_stage, "horizon_log_return",
+        lambda log_close, horizon: pd.DataFrame(0.0, index=log_close.index, columns=log_close.columns),
+    )
+    monkeypatch.setattr(
+        committee_stage, "efficiency_ratio",
+        lambda log_close, horizon: pd.DataFrame(0.5, index=log_close.index, columns=log_close.columns),
+    )
+    monkeypatch.setattr(committee_stage._statistics, "_xs_rank_ic", lambda *_a, **_k: {"mean_ic": 0.0})
+    monkeypatch.setattr(committee_stage._statistics, "_date_clustered_ols", lambda *_a, **_k: {})
+    monkeypatch.setattr(
+        committee_stage._scaling, "_regime_cash_scale",
+        lambda vol_mean: pd.Series(1.0, index=vol_mean.index),
+    )
+
+    ctx = _bare_context()
+    assert ctx.config.committee_capital is False
+    committee_stage.build_committee(ctx, StageTelemetry(log_run=False))
+    assert ctx._fold_committee_admission is None

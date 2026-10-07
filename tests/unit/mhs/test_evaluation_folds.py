@@ -497,8 +497,13 @@ def test_committee_capital_reaches_fold_targets(mhs_market_with_taker_buy_quote)
         str(root), _FOLD, request, funding_by_symbol,
     )
     request_on = dataclasses.replace(request, committee_capital=True)
+    from src.mhs.features import FeatureAdmission as _FeatureAdmission
+
     target_on, _signal, _roster, _grid = _build_fold_target_weights(
         str(root), _FOLD, request_on, funding_by_symbol,
+        committee_admission=_FeatureAdmission(
+            _FOLD.train_end, research_go_mod._resolved_committee_members(request_on),
+        ),
     )
     assert not target_off.equals(target_on)
     assert np.isfinite(target_on.to_numpy(dtype="float64")).all()
@@ -521,12 +526,13 @@ def test_committee_capital_no_member_fails_closed(mhs_market_with_taker_buy_quot
         execution_timeframe="3m", log_run=False,
         committee_capital=True,
     )
-    import src.mhs.evaluation.committee as committee_mod
-    import src.mhs.features as features_mod
-    monkeypatch.setattr(committee_mod, "build_feature_books", lambda *a, **k: {})
-    monkeypatch.setattr(features_mod, "build_feature_books", lambda *a, **k: {})
+    from src.mhs.features import FeatureAdmission as _FeatureAdmissionFailClosed
+
     with pytest.raises(RuntimeError, match="committee_capital"):
-        _build_fold_target_weights(str(root), _FOLD, request, funding_by_symbol)
+        _build_fold_target_weights(
+            str(root), _FOLD, request, funding_by_symbol,
+            committee_admission=_FeatureAdmissionFailClosed(_FOLD.train_end, ()),
+        )
 
 def _parity_fold_report(
     fold_index: int, book_structure: dict[str, float] | None,
@@ -722,7 +728,8 @@ def _capturing_anchored_fold(
     root, fold, request, funding_by_symbol, initial_equity, fold_index,
     telemetry=None, slow_horizon_override=None, fast_horizon_override=None,
     funding_carry_override=None, committee_member_weights=None,
-    validation_plan=None, shared_reference=None,
+    validation_plan=None, shared_reference=None, committee_admission=None,
+    **_kwargs,
 ):
     _CAPTURED_FOLD_SUBMISSIONS.append({
         "fold_index": fold_index,
@@ -742,7 +749,7 @@ def test_post_book_concurrently_forwards_only_fold_local_policy(monkeypatch) -> 
     monkeypatch.setattr(folds_mod, "_run_anchored_fold", _capturing_anchored_fold)
     monkeypatch.setattr(
         folds_mod, "_build_fold_validation_plan",
-        lambda root, fold, request, funding, slow, committee: folds_mod._FoldValidationPlan(
+        lambda root, fold, request, funding, slow, committee, *a, **k: folds_mod._FoldValidationPlan(
             target_weights=pd.DataFrame(), target_replay=pd.DataFrame(),
             signal_available_at=pd.DatetimeIndex([], tz="UTC"),
             terminal_censored=0, decision_intents=0,

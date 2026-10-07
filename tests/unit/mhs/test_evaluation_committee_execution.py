@@ -11,7 +11,8 @@ import src.mhs.evaluation.concurrency as concurrency_mod
 from src.mhs.diagnostic_run import run_mhs_horizon_diagnostic
 from src.mhs.evaluation.committee import _committee_evidence_weights_by_boundary, _committee_execution_book
 from src.mhs.evaluation.fold_weights import _build_fold_target_weights
-from src.mhs.features import FEATURE_REGISTRY, build_feature_books
+from src.mhs.features import FEATURE_REGISTRY, FeatureAdmission, build_feature_books
+from src.mhs import research_go as _research_go
 from src.mhs.marks import _load_funding_series
 from src.mhs.params import (
     COMMITTEE_MEMBERS,
@@ -140,10 +141,16 @@ def test_committee_tranche_smoothing_default_off_byte_identical(mhs_market_with_
     )
     target_default, _signal, _roster, _grid = _build_fold_target_weights(
         str(root), _FOLD, request, funding_by_symbol,
+        committee_admission=FeatureAdmission(
+            _FOLD.train_end, _research_go._resolved_committee_members(request),
+        ),
     )
     target_off, _signal, _roster, _grid = _build_fold_target_weights(
         str(root), _FOLD, dataclasses.replace(request, committee_tranche_smoothing=False),
         funding_by_symbol,
+        committee_admission=FeatureAdmission(
+            _FOLD.train_end, _research_go._resolved_committee_members(request),
+        ),
     )
     pd.testing.assert_frame_equal(target_default, target_off)
 
@@ -187,7 +194,12 @@ def test_committee_tranche_smoothing_threads_both_call_sites(mhs_market_with_tak
         return real(*args, **kwargs)
 
     monkeypatch.setattr(committee_mod, "_committee_execution_book", _spy)
-    _build_fold_target_weights(str(root), _FOLD, request, funding_by_symbol)
+    _build_fold_target_weights(
+        str(root), _FOLD, request, funding_by_symbol,
+        committee_admission=FeatureAdmission(
+            _FOLD.train_end, _research_go._resolved_committee_members(request),
+        ),
+    )
     assert seen["tranche_count"] == COMMITTEE_TRANCHE_COUNT
 
     seen.clear()
@@ -238,7 +250,12 @@ def test_committee_tranche_count_threads_committee_and_carry_books_at_both_call_
     monkeypatch.setattr(committee_stage_mod, "funding_carry_execution_book", _carry_spy)
 
     # When the fold target builder runs
-    _build_fold_target_weights(str(root), _FOLD, request, funding_by_symbol)
+    _build_fold_target_weights(
+        str(root), _FOLD, request, funding_by_symbol,
+        committee_admission=FeatureAdmission(
+            _FOLD.train_end, _research_go._resolved_committee_members(request),
+        ),
+    )
     # Then both books received the configured count, never the module default
     assert seen == {"committee": [count], "carry": [count]}
 
@@ -365,10 +382,16 @@ def test_committee_regime_adaptive_tranche_default_off_byte_identical(
     )
     target_default, _signal, _roster, _grid = _build_fold_target_weights(
         str(root), _FOLD, request, funding_by_symbol,
+        committee_admission=FeatureAdmission(
+            _FOLD.train_end, _research_go._resolved_committee_members(request),
+        ),
     )
     target_off, _signal, _roster, _grid = _build_fold_target_weights(
         str(root), _FOLD, dataclasses.replace(request, committee_regime_adaptive_tranche=False),
         funding_by_symbol,
+        committee_admission=FeatureAdmission(
+            _FOLD.train_end, _research_go._resolved_committee_members(request),
+        ),
     )
     pd.testing.assert_frame_equal(target_default, target_off)
 
@@ -413,7 +436,12 @@ def test_committee_regime_adaptive_tranche_threads_both_call_sites(
         return real(*args, **kwargs)
 
     monkeypatch.setattr(committee_mod, "_committee_execution_book", _spy)
-    _build_fold_target_weights(str(root), _FOLD, request, funding_by_symbol)
+    _build_fold_target_weights(
+        str(root), _FOLD, request, funding_by_symbol,
+        committee_admission=FeatureAdmission(
+            _FOLD.train_end, _research_go._resolved_committee_members(request),
+        ),
+    )
     assert seen["regime_adaptive_window"] == COMMITTEE_REGIME_ADAPTIVE_WINDOW
 
     seen.clear()
@@ -453,7 +481,12 @@ def test_committee_beta_neutralize_threads_both_call_sites(
         return real(*args, **kwargs)
 
     monkeypatch.setattr(committee_mod, "_committee_execution_book", _spy)
-    _build_fold_target_weights(str(root), _FOLD, request_on, funding_by_symbol)
+    _build_fold_target_weights(
+        str(root), _FOLD, request_on, funding_by_symbol,
+        committee_admission=FeatureAdmission(
+            _FOLD.train_end, _research_go._resolved_committee_members(request_on),
+        ),
+    )
     assert isinstance(seen["beta"], pd.DataFrame)
 
     seen.clear()
@@ -469,7 +502,12 @@ def test_committee_beta_neutralize_threads_both_call_sites(
         execution_timeframe="3m", log_run=False,
         execution_universe_size=8, committee_capital=True,
     )
-    _build_fold_target_weights(str(root), _FOLD, request_default, funding_by_symbol)
+    _build_fold_target_weights(
+        str(root), _FOLD, request_default, funding_by_symbol,
+        committee_admission=FeatureAdmission(
+            _FOLD.train_end, _research_go._resolved_committee_members(request_default),
+        ),
+    )
     assert seen["beta"] is None
 
     seen.clear()
@@ -844,6 +882,9 @@ def test_fold_target_weights_threads_committee_member_weights(monkeypatch, mhs_m
         _build_fold_target_weights(
             str(root), _FOLD, request, funding_by_symbol, None,
             committee_member_weights={"some_member": 1.0},
+            committee_admission=FeatureAdmission(
+                _FOLD.train_end, _research_go._resolved_committee_members(request),
+            ),
         )
     # The spy was called and received member_weights
     assert "member_weights" in spy
@@ -877,3 +918,254 @@ def test_top_level_committee_regime_scale_uses_shared_hourly_helper(mhs_market_w
     assert calls
     spacing = calls[0].to_series().diff().dropna()
     assert (spacing == pd.Timedelta(hours=1)).all()
+
+
+def _small_committee_panels(
+    n_hours: int = 2000, n_symbols: int = 4, seed: int = 11,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DatetimeIndex]:
+    """Small dense synthetic panels for admission invariant tests (fast).
+
+    All members of a small ``(flow, reversal)`` member set are admitted on the
+    full window; callers inject a post-cutoff taker gap to separate the frozen
+    admission path from the in-window audit path.
+    """
+    grid = pd.date_range("2021-01-01", periods=n_hours, freq="1h", tz="UTC")
+    symbols = [f"T{i:02d}" for i in range(n_symbols)]
+    rng = np.random.default_rng(seed)
+    close = pd.DataFrame(
+        100.0 * np.exp(np.cumsum(rng.normal(0.0, 1e-4, (len(grid), len(symbols))), axis=0)),
+        index=grid, columns=symbols,
+    )
+    quote_vol = pd.DataFrame(
+        rng.uniform(900.0, 1100.0, (len(grid), len(symbols))), index=grid, columns=symbols,
+    )
+    taker_buy_quote = quote_vol * rng.uniform(0.4, 0.6, (len(grid), len(symbols)))
+    mask = pd.DataFrame(True, index=grid, columns=symbols)
+    decision_grid = pd.date_range(grid[0], grid[-1], freq="24h", tz="UTC")
+    return close, quote_vol, taker_buy_quote, mask, decision_grid
+
+
+def test_execution_book_honors_frozen_admission_despite_in_window_gap() -> None:
+    # I-FOLD-ADMISSION-PIT: taker_buy_quote is NaN for the whole execution
+    # tail, yet the frozen admission (decided strictly before the cutoff)
+    # still executes the flow member; an audited call over the same window
+    # drops it.
+    from src.mhs.evaluation.committee import _committee_boundary_admission_and_weights
+    from src.mhs.features import build_admitted_feature_books
+
+    members = ("flow_imb_168h", "rev_24h")
+    close, quote_vol, taker_valid, mask, decision_grid = _small_committee_panels()
+    cutoff = close.index[1000]
+    taker_gap = taker_valid.copy()
+    taker_gap.loc[taker_gap.index >= cutoff] = np.nan
+    admission_by_label, _ = _committee_boundary_admission_and_weights(
+        close, quote_vol, taker_gap, mask, decision_grid, 2,
+        {"C": cutoff}, members=members, evidence_weighting=False,
+    )
+    admission = admission_by_label["C"]
+    assert "flow_imb_168h" in admission.admitted
+    frozen = _committee_execution_book(
+        close, quote_vol, taker_gap, mask, decision_grid,
+        min_symbols=2, members=members, admission=admission,
+    )
+    audited = _committee_execution_book(
+        close, quote_vol, taker_gap, mask, decision_grid,
+        min_symbols=2, members=members,
+    )
+    assert not frozen.equals(audited)
+    member_specs = [s for s in FEATURE_REGISTRY if s.name in members]
+    audited_books = build_feature_books(
+        member_specs,
+        {"close": close, "quote_vol": quote_vol, "taker_buy_quote": taker_gap},
+        mask, decision_grid, min_symbols=2,
+    )
+    assert "flow_imb_168h" not in audited_books
+    flow_spec = next(s for s in FEATURE_REGISTRY if s.name == "flow_imb_168h")
+    flow_ref = build_admitted_feature_books(
+        [flow_spec],
+        {"close": close, "quote_vol": quote_vol, "taker_buy_quote": taker_gap},
+        mask, decision_grid, min_symbols=2,
+    )["flow_imb_168h"]
+    flow_grid = flow_ref.reindex(frozen.index).fillna(0.0)
+    corr_frozen = float(frozen.corrwith(flow_grid, axis=1).mean())
+    corr_audited = float(audited.corrwith(flow_grid, axis=1).mean())
+    assert corr_frozen > corr_audited
+
+
+def test_admission_and_coverage_cutoff_mutually_exclusive() -> None:
+    # I-FOLD-ADMISSION-PIT: the frozen admission path and the in-place audit
+    # path must never be combined in one call.
+    close, quote_vol, taker_buy_quote, mask, decision_grid = _small_committee_panels()
+    cutoff = close.index[500]
+    admission = FeatureAdmission(cutoff, ("rev_24h",))
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        _committee_execution_book(
+            close, quote_vol, taker_buy_quote, mask, decision_grid,
+            min_symbols=2, coverage_cutoff=cutoff, admission=admission,
+        )
+
+
+def test_admission_outside_members_fails_closed() -> None:
+    # I-FOLD-ADMISSION-PIT: an admitted name outside the resolved member set
+    # fails closed instead of executing an unadmitted member.
+    from src.mhs.evaluation.integrity import CommitteeAdmissionIntegrityError
+
+    close, quote_vol, taker_buy_quote, mask, decision_grid = _small_committee_panels()
+    admission = FeatureAdmission(close.index[500], ("rev_24h", "mom_168h"))
+    with pytest.raises(CommitteeAdmissionIntegrityError):
+        _committee_execution_book(
+            close, quote_vol, taker_buy_quote, mask, decision_grid,
+            min_symbols=2, members=("rev_24h",), admission=admission,
+        )
+
+
+def test_weights_must_come_from_admitting_boundary() -> None:
+    # I-COVERAGE-PIT: member_weights keys must equal the admitting
+    # boundary's admitted tuple -- one extra or one missing key fails closed.
+    from src.mhs.evaluation.integrity import CommitteeAdmissionIntegrityError
+
+    members = ("rev_24h", "mom_168h")
+    close, quote_vol, taker_buy_quote, mask, decision_grid = _small_committee_panels()
+    admission = FeatureAdmission(close.index[500], members)
+    kwargs = {
+        "close": close, "quote_vol": quote_vol, "taker_buy_quote": taker_buy_quote,
+        "execution_mask": mask, "decision_grid": decision_grid, "min_symbols": 2,
+        "members": members, "admission": admission,
+    }
+    with pytest.raises(CommitteeAdmissionIntegrityError):
+        _committee_execution_book(
+            **kwargs, member_weights={"rev_24h": 0.5, "mom_168h": 0.4, "extra": 0.1},
+        )
+    with pytest.raises(CommitteeAdmissionIntegrityError):
+        _committee_execution_book(**kwargs, member_weights={"rev_24h": 1.0})
+
+
+def test_empty_admission_keeps_no_member_error() -> None:
+    # D5: an empty frozen admission keeps the existing fail-closed
+    # RuntimeError (which yields INCOMPLETE_ANCHORED_FOLD downstream).
+    close, quote_vol, taker_buy_quote, mask, decision_grid = _small_committee_panels()
+    admission = FeatureAdmission(close.index[500], ())
+    with pytest.raises(RuntimeError, match="committee_capital"):
+        _committee_execution_book(
+            close, quote_vol, taker_buy_quote, mask, decision_grid,
+            min_symbols=2, admission=admission,
+        )
+
+
+def test_admission_path_equals_cutoff_path() -> None:
+    # D4: the admission path and the coverage_cutoff=C path produce
+    # byte-identical books when the admission came from the same panels,
+    # mask and cutoff C.
+    from src.mhs.evaluation.committee import _committee_boundary_admission_and_weights
+
+    members = ("flow_imb_168h", "rev_24h")
+    close, quote_vol, taker_buy_quote, mask, decision_grid = _small_committee_panels()
+    cutoff = close.index[1000]
+    admission_by_label, _ = _committee_boundary_admission_and_weights(
+        close, quote_vol, taker_buy_quote, mask, decision_grid, 2,
+        {"C": cutoff}, members=members, evidence_weighting=False,
+    )
+    admission = admission_by_label["C"]
+    assert len(admission.admitted) > 0
+    book_via_admission = _committee_execution_book(
+        close, quote_vol, taker_buy_quote, mask, decision_grid,
+        min_symbols=2, members=members, admission=admission,
+    )
+    book_via_cutoff = _committee_execution_book(
+        close, quote_vol, taker_buy_quote, mask, decision_grid,
+        min_symbols=2, members=members, coverage_cutoff=cutoff,
+    )
+    pd.testing.assert_frame_equal(book_via_admission, book_via_cutoff, check_exact=True)
+
+
+def test_boundary_admission_is_weighting_independent() -> None:
+    # I-COVERAGE-PIT: admission is identical with and without evidence
+    # weighting; True weights cover exactly the admitted set, False yields
+    # no weights.
+    from src.mhs.evaluation.committee import _committee_boundary_admission_and_weights
+
+    members = ("flow_imb_168h", "rev_24h")
+    close, quote_vol, taker_buy_quote, mask, decision_grid = _small_committee_panels()
+    train_ends = {"fold_0": close.index[800], "fold_1": close.index[1200]}
+    base = {
+        "close": close, "quote_vol": quote_vol, "taker_buy_quote": taker_buy_quote,
+        "execution_mask": mask, "decision_grid": decision_grid, "min_symbols": 2,
+        "train_ends": train_ends, "members": members,
+    }
+    adm_true, weights_true = _committee_boundary_admission_and_weights(
+        **base, evidence_weighting=True,
+    )
+    adm_false, weights_false = _committee_boundary_admission_and_weights(
+        **base, evidence_weighting=False,
+    )
+    assert adm_true == adm_false
+    for label in train_ends:
+        assert set(weights_true[label]) == set(adm_true[label].admitted)
+    assert weights_false == {}
+
+
+def test_evidence_weights_wrapper_is_unchanged() -> None:
+    # The legacy wrapper returns element [1] of the new boundary function
+    # with evidence_weighting=True.
+    from src.mhs.evaluation.committee import _committee_boundary_admission_and_weights
+
+    members = ("flow_imb_168h", "rev_24h")
+    close, quote_vol, taker_buy_quote, mask, decision_grid = _small_committee_panels()
+    train_ends = {"fold_0": close.index[800], "fold_1": close.index[1200]}
+    expected = _committee_boundary_admission_and_weights(
+        close, quote_vol, taker_buy_quote, mask, decision_grid, 2,
+        train_ends, members=members, evidence_weighting=True,
+    )[1]
+    actual = _committee_evidence_weights_by_boundary(
+        close, quote_vol, taker_buy_quote, mask, decision_grid,
+        min_symbols=2, train_ends=train_ends, members=members,
+    )
+    assert actual == expected
+
+
+@pytest.mark.parametrize("offset_hours", [0, 12])
+def test_evidence_weights_exclude_unobserved_return_endpoints(monkeypatch, offset_hours) -> None:
+    from src.mhs.evaluation.committee import _committee_boundary_admission_and_weights
+
+    close, quote_vol, taker_buy_quote, mask, grid = _small_committee_panels()
+    cutoff = grid[40] + pd.Timedelta(hours=offset_hours)
+    captured = []
+    train_weights = committee_mod.train_evidence_weights
+
+    def capture(proxies, train_mask):
+        captured.append((pd.DataFrame(proxies), train_mask))
+        return train_weights(proxies, train_mask)
+
+    monkeypatch.setattr(committee_mod, "train_evidence_weights", capture)
+    changed = close.copy()
+    changed.loc[changed.index >= cutoff, changed.columns[0]] *= 1000.0
+    results = [
+        _committee_boundary_admission_and_weights(
+            panel, quote_vol, taker_buy_quote, mask, grid, 2,
+            {"b": cutoff}, members=("flow_imb_168h", "rev_24h"), evidence_weighting=True,
+        )
+        for panel in (close, changed)
+    ]
+    original_proxies, original_mask = captured[0]
+    changed_proxies, changed_mask = captured[1]
+    assert not original_proxies.equals(changed_proxies)
+    assert original_mask.any()
+    endpoints = pd.Series(grid, index=grid).shift(-1)
+    assert (endpoints.loc[original_mask] < cutoff).all()
+    pd.testing.assert_series_equal(original_mask, changed_mask)
+    pd.testing.assert_frame_equal(
+        original_proxies.loc[original_mask], changed_proxies.loc[changed_mask], check_exact=True,
+    )
+    assert results[0] == results[1]
+
+
+def test_frozen_admission_rejects_unregistered_resolved_member() -> None:
+    from src.mhs.evaluation.integrity import CommitteeAdmissionIntegrityError
+
+    close, quote_vol, taker_buy_quote, mask, grid = _small_committee_panels()
+    admission = FeatureAdmission(close.index[500], ("rev_24h", "unknown"))
+    with pytest.raises(CommitteeAdmissionIntegrityError):
+        _committee_execution_book(
+            close, quote_vol, taker_buy_quote, mask, grid, 2,
+            members=admission.admitted, admission=admission,
+        )

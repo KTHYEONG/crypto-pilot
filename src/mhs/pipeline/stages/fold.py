@@ -97,6 +97,7 @@ def run_folds(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
         ctx.fold_funding, ctx.initial_equity, ctx.recorder, ctx.fold_slow_horizons,
         ctx.fold_fast_horizons, ctx.fold_funding_carry, ctx._fold_committee_weights,
         base_panel=getattr(ctx, "base_panel", None),
+        fold_committee_admission=getattr(ctx, "_fold_committee_admission", None),
     )
     ctx.folds = tuple(fold_reports)
     # Invalidate shared market-data state so opt-in diagnostics run with minimal parent memory.

@@ -962,3 +962,19 @@ def test_retired_jsonl_symbols_are_gone() -> None:
     )
     assert [name for name in retired if hasattr(rh, name)] == []
     assert "jsonl" not in Path(rh.__file__).read_text(encoding="utf-8")
+
+
+def test_admission_procedure_is_part_of_trial_identity() -> None:
+    # D6: the committee admission procedure is a sealed decision constant in the
+    # params snapshot, so pre-fix and post-fix committee runs never share a trial.
+    from src.mhs.live_strategy import capture_params_snapshot
+    from src.mhs.run_history import trial_identity_key
+
+    snapshot = capture_params_snapshot()
+    assert snapshot["COMMITTEE_ADMISSION_PROCEDURE"] == "boundary_frozen_warmup_excluded_v1"
+    base = {"flags": {"committee_capital": True}, "params_snapshot": snapshot}
+    stripped_snapshot = {
+        key: value for key, value in snapshot.items() if key != "COMMITTEE_ADMISSION_PROCEDURE"
+    }
+    stripped = {"flags": {"committee_capital": True}, "params_snapshot": stripped_snapshot}
+    assert trial_identity_key(base) != trial_identity_key(stripped)

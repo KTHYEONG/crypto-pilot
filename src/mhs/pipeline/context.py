@@ -17,6 +17,7 @@ from src.mhs.telemetry import StageTelemetry
 
 if TYPE_CHECKING:
     from src.mhs.contracts import MhsDiagnosticRequest
+    from src.mhs.features import FeatureAdmission
 
 
 @dataclass
@@ -74,6 +75,7 @@ class PipelineContext:
     fold_fast_horizons: dict[int, tuple[int, str]] = field(default_factory=dict)
     fold_funding_carry: dict[int, tuple[int | None, int | None, str, float | None]] = field(default_factory=dict)
     _fold_committee_weights: dict[int, Any] | None = None
+    _fold_committee_admission: dict[int, FeatureAdmission] | None = None
     _fold_growth_budget_target_vol: dict[int, float] | None = None
     # run-level 일간 참조 수익률: fold worker의 EWMA 워밍업 원천(I-WARM).
     _fold_exposure_warmup_returns: Any = None

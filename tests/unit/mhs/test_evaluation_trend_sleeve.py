@@ -13,6 +13,8 @@ import src.mhs.statistics as statistics
 from src.mhs.evaluation.diagnostics import _trend_sleeve_diagnostic
 from src.mhs.evaluation.folds import _apply_trend_sleeve, _trend_sleeve_position
 from src.mhs.evaluation.fold_weights import _build_fold_target_weights
+from src.mhs.features import FeatureAdmission
+from src.mhs import research_go as _research_go
 from src.mhs.execution.contracts import bar_funding_panel
 from src.mhs.execution.pnl import mhs_ledger_pnl
 from src.mhs.marks import _load_funding_series, _pit_execution_mask
@@ -180,18 +182,28 @@ def test_trend_sleeve_overlay_off_byte_identical(mhs_market_with_taker_buy_quote
     monkeypatch.setattr(folds_mod, "_apply_trend_sleeve", _must_not_be_called)
     target_patched, _sig, _roster, _grid = _build_fold_target_weights(
         str(root), _FOLD, request, funding_by_symbol,
+        committee_admission=FeatureAdmission(
+            _FOLD.train_end, _research_go._resolved_committee_members(request),
+        ),
     )
 
     monkeypatch.undo()
     target_baseline, _sig, _roster, _grid = _build_fold_target_weights(
         str(root), _FOLD, request, funding_by_symbol,
+        committee_admission=FeatureAdmission(
+            _FOLD.train_end, _research_go._resolved_committee_members(request),
+        ),
     )
     pd.testing.assert_frame_equal(target_patched, target_baseline)
 
+    _gross0_request = research_baseline(**base, trend_sleeve=True, trend_sleeve_gross=0.0)
     target_gross0, _sig, _roster, _grid = _build_fold_target_weights(
         str(root), _FOLD,
-        research_baseline(**base, trend_sleeve=True, trend_sleeve_gross=0.0),
+        _gross0_request,
         funding_by_symbol,
+        committee_admission=FeatureAdmission(
+            _FOLD.train_end, _research_go._resolved_committee_members(_gross0_request),
+        ),
     )
     pd.testing.assert_frame_equal(target_gross0, target_baseline)
 
@@ -230,6 +242,9 @@ def test_trend_sleeve_overlay_additive_fold(mhs_market_with_taker_buy_quote, mon
     monkeypatch.setattr(folds_mod, "_apply_trend_sleeve", _spy)
     target_on, _sig, _roster, _grid = _build_fold_target_weights(
         str(root), _FOLD, request, funding_by_symbol,
+        committee_admission=FeatureAdmission(
+            _FOLD.train_end, _research_go._resolved_committee_members(request),
+        ),
     )
     assert seen["called"]
     assert seen["position"] is not None
@@ -308,6 +323,9 @@ def test_trend_sleeve_overlay_roster_no_starvation(mhs_market_with_taker_buy_quo
     monkeypatch.setattr(folds_mod, "_apply_trend_sleeve", _spy)
     target_on, _sig, _roster, _grid = _build_fold_target_weights(
         str(root), _FOLD, request, funding_by_symbol,
+        committee_admission=FeatureAdmission(
+            _FOLD.train_end, _research_go._resolved_committee_members(request),
+        ),
     )
     assert "execution_mask" in seen
     mask_1h = seen["execution_mask"]
@@ -346,6 +364,9 @@ def test_trend_sleeve_fold_memory_order(mhs_market_with_taker_buy_quote, monkeyp
     monkeypatch.setattr(folds_mod, "_trend_sleeve_position", _spy)
     _target, _sig, _roster, _grid = _build_fold_target_weights(
         str(root), _FOLD, request, funding_by_symbol,
+        committee_admission=FeatureAdmission(
+            _FOLD.train_end, _research_go._resolved_committee_members(request),
+        ),
     )
     assert "eligible_shape" in seen
     assert seen["eligible_shape"][0] == len(_grid)

@@ -63,6 +63,7 @@ GO_REASON_SELECTION_WINDOW_OVERLAP = "SELECTION_WINDOW_OVERLAP"
 # registration state (GO_REASON_UNSPECIFIED_POLICY). Consumers distinguish
 # "data was intact but alpha underperformed" from "data itself was deficient"
 # by whether MhsResearchGoResult.data_integrity_reason_codes is non-empty.
+GO_REASON_COMMITTEE_ADMISSION_NOT_PIT = "COMMITTEE_ADMISSION_NOT_POINT_IN_TIME"
 GO_REASON_DATA_INTEGRITY_CODES = frozenset[str]({
     GO_REASON_INCOMPLETE_FOLD,
     GO_REASON_INVALID_PRIMARY,
@@ -71,6 +72,7 @@ GO_REASON_DATA_INTEGRITY_CODES = frozenset[str]({
     GO_REASON_CAPITAL_BREACH,
     GO_REASON_RESOURCE_BREACH,
     GO_REASON_PATH_DIVERGENCE,
+    GO_REASON_COMMITTEE_ADMISSION_NOT_PIT,
 })
 
 

@@ -12,6 +12,7 @@ from src.mhs.books import inverse_realized_vol_tilt, portfolio_rebalance_trigger
 from src.mhs.contracts import MhsDiagnosticRequest
 from src.mhs.evidence import AnchoredPurgedFold
 from src.mhs.execution import bar_funding_panel
+from src.mhs.features import FeatureAdmission
 from src.mhs.funding import funding_carry_execution_book
 from src.mhs.horizons import realized_vol
 from src.mhs.marks import (
@@ -32,7 +33,6 @@ from src.mhs.regime import beta_neutralize_weights, causal_market_beta, crash_re
 from src.mhs.types import (
     BOOK_BLEND_WEIGHTS,
     BOOK_SPECS,
-    COMMITTEE_OOS_START,
     COMMITTEE_REGIME_ADAPTIVE_WINDOW,
     CRASH_REGIME_REFERENCE_SYMBOLS,
     FUNDING_CARRY_SLEEVE_LOOKBACK_HOURS,
@@ -78,7 +78,8 @@ def _rebalance_fold_weights(
         if seed_row is not None:
             raise ValueError("deadband_seed_row requires rebalance_filter='per_symbol_deadband'")
         return portfolio_rebalance_trigger(
-            weights, REBALANCE_TRACKING_ERROR_THRESHOLD,
+            weights,
+            REBALANCE_TRACKING_ERROR_THRESHOLD,
         ).mul(regime_scale, axis=0)
     scaled = weights.mul(regime_scale, axis=0)
     if apply_deadband is False:
@@ -100,7 +101,7 @@ def _build_fold_target_weights(
     require_minute_roster: bool = True,
     base_panel: dict[str, pd.DataFrame] | None = None,
     panel_warmup_hours: int = FOLD_PANEL_WARMUP_HOURS,
-    committee_oos_start: pd.Timestamp = COMMITTEE_OOS_START,
+    committee_admission: FeatureAdmission | None = None,
     apply_rebalance_deadband: bool = True,
     panel_quarantine: PanelQuarantine | None = None,
 ) -> tuple[pd.DataFrame, pd.DatetimeIndex, list[str], pd.DatetimeIndex]:
@@ -112,11 +113,41 @@ def _build_fold_target_weights(
     momentum books are never built, so fast/slow-only knobs (fast_book_mode, slow_book_mode,
     ensemble_signal, crash_regime_tilt_alpha) cannot influence the result; beta_neutralize
     still applies through the committee book's causal beta.
+    Under committee capital the member set is ``committee_admission`` -- the
+    admission decided on rows strictly before ``fold.train_end``, the same
+    boundary that fit ``committee_member_weights`` -- and no coverage audit runs
+    on the fold panel, so no decision at or before T can depend on data after T
+    (I-FOLD-ADMISSION-PIT). The same admission serves the validation and the
+    train-reference windows.
+
+    Raises:
+        CommitteeAdmissionIntegrityError: committee capital without
+            ``committee_admission``; ``committee_admission.cutoff`` after
+            ``fold.validation_start`` (I-FOLD-ADMISSION-PIT); cutoff different
+            from ``fold.train_end`` (I-COVERAGE-PIT); or an admission/weights
+            mismatch surfaced by the committee book.
+        ValueError: ``committee_admission`` given while committee capital is
+            off (plus existing window/deadband errors).
     """
     ts = fold.train_start
     vs, ve = _resolve_effective_fold_window(fold, decision_start, decision_end)
     if apply_rebalance_deadband is False and request.rebalance_filter != "per_symbol_deadband":
         raise ValueError("apply_rebalance_deadband=False requires rebalance_filter='per_symbol_deadband'")
+    if request.committee_capital:
+        if committee_admission is None:
+            raise integrity.CommitteeAdmissionIntegrityError(
+                "committee_capital requires committee_admission (fold train_end boundary)"
+            )
+        if committee_admission.cutoff > fold.validation_start:
+            raise integrity.CommitteeAdmissionIntegrityError(
+                f"committee admission cutoff {committee_admission.cutoff} after validation_start {fold.validation_start}"
+            )
+        if committee_admission.cutoff != fold.train_end:
+            raise integrity.CommitteeAdmissionIntegrityError(
+                f"committee admission cutoff {committee_admission.cutoff} != fold train_end {fold.train_end}"
+            )
+    elif committee_admission is not None:
+        raise ValueError("committee_admission requires committee_capital")
     panel_start = max(ts, vs - pd.Timedelta(hours=panel_warmup_hours))
     _panel_columns = (
         ("close", "open", "quote_vol", "taker_buy_quote")
@@ -127,8 +158,15 @@ def _build_fold_target_weights(
         slice_base_panel(base_panel, panel_start, ve, min_bars=PANEL_MIN_HISTORY_BARS)
         if base_panel is not None
         else load_base_panel(
-            root, "1h", _panel_columns, panel_start, ve,
-            partition="dev", min_bars=PANEL_MIN_HISTORY_BARS, data_policy=request.data_policy, quarantine=panel_quarantine,
+            root,
+            "1h",
+            _panel_columns,
+            panel_start,
+            ve,
+            partition="dev",
+            min_bars=PANEL_MIN_HISTORY_BARS,
+            data_policy=request.data_policy,
+            quarantine=panel_quarantine,
         )
     )
     close, opens, quote_vol = panel["close"], panel["open"], panel["quote_vol"]
@@ -136,10 +174,7 @@ def _build_fold_target_weights(
     del panel
     grid_1h = close.index
     symbols = list(close.columns)
-    funded = [
-        s for s in symbols
-        if s in funding_by_symbol and s not in integrity.SOURCE_GAP_EXCLUDED_SYMBOLS
-    ]
+    funded = [s for s in symbols if s in funding_by_symbol and s not in integrity.SOURCE_GAP_EXCLUDED_SYMBOLS]
     if not funded:
         raise RuntimeError("no fold symbol has funding coverage")
     close = close[funded]
@@ -150,8 +185,7 @@ def _build_fold_target_weights(
     bar_period = grid_1h[1] - grid_1h[0]
     funding_window = {
         s: funding_by_symbol[s].loc[
-            (funding_by_symbol[s].index >= grid_1h[0])
-            & (funding_by_symbol[s].index < grid_1h[-1] + bar_period)
+            (funding_by_symbol[s].index >= grid_1h[0]) & (funding_by_symbol[s].index < grid_1h[-1] + bar_period)
         ]
         for s in funded
     }
@@ -192,26 +226,43 @@ def _build_fold_target_weights(
     if not request.committee_capital:
         if request.fast_book_mode == "horizon_ensemble":
             w_fast_execution = books._horizon_ensemble_execution_weights(
-                log_close, eligible, execution_mask, fast, fast_grid,
-                "horizon_ensemble", "raw", fast_ema,
+                log_close,
+                eligible,
+                execution_mask,
+                fast,
+                fast_grid,
+                "horizon_ensemble",
+                "raw",
+                fast_ema,
             )
         else:
             w_fast_tilted = inverse_realized_vol_tilt(
-                w_fast, realized_vol(log_close, fast.horizon_hours).reindex(fast_grid),
+                w_fast,
+                realized_vol(log_close, fast.horizon_hours).reindex(fast_grid),
             )
             w_fast_execution = renormalize_within_mask(
-                w_fast_tilted, execution_mask.reindex(w_fast.index).fillna(False), fast.min_symbols,
+                w_fast_tilted,
+                execution_mask.reindex(w_fast.index).fillna(False),
+                fast.min_symbols,
             )
         w_slow_execution = books._horizon_ensemble_execution_weights(
-            log_close, eligible, execution_mask, slow, slow_grid,
-            request.slow_book_mode, request.ensemble_signal, slow_ema,
+            log_close,
+            eligible,
+            execution_mask,
+            slow,
+            slow_grid,
+            request.slow_book_mode,
+            request.ensemble_signal,
+            slow_ema,
         )
     # I-SINGLE-CONFIGURATION: one causal-beta computation shared by the legacy
     # slow-book neutralize and the committee execution book below.
     causal_beta = (
         causal_market_beta(
-            log_close, eligible,
-            CAUSAL_BETA_LOOKBACK_BARS, CAUSAL_BETA_MIN_PERIODS,
+            log_close,
+            eligible,
+            CAUSAL_BETA_LOOKBACK_BARS,
+            CAUSAL_BETA_MIN_PERIODS,
         )
         if request.beta_neutralize
         else None
@@ -239,26 +290,47 @@ def _build_fold_target_weights(
         w_slow_execution_1h = w_slow_execution.reindex(grid_1h).ffill().fillna(0.0)
         if request.crash_regime_tilt_alpha is not None:
             w_slow_execution_1h = crash_regime_tilt_weights(
-                w_slow_execution_1h, log_close,
+                w_slow_execution_1h,
+                log_close,
                 execution_mask.reindex(grid_1h).ffill().fillna(False),
-                CRASH_REGIME_REFERENCE_SYMBOLS, slow.horizon_hours,
-                request.crash_regime_tilt_alpha, min_symbols=slow.min_symbols,
+                CRASH_REGIME_REFERENCE_SYMBOLS,
+                slow.horizon_hours,
+                request.crash_regime_tilt_alpha,
+                min_symbols=slow.min_symbols,
             )
     if request.committee_capital:
-        blend_1h = committee._committee_execution_book(
-            close, quote_vol, taker_buy_quote, execution_mask, slow_grid, slow.min_symbols,
-            _research_go._resolved_committee_tranche_count(request),
-            regime_adaptive_window=(
-                COMMITTEE_REGIME_ADAPTIVE_WINDOW
-                if request.committee_regime_adaptive_tranche else None
-            ),
-            target_gross=request.committee_target_gross,
-            member_weights=committee_member_weights,
-            carry_book=funding_carry_execution_book(bar_funding, execution_mask, FUNDING_CARRY_SLEEVE_LOOKBACK_HOURS, slow_grid, request.committee_tranche_count, slow.min_symbols) if request.funding_carry_sleeve else None, carry_weight=request.funding_carry_weight if request.funding_carry_sleeve else 0.0,
-            members=_research_go._resolved_committee_members(request),
-            coverage_cutoff=committee_oos_start,
-            beta=causal_beta,
-        ).reindex(grid_1h).fillna(0.0)
+        blend_1h = (
+            committee._committee_execution_book(
+                close,
+                quote_vol,
+                taker_buy_quote,
+                execution_mask,
+                slow_grid,
+                slow.min_symbols,
+                _research_go._resolved_committee_tranche_count(request),
+                regime_adaptive_window=(
+                    COMMITTEE_REGIME_ADAPTIVE_WINDOW if request.committee_regime_adaptive_tranche else None
+                ),
+                target_gross=request.committee_target_gross,
+                member_weights=committee_member_weights,
+                carry_book=funding_carry_execution_book(
+                    bar_funding,
+                    execution_mask,
+                    FUNDING_CARRY_SLEEVE_LOOKBACK_HOURS,
+                    slow_grid,
+                    request.committee_tranche_count,
+                    slow.min_symbols,
+                )
+                if request.funding_carry_sleeve
+                else None,
+                carry_weight=request.funding_carry_weight if request.funding_carry_sleeve else 0.0,
+                members=_research_go._resolved_committee_members(request),
+                beta=causal_beta,
+                admission=committee_admission,
+            )
+            .reindex(grid_1h)
+            .fillna(0.0)
+        )
         del close, taker_buy_quote
     else:
         blend_1h = (
@@ -271,7 +343,10 @@ def _build_fold_target_weights(
     # gating the committee book already uses.
     if trend_position is not None:
         blend_1h = folds._apply_trend_sleeve(
-            blend_1h, trend_position, execution_mask, request.trend_sleeve_gross,
+            blend_1h,
+            trend_position,
+            execution_mask,
+            request.trend_sleeve_gross,
         )
     _active_spec, active_grid = books._active_blend_book_and_grid(fast, slow, fast_grid, slow_grid)
     del _active_spec
@@ -282,19 +357,28 @@ def _build_fold_target_weights(
     # The regime cash scale must read the traded execution roster, not the
     # full eligible universe: only the execution_mask symbols carry capital, so
     # their realized vol is the quantity that decides high-vol cash scaling.
-    regime_scale = _scaling.regime_cash_scale_1h(log_close, execution_mask, grid_1h, fast.horizon_hours, request.trend_efficiency_overlay).reindex(decision_grid).fillna(1.0)
+    regime_scale = (
+        _scaling.regime_cash_scale_1h(
+            log_close, execution_mask, grid_1h, fast.horizon_hours, request.trend_efficiency_overlay
+        )
+        .reindex(decision_grid)
+        .fillna(1.0)
+    )
     del execution_mask
     del log_close
     target_weights = _rebalance_fold_weights(
-        target_weights, regime_scale, request, apply_rebalance_deadband, deadband_seed_row,
+        target_weights,
+        regime_scale,
+        request,
+        apply_rebalance_deadband,
+        deadband_seed_row,
     )
 
     if target_weights.empty:
         raise RuntimeError("fold decision grid is empty")
     execution_symbols = sorted(target_weights.columns[target_weights.ne(0.0).any(axis=0)])
     minute_roster = [
-        s for s in execution_symbols
-        if os.path.exists(os.path.join(root, request.execution_timeframe, f"{s}.parquet"))
+        s for s in execution_symbols if os.path.exists(os.path.join(root, request.execution_timeframe, f"{s}.parquet"))
     ]
     # 라이브 경로는 target weights만 emit하고 분단위 실행 리플레이를 하지 않으므로
     # minute roster 불변식은 백테스트(replay) 경로에서만 강제한다.

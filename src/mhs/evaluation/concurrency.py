@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from typing import Any
 
@@ -15,6 +16,7 @@ from src.mhs.evidence import (
     compute_deployment_readiness,
     resolved_anchored_folds,
 )
+from src.mhs.features import FeatureAdmission
 from src.mhs.parallel import (
     FORK_CONTEXT,
     assert_fork_admission,
@@ -118,31 +120,47 @@ def _run_books_concurrent(
             m_step = m_book.reindex(slow_grid).ffill().fillna(0.0)
             member_names.append(m_name)
             books_dict[f"member_{m_name}"] = (
-                slow, slow_grid, m_step, phase_slow, slow.horizon_hours, m_step,
+                slow,
+                slow_grid,
+                m_step,
+                phase_slow,
+                slow.horizon_hours,
+                m_step,
             )
     n_total_workers = 1 + len(member_names) + (2 if request.reference_books_diagnostic else 0)
     _books_reserve = _resolve_ram_budget(request.max_rss_bytes, request.ram_guard)[1]
     _books_workers = plan_worker_count(
-        n_total_workers, WORKER_PEAK_RSS_BYTES, request.ram_guard,
+        n_total_workers,
+        WORKER_PEAK_RSS_BYTES,
+        request.ram_guard,
         observer=_worker_plan_observer(telemetry, "books", WORKER_PEAK_RSS_BYTES),
         reserve_bytes=_books_reserve,
     )
     assert_fork_admission("books", _books_workers, WORKER_PEAK_RSS_BYTES, _books_reserve)
     with (
-        fork_shared_payload({
-            "grid_1h": grid_1h,
-            "opens": opens,
-            "bar_funding": bar_funding,
-            "funding_by_symbol": funding_by_symbol,
-            "books": books_dict,
-        }) as token,
+        fork_shared_payload(
+            {
+                "grid_1h": grid_1h,
+                "opens": opens,
+                "bar_funding": bar_funding,
+                "funding_by_symbol": funding_by_symbol,
+                "books": books_dict,
+            }
+        ) as token,
         frozen_gc_heap(),
         ProcessPoolExecutor(max_workers=_books_workers, mp_context=FORK_CONTEXT) as pool,
     ):
         f_fast = (
             pool.submit(
                 windows._book_outcome_worker,
-                "fast_reversal", token, n_symbols, root, request, start, end, initial_equity,
+                "fast_reversal",
+                token,
+                n_symbols,
+                root,
+                request,
+                start,
+                end,
+                initial_equity,
             )
             if request.reference_books_diagnostic
             else None
@@ -150,19 +168,40 @@ def _run_books_concurrent(
         f_slow = (
             pool.submit(
                 windows._book_outcome_worker,
-                "slow_momentum", token, n_symbols, root, request, start, end, initial_equity,
+                "slow_momentum",
+                token,
+                n_symbols,
+                root,
+                request,
+                start,
+                end,
+                initial_equity,
             )
             if request.reference_books_diagnostic
             else None
         )
         f_blend = pool.submit(
             windows._book_outcome_worker,
-            "blend", token, n_symbols, root, request, start, end, initial_equity,
+            "blend",
+            token,
+            n_symbols,
+            root,
+            request,
+            start,
+            end,
+            initial_equity,
         )
         f_members = {
             m_name: pool.submit(
                 windows._book_outcome_worker,
-                f"member_{m_name}", token, n_symbols, root, request, start, end, initial_equity,
+                f"member_{m_name}",
+                token,
+                n_symbols,
+                root,
+                request,
+                start,
+                end,
+                initial_equity,
             )
             for m_name in member_names
         }
@@ -226,11 +265,17 @@ def _run_post_diag_deploy(
     net_1h = equity_1h.pct_change().dropna()
     if request.bootstrap_ci_diagnostic and len(net_1h) >= 2:
         bootstrap_ci = _statistics._bootstrap_ci(
-            net_1h, _statistics._BOOTSTRAP_REPLICATES, _statistics._BOOTSTRAP_MEAN_BLOCK, _statistics._BOOTSTRAP_SEED,
+            net_1h,
+            _statistics._BOOTSTRAP_REPLICATES,
+            _statistics._BOOTSTRAP_MEAN_BLOCK,
+            _statistics._BOOTSTRAP_SEED,
         )
     participation = participation_mod._participation_warnings(
-        blend_report.primary, root, request.execution_timeframe,
-        execution_symbols, minute_grid,
+        blend_report.primary,
+        root,
+        request.execution_timeframe,
+        execution_symbols,
+        minute_grid,
     )
     termination_counts = dict(blend_report.primary.termination_counts)
     placebo_percentile: float | None = None
@@ -238,8 +283,15 @@ def _run_post_diag_deploy(
         if blend_report.primary_naive_sharpe is None:
             raise DataIntegrityError("blend report requires a naive Sharpe for the placebo")
         placebo_percentile = _statistics._placebo_sharpe_percentile(
-            signal_48h, eligible, opens, bar_funding, grid_1h,
-            fast, blend_report.primary_naive_sharpe, 500, _statistics._BOOTSTRAP_SEED,
+            signal_48h,
+            eligible,
+            opens,
+            bar_funding,
+            grid_1h,
+            fast,
+            blend_report.primary_naive_sharpe,
+            500,
+            _statistics._BOOTSTRAP_SEED,
         )
     deployment = compute_deployment_readiness(
         equity_1h,
@@ -274,6 +326,7 @@ def _run_post_book_concurrently(
     fold_funding_carry: dict[int, tuple[int | None, int | None, str, float | None]] | None = None,
     fold_committee_weights: dict[int, dict[str, float]] | None = None,
     base_panel: dict[str, pd.DataFrame] | None = None,
+    fold_committee_admission: Mapping[int, FeatureAdmission] | None = None,
 ) -> tuple[
     tuple[float, float] | None,
     float | None,
@@ -305,20 +358,38 @@ def _run_post_book_concurrently(
     if not fold_list:
         if blend_report is not None and blend_report.primary is not None:
             (
-                bootstrap_ci, placebo_percentile, participation,
-                termination_counts, deployment,
+                bootstrap_ci,
+                placebo_percentile,
+                participation,
+                termination_counts,
+                deployment,
             ) = _run_post_diag_deploy(
-                blend_report, root, request, execution_symbols, minute_grid,
-                signal_48h, eligible, opens, bar_funding, grid_1h, fast,
+                blend_report,
+                root,
+                request,
+                execution_symbols,
+                minute_grid,
+                signal_48h,
+                eligible,
+                opens,
+                bar_funding,
+                grid_1h,
+                fast,
             )
         return (
-            bootstrap_ci, placebo_percentile, participation,
-            termination_counts, fold_reports, deployment,
+            bootstrap_ci,
+            placebo_percentile,
+            participation,
+            termination_counts,
+            fold_reports,
+            deployment,
         )
 
     _post_book_reserve = _resolve_ram_budget(request.max_rss_bytes, request.ram_guard)[1]
     max_workers = plan_worker_count(
-        min(3, len(fold_list)), WORKER_PEAK_RSS_BYTES, request.ram_guard,
+        min(3, len(fold_list)),
+        WORKER_PEAK_RSS_BYTES,
+        request.ram_guard,
         observer=_worker_plan_observer(telemetry, "post_book_folds", WORKER_PEAK_RSS_BYTES),
         reserve_bytes=_post_book_reserve,
     )
@@ -329,7 +400,14 @@ def _run_post_book_concurrently(
         ProcessPoolExecutor(max_workers=max_workers, mp_context=FORK_CONTEXT) as pool,
     ):
         validation_futures = folds._submit_fold_validation_phase(
-            pool, token, root, fold_list, worker_request, fold_slow_horizons, fold_committee_weights,
+            pool,
+            token,
+            root,
+            fold_list,
+            worker_request,
+            fold_slow_horizons,
+            fold_committee_weights,
+            fold_committee_admission,
         )
         # The fold pool is now forked; start the diagnostics/deployment thread.
         with ThreadPoolExecutor(max_workers=1) as tpool:
@@ -338,17 +416,39 @@ def _run_post_book_concurrently(
                 assert blend_report is not None
                 post_future = tpool.submit(
                     _run_post_diag_deploy,
-                    blend_report, root, request, execution_symbols, minute_grid,
-                    signal_48h, eligible, opens, bar_funding, grid_1h, fast,
+                    blend_report,
+                    root,
+                    request,
+                    execution_symbols,
+                    minute_grid,
+                    signal_48h,
+                    eligible,
+                    opens,
+                    bar_funding,
+                    grid_1h,
+                    fast,
                 )
             fold_reports = folds._complete_anchored_folds(
-                pool, token, validation_futures, root, fold_list, worker_request, initial_equity,
-                fold_slow_horizons, fold_fast_horizons, fold_funding_carry, fold_committee_weights,
+                pool,
+                token,
+                validation_futures,
+                root,
+                fold_list,
+                worker_request,
+                initial_equity,
+                fold_slow_horizons,
+                fold_fast_horizons,
+                fold_funding_carry,
+                fold_committee_weights,
+                fold_committee_admission,
             )
             if post_future is not None:
                 (
-                    bootstrap_ci, placebo_percentile, participation,
-                    termination_counts, deployment,
+                    bootstrap_ci,
+                    placebo_percentile,
+                    participation,
+                    termination_counts,
+                    deployment,
                 ) = post_future.result()
     if telemetry is not None:
         for fold_report in fold_reports:
@@ -359,6 +459,10 @@ def _run_post_book_concurrently(
             )
             telemetry.record(f"anchored_fold_{fold_report.fold_index}", fill_count=fill_count)
     return (
-        bootstrap_ci, placebo_percentile, participation,
-        termination_counts, fold_reports, deployment,
+        bootstrap_ci,
+        placebo_percentile,
+        participation,
+        termination_counts,
+        fold_reports,
+        deployment,
     )

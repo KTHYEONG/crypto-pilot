@@ -110,6 +110,11 @@ COMMITTEE_DEFAULT_MEMBER_SET: str = "flow_momentum"
 # Canonical value of committee_member_set while committee capital is off; equal to the frozen trial-identity baseline so a capital-off run never carries an inert member set into its trial key or procedure digest.
 COMMITTEE_MEMBER_SET_INERT: str = "risk_premia"
 
+# Sealed identity of the committee member-admission procedure. Bumped (never edited
+# in place) whenever admission semantics change, so run-history trial identities and
+# preregistered procedure digests of different admission procedures never collide.
+COMMITTEE_ADMISSION_PROCEDURE: str = "boundary_frozen_warmup_excluded_v1"
+
 COMMITTEE_MEMBERS: tuple[str, ...] = COMMITTEE_MEMBER_SETS[
     COMMITTEE_DEFAULT_MEMBER_SET
 ]

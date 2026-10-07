@@ -332,3 +332,87 @@ def test_misaligned_signal_length_forces_fallback() -> None:
         signal_available_at=shared.signal_available_at[:-1], daily_returns=shared.daily_returns,
     )
     assert _shared_train_reference_slice(broken, fold_k, 0, own, signals, ExecutionSpec()) is None
+
+
+def test_group_key_separates_member_sets_not_cutoffs() -> None:
+    # I-FOLD-ADMISSION-PIT: the admitted member tuple joins the train-reference
+    # group key (never the admission cutoff, which differs per fold by
+    # construction), so folds executing different member sets never share a replay.
+    from src.mhs.features import FeatureAdmission
+
+    fold_k = _fold(_TE_K)
+    fold_h = _fold(_TE_H)
+    assert fold_k.train_start == fold_h.train_start
+    shared_a = FeatureAdmission(cutoff=_TE_K, admitted=("a", "b"))
+    shared_b = FeatureAdmission(cutoff=_TE_H, admitted=("a", "b"))
+    assert _train_reference_group_key(
+        fold_k, None, None, committee_admission=shared_a
+    ) == _train_reference_group_key(fold_h, None, None, committee_admission=shared_b)
+    divergent = FeatureAdmission(cutoff=_TE_K, admitted=("a", "c"))
+    assert _train_reference_group_key(
+        fold_k, None, None, committee_admission=shared_a
+    ) != _train_reference_group_key(fold_k, None, None, committee_admission=divergent)
+    empty = FeatureAdmission(cutoff=_TE_K, admitted=())
+    assert _train_reference_group_key(fold_k, None, None) != _train_reference_group_key(
+        fold_k, None, None, committee_admission=empty
+    )
+
+
+def test_shared_reference_rejects_mixed_member_sets() -> None:
+    # I-FOLD-ADMISSION-PIT: folds executing different member sets never share
+    # a reference replay -- the group build fails closed before any replay.
+    from src.mhs.features import FeatureAdmission
+
+    fold0 = _fold(_TE_K)
+    fold1 = _fold(_TE_H)
+    group = ((0, fold0), (1, fold1))
+    admissions = {
+        0: FeatureAdmission(cutoff=_TE_K, admitted=("a", "b")),
+        1: FeatureAdmission(cutoff=_TE_H, admitted=("a", "c")),
+    }
+    with pytest.raises(ValueError, match="common admitted tuple"):
+        _build_shared_train_reference(
+            "r", group, object(), {}, 1.0, None, None, committee_admissions=admissions,
+        )
+
+
+def test_reference_from_shared_threads_admission(monkeypatch) -> None:
+    # Line 879: _reference_from_shared forwards the fold's own admission into
+    # both the own-target build and the group-key comparison.
+    from src.mhs.features import FeatureAdmission
+
+    fold_k, own, signals, shared = _shared_fixture()
+    admission = FeatureAdmission(cutoff=_TE_K, admitted=("a",))
+    seen: dict[str, object] = {}
+
+    def _targets(*a, **k):
+        seen["admission"] = k.get("committee_admission")
+        return own, signals, ["A", "B"]
+
+    monkeypatch.setattr(folds_mod, "_fold_reference_targets", _targets)
+
+    def _slice(*a, **k):
+        return pd.Series(
+            0.001,
+            index=pd.date_range(end=_TE_K - pd.Timedelta(days=1), periods=100, freq="1D", tz="UTC"),
+            dtype="float64",
+        )
+
+    monkeypatch.setattr(folds_mod, "_shared_train_reference_slice", _slice)
+    monkeypatch.setattr(
+        folds_mod.specs, "_resolved_base_execution_spec", lambda _r: ExecutionSpec(),
+    )
+    matching = _SharedTrainReference(
+        group_key=folds_mod._train_reference_group_key(
+            fold_k, None, None, committee_admission=admission,
+        ),
+        reference_start=shared.reference_start, horizon_end=shared.horizon_end,
+        target_weights=shared.target_weights, signal_available_at=shared.signal_available_at,
+        daily_returns=shared.daily_returns,
+    )
+    out = _reference_from_shared(
+        "root", fold_k, object(), {}, 1.0, 0, None, None, matching,
+        committee_admission=admission,
+    )
+    assert seen["admission"] is admission
+    assert len(out) == 100

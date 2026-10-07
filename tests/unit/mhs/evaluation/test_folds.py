@@ -386,10 +386,11 @@ def test_uncertified_train_reference_yields_gap_code(mhs_market, monkeypatch) ->
     assert report.primary_valid is False
     assert report.failures == ("RELEVANT_EXECUTION_DATA_GAP",)
     assert len(build_calls) == 2
-    assert build_calls[0] == {}
+    assert build_calls[0] == {"committee_admission": None}
     assert build_calls[1] == {
         "decision_start": fold.train_start + pd.Timedelta(hours=folds.FOLD_PANEL_WARMUP_HOURS),
         "decision_end": fold.train_end,
+        "committee_admission": None,
     }
 
 
