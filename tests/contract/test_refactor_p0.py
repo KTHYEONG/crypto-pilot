@@ -48,14 +48,13 @@ def test_discovery_window_constants_are_ordered() -> None:
     assert DISCOVERY_START < DISCOVERY_END < HOLDOUT_CUTOFF
 
 def test_log_dir_declared_once() -> None:
-    """telemetry reuses the common LOG_DIR object rather than redeclaring it."""
+    """Log dir is declared once and not re-exported by telemetry."""
     import ast
     from pathlib import Path
 
-    from src.common.logging import LOG_DIR as common_log_dir
-    from src.mhs.telemetry import LOG_DIR as telemetry_log_dir
+    import src.mhs.telemetry as telemetry_mod
 
-    assert telemetry_log_dir is common_log_dir
+    assert not hasattr(telemetry_mod, "LOG_DIR")
 
     declaring: list[str] = []
     for path in Path("src").rglob("*.py"):

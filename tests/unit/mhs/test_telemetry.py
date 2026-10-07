@@ -46,23 +46,63 @@ class TestTag:
 
 
 class TestStageTelemetry:
-    def test_log_emits_message(self):
+    def test_log_emits_message(self, caplog):
         """SCENARIO_ANALYSIS_ARCHITECTURE_02: StageTelemetry.log emits [TAG] stage=... k=v ..."""
         from io import StringIO
+
+        from src.mhs.telemetry import TELEMETRY_LOGGER_NAME
+
         telemetry = StageTelemetry(log_run=False)
         stream = StringIO()
         handler = logging.StreamHandler(stream)
         handler.setLevel(logging.DEBUG)
         telemetry._logger.addHandler(handler)
         try:
-            telemetry.log(Tag.ALGO, "committee_book", gross=0.9231, members=("a", "b", "c", "d", "e", "f", "g"))
+            with caplog.at_level(logging.INFO, logger=TELEMETRY_LOGGER_NAME):
+                telemetry.log(Tag.ALGO, "committee_book", gross=0.9231, members=("a", "b", "c", "d", "e", "f", "g"))
             output = stream.getvalue()
             assert "[ALGO]" in output
             assert "stage=committee_book" in output
             assert "gross=0.923" in output
             assert "truncated=2" in output
+            assert any(record.name == TELEMETRY_LOGGER_NAME and record.getMessage() in output for record in caplog.records)
         finally:
             telemetry._logger.removeHandler(handler)
+
+    def test_construction_attaches_no_handler_and_opens_no_file(self):
+        from src.common.logging import LOG_DIR
+        from src.mhs.telemetry import TELEMETRY_LOGGER_NAME
+
+        logger = logging.getLogger(TELEMETRY_LOGGER_NAME)
+        handlers_before = list(logger.handlers)
+        propagate_before = logger.propagate
+        level_before = logger.level
+        before = {p.relative_to(LOG_DIR): p.read_bytes() for p in LOG_DIR.rglob("*") if p.is_file()}
+        telemetry = StageTelemetry()
+        try:
+            assert list(logger.handlers) == handlers_before
+            assert logger.propagate == propagate_before
+            assert logger.level == level_before
+            telemetry.log(Tag.SYS, "probe", k=1)
+            assert list(logger.handlers) == handlers_before
+            after = {p.relative_to(LOG_DIR): p.read_bytes() for p in LOG_DIR.rglob("*") if p.is_file()}
+            assert after == before
+        finally:
+            assert list(logger.handlers) == handlers_before
+
+    def test_debug_streams_without_root_raise_before_io(self, tmp_path, monkeypatch):
+        from src.common.logging import LOG_DIR
+
+        monkeypatch.chdir(tmp_path)
+        before = {p.relative_to(LOG_DIR) for p in LOG_DIR.rglob("*")}
+        with pytest.raises(TypeError):
+            StageTelemetry(debug_streams=True)
+        with pytest.raises(TypeError):
+            StageTelemetry(debug_streams=True, streams_root=None)
+        with pytest.raises(TypeError):
+            StageTelemetry(debug_streams=True, streams_root=str(tmp_path))  # type: ignore[arg-type]
+        assert list(tmp_path.iterdir()) == []
+        assert {p.relative_to(LOG_DIR) for p in LOG_DIR.rglob("*")} == before
 
     def test_log_rejects_invalid_tag(self):
         telemetry = StageTelemetry(log_run=False)

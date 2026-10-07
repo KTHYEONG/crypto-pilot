@@ -89,3 +89,104 @@ def test_live_session_roots_are_partitioned() -> None:
     temp_root = Path(os.environ["PYTEST_DEBUG_TEMPROOT"]).resolve()
     for root in (_src_paths.BACKTESTS_DIR, _src_paths.FROZEN_BACKTESTS_DIR, _src_logging.LOG_DIR):
         assert root.resolve().is_relative_to(temp_root)
+
+
+def test_importing_research_surface_writes_nothing(tmp_path: Path) -> None:
+    import subprocess
+    import sys
+
+    repo_root = Path(__file__).resolve().parents[2]
+    backtests_dir = tmp_path / "bt"
+    log_dir = tmp_path / "logs"
+    probe = (
+        "import src.common.paths as p, src.common.logging as l, src.mhs.telemetry as t,"
+        " src.mhs.report.persist, src.mhs.preregistration,"
+        " src.mhs.pipeline.orchestrator, src.cli.main;"
+        " tel = t.StageTelemetry();"
+        " print(str(p.BACKTESTS_DIR)); print(str(l.LOG_DIR))"
+    )
+    env = {
+        **os.environ,
+        "CRYPTO_PILOT_BACKTESTS_DIR": str(backtests_dir),
+        "CRYPTO_PILOT_LOG_DIR": str(log_dir),
+    }
+    result = subprocess.run([sys.executable, "-c", probe], cwd=repo_root, capture_output=True, text=True, env=env, timeout=120)  # noqa: S603
+    assert result.returncode == 0, result.stderr
+    lines = result.stdout.strip().splitlines()
+    assert lines[-2] == str(backtests_dir)
+    assert lines[-1] == str(log_dir)
+    assert not backtests_dir.exists()
+    assert not log_dir.exists()
+
+
+def test_no_module_level_filesystem_call_in_src() -> None:
+    import ast
+
+    repo_root = Path(__file__).resolve().parents[2]
+    watched = {"mkdir", "makedirs", "open", "write_text", "write_bytes", "touch", "FileHandler", "RotatingFileHandler", "basicConfig", "addHandler", "setup_logger", "connect", "to_parquet"}
+    offenders: list[str] = []
+    for path in sorted((repo_root / "src").rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                continue
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
+                continue
+            if isinstance(node, ast.If):
+                test = node.test
+                if (
+                    isinstance(test, ast.Compare)
+                    and isinstance(test.left, ast.Name)
+                    and test.left.id == "__name__"
+                    and len(test.ops) == 1
+                    and isinstance(test.ops[0], ast.Eq)
+                    and len(test.comparators) == 1
+                    and isinstance(test.comparators[0], ast.Constant)
+                    and test.comparators[0].value == "__main__"
+                ):
+                    continue
+            for child in ast.walk(node):
+                if isinstance(child, ast.Call):
+                    func = child.func
+                    name = func.attr if isinstance(func, ast.Attribute) else (func.id if isinstance(func, ast.Name) else None)
+                    if name in watched:
+                        offenders.append(f"{path.relative_to(repo_root)}:{child.lineno}:{name}")
+    assert offenders == []
+
+
+def test_escaped_file_handler_is_reported(tmp_path: Path) -> None:
+    import contextlib
+    import logging
+
+    from tests.fixtures.hermetic import escaped_file_handlers
+
+    proc_root = tmp_path / "proc"
+    proc_root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    name_a = "hermetic_probe_outside_logger"
+    name_b = "hermetic_probe_inside_logger"
+    logger_a = logging.getLogger(name_a)
+    logger_b = logging.getLogger(name_b)
+    handler_a = logging.FileHandler(outside / "a.log", encoding="utf-8")
+    handler_b = logging.FileHandler(proc_root / "b.log", encoding="utf-8")
+    stream_handler = logging.StreamHandler()
+    logger_a.addHandler(handler_a)
+    logger_b.addHandler(handler_b)
+    logger_b.addHandler(stream_handler)
+    try:
+        offenders = escaped_file_handlers(proc_root)
+        assert offenders == [(name_a, (outside / "a.log").resolve())]
+    finally:
+        for logger, handler in ((logger_a, handler_a), (logger_b, handler_b), (logger_b, stream_handler)):
+            with contextlib.suppress(Exception):
+                logger.removeHandler(handler)
+            with contextlib.suppress(Exception):
+                handler.close()
+
+
+def test_live_session_has_no_escaped_file_handlers() -> None:
+    from tests.fixtures.hermetic import escaped_file_handlers
+
+    temp_root = Path(os.environ["PYTEST_DEBUG_TEMPROOT"])
+    assert escaped_file_handlers(temp_root) == []
