@@ -24,6 +24,8 @@ PARAMS_SNAPSHOT_KEYS: tuple[str, ...] = (
     "COMMITTEE_KELLY_FRACTION",
     "COMMITTEE_KELLY_LCB_Z",
     "COMMITTEE_ADMISSION_PROCEDURE",
+    "INSTRUMENT_LIFECYCLE_PROCEDURE",
+    "INSTRUMENT_SETTLEMENT_REGISTRY_DIGEST",
 )
 
 
@@ -32,6 +34,11 @@ def capture_params_snapshot() -> dict[str, Any]:
 
     snap: dict[str, Any] = {}
     for key in PARAMS_SNAPSHOT_KEYS:
+        if key == "INSTRUMENT_SETTLEMENT_REGISTRY_DIGEST":
+            from src.mhs.instrument_settlements import load_instrument_settlement_registry
+
+            snap[key] = load_instrument_settlement_registry().digest
+            continue
         val = getattr(mhs_params, key)
         if key == "COMMITTEE_OOS_START":
             snap[key] = pd.Timestamp(val).isoformat()

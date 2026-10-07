@@ -20,6 +20,7 @@ from .contracts import (
     ExecutionReplayWindow,
     StrategyExecutionReplayResult,
 )
+from .window_stream import _single_panel_execution_window
 
 
 def strategy_aware_execution_replay(
@@ -78,33 +79,18 @@ def strategy_aware_execution_replay(
     for sym in target_weights.columns:
         if sym not in minute_highs.columns:
             raise DataIntegrityError(f"target references unavailable symbol {sym}")
-    if minute_marks is not None:
-        if (
-            not minute_marks.index.equals(minute_closes.index)
-            or list(minute_marks.columns) != list(minute_closes.columns)
-        ):
-            raise DataIntegrityError("minute_marks must exactly align to minute_closes")
-        marks: pd.DataFrame = minute_marks
-    else:
-        marks = minute_closes
+    if minute_marks is not None and (
+        not minute_marks.index.equals(minute_closes.index)
+        or list(minute_marks.columns) != list(minute_closes.columns)
+    ):
+        raise DataIntegrityError("minute_marks must exactly align to minute_closes")
 
     minute_grid = minute_closes.index
     if not bar_funding.index.equals(minute_grid):
         raise DataIntegrityError("bar_funding must align exactly to the minute grid")
-    symbols = list(target_weights.columns)
-    window = ExecutionReplayWindow(
-        window_start=minute_grid[0],
-        window_end=minute_grid[-1],
-        columns=tuple(symbols),
-        symbols=tuple(symbols),
-        minute_grid=minute_grid,
-        highs=minute_highs[symbols],
-        lows=minute_lows[symbols],
-        closes=minute_closes[symbols],
-        marks=marks[symbols] if minute_marks is not None else None,
-        bar_funding=bar_funding[symbols],
-        target_weights=target_weights,
-        signal_available_at=signal_available_at,
+    window = _single_panel_execution_window(
+        target_weights, signal_available_at, minute_highs, minute_lows, minute_closes,
+        minute_marks, bar_funding,
     )
     return _delegate_single_panel_window(
         window, initial_equity=initial_equity, execution_bound=execution_bound, spec=spec,

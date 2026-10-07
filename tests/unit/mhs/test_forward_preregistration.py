@@ -732,3 +732,22 @@ def test_procedure_digest_binds_admission_procedure(monkeypatch) -> None:
     assert procedure_payload(request)["params_snapshot"]["COMMITTEE_ADMISSION_PROCEDURE"] == (
         "boundary_frozen_warmup_excluded_v2"
     )
+
+
+def test_registry_digest_rekeys_procedure_digest(monkeypatch) -> None:
+    import dataclasses
+
+    from src.mhs import instrument_settlements as _mod
+    from src.mhs.live_strategy import capture_params_snapshot
+    from src.mhs.preregistration import procedure_identity_digest
+
+    registry = _mod.load_instrument_settlement_registry()
+    request = research_baseline()
+    before = procedure_identity_digest(request)
+    records = list(registry.settlements)
+    records[0] = dataclasses.replace(records[0], settlement_price=records[0].settlement_price * 1.01)
+    changed = _mod.assemble_instrument_settlement_registry(records, registry.truncations)
+    monkeypatch.setattr(_mod, "load_instrument_settlement_registry", lambda: changed)
+    snap = capture_params_snapshot()
+    assert snap["INSTRUMENT_SETTLEMENT_REGISTRY_DIGEST"] == changed.digest
+    assert procedure_identity_digest(request) != before

@@ -1430,3 +1430,20 @@ def test_book_outcome_failure_path_records_telemetry(monkeypatch) -> None:
     assert report.failure is not None
     assert report.failure.reason
     assert [m.stage for m in recorder.records] == ["replay_blend_failed"]
+
+
+def test_spill_preserves_settlement_events(tmp_path) -> None:
+    import pandas as pd
+    import numpy as np
+    from src.mhs.execution.contracts import ExecutionReplayWindow, InstrumentSettlementEvent
+    from src.mhs.evaluation.windows import _spill_window_to_ipc, _load_window_from_ipc
+    minute_grid = pd.date_range("2021-01-01", periods=10, freq="3min", tz="UTC")
+    decision_grid = pd.date_range("2021-01-01", periods=2, freq="6h", tz="UTC")
+    px = pd.DataFrame({"A": np.full(10, 1.0)}, index=minute_grid)
+    e1 = InstrumentSettlementEvent(event_id="A:1", symbol="A", effective_at=minute_grid[5], available_at=minute_grid[5], settlement_price=1.0, fee_bps=0.0, source_digest="sha256:a", announced_at=minute_grid[0], last_trade_at=minute_grid[4], price_source="twap30_proxy")
+    e2 = InstrumentSettlementEvent(event_id="A:2", symbol="A", effective_at=minute_grid[8], available_at=minute_grid[8], settlement_price=2.0, fee_bps=1.0, source_digest="sha256:b", announced_at=minute_grid[1], last_trade_at=minute_grid[7], price_source="curated")
+    window = ExecutionReplayWindow(window_start=minute_grid[0], window_end=minute_grid[-1], columns=("A",), symbols=("A",), minute_grid=minute_grid, highs=px, lows=px, closes=px, marks=px, bar_funding=px * 0.0, target_weights=pd.DataFrame({"A": [0.5, 0.0]}, index=decision_grid), signal_available_at=decision_grid, settlement_events=(e1, e2))
+    path = str(tmp_path / "window_00000.arrow")
+    _spill_window_to_ipc(window, path)
+    loaded = _load_window_from_ipc(path)
+    assert loaded.settlement_events == (e1, e2)

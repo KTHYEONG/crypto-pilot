@@ -307,8 +307,9 @@ def test_settlement_defers_until_symbol_and_due_bar_are_reachable() -> None:
     result = _run([first, second])
     assert not (result.simulated_fills["reason"] == "delist_settlement").any()
     settled = {p.symbol: p for p in result.terminal_positions if p.status == "settled"}
-    assert set(settled) == {"BUSDT"}
-    assert settled["BUSDT"].quantity == pytest.approx(0.0)
+    assert settled == {}
+    assert result.termination_counts["DELIST_SETTLEMENT_NOOP"] == 1
+    assert "BUSDT" not in {position.symbol for position in result.terminal_positions}
     by_symbol = {p.symbol: p for p in result.terminal_positions if p.status == "open_marked"}
     assert by_symbol["AUSDT"].quantity == pytest.approx(5.0)
 

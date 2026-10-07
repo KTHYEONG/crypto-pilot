@@ -231,7 +231,8 @@ def test_evaluation_modules_respect_size_budget() -> None:
     budget = 700
     # frozen at measured size; growth fails, shrink requires deleting/lowering the entry.
     allowlist: dict[str, int] = {
-        "src/mhs/evaluation/windows.py": 712,
+        # spec 34: settlement events survive the IPC spill.
+        "src/mhs/evaluation/windows.py": 721,
         # Fold validation, shared train-reference reuse and fork scheduling form one lifecycle.
         "src/mhs/evaluation/folds.py": 1084,
     }
@@ -346,7 +347,8 @@ def test_execution_module_size_budget_with_allowlist() -> None:
 
     default_budget = 700
     # frozen at measured size; growth fails, shrink requires deleting/lowering the entry.
-    allowlist = {"src/mhs/execution/accumulator.py": 1897}
+    # spec 34: causal settlement interleaving and delivery cutoff.
+    allowlist = {"src/mhs/execution/accumulator.py": 2037}
 
     measured = {
         str(path): len(path.read_text(encoding="utf-8").splitlines())
@@ -368,7 +370,8 @@ def test_source_module_size_budget() -> None:
     default_budget = 700
     # frozen at measured size; growth fails, shrink requires deleting/lowering the entry.
     allowlist = {
-        "src/mhs/execution/accumulator.py": 1897,
+        # spec 34: causal settlement interleaving and delivery cutoff.
+        "src/mhs/execution/accumulator.py": 2037,
         # Cycle phases stay co-located to preserve runtime module-global test seams;
         # explicit phase contracts add lines while reducing orchestration complexity.
         # spec 17: venue snapshot passthrough, disabled-collection audit, genesis alert.
@@ -386,13 +389,15 @@ def test_source_module_size_budget() -> None:
         "src/application/mhs_supervisor.py": 1214,
         # Frozen account/exposure services stay co-located: two research workflows share
         # the catalog seam and unit-ledger helpers; split only with a new service boundary.
-        "src/application/mhs_frozen_account.py": 812,
+        # spec 34: stress settlement haircut on the frozen stress spec.
+        "src/application/mhs_frozen_account.py": 815,
         "src/mhs/reporting/inventory.py": 741,
         "src/mhs/backtest/paths.py": 849,
         "src/mhs/backtest/journal.py": 1091,
         # spec 34 part 1: I6 settlement-registry audit gate before the replay stream.
         "src/mhs/backtest/inventory.py": 880,
-        "src/mhs/evaluation/windows.py": 712,
+        # spec 34: settlement events survive the IPC spill.
+        "src/mhs/evaluation/windows.py": 721,
         # Unified MhsDiagnosticRequest carries per-field CLI/validation metadata as the single schema source (spec 10 parts 2-3).
         # Freeze the existing fold lifecycle; further growth requires decomposition.
         "src/mhs/evaluation/folds.py": 1084,

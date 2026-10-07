@@ -127,7 +127,8 @@ def evaluate_frozen_mhs_research(
     if base_spec.one_way_taker_bps() != 6.0 or stress_spec.one_way_taker_bps() != 18.0:
         raise DataIntegrityError("base cost must be 6 bps and stress cost 18 bps one-way")
     if dataclasses.replace(
-        stress_spec, taker_fee_bps=base_spec.taker_fee_bps, taker_slippage_bps=base_spec.taker_slippage_bps
+        stress_spec, taker_fee_bps=base_spec.taker_fee_bps, taker_slippage_bps=base_spec.taker_slippage_bps,
+        settlement_price_haircut_bps=base_spec.settlement_price_haircut_bps,
     ) != base_spec:
         raise DataIntegrityError("stress spec must match base mechanics except crossing cost")
     if execution_bound not in ("OHLCV_IMMEDIATE_TAKER", "OHLCV_STRICT_PROXY"):
