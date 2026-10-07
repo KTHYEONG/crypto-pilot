@@ -39,9 +39,10 @@ class TestTag:
         assert Tag.DATA == "DATA"
         assert Tag.ALGO == "ALGO"
         assert Tag.EVAL == "EVAL"
+        assert {Tag.PORTFOLIO, Tag.RISK, Tag.EXEC} == {"PORTFOLIO", "RISK", "EXEC"}
 
     def test_tag_is_strenum(self):
-        assert len(Tag) == 4
+        assert len(Tag) == 7
 
 
 class TestStageTelemetry:

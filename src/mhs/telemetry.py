@@ -24,11 +24,14 @@ _MAX_SEQUENCE_ITEMS = 5
 
 
 class Tag(StrEnum):
-    """Closed 4-member tag set for MHS telemetry (rules/logging.md §3)."""
+    """Closed tag set for MHS telemetry: the six rules/logging.md categories plus legacy EVAL."""
 
     SYS = "SYS"
     DATA = "DATA"
     ALGO = "ALGO"
+    PORTFOLIO = "PORTFOLIO"
+    RISK = "RISK"
+    EXEC = "EXEC"
     EVAL = "EVAL"
 
 
