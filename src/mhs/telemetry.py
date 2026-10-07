@@ -11,14 +11,17 @@ and reports produced with sidecars ON and OFF satisfy I-IDENTITY.
 from __future__ import annotations
 
 import json
+import logging
 import time
 from collections.abc import Iterable, Mapping
 from enum import StrEnum
 from pathlib import Path
+from typing import Final
 
 import psutil
 
-from src.common.logging import LOG_DIR, setup_logger
+TELEMETRY_LOGGER_NAME: Final[str] = "MhsTelemetry"
+"""Logger that carries MHS stage telemetry; the application boundary decides its handlers."""
 
 _MAX_SEQUENCE_ITEMS = 5
 
@@ -123,7 +126,12 @@ def _format_value(v: object) -> str:
 
 
 class StageTelemetry:
-    """Tagged log lines + optional JSONL sidecars.  Computation is never affected (I-OBSERVE)."""
+    """Tagged log lines + optional JSONL sidecars. Computation is never affected (I-OBSERVE).
+
+    Library telemetry never chooses a destination: log lines go to the ``TELEMETRY_LOGGER_NAME`` logger with
+    whatever handlers the application boundary attached (none attached means standard propagation), and JSONL
+    sidecars require an explicit ``streams_root``.
+    """
 
     def __init__(
         self,
@@ -132,14 +140,26 @@ class StageTelemetry:
         debug_streams: bool = False,
         streams_root: Path | None = None,
     ) -> None:
-        self._logger = setup_logger("MhsTelemetry")
+        """
+        Args:
+            log_run: Emit per-stage ``[SYS]`` resource lines from ``record``.
+            debug_streams: Enable JSONL sidecars.
+            streams_root: Sidecar directory; required when ``debug_streams`` is true, ignored otherwise.
+        Raises:
+            TypeError: ``debug_streams`` is true and ``streams_root`` is not a ``pathlib.Path``; raised before any
+                directory is created.
+        """
+        if debug_streams and not isinstance(streams_root, Path):
+            raise TypeError(f"streams_root must be a pathlib.Path when debug_streams is true, got {type(streams_root).__name__}")
+        self._logger = logging.getLogger(TELEMETRY_LOGGER_NAME)
         self._log_run = log_run
         self._debug_streams = debug_streams
-        self._streams_root = streams_root or (LOG_DIR / "mhs")
+        self._streams_root = streams_root
         self._records: list[_ResourceMeasurement] = []
         self._last = time.perf_counter()
         self._peak_rss = -1
         if self._debug_streams:
+            assert isinstance(self._streams_root, Path)
             self._streams_root.mkdir(parents=True, exist_ok=True)
 
     @property
@@ -156,14 +176,16 @@ class StageTelemetry:
         self._logger.info(" ".join(parts))
 
     def stream(self, name: str, rows: Iterable[Mapping[str, object]]) -> None:
-        """Append full-precision JSONL rows to ``logs/mhs/<name>.jsonl``.
+        """Append full-precision JSONL rows to ``<streams_root>/<name>.jsonl``.
 
         No-op unless sidecars are enabled.  Any exception is swallowed (I-OBSERVE).
         """
         if not self._debug_streams:
             return
         try:
-            path = self._streams_root / f"{name}.jsonl"
+            root = self._streams_root
+            assert isinstance(root, Path)
+            path = root / f"{name}.jsonl"
             with open(path, "a", encoding="utf-8") as f:
                 for row in rows:
                     f.write(json.dumps(row, default=str) + "\n")
