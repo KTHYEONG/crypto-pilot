@@ -24,7 +24,6 @@ from src.live.order_journal import OrderJournal
 if TYPE_CHECKING:
     from src.live.order_journal import JournalFill
 
-#: Venue statuses that mean the order may still fill; left for the open-order sweep.
 
 @dataclass(frozen=True, slots=True)
 class RecoveryReport:

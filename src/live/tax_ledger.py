@@ -63,11 +63,11 @@ def resolve_tax_ledger_dir(settings: LiveSettings) -> Path:
     account, and ``LIVE_RECORD_RUN_ID`` rotates, so a run-scoped venue ledger would restart its
     genesis on every rotation and never be provably complete.
     """
-    if settings.tax_ledger_dir:
-        return Path(settings.tax_ledger_dir)
     if settings.mode.suppresses_mutations:
         return settings.resolved_tax_ledger_dir(default_tax_ledger_dir)
-    return default_venue_tax_ledger_root() / VENUE_TAX_LEDGER_ENVIRONMENTS[settings.mode]
+    return settings.resolved_tax_ledger_dir(
+        lambda: default_venue_tax_ledger_root() / VENUE_TAX_LEDGER_ENVIRONMENTS[settings.mode]
+    )
 
 INCOME_TYPE_KIND: Mapping[str, str] = {
     "REALIZED_PNL": "REALIZED_PNL",

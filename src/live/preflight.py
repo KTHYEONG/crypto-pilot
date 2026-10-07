@@ -5,11 +5,15 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pandas as pd
 
 from src.common.errors import DataIntegrityError
+from src.live.settings import ExecutionMode
+
+if TYPE_CHECKING:
+    from src.live.settings import LiveSettings
 
 logger = logging.getLogger("LivePreflight")
 
@@ -47,7 +51,7 @@ def _load_artifact_frame(artifact_path: Path, artifact_key: Any | None) -> pd.Da
     return frame
 
 
-def tax_collection_check(settings: Any, tax_dir: Path) -> PreflightCheck:
+def tax_collection_check(settings: LiveSettings, tax_dir: Path) -> PreflightCheck:
     """Whether venue tax collection is configured safely for this mode (no I/O, no logging).
 
     A live account traded without collection loses venue history the yearly tax summary needs
@@ -59,7 +63,7 @@ def tax_collection_check(settings: Any, tax_dir: Path) -> PreflightCheck:
         return PreflightCheck(name="tax_collection_ready", passed=True, detail="suppressed mode: simulated tax records")
     if settings.tax_collection_enabled:
         return PreflightCheck(name="tax_collection_ready", passed=True, detail=f"enabled=True tax_dir={tax_dir}")
-    if str(settings.mode.value) == "live_mainnet":
+    if settings.mode is ExecutionMode.LIVE_MAINNET:
         return PreflightCheck(
             name="tax_collection_ready", passed=False,
             detail=f"[RISK] live_mainnet requires LIVE_TAX_COLLECTION_ENABLED=true tax_dir={tax_dir}",
