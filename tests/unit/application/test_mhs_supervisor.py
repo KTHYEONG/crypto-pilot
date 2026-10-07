@@ -803,7 +803,7 @@ def test_data_snapshot_absent_for_missing_root(tmp_path) -> None:
 def test_sealed_manifest_upgrades_data_identity(tmp_path) -> None:
     import pandas as pd
 
-    from src.mhs.data_provenance import seal_mhs_input_manifest
+    from src.mhs.data_provenance import mhs_input_layout_for_lake, seal_mhs_input_manifest
 
     root = tmp_path / "data"
     frame = pd.DataFrame(
@@ -812,7 +812,7 @@ def test_sealed_manifest_upgrades_data_identity(tmp_path) -> None:
     target = root / "ohlcv" / "3m" / "AAAUSDT.parquet"
     target.parent.mkdir(parents=True, exist_ok=True)
     frame.to_parquet(target)
-    digest = seal_mhs_input_manifest([target], data_root=root, output_path=root / "mhs_execution" / "input_manifest.json")
+    digest = seal_mhs_input_manifest([target], layout=mhs_input_layout_for_lake(root), output_path=root / "mhs_execution" / "input_manifest.json")
     assert sup._snapshot_data_tree(root) == f"sealed:{digest}"
     target.write_bytes(target.read_bytes() + b"\x00")
     resealed = sup._snapshot_data_tree(root)
@@ -1384,3 +1384,36 @@ def test_workload_memory_all_skipped_returns_zeros(monkeypatch) -> None:
         [_psutil.NoSuchProcess(pid=1), _psutil.AccessDenied(pid=2)],
     )
     assert sup._workload_memory(1) == (0, 0, None)
+
+
+def test_default_data_identity_unchanged(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(sup, "FUTURES_DATA_DIR", tmp_path)
+    _write_parquet_bytes(tmp_path / "funding" / "BTCUSDT.parquet", b"funding")
+    _write_parquet_bytes(tmp_path / "ohlcv" / "3m" / "BTCUSDT.parquet", b"ohlcv")
+    assert sup._data_identity(None) == sup._snapshot_data_tree(tmp_path.resolve())
+
+
+def test_override_identity_covers_funding_and_ohlcv(tmp_path, monkeypatch) -> None:
+    import src.application.mhs_supervisor as supervisor_mod
+    import src.mhs.data_provenance as provenance
+
+    lake = tmp_path / "futures"
+    ohlcv_file = lake / "ohlcv" / "3m" / "AUSDT.parquet"
+    funding_file = lake / "funding" / "AUSDT.parquet"
+    unrelated = tmp_path / "elsewhere" / "x.parquet"
+    for path in (ohlcv_file, funding_file, unrelated):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"v1-" + path.name.encode())
+    monkeypatch.setattr("src.common.paths.FUTURES_DATA_DIR", lake)
+    monkeypatch.setattr(provenance, "FUTURES_DATA_DIR", lake)
+    monkeypatch.setattr(supervisor_mod, "FUTURES_DATA_DIR", lake)
+    before = sup._data_identity(str(lake / "ohlcv"))
+    assert before.startswith("composite:")
+    funding_file.write_bytes(b"v2-restated")
+    assert sup._data_identity(str(lake / "ohlcv")) != before
+    after_funding = sup._data_identity(str(lake / "ohlcv"))
+    ohlcv_file.write_bytes(b"v2-restated")
+    assert sup._data_identity(str(lake / "ohlcv")) != after_funding
+    after_both = sup._data_identity(str(lake / "ohlcv"))
+    unrelated.write_bytes(b"v2-restated")
+    assert sup._data_identity(str(lake / "ohlcv")) == after_both

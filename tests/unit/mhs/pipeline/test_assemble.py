@@ -390,3 +390,44 @@ def test_assemble_report_reliability_still_blocks_recovering_blend_gap() -> None
     assert report.backtest_reliability is not None
     assert "PRIMARY_EXECUTION_INVALID" in report.backtest_reliability.reason_codes
     assert "MISSING_DATA" in report.backtest_reliability.reason_codes
+
+
+def test_assemble_report_validates_provenance_through_ohlcv_root_override(tmp_path, monkeypatch) -> None:
+    """INV-INPUT-SEAL wiring: the sealed-manifest check resolves through the
+    OHLCV-root ``data_root`` override, never ``ctx.root``."""
+    import dataclasses
+
+    from src.mhs.data_provenance import (
+        DataEvidenceTier,
+        mhs_input_layout_for_lake,
+        mhs_sealable_input_paths,
+        seal_mhs_input_manifest,
+    )
+    from src.mhs.resources import _StageRecorder
+
+    ohlcv_root = tmp_path / "ohlcv"
+    for rel in ("ohlcv/1h/BTCUSDT.parquet", "ohlcv/3m/BTCUSDT.parquet", "funding/BTCUSDT.parquet"):
+        path = tmp_path / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame({"timestamp": [1735689600000]}).to_parquet(path)
+    monkeypatch.setattr("src.mhs.data_provenance.FUTURES_DATA_DIR", tmp_path)
+    layout = mhs_input_layout_for_lake(tmp_path)
+    manifest = tmp_path / "manifest.json"
+    seal_mhs_input_manifest(
+        mhs_sealable_input_paths(layout=layout, execution_timeframe="3m"),
+        layout=layout, output_path=manifest,
+    )
+    recorder = _StageRecorder(log_run=False)
+    ctx = _bare_context(recorder)
+    ctx.config = dataclasses.replace(ctx.config, data_root=str(ohlcv_root), input_manifest_path=str(manifest))
+    ctx.symbols = ["BTCUSDT"]
+    ctx.execution_symbols = ["BTCUSDT"]
+    ctx.root = str(tmp_path / "elsewhere")
+
+    report = assemble_report(ctx, ctx.telemetry)
+
+    assert ctx.input_provenance is not None
+    assert ctx.input_provenance.valid
+    assert ctx.input_provenance.tier is DataEvidenceTier.REPRODUCIBLE_ARCHIVE
+    assert ctx.input_provenance.files_checked == 3
+    assert report.backtest_reliability is not None

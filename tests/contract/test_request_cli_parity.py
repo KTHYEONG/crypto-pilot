@@ -374,10 +374,10 @@ def test_hourly_and_generic_contracts_preserved() -> None:
 def test_sealed_inputs_require_explicit_3m() -> None:
     from pathlib import Path
 
-    from src.mhs.data_provenance import resolve_required_mhs_input_paths
+    from src.mhs.data_provenance import mhs_input_layout_for_lake, resolve_required_mhs_input_paths
 
     paths = resolve_required_mhs_input_paths(
-        data_root=Path("/data"), panel_symbols=["AAA"], execution_symbols=["AAA"], execution_timeframe="3m",
+        layout=mhs_input_layout_for_lake(Path("/data")), panel_symbols=["AAA"], execution_symbols=["AAA"], execution_timeframe="3m",
     )
     assert Path("ohlcv/3m/AAA.parquet") in [Path(p.parent.name) / p.name for p in paths] or any(
         "ohlcv/3m" in p.as_posix() for p in paths

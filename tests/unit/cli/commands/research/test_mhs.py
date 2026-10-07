@@ -1027,14 +1027,14 @@ def test_mhs_collection_rejects_unsupported_timeframe_programmatically(tmp_path)
     import pytest
 
     import src.market_data.services.mhs_execution as mc
-    from src.mhs.data_provenance import mhs_sealable_input_paths, resolve_required_mhs_input_paths
+    from src.mhs.data_provenance import mhs_input_layout_for_lake, mhs_sealable_input_paths, resolve_required_mhs_input_paths
 
     with pytest.raises(ValueError, match="unknown execution_timeframe"):
         mc.build_mhs_execution_plan("2021-01-01", "2021-02-01", timeframe="5m")
     with pytest.raises(ValueError, match="unknown execution_timeframe"):
-        resolve_required_mhs_input_paths(data_root=tmp_path, panel_symbols=["A"], execution_symbols=["A"], execution_timeframe="5m")
+        resolve_required_mhs_input_paths(layout=mhs_input_layout_for_lake(tmp_path), panel_symbols=["A"], execution_symbols=["A"], execution_timeframe="5m")
     with pytest.raises(ValueError, match="unknown execution_timeframe"):
-        mhs_sealable_input_paths(data_root=tmp_path, execution_timeframe="1m")
+        mhs_sealable_input_paths(layout=mhs_input_layout_for_lake(tmp_path), execution_timeframe="1m")
     manifest = tmp_path / "m.json"
     assert not manifest.exists()
 

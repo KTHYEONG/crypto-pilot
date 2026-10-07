@@ -391,7 +391,7 @@ def test_data_seal_mhs_inputs_seals_complete_symbols(tmp_path) -> None:
     # When
     args = parser.parse_args([
         "data", "seal-mhs-inputs",
-        "--data-root", str(tmp_path),
+        "--lake-root", str(tmp_path),
         "--execution-timeframe", "3m",
         "--output", str(out),
     ])
@@ -415,11 +415,30 @@ def test_data_seal_mhs_inputs_seals_complete_symbols(tmp_path) -> None:
     (empty_root / "ohlcv" / "1h").mkdir(parents=True)
     empty_args = parser.parse_args([
         "data", "seal-mhs-inputs",
-        "--data-root", str(empty_root),
+        "--lake-root", str(empty_root),
         "--output", str(tmp_path / "never.json"),
     ])
     with pytest.raises(SystemExit):
         empty_args.handler(empty_args)
+
+
+def test_seal_mhs_inputs_old_data_root_flag_rejected(tmp_path) -> None:
+    import argparse
+
+    import pytest
+
+    from src.cli.commands.data import add_data_commands
+
+    parser = argparse.ArgumentParser()
+    add_data_commands(parser.add_subparsers(dest="group", required=True).add_parser("data"))
+    with pytest.raises(SystemExit) as exc_info:
+        parser.parse_args([
+            "data", "seal-mhs-inputs",
+            "--data-root", str(tmp_path),
+            "--output", str(tmp_path / "never.json"),
+        ])
+    assert exc_info.value.code == 2
+    assert not (tmp_path / "never.json").exists()
 
 
 def test_universe_gaps_no_execute_skips_collection(monkeypatch) -> None:
