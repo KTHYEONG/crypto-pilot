@@ -586,7 +586,7 @@ class TestFoldSafeHorizonEfficiency:
     @pytest.fixture(scope="module")
     def fold_safe_baseline_report(self, synthetic_market) -> MhsHorizonDiagnosticReport:
         root, end = synthetic_market
-        from src.mhs.evaluation import fold_discovery as evaluation_folds
+        import src.mhs.evaluation.fold_discovery as evaluation_folds
 
         real_fn = evaluation_folds.fold_train_only_discovery_qualification
 

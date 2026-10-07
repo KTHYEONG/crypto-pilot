@@ -33,6 +33,7 @@ from src.mhs.params import (
     FROZEN_EXPOSURE_PLATEAU_TOLERANCE,
     FROZEN_EXPOSURE_SEED,
     NULL_BOOTSTRAP_MEAN_BLOCK_DAYS,
+    SETTLEMENT_PRICE_STRESS_HAIRCUT_BPS,
 )
 from src.mhs.resources import MhsMemoryBudget
 
@@ -68,7 +69,9 @@ def frozen_execution_specs() -> tuple[ExecutionSpec, ExecutionSpec]:
     from src.mhs.types import ExecutionSpec
 
     base = dataclasses.replace(ExecutionSpec(), taker_fee_bps=5.0, taker_slippage_bps=1.0, decision_anchor="submit_bar")
-    stress = dataclasses.replace(base, taker_slippage_bps=13.0)
+    stress = dataclasses.replace(
+        base, taker_slippage_bps=13.0, settlement_price_haircut_bps=SETTLEMENT_PRICE_STRESS_HAIRCUT_BPS
+    )
     return base, stress
 
 

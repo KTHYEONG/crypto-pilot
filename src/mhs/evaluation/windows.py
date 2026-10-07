@@ -38,6 +38,8 @@ from src.mhs.execution import (
     replay_execution_windows,
     replay_execution_windows_coupled,
 )
+from src.mhs.execution.settlement import settlement_event_from_json as _settlement_event_from_json
+from src.mhs.execution.settlement import settlement_event_to_json as _settlement_event_to_json
 from src.mhs.execution.window_stream import MhsExecutionWindow as MhsExecutionWindow
 from src.mhs.execution.window_stream import _estimate_mhs_execution_allocation as _estimate_mhs_execution_allocation
 from src.mhs.execution.window_stream import _iter_mhs_execution_windows as _iter_mhs_execution_windows
@@ -158,6 +160,10 @@ def _spill_window_to_ipc(window: ExecutionReplayWindow, target_path: str) -> Non
                 {"symbol": g.symbol, "start_ns": int(g.start.value), "end_ns": int(g.end.value), "reason": g.reason}
                 for g in window.funding_coverage_gaps
             ],
+            "settlement_events": [
+                _settlement_event_to_json(e)
+                for e in window.settlement_events
+            ],
         }
         with zipfile.ZipFile(target_path, "w", compression=zipfile.ZIP_STORED) as zf:
             zf.writestr("meta.json", json.dumps(meta))
@@ -234,6 +240,9 @@ def _load_window_from_ipc(target_path: str) -> ExecutionReplayWindow:
             bar_available_at=available,
             logical_partition=tuple(logical_partition) if logical_partition is not None else None,
             funding_coverage_gaps=coverage,
+            settlement_events=tuple(
+                _settlement_event_from_json(p) for p in meta.get("settlement_events", [])
+            ),
         )
     except Exception as exc:
         raise DataIntegrityError(f"window IPC load failed for {target_path}: {exc}") from exc
