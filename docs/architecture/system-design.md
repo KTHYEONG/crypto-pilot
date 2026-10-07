@@ -126,6 +126,7 @@ data/
    누락된 펀딩비를 `0.0`으로 임의 대체하는 행위를 원천 차단하며, 데이터 부재 시 즉시 예외를 발생시키고 실행을 중단합니다.
 4. **11개 원시 필드 온전 추출 (Full Field Extraction)**:
    Binance REST Klines의 모든 11개 필드(`quote_volume`, `taker_buy_base_volume` 등)를 온전히 보존하여 유동성 게이트와 플로우 불균형 피처의 NaN 오염을 차단합니다.
+5. **결손 3분봉 실행 소스 Fail-Closed**: 0이 아닌 목표 가중치를 받은 심볼의 `3m` 실행 파일이 없으면 리플레이 전에 `DataIntegrityError`로 중단합니다(북/폴드 사유 `RELEVANT_EXECUTION_DATA_GAP`). 목표를 받지 않은 로스터 심볼의 결손은 `unsupported_assumptions`에 `EXECUTION_SOURCE_MISSING_UNTARGETED` 토큰으로 공시만 합니다.
 
 ---
 

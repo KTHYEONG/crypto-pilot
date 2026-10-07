@@ -106,6 +106,7 @@ class PipelineContext:
 
     # Replay (S6)
     execution_symbols: list[str] = field(default_factory=list)
+    execution_source_disclosure: tuple[str, ...] = ()
     initial_equity: float = 1.0
     minute_grid: Any = None  # pd.DatetimeIndex | None
     has_minute_data: bool = False

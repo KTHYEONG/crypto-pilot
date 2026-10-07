@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import dataclasses
-import os
 
 import numpy as np
 import pandas as pd
 
+from src.common.errors import DataIntegrityError
 from src.mhs import research_go as _research_go
 from src.mhs import scaling as _scaling
 from src.mhs.books import inverse_realized_vol_tilt, portfolio_rebalance_trigger, renormalize_within_mask
@@ -16,6 +16,7 @@ from src.mhs.features import FeatureAdmission
 from src.mhs.funding import funding_carry_execution_book
 from src.mhs.horizons import realized_vol
 from src.mhs.marks import (
+    _missing_execution_sources,
     _pit_execution_mask,
     clear_mhs_market_data_caches,
 )
@@ -128,6 +129,14 @@ def _build_fold_target_weights(
             mismatch surfaced by the committee book.
         ValueError: ``committee_admission`` given while committee capital is
             off (plus existing window/deadband errors).
+        RuntimeError: ``require_minute_roster`` and no targeted symbol has an execution
+            source ("no fold decision symbol has minute execution data", unchanged).
+        DataIntegrityError: ``require_minute_roster`` and at least one symbol with a
+            finite non-zero fold target lacks its execution source while others have
+            one: "fold execution source missing for <n> targeted symbol(s) [<SYM>, ...]
+            timeframe=<tf> root=<root> decision_window=[<vs iso>, <ve iso>]". Dropping the
+            column instead would replay and certify a fold book that silently omits the
+            symbol's P&L and costs.
     """
     ts = fold.train_start
     vs, ve = _resolve_effective_fold_window(fold, decision_start, decision_end)
@@ -377,12 +386,23 @@ def _build_fold_target_weights(
     if target_weights.empty:
         raise RuntimeError("fold decision grid is empty")
     execution_symbols = sorted(target_weights.columns[target_weights.ne(0.0).any(axis=0)])
-    minute_roster = [
-        s for s in execution_symbols if os.path.exists(os.path.join(root, request.execution_timeframe, f"{s}.parquet"))
-    ]
+    absent = set(_missing_execution_sources(root, execution_symbols, request.execution_timeframe))
+    minute_roster = [s for s in execution_symbols if s not in absent]
     # 라이브 경로는 target weights만 emit하고 분단위 실행 리플레이를 하지 않으므로
     # minute roster 불변식은 백테스트(replay) 경로에서만 강제한다.
     if require_minute_roster and not minute_roster:
         raise RuntimeError("no fold decision symbol has minute execution data")
+    if require_minute_roster:
+        targeted_missing = sorted(
+            s
+            for s in execution_symbols
+            if s in absent and bool((target_weights[s].notna() & target_weights[s].ne(0.0)).any())
+        )
+        if targeted_missing:
+            raise DataIntegrityError(
+                f"fold execution source missing for {len(targeted_missing)} targeted symbol(s) "
+                f"[{', '.join(targeted_missing)}] timeframe={request.execution_timeframe} "
+                f"root={root} decision_window=[{vs.isoformat()}, {ve.isoformat()}]"
+            )
     signal_available_at = target_weights.index + pd.Timedelta(hours=1)
     return target_weights, signal_available_at, minute_roster, grid_1h

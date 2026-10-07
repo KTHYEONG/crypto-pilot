@@ -659,6 +659,189 @@ def test_fold_targets_invariant_to_post_t_value_corruption() -> None:
     )
 
 
+def _execution_source_fold_market():
+    import numpy as np
+    import pandas as pd
+
+    from src.mhs.evidence import AnchoredPurgedFold
+
+    idx = pd.date_range("2021-01-01", periods=2000, freq="1h", tz="UTC")
+    cols = [f"SYM{i}USDT" for i in range(10)]
+    rng = np.random.default_rng(7)
+    close = pd.DataFrame(
+        100 + np.cumsum(rng.normal(0, 0.1, (2000, 10)), axis=0), index=idx, columns=cols,
+    )
+    quote_vol = pd.DataFrame(1e6, index=idx, columns=cols)
+    base_panel = {"close": close, "open": close.copy(), "quote_vol": quote_vol}
+    fold = AnchoredPurgedFold(idx[0], idx[100], idx[800], idx[1800], 24, 24)
+    funding = {c: pd.Series(0.0, index=idx) for c in cols}
+    return base_panel, fold, funding
+
+
+def _first_targeted_symbol(target_weights):
+    for col in target_weights.columns:
+        series = target_weights[col]
+        if bool((series.notna() & series.ne(0.0)).any()):
+            return col
+    raise AssertionError("fixture must target at least one symbol")
+
+
+def _fold_request():
+    from tests.fixtures.mhs_requests import research_baseline
+
+    return research_baseline(execution_timeframe="3m")
+
+
+def test_fold_targeted_symbol_without_execution_source_fails_closed(tmp_path) -> None:
+    import pytest
+
+    from src.common.errors import DataIntegrityError
+    from src.mhs.evaluation.fold_weights import _build_fold_target_weights
+
+    base_panel, fold, funding = _execution_source_fold_market()
+    request = _fold_request()
+    probe, *_ = _build_fold_target_weights(
+        "root", fold, request, funding,
+        base_panel=base_panel, require_minute_roster=False, panel_warmup_hours=24,
+    )
+    victim = _first_targeted_symbol(probe)
+    execution_symbols = sorted(probe.columns[probe.ne(0.0).any(axis=0)])
+    assert victim in execution_symbols
+    three = tmp_path / "3m"
+    three.mkdir(parents=True)
+    for sym in execution_symbols:
+        if sym != victim:
+            (three / f"{sym}.parquet").touch()
+
+    with pytest.raises(DataIntegrityError, match=r"fold execution source missing for 1 targeted symbol") as excinfo:
+        _build_fold_target_weights(
+            str(tmp_path), fold, request, funding,
+            base_panel=base_panel, require_minute_roster=True, panel_warmup_hours=24,
+        )
+    exc = excinfo.value
+    assert str(exc).startswith("fold execution source missing for 1 targeted symbol(s)")
+    assert victim in str(exc)
+    assert "decision_window=" in str(exc)
+    assert fold.validation_start.isoformat() in str(exc)
+
+
+def test_fold_missing_source_maps_to_execution_gap_reason(tmp_path, monkeypatch) -> None:
+    from src.mhs.evaluation import folds
+
+    base_panel, fold, funding = _execution_source_fold_market()
+    request = _fold_request()
+    monkeypatch.setattr(fold_weights, "load_base_panel", lambda *_a, **_k: base_panel)
+    targets, *_ = fold_weights._build_fold_target_weights(
+        str(tmp_path), fold, request, funding, require_minute_roster=False,
+    )
+    victim = _first_targeted_symbol(targets)
+    three = tmp_path / "3m"
+    three.mkdir()
+    for symbol in targets.columns:
+        if symbol != victim:
+            (three / f"{symbol}.parquet").touch()
+
+    def _unexpected_reference(*_a, **_k):
+        raise AssertionError("missing validation source must fail before train replay")
+
+    monkeypatch.setattr(folds, "_fold_train_reference_returns", _unexpected_reference)
+    report = folds._run_anchored_fold(str(tmp_path), fold, request, funding, 1.0, 0)
+    assert report.strict is None
+    assert report.stress is None
+    assert report.primary_valid is False
+    assert report.failures == ("RELEVANT_EXECUTION_DATA_GAP",)
+
+
+def test_fold_without_any_execution_source_keeps_incomplete_outcome(tmp_path) -> None:
+    import pytest
+
+    from src.mhs.evaluation.fold_weights import _build_fold_target_weights
+
+    base_panel, fold, funding = _execution_source_fold_market()
+    with pytest.raises(RuntimeError, match="no fold decision symbol has minute execution data"):
+        _build_fold_target_weights(
+            str(tmp_path), fold, _fold_request(), funding,
+            base_panel=base_panel, require_minute_roster=True, panel_warmup_hours=24,
+        )
+
+
+def test_fold_builder_without_minute_roster_requirement_is_unchanged(tmp_path) -> None:
+    from src.mhs.evaluation.fold_weights import _build_fold_target_weights
+
+    base_panel, fold, funding = _execution_source_fold_market()
+    request = _fold_request()
+    probe, *_ = _build_fold_target_weights(
+        "root", fold, request, funding,
+        base_panel=base_panel, require_minute_roster=False, panel_warmup_hours=24,
+    )
+    victim = _first_targeted_symbol(probe)
+    execution_symbols = sorted(probe.columns[probe.ne(0.0).any(axis=0)])
+    three = tmp_path / "3m"
+    three.mkdir(parents=True)
+    for sym in execution_symbols:
+        if sym != victim:
+            (three / f"{sym}.parquet").touch()
+
+    target_weights, _signals, minute_roster, _grid = _build_fold_target_weights(
+        str(tmp_path), fold, request, funding,
+        base_panel=base_panel, require_minute_roster=False, panel_warmup_hours=24,
+    )
+    assert victim not in minute_roster
+    assert minute_roster == [s for s in execution_symbols if s != victim]
+
+
+def test_fold_with_all_execution_sources_present_is_unchanged(tmp_path) -> None:
+    import pandas as pd
+
+    from src.mhs.evaluation.fold_weights import _build_fold_target_weights
+
+    base_panel, fold, funding = _execution_source_fold_market()
+    request = _fold_request()
+    reference, ref_signals, _ref_roster, _ref_grid = _build_fold_target_weights(
+        "root", fold, request, funding,
+        base_panel=base_panel, require_minute_roster=False, panel_warmup_hours=24,
+    )
+    execution_symbols = sorted(reference.columns[reference.ne(0.0).any(axis=0)])
+    three = tmp_path / "3m"
+    three.mkdir(parents=True)
+    for sym in execution_symbols:
+        (three / f"{sym}.parquet").touch()
+
+    target_weights, signals, minute_roster, _grid = _build_fold_target_weights(
+        str(tmp_path), fold, request, funding,
+        base_panel=base_panel, require_minute_roster=True, panel_warmup_hours=24,
+    )
+    assert minute_roster == execution_symbols
+    pd.testing.assert_frame_equal(target_weights, reference, check_exact=True)
+    pd.testing.assert_index_equal(signals, ref_signals, exact=True)
+
+
+def test_shared_train_reference_falls_back_on_missing_source(monkeypatch) -> None:
+    import pandas as pd
+    import pytest
+
+    import src.mhs.evaluation.folds as folds_mod
+    from src.common.errors import DataIntegrityError
+    from src.mhs.evidence import AnchoredPurgedFold
+
+    base_panel, fold, funding = _execution_source_fold_market()
+    request = _fold_request()
+    other = AnchoredPurgedFold(
+        fold.train_start, fold.train_start + pd.Timedelta(hours=900),
+        fold.train_start + pd.Timedelta(hours=1000), fold.train_start + pd.Timedelta(hours=1900), 24, 24,
+    )
+
+    def _boom(*_args, **_kwargs):
+        raise DataIntegrityError("fold execution source missing for 1 targeted symbol(s) [SYM0USDT]")
+
+    monkeypatch.setattr(folds_mod, "_fold_reference_targets", _boom)
+    assert folds_mod._build_shared_train_reference(
+        "root", ((0, fold), (1, other)), request, funding, 1.0, None, None,
+    ) is None
+    with pytest.raises(ValueError, match="at least two folds"):
+        folds_mod._build_shared_train_reference("root", ((0, fold),), request, funding, 1.0, None, None)
+
+
 def test_fold_executes_boundary_admission_verbatim() -> None:
     import pytest
 

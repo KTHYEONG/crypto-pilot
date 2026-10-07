@@ -198,3 +198,76 @@ def test_blend_failure_still_blocks(monkeypatch: pytest.MonkeyPatch) -> None:
     blend_bad.failure = SimpleNamespace(reason="RELEVANT_EXECUTION_DATA_GAP")
     ctx = _stubbed_run(monkeypatch, (None, None, blend_bad, {}, None))
     assert ctx.book_reasons == ("RELEVANT_EXECUTION_DATA_GAP",)
+
+
+def _disclosure_mask() -> pd.DataFrame:
+    return pd.DataFrame(True, index=_GRID, columns=["AAAUSDT", "BBBUSDT", "CCCUSDT"])
+
+
+def test_untargeted_roster_member_without_execution_source_is_disclosed(tmp_path) -> None:
+    (tmp_path / "3m").mkdir(parents=True)
+    (tmp_path / "3m" / "AAAUSDT.parquet").touch()
+
+    assert replay_stage._untargeted_missing_execution_disclosure(
+        _disclosure_mask(), ["AAAUSDT"], str(tmp_path), "3m",
+    ) == ("EXECUTION_SOURCE_MISSING_UNTARGETED:n=2:BBBUSDT,CCCUSDT",)
+
+
+def test_never_member_symbol_is_not_disclosed(tmp_path) -> None:
+    (tmp_path / "3m").mkdir(parents=True)
+    (tmp_path / "3m" / "AAAUSDT.parquet").touch()
+    mask = _disclosure_mask()
+    mask["DDDUSDT"] = False
+
+    assert replay_stage._untargeted_missing_execution_disclosure(
+        mask, ["AAAUSDT"], str(tmp_path), "3m",
+    ) == ("EXECUTION_SOURCE_MISSING_UNTARGETED:n=2:BBBUSDT,CCCUSDT",)
+
+
+def test_targeted_missing_symbol_is_not_disclosed(tmp_path) -> None:
+    (tmp_path / "3m").mkdir(parents=True)
+    (tmp_path / "3m" / "AAAUSDT.parquet").touch()
+
+    assert replay_stage._untargeted_missing_execution_disclosure(
+        _disclosure_mask(), ["AAAUSDT", "BBBUSDT"], str(tmp_path), "3m",
+    ) == ("EXECUTION_SOURCE_MISSING_UNTARGETED:n=1:CCCUSDT",)
+
+
+def test_no_missing_sources_yields_no_disclosure(tmp_path) -> None:
+    (tmp_path / "3m").mkdir(parents=True)
+    for sym in ("AAAUSDT", "BBBUSDT", "CCCUSDT"):
+        (tmp_path / "3m" / f"{sym}.parquet").touch()
+
+    assert replay_stage._untargeted_missing_execution_disclosure(
+        _disclosure_mask(), ["AAAUSDT"], str(tmp_path), "3m",
+    ) == ()
+
+
+def test_run_replays_records_disclosure_on_context(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    ctx = _bare_context()
+    for frame_name in ("w_fast_execution", "w_slow_execution", "blend_1h"):
+        frame = getattr(ctx, frame_name)
+        frame["BBBUSDT"] = 0.0
+    ctx.root = str(tmp_path)
+    (tmp_path / "3m").mkdir(parents=True)
+    (tmp_path / "3m" / "AAAUSDT.parquet").touch()
+    monkeypatch.setattr(
+        replay_stage.os.path, "exists", lambda p: str(p).endswith("AAAUSDT.parquet"),
+    )
+
+    def _fake_guard_stage_or_breach(*_a: object, **_k: object) -> None:
+        return None
+
+    def _fake_run_books_concurrent(*_a: object, **_k: object):
+        return (None, None, _FakeBookReport("blend"), {}, None)
+
+    monkeypatch.setattr(replay_stage, "_guard_stage_or_breach", _fake_guard_stage_or_breach, raising=False)
+    monkeypatch.setattr(guards_mod, "_guard_stage_or_breach", _fake_guard_stage_or_breach, raising=False)
+    monkeypatch.setattr(replay_stage, "_run_books_concurrent", _fake_run_books_concurrent, raising=False)
+    monkeypatch.setattr(concurrency_mod, "_run_books_concurrent", _fake_run_books_concurrent, raising=False)
+    ctx.recorder = type("_R", (), {"record": lambda self, *a, **k: None})()
+
+    replay_stage.run_replays(ctx, StageTelemetry(log_run=False))
+
+    assert ctx.execution_symbols == ["AAAUSDT"]
+    assert ctx.execution_source_disclosure == ("EXECUTION_SOURCE_MISSING_UNTARGETED:n=1:BBBUSDT",)

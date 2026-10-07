@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
 from typing import Literal
 
@@ -97,6 +98,39 @@ def clear_mhs_market_data_caches() -> None:
     """
 
 
+def _execution_source_path(root: str, symbol: str, timeframe: Literal["3m"]) -> str:
+    """Canonical execution OHLCV parquet path ``<root>/<timeframe>/<symbol>.parquet``.
+
+    ``root`` is an OHLCV root (the directory holding ``1h/`` and ``3m/``), the same
+    convention as the window loader and the fold minute roster.
+    """
+    return os.path.join(root, timeframe, f"{symbol}.parquet")
+
+
+def _missing_execution_sources(
+    root: str,
+    symbols: Iterable[str],
+    timeframe: Literal["3m"],
+) -> tuple[str, ...]:
+    """Return the symbols whose execution OHLCV parquet is absent under ``root``.
+
+    Existence is the only predicate: a present file with no rows inside a replay
+    window is an in-window gap that the replay records as per-intent gap evidence,
+    whereas an absent file means the symbol was never collected for execution and no
+    replay of a target on it can produce real fills, fees or funding. Callers that
+    hold targets decide whether absence is fatal; this helper never raises for it.
+
+    Args:
+        root: OHLCV root directory.
+        symbols: Candidate symbols; duplicates allowed.
+        timeframe: Execution timeframe; only ``"3m"`` is supported.
+    Returns:
+        Sorted, de-duplicated tuple of symbols whose file does not exist; ``()`` when
+        none are missing or ``symbols`` is empty.
+    """
+    return tuple(sorted({s for s in symbols if not os.path.exists(_execution_source_path(root, s, timeframe))}))
+
+
 def _load_symbol_minute_frame(
     path: str,
     sym: str,
@@ -152,15 +186,15 @@ def _load_window_minute_frames(
     identically (ms->datetime UTC, ``drop_duplicates(keep="last")``,
     ``sort_index``). For a given window the returned frames equal the
     full-period-frame ``.loc`` slice byte-for-byte. Missing Parquet files are
-    skipped.
+    skipped; callers holding targets own the fail-closed decision (`_missing_execution_sources`).
     """
     frames: dict[str, pd.DataFrame] = {}
     start_ms = int(grid_start.value // 1_000_000)
     end_ms = int(grid_end.value // 1_000_000)
     jobs = [
-        (os.path.join(root, timeframe, f"{sym}.parquet"), sym)
+        (_execution_source_path(root, sym, timeframe), sym)
         for sym in symbols
-        if os.path.exists(os.path.join(root, timeframe, f"{sym}.parquet"))
+        if os.path.exists(_execution_source_path(root, sym, timeframe))
     ]
     if not jobs:
         return frames

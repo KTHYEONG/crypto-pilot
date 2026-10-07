@@ -15,14 +15,52 @@ from __future__ import annotations
 
 import gc
 import os
+from collections.abc import Sequence
+from typing import Final, Literal
 
 import pandas as pd
 
 import src.mhs.evaluation.committee as committee
 import src.mhs.evaluation.concurrency as concurrency
 import src.mhs.evaluation.guards as guards
+from src.mhs.marks import _missing_execution_sources
 from src.mhs.pipeline.context import PipelineContext
-from src.mhs.telemetry import StageTelemetry
+from src.mhs.telemetry import StageTelemetry, Tag
+
+EXECUTION_SOURCE_MISSING_UNTARGETED: Final[str] = "EXECUTION_SOURCE_MISSING_UNTARGETED"
+
+
+def _untargeted_missing_execution_disclosure(
+    execution_mask: pd.DataFrame,
+    execution_symbols: Sequence[str],
+    root: str,
+    timeframe: Literal["3m"],
+) -> tuple[str, ...]:
+    """Disclose roster members that lack an execution source but were never targeted.
+
+    Such a symbol cannot change the replay (it carries no target), so the run proceeds
+    unchanged; the disclosure exists so a reader can see that the executable universe
+    was narrower than the point-in-time roster rather than infer it from absent fills.
+    Targeted symbols without a source are not listed here: the execution stream fails
+    closed on them.
+
+    Args:
+        execution_mask: Post-gate point-in-time roster (decision x symbol, bool).
+        execution_symbols: Symbols with a non-zero target in any replayed book.
+        root: OHLCV root.
+        timeframe: Execution timeframe.
+    Returns:
+        ``()`` when no untargeted roster member lacks a source; otherwise exactly one
+        token ``"EXECUTION_SOURCE_MISSING_UNTARGETED:n=<count>:<SYM1>,<SYM2>,..."`` with
+        symbols sorted.
+    """
+    targeted = set(execution_symbols)
+    roster = [c for c in execution_mask.columns if bool(execution_mask[c].any())]
+    candidates = [s for s in roster if s not in targeted]
+    missing = _missing_execution_sources(root, candidates, timeframe)
+    if not missing:
+        return ()
+    return (f"{EXECUTION_SOURCE_MISSING_UNTARGETED}:n={len(missing)}:{','.join(missing)}",)
 
 
 def run_replays(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
@@ -37,6 +75,18 @@ def run_replays(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
         )
     )
     ctx.initial_equity = 1.0
+    ctx.execution_source_disclosure = _untargeted_missing_execution_disclosure(
+        ctx.execution_mask, ctx.execution_symbols, ctx.root, ctx.config.execution_timeframe,
+    )
+    if ctx.execution_source_disclosure:
+        token = ctx.execution_source_disclosure[0]
+        rest = token.removeprefix(f"{EXECUTION_SOURCE_MISSING_UNTARGETED}:")
+        count_str, _, syms = rest.partition(":")
+        telemetry.log(
+            Tag.DATA, "execution_source_audit",
+            missing_untargeted=int(count_str.removeprefix("n=")),
+            symbols=syms.split(",") if syms else [],
+        )
     ctx.minute_grid = pd.date_range(
         ctx.start, ctx.end,
         freq="3min",

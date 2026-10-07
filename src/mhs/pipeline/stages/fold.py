@@ -80,6 +80,7 @@ def run_folds(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
     ctx.unsupported = (
         "partial_fill", "queue_position", "post_only_rejection",
         "cancel_replace_latency", "order_size_impact",
+        *ctx.execution_source_disclosure,
     )
 
     # Folds, statistical diagnostics, and deployment readiness are independent

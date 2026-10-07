@@ -428,3 +428,59 @@ def test_run_folds_threads_config_data_policy_to_feature_panels(monkeypatch: pyt
         fold_stage.run_folds(ctx, StageTelemetry(log_run=False))
 
     assert captured["data_policy"] == "zombie_mask_v1"
+
+
+def _stub_post_book_for_unsupported(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        concurrency_mod, "_run_post_book_concurrently",
+        lambda *_a, **_k: (None, None, {}, {}, [], "deployment-stub"), raising=False,
+    )
+    monkeypatch.setattr(
+        fold_stage, "_run_post_book_concurrently",
+        lambda *_a, **_k: (None, None, {}, {}, [], "deployment-stub"), raising=False,
+    )
+    monkeypatch.setattr(fold_stage, "_guard_stage_or_breach", lambda *_a, **_k: None, raising=False)
+    monkeypatch.setattr(guards_mod, "_guard_stage_or_breach", lambda *_a, **_k: None, raising=False)
+    monkeypatch.setattr(fold_stage, "_fold_blend_parity", lambda *_a, **_k: (None, ()), raising=False)
+    monkeypatch.setattr(evidence_mod, "_fold_blend_parity", lambda *_a, **_k: (None, ()), raising=False)
+    monkeypatch.setattr(fold_stage, "_fold_growth_concentration", lambda *_a, **_k: (None, ()), raising=False)
+    monkeypatch.setattr(evidence_mod, "_fold_growth_concentration", lambda *_a, **_k: (None, ()), raising=False)
+    monkeypatch.setattr(
+        fold_stage._statistics, "_deflated_sharpe_evidence", lambda *_a, **_k: (None, None, None),
+    )
+    monkeypatch.setattr(
+        fold_stage._research_go, "_mhs_research_go",
+        lambda *_a, **_k: type("_RG", (), {"eligible": False})(),
+    )
+    monkeypatch.setattr(
+        fold_stage._research_go, "_resolved_growth_envelope",
+        lambda _config: type("_Env", (), {"max_drawdown": -0.5})(),
+    )
+
+
+def test_unsupported_assumptions_carry_disclosure_after_fixed_assumptions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_post_book_for_unsupported(monkeypatch)
+    ctx = _bare_context(committee_book=False)
+    ctx.execution_source_disclosure = ("EXECUTION_SOURCE_MISSING_UNTARGETED:n=1:BBBUSDT",)
+    fold_stage.run_folds(ctx, StageTelemetry(log_run=False))
+
+    assert ctx.unsupported == (
+        "partial_fill", "queue_position", "post_only_rejection",
+        "cancel_replace_latency", "order_size_impact",
+        "EXECUTION_SOURCE_MISSING_UNTARGETED:n=1:BBBUSDT",
+    )
+
+
+def test_empty_disclosure_keeps_unsupported_assumptions_identical(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_post_book_for_unsupported(monkeypatch)
+    ctx = _bare_context(committee_book=False)
+    fold_stage.run_folds(ctx, StageTelemetry(log_run=False))
+
+    assert ctx.unsupported == (
+        "partial_fill", "queue_position", "post_only_rejection",
+        "cancel_replace_latency", "order_size_impact",
+    )
