@@ -65,6 +65,10 @@ def _run_mhs_horizon_diagnostic(args: argparse.Namespace) -> None:
         registration = register_procedure(request, now=pd.Timestamp.now(tz="UTC"))
         _logger.info("[EVAL] procedure_registered digest=%s effective_start=%s", registration.procedure_digest, registration.effective_start.isoformat())
         return
+    from src.common.logging import LOG_DIR, setup_logger
+    from src.mhs.telemetry import TELEMETRY_LOGGER_NAME
+
+    setup_logger(TELEMETRY_LOGGER_NAME, log_dir=LOG_DIR)
     report = run_mhs_diagnostic(request)
     persist_start = time.perf_counter()
     from uuid import uuid4

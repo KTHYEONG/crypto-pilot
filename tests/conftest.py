@@ -16,6 +16,7 @@ for _key, _val in (
 
 
 import contextlib
+import logging
 import shutil
 import sys
 import tempfile
@@ -134,6 +135,37 @@ def _sanitize_host_environment() -> None:
         yield
     finally:
         os.environ.update(saved)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_telemetry_logger():
+    from src.mhs.telemetry import TELEMETRY_LOGGER_NAME
+
+    logger = logging.getLogger(TELEMETRY_LOGGER_NAME)
+    snapshot_handlers = list(logger.handlers)
+    level = logger.level
+    propagate = logger.propagate
+    try:
+        yield
+    finally:
+        for handler in list(logger.handlers):
+            if handler not in snapshot_handlers:
+                logger.removeHandler(handler)
+                with contextlib.suppress(Exception):
+                    handler.close()
+        logger.setLevel(level)
+        logger.propagate = propagate
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _no_escaped_file_handlers():
+    yield
+    from tests.fixtures.hermetic import escaped_file_handlers
+
+    offenders = escaped_file_handlers(_PROC_TEMP_ROOT)
+    if offenders:
+        details = "; ".join(f"{name}={path}" for name, path in offenders)
+        raise AssertionError(f"escaped file handlers outside temp root: {details}")
 
 
 pytest_plugins = [

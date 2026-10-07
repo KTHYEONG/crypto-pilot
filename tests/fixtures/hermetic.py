@@ -2,10 +2,46 @@
 
 from __future__ import annotations
 
+import logging
+import os
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 import pytest
+
+
+def escaped_file_handlers(temp_root: Path) -> list[tuple[str, Path]]:
+    """List file handlers attached anywhere in the logging tree whose file escapes ``temp_root``.
+
+    Scans the root logger and every registered ``logging.Logger`` (placeholders skipped) for
+    ``logging.FileHandler`` instances (``RotatingFileHandler`` included) and resolves each ``baseFilename``.
+    The OS null device (pytest's own log-file sink when no ``log_file`` is configured) is skipped:
+    it discards writes and is never operator storage.
+
+    Args:
+        temp_root: This process's partitioned pytest temp root.
+    Returns:
+        ``(logger_name, resolved_path)`` pairs outside ``temp_root.resolve()``, sorted by logger name then path;
+        the root logger is reported as ``"root"``. Empty when hermetic.
+    """
+    resolved_temp = temp_root.resolve()
+    null_device = Path(os.devnull).resolve()
+    offenders: list[tuple[str, Path]] = []
+    loggers: list[tuple[str, logging.Logger]] = [("root", logging.getLogger())]
+    manager = logging.Logger.manager
+    for name, obj in list(manager.loggerDict.items()):
+        if isinstance(obj, logging.Logger):
+            loggers.append((name, obj))
+    for logger_name, logger in loggers:
+        for handler in list(logger.handlers):
+            if isinstance(handler, logging.FileHandler):
+                resolved = Path(handler.baseFilename).resolve()
+                if resolved == null_device:
+                    continue
+                if not resolved.is_relative_to(resolved_temp):
+                    offenders.append((logger_name, resolved))
+    offenders.sort(key=lambda item: (item[0], str(item[1])))
+    return offenders
 
 
 def assert_storage_roots_hermetic(

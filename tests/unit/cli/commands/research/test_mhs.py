@@ -1148,3 +1148,49 @@ def test_retired_report_path_constants_have_no_callers() -> None:
     assert violations == []
     with pytest.raises(ImportError):
         from src.mhs.reporting.process import PROCESS_REPORT_PATH  # noqa: F401
+
+
+def test_cli_attaches_telemetry_log_before_running(monkeypatch) -> None:
+    import argparse
+    import os
+    from pathlib import Path
+
+    import src.common.logging as app_logging
+    from src.mhs.telemetry import TELEMETRY_LOGGER_NAME
+
+    calls: list = []
+
+    def _spy_setup(name, *, log_dir, level=logging.INFO):
+        calls.append(("setup", name, log_dir))
+        return logging.getLogger(name)
+
+    monkeypatch.setattr(app_logging, "setup_logger", _spy_setup)
+    monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda config: (calls.append(("run",)), _fake_report())[1])
+    monkeypatch.setattr("src.mhs.report.persist.persist_mhs_horizon_diagnostic_report", lambda *a, **k: None)
+
+    sub = argparse.ArgumentParser().add_subparsers()
+    add_mhs_commands(sub)
+    parser = sub.choices["mhs-horizon-diagnostic"]
+    _run_mhs_horizon_diagnostic(parser.parse_args([]))
+
+    assert calls[0] == ("setup", TELEMETRY_LOGGER_NAME, app_logging.LOG_DIR)
+    assert calls[1] == ("run",)
+    assert Path(os.environ["PYTEST_DEBUG_TEMPROOT"]).resolve() in app_logging.LOG_DIR.resolve().parents or app_logging.LOG_DIR.resolve() == Path(os.environ["PYTEST_DEBUG_TEMPROOT"]).resolve()
+
+
+def test_registration_path_opens_no_telemetry_log(monkeypatch) -> None:
+    import argparse
+
+    import pandas as pd
+
+    import src.common.logging as app_logging
+
+    calls: list = []
+    monkeypatch.setattr(app_logging, "setup_logger", lambda *a, **k: (calls.append("setup"), logging.getLogger("x"))[1])
+    monkeypatch.setattr("src.mhs.preregistration.register_procedure", lambda *a, **k: types.SimpleNamespace(procedure_digest="d", effective_start=pd.Timestamp("2026-01-01", tz="UTC")))
+
+    sub = argparse.ArgumentParser().add_subparsers()
+    add_mhs_commands(sub)
+    parser = sub.choices["mhs-horizon-diagnostic"]
+    _run_mhs_horizon_diagnostic(parser.parse_args(["--register-procedure"]))
+    assert calls == []
