@@ -79,13 +79,13 @@ def test_streams_off_creates_no_files(tmp_path):
 
 
 def test_tag_scanning():
-    """SCENARIO_ANALYSIS_ARCHITECTURE_12: Every tag in src/mhs/ belongs to {SYS, DATA, ALGO, EVAL}."""
+    """SCENARIO_ANALYSIS_ARCHITECTURE_12: Every tag in src/mhs/ belongs to the closed ``Tag`` set."""
     import re
     from pathlib import Path
 
     src_mhs = Path(__file__).resolve().parent.parent.parent.parent / "src" / "mhs"
     pattern = re.compile(r"\[([A-Z]+)\]")
-    valid_tags = {Tag.SYS, Tag.DATA, Tag.ALGO, Tag.EVAL}
+    valid_tags = {str(tag) for tag in Tag}
     violations = []
     for py_file in src_mhs.rglob("*.py"):
         if "__pycache__" in str(py_file):
