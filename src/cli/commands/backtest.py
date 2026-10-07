@@ -7,19 +7,17 @@ import json
 import logging
 import uuid
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Literal, cast
 
 import pandas as pd
 
+from src.application.mhs_frozen_account import frozen_execution_specs
+from src.backtests.catalog import append_backtest_index
 from src.backtests.contracts import RetentionPolicy
 from src.common.paths import BACKTESTS_DIR, FROZEN_BACKTESTS_DIR, VENUE_RULES_DIR
 from src.mhs.params import (
     ACCOUNT_DEFAULT_CAPITAL_USDT,
     ACCOUNT_IMPACT_Y,
-    ACCOUNT_MAKER_FEE_BPS,
-    ACCOUNT_PASSIVE_WINDOW_BARS,
-    ACCOUNT_TAKER_FEE_BPS,
-    ACCOUNT_UNIT_REFERENCE_CAPITAL,
     DEFAULT_DETAIL_RETENTION_MAX_RUNS,
     DISCOVERY_START,
     PROCESS_EVALUATION_CEILING,
@@ -30,7 +28,6 @@ if TYPE_CHECKING:
     from src.mhs.frozen_research_candidate import FrozenMhsStrategySpec
     from src.mhs.frozen_research_evidence import FrozenExecutionBound
     from src.mhs.frozen_research_run import FrozenMhsBacktestRequest
-    from src.mhs.types import ExecutionSpec
 
 _logger = logging.getLogger("MhsBacktestCli")
 
@@ -286,58 +283,12 @@ def run_mhs_backtest(args: argparse.Namespace) -> None:
     if result_output.is_file():
         payload = json.loads(result_output.read_text(encoding="utf-8"))
         base = payload.get("financial", {}).get("base", {})
-        _append_backtest_index(
+        append_backtest_index(
             index_path=BACKTESTS_DIR / "index.jsonl",
             kind="mhs", run_dir=result_output.parent, created_at=pd.Timestamp.now(tz="UTC"),
             evaluation_start=start, evaluation_end=end, strategy_id="process_inventory_3m",
             base_cagr=base.get("cagr"), base_max_drawdown=base.get("max_drawdown"),
         )
-
-def _append_backtest_index(
-    *, index_path: Path, kind: str, run_dir: Path, created_at: pd.Timestamp,
-    evaluation_start: pd.Timestamp, evaluation_end: pd.Timestamp,
-    strategy_id: str, base_cagr: float | None, base_max_drawdown: float | None,
-    execution: str | None = None,
-) -> None:
-    """Append one headline row to the single cross-pipeline backtest catalog.
-
-    This is the sole file a human or analysis script needs to read to see
-    every backtest ever run (canonical or frozen-research), with headline
-    metrics inline; `registry.sqlite3`/`evidence/` stay internal plumbing for
-    fingerprint reuse and content-addressed detail dedup.
-
-    Args:
-        index_path: Destination `index.jsonl`, derived by the caller from
-            whichever run-root it already owns (never hardcoded here).
-        kind: Producing pipeline identity, `"mhs"` or `"mhs_frozen"`.
-        run_dir: Directory holding that run's own result envelope.
-        created_at: UTC timestamp of index-write time.
-        evaluation_start: Registered evaluation start.
-        evaluation_end: Registered evaluation end.
-        strategy_id: Strategy identity string for the run.
-        base_cagr: Headline base-cost CAGR, or `None` if not cheaply available.
-        base_max_drawdown: Headline base-cost max drawdown, or `None` likewise.
-    Returns:
-        None after appending one JSON line to `index_path`.
-    """
-    try:
-        rel_run_dir = str(run_dir.relative_to(index_path.parent))
-    except ValueError:
-        rel_run_dir = str(run_dir)
-    record = {
-        "kind": kind,
-        "run_dir": rel_run_dir,
-        "created_at": created_at.isoformat(),
-        "evaluation_start": evaluation_start.isoformat(),
-        "evaluation_end": evaluation_end.isoformat(),
-        "strategy_id": strategy_id,
-        "base_cagr": base_cagr,
-        "base_max_drawdown": base_max_drawdown,
-    }
-    if execution is not None:
-        record["execution"] = execution
-    with index_path.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(record, sort_keys=True) + "\n")
 
 
 def _frozen_strategy(breadth: int, variant: str = "primary") -> FrozenMhsStrategySpec:
@@ -381,17 +332,6 @@ def _frozen_strategy(breadth: int, variant: str = "primary") -> FrozenMhsStrateg
         strategy_id=f"frozen_mhs_b{breadth}_control_v2",
         breadth=breadth,
     )
-
-
-def _frozen_specs() -> tuple[ExecutionSpec, ExecutionSpec]:
-    """Build the registered six/eighteen-basis-point cost pair with the submit-bar anchor, so every order is sized and priced from the last mark published before it is sent."""
-    import dataclasses
-
-    from src.mhs.types import ExecutionSpec
-
-    base = dataclasses.replace(ExecutionSpec(), taker_fee_bps=5.0, taker_slippage_bps=1.0, decision_anchor="submit_bar")
-    stress = dataclasses.replace(base, taker_slippage_bps=13.0)
-    return base, stress
 
 
 def _frozen_run_name(start: pd.Timestamp, end: pd.Timestamp, breadth: int, created_at: pd.Timestamp, variant: str = "primary", execution: str = "taker") -> str:
@@ -463,7 +403,7 @@ def _write_frozen_manifest(output: Path, *, request: FrozenMhsBacktestRequest, b
     if output.parent.parent == FROZEN_BACKTESTS_DIR:
         payload = json.loads(output.read_text(encoding="utf-8"))
         evaluation = payload.get("report_periods", {}).get("evaluation", {})
-        _append_backtest_index(
+        append_backtest_index(
             index_path=FROZEN_BACKTESTS_DIR.parent.parent / "index.jsonl",
             kind="mhs_frozen", run_dir=output.parent, created_at=pd.Timestamp.now(tz="UTC"),
             evaluation_start=request.evaluation_start, evaluation_end=request.evaluation_end,
@@ -536,7 +476,7 @@ def run_frozen_mhs_backtest_command(args: argparse.Namespace) -> None:
     execution_bound: FrozenExecutionBound = "OHLCV_STRICT_PROXY" if execution == "maker" else "OHLCV_IMMEDIATE_TAKER"
     output = _resolve_frozen_destination(args, start=start, end=end, breadth=breadth, variant=variant, execution=execution)
     budget = _resolve_budget(args)
-    base_spec, stress_spec = _frozen_specs()
+    base_spec, stress_spec = frozen_execution_specs()
     try:
         report_periods = (
             FrozenMhsReportPeriod(
@@ -596,254 +536,26 @@ def run_frozen_exposure_command(args: argparse.Namespace) -> None:
         SystemExit: Missing or invalid run artifacts, an existing ``exposure.json``, or a solver
             rejection.
     """
-    import os
-
-    import numpy as np
-
-    from src.common.errors import DataIntegrityError
-    from src.common.paths import FUTURES_DATA_DIR
-    from src.mhs.frozen_research_universe import build_frozen_pit_roster
-    from src.mhs.growth_exposure import (
-        GapSample,
-        roster_gap_sample,
-        solve_log_growth_exposure,
-        structurally_excluded_symbols,
-    )
-    from src.mhs.panel import load_base_panel
-    from src.mhs.params import (
-        COMMITTEE_GROWTH_HORIZON_YEARS,
-        COMMITTEE_GROWTH_N_PATHS,
-        FROZEN_EXPOSURE_GAP_THRESHOLD,
-        FROZEN_EXPOSURE_GRID,
-        FROZEN_EXPOSURE_MEAN_HAIRCUT,
-        FROZEN_EXPOSURE_PLATEAU_TOLERANCE,
-        FROZEN_EXPOSURE_SEED,
-        NULL_BOOTSTRAP_MEAN_BLOCK_DAYS,
-    )
-    from src.mhs.resources import (
-        _current_tree_swap_bytes,
-        assert_mhs_stage_allocation,
-        resolve_mhs_memory_budget,
-    )
+    from src.application.mhs_frozen_account import FrozenAccountError, FrozenExposureRequest, run_frozen_exposure
 
     raw_run_dir = getattr(args, "run_dir", None)
     if raw_run_dir is None:
         raise SystemExit("run-dir is required")
-    run_dir = Path(raw_run_dir)
-    if not run_dir.is_dir():
-        raise SystemExit(f"run-dir must be an existing frozen run directory, got {raw_run_dir!r}")
-    exposure_path = run_dir / "exposure.json"
-    if os.path.lexists(exposure_path):
-        raise SystemExit(f"exposure output must be fresh: {exposure_path} already exists")
-    try:
-        payload = json.loads((run_dir / "result.json").read_text(encoding="utf-8"))
-        daily = pd.read_parquet(run_dir / "daily.parquet")
-        exposure_multiplier = float(payload["exposure_multiplier"])
-        strategy_id = payload["strategy_id"]
-        execution_bound = payload["execution_bound"]
-        breadth = payload["breadth"]
-        source_start = pd.Timestamp(payload["source_start"]).tz_convert("UTC")
-        evaluation_start = pd.Timestamp(payload["evaluation_start"]).tz_convert("UTC")
-        evaluation_end = pd.Timestamp(payload["evaluation_end"]).tz_convert("UTC")
-        unit_returns = daily["base_return"] / exposure_multiplier
-        unit_max_weight = float(daily["max_name_weight"].mean() / exposure_multiplier)
-    except (OSError, ValueError, KeyError, TypeError) as exc:
-        raise SystemExit(f"invalid frozen run artifacts: {exc}") from exc
-    budget = _resolve_budget(args)
     data_root = getattr(args, "data_root", None)
-    root = str(Path(data_root)) if data_root is not None else str(FUTURES_DATA_DIR / "ohlcv")
+    request = FrozenExposureRequest(
+        run_dir=Path(raw_run_dir),
+        data_root=Path(data_root) if data_root is not None else None,
+        memory_budget=_resolve_budget(args),
+    )
     try:
-        resolved = resolve_mhs_memory_budget(budget)
-        initial_swap_bytes = _current_tree_swap_bytes()
-
-        def _admit_panel(estimated_bytes: int) -> None:
-            assert_mhs_stage_allocation(
-                stage="frozen_source_panel", estimated_bytes=int(estimated_bytes),
-                budget=resolved, replay=False, initial_swap_bytes=initial_swap_bytes,
-            )
-
-        assert_mhs_stage_allocation(
-            stage="frozen_source_panel", estimated_bytes=0,
-            budget=resolved, replay=False, initial_swap_bytes=initial_swap_bytes,
-        )
-        panel = load_base_panel(
-            root, "1h", ("close", "quote_vol"), source_start, evaluation_end, partition="all",
-            selection_mode="causal_history", allocation_admission=_admit_panel,
-        )
-        daily_close = panel["close"].resample("1D").last().astype("float64")
-        daily_quote_volume = panel["quote_vol"].resample("1D").sum(min_count=1).astype("float64")
-        census = tuple(panel["close"].columns)
-        # 로스터는 원천 시작부터 만들어 30일 유동성·90일 시즌링 워밍업을 보존한 뒤 평가 구간으로 자른다.
-        roster = build_frozen_pit_roster(
-            daily_close, daily_quote_volume, census, breadth=breadth, blocked_decisions=None,
-        )
-        in_window = (daily_close.index >= evaluation_start) & (daily_close.index < evaluation_end)
-        # 거래 제외(DELISTED) 종목만 갭 표본으로 쓴다: 그 외 종목의 급락은 원장이 이미 실제로
-        # 겪어 실현수익률에 반영돼 있으므로, 여기서 다시 얹으면 같은 위험을 이중으로 계산하게 된다.
-        gap_symbols = [s for s in census if s in structurally_excluded_symbols()]
-        # 등록부에 배제 종목이 없으면 갭 표본은 비어 있고(solve_log_growth_exposure가 지원하는
-        # 상태), roster_gap_sample을 0열 프레임으로 호출해 실패시키지 않는다.
-        gaps = (
-            roster_gap_sample(
-                daily_close.loc[in_window, gap_symbols], roster.loc[in_window, gap_symbols],
-                threshold=FROZEN_EXPOSURE_GAP_THRESHOLD,
-            )
-            if gap_symbols
-            else GapSample(magnitudes=np.empty(0, dtype="float64"), events_per_year=0.0)
-        )
-        solution = solve_log_growth_exposure(
-            unit_returns,
-            max_name_weight=unit_max_weight,
-            gaps=gaps,
-            mean_haircut=FROZEN_EXPOSURE_MEAN_HAIRCUT,
-            grid=FROZEN_EXPOSURE_GRID,
-            plateau_tolerance=FROZEN_EXPOSURE_PLATEAU_TOLERANCE,
-            n_paths=COMMITTEE_GROWTH_N_PATHS,
-            horizon_years=COMMITTEE_GROWTH_HORIZON_YEARS,
-            mean_block_days=NULL_BOOTSTRAP_MEAN_BLOCK_DAYS,
-            seed=FROZEN_EXPOSURE_SEED,
-        )
-        exposure = {
-            "run_dir": run_dir.name,
-            "strategy_id": strategy_id,
-            "execution_bound": execution_bound,
-            "exposure_multiplier": exposure_multiplier,
-            "grid": list(solution.grid),
-            "growth": list(solution.growth),
-            "ruin_probability": list(solution.ruin_probability),
-            "argmax": solution.argmax,
-            "chosen": solution.chosen,
-            "gap_events_per_year": solution.gap_events_per_year,
-            "gap_sample_size": solution.gap_sample_size,
-            "gap_symbols": sorted(gap_symbols),
-            "mean_haircut": FROZEN_EXPOSURE_MEAN_HAIRCUT,
-            "plateau_tolerance": FROZEN_EXPOSURE_PLATEAU_TOLERANCE,
-            "seed": FROZEN_EXPOSURE_SEED,
-            "created_at": pd.Timestamp.now(tz="UTC").isoformat(),
-            "unlever_assumption": "unit returns and max name weight are linear rescalings of the levered ledger; residual drift/cost nonlinearity is accepted",
-        }
-        tmp_path = run_dir / "exposure.json.tmp"
-        with open(tmp_path, "w", encoding="utf-8") as handle:
-            json.dump(exposure, handle, sort_keys=True)
-        os.replace(tmp_path, exposure_path)
-    except (DataIntegrityError, ValueError, OSError) as exc:
-        raise SystemExit(f"frozen exposure failed: {exc}") from exc
+        report = run_frozen_exposure(request)
+    except FrozenAccountError as exc:
+        raise SystemExit(str(exc)) from exc
     _logger.info(
         "[EVAL] frozen exposure run=%s chosen=%.2f argmax=%.2f gaps_per_year=%.2f",
-        run_dir.name, solution.chosen, solution.argmax, solution.gap_events_per_year,
+        request.run_dir.name, report.payload["chosen"], report.payload["argmax"], report.payload["gap_events_per_year"],
     )
-    print(str(exposure_path))  # noqa: T201 -- exposure command prints only the finalized exposure path
-
-
-def _account_headlines(equity: pd.Series, capital: float) -> tuple[float, float, float]:
-    """CAGR, daily max drawdown (negative or zero), and final equity for one account path."""
-    import numpy as np
-
-    values = equity.to_numpy(dtype="float64")
-    final = float(values[-1])
-    years = len(values) / 365.0
-    cagr = float(final / capital) ** (1.0 / years) - 1.0 if final > 0 else -1.0
-    running = np.maximum.accumulate(values)
-    with np.errstate(divide="ignore", invalid="ignore"):
-        relative = np.where(running > 0, values / running, 1.0)
-    return cagr, float((relative - 1.0).min()), final
-
-
-def _latest_same_book_reference(
-    index_path: Path,
-    *,
-    execution: str,
-    strategy: FrozenMhsStrategySpec,
-    evaluation_start: pd.Timestamp,
-    evaluation_end: pd.Timestamp,
-) -> dict[str, Any] | None:
-    """Latest canonical ``mhs_frozen`` run of the exact book the account ledger replays.
-
-    A reference must share the strategy id, execution mode, evaluation window, name clip and
-    exposure multiplier; the last two live only in the run's ``result.json`` (resolved against
-    the catalog directory), so rows whose result is missing or unreadable are skipped. Returns
-    the catalog row, or None when no run of the same book exists.
-    """
-    if not index_path.is_file():
-        return None
-    reference: dict[str, Any] | None = None
-    for line in index_path.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
-            continue
-        record = json.loads(line)
-        if record.get("kind") != "mhs_frozen":
-            continue
-        if record.get("strategy_id") != strategy.strategy_id:
-            continue
-        if record.get("execution", "taker") != execution:
-            continue
-        try:
-            row_start = pd.Timestamp(record["evaluation_start"]).tz_convert("UTC")
-            row_end = pd.Timestamp(record["evaluation_end"]).tz_convert("UTC")
-        except (KeyError, ValueError, TypeError):
-            continue
-        if row_start != evaluation_start or row_end != evaluation_end:
-            continue
-        run_dir = record.get("run_dir")
-        if not isinstance(run_dir, str):
-            continue
-        try:
-            payload = json.loads((index_path.parent / run_dir / "result.json").read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            continue
-        if payload.get("name_clip") != strategy.name_clip:
-            continue
-        if payload.get("exposure_multiplier") != strategy.exposure_multiplier:
-            continue
-        reference = {**record, "name_clip": payload.get("name_clip"), "exposure_multiplier": payload.get("exposure_multiplier")}
-    return reference
-
-
-def _resolve_account_destination(*, start: pd.Timestamp, end: pd.Timestamp, policy: str, capital: float, execution: str = "taker") -> Path:
-    """Resolve a fresh account run directory named by window, policy, and capital."""
-    import os
-
-    stem = f"{start:%Y%m%d}_{end:%Y%m%d}_top20_account_{policy}_{capital:.0f}"
-    stamp = f"{pd.Timestamp.now(tz='UTC'):%Y%m%dT%H%M%S}Z"
-    name = f"{stem}_{stamp}" if execution == "taker" else f"{stem}_maker_{stamp}"
-    run_dir = FROZEN_BACKTESTS_DIR / name
-    suffix = 1
-    while os.path.lexists(run_dir):
-        suffix += 1
-        run_dir = FROZEN_BACKTESTS_DIR / f"{name}-{suffix}"
-    run_dir.mkdir(parents=True)
-    return run_dir
-
-
-def _export_unit_returns(
-    *, equity: pd.Series, strategy_id: str, execution: str,
-    start: pd.Timestamp, end: pd.Timestamp, run_dir: Path, dest: Path,
-) -> None:
-    """Write the unit reference ledger daily returns with run-identity metadata."""
-    import pyarrow as pa
-    import pyarrow.parquet as pq
-
-    returns = equity.pct_change().iloc[1:]
-    returns.index.name = "entry_day"
-    returns.name = "unit_return"
-    table = pa.Table.from_pandas(returns.to_frame(), preserve_index=True)
-    metadata = {
-        "strategy_id": strategy_id,
-        "execution": execution,
-        "evaluation_start": start.isoformat(),
-        "evaluation_end": end.isoformat(),
-        "run_dir": str(run_dir),
-    }
-    merged = dict(table.schema.metadata or {})
-    merged.update({key: str(value) for key, value in metadata.items()})
-    table = table.replace_schema_metadata(merged)
-    dest = Path(dest)
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    tmp = dest.with_suffix(dest.suffix + ".tmp")
-    pq.write_table(table, tmp)
-    import os
-
-    os.replace(tmp, dest)
+    print(str(report.path))  # noqa: T201 -- exposure command prints only the finalized exposure path
 
 
 def run_frozen_account_command(args: argparse.Namespace) -> None:
@@ -863,18 +575,6 @@ def run_frozen_account_command(args: argparse.Namespace) -> None:
         SystemExit: Invalid arguments, missing venue snapshot, a data-integrity failure,
             or a failed unit reference replay.
     """
-    import dataclasses
-
-    from src.common.errors import DataIntegrityError
-    from src.market_data.binance.venue_rules import latest_venue_rule_snapshot, load_venue_rule_snapshot
-    from src.mhs.account_ledger import replay_account
-    from src.mhs.account_policy import account_growth_policy
-    from src.mhs.account_sources import assemble_account_inputs
-    from src.mhs.frozen_research_candidate import FROZEN_MHS_TOP20_ACCOUNT_UNIT_V2
-    from src.mhs.frozen_research_evidence import FrozenMhsReportPeriod
-    from src.mhs.frozen_research_run import FrozenMhsBacktestRequest, build_frozen_request_candidate
-    from src.mhs.params import ACCOUNT_RECON_CAGR_TOLERANCE, ACCOUNT_RECON_MDD_TOLERANCE
-
     if getattr(args, "source_start", None) is None:
         raise SystemExit("source-start is required")
     if getattr(args, "start", None) is None:
@@ -905,229 +605,30 @@ def run_frozen_account_command(args: argparse.Namespace) -> None:
         raise SystemExit(f"--fixed-exposure must be a positive finite exposure, got {raw_fixed!r}")
     if not 0 < capital < float("inf"):
         raise SystemExit(f"--capital must be a positive finite capital, got {getattr(args, 'capital', None)!r}")
+    from src.application.mhs_frozen_account import FrozenAccountError, FrozenAccountRequest, run_frozen_account
+
     raw_venue = getattr(args, "venue_rules", None)
-    try:
-        venue_path = Path(raw_venue) if raw_venue is not None else latest_venue_rule_snapshot(VENUE_RULES_DIR)
-        rules = load_venue_rule_snapshot(venue_path)
-    except (DataIntegrityError, FileNotFoundError, NotADirectoryError, OSError, ValueError) as exc:
-        raise SystemExit(f"missing venue snapshot ({exc}); run data collect venue-rules first") from exc
-    strategy = FROZEN_MHS_TOP20_ACCOUNT_UNIT_V2
-    budget = _resolve_budget(args)
-    base_spec, stress_spec = _frozen_specs()
-    request = FrozenMhsBacktestRequest(
+    request = FrozenAccountRequest(
         source_start=source_start, evaluation_start=start, evaluation_end=end,
-        strategy=strategy, initial_equity=capital,
-        base_spec=base_spec, stress_spec=stress_spec,
-        report_periods=(
-            FrozenMhsReportPeriod(
-                label="evaluation",
-                start=start.normalize(),
-                end=(end - pd.Timedelta(days=1)).normalize(),
-            ),
-        ),
+        runs_root=FROZEN_BACKTESTS_DIR, venue_rules_root=VENUE_RULES_DIR,
+        policy=cast(Literal["growth", "fixed"], policy_name),
+        execution=cast(Literal["taker", "maker"], execution),
+        capital=capital, impact_y=impact_y,
+        fixed_exposure=fixed_exposure,
+        apply_order_filters=not getattr(args, "no_order_filters", False),
+        venue_rules=Path(raw_venue) if raw_venue is not None else None,
         data_root=Path(args.data_root) if getattr(args, "data_root", None) else None,
-        memory_budget=budget,
-        execution_bound="OHLCV_IMMEDIATE_TAKER",
+        memory_budget=_resolve_budget(args),
+        export_unit_returns=Path(export) if (export := getattr(args, "export_unit_returns", None)) is not None else None,
     )
     try:
-        candidate, context = build_frozen_request_candidate(request)
-        unit_weights, marks, funding_cum, adv, daily_sigma, anchor_times = assemble_account_inputs(candidate, context)
-    except (DataIntegrityError, ValueError, OSError) as exc:
-        raise SystemExit(f"frozen account failed: {exc}") from exc
-    growth_base = account_growth_policy(impact_y=impact_y)
-    if policy_name == "growth":
-        policy = growth_base
-    else:
-        assert fixed_exposure is not None
-        policy = dataclasses.replace(growth_base, kind="fixed", exposure_max=fixed_exposure)
-    apply_filters = not getattr(args, "no_order_filters", False)
-    if execution == "maker":
-        execution_kwargs: dict[str, Any] = {
-            "execution": "maker",
-            "maker_fee_bps": ACCOUNT_MAKER_FEE_BPS,
-            "passive_window_bars": ACCOUNT_PASSIVE_WINDOW_BARS,
-        }
-    else:
-        execution_kwargs = {"execution": "taker"}
-    try:
-        unit_policy = dataclasses.replace(policy, kind="fixed", exposure_max=1.0, impact_y=0.0)
-        unit = replay_account(
-            unit_weights, marks, funding_cum, adv, daily_sigma, rules, unit_policy,
-            anchor_times=anchor_times,
-            capital=ACCOUNT_UNIT_REFERENCE_CAPITAL, taker_fee_bps=ACCOUNT_TAKER_FEE_BPS,
-            apply_order_filters=False, **execution_kwargs,
-        )
-    except (DataIntegrityError, ValueError) as exc:
-        raise SystemExit(f"frozen account failed: unit reference {exc}") from exc
-    if unit.liquidated_at is not None:
-        raise SystemExit(
-            f"frozen account failed: unit reference liquidated at {unit.liquidated_at}"
-        )
-    try:
-        result = replay_account(
-            unit_weights, marks, funding_cum, adv, daily_sigma, rules, policy,
-            anchor_times=anchor_times,
-            capital=capital, taker_fee_bps=ACCOUNT_TAKER_FEE_BPS, apply_order_filters=apply_filters,
-            unit_equity=unit.daily_equity, **execution_kwargs,
-        )
-    except (DataIntegrityError, ValueError) as exc:
-        raise SystemExit(f"frozen account failed: {exc}") from exc
-    index_path = FROZEN_BACKTESTS_DIR.parent.parent / "index.jsonl"
-    unit_cagr, unit_daily_mdd, _ = _account_headlines(unit.daily_equity, ACCOUNT_UNIT_REFERENCE_CAPITAL)
-    unit_mdd = unit.intraday_max_drawdown
-    try:
-        reference = _latest_same_book_reference(
-            index_path, execution=execution, strategy=strategy,
-            evaluation_start=start, evaluation_end=end,
-        )
-        if reference is None:
-            reconciliation: dict[str, Any] = {
-                "status": "missing_reference",
-                "fixed_exposure": 1.0,
-                "capital": ACCOUNT_UNIT_REFERENCE_CAPITAL,
-                "order_filters": False,
-                "impact_y": 0.0,
-                "cagr": unit_cagr,
-                "mdd": unit_mdd,
-                "mdd_convention": "magnitude",
-                "mdd_definition": "3m_close_path",
-                "cagr_tolerance": ACCOUNT_RECON_CAGR_TOLERANCE,
-                "mdd_tolerance": ACCOUNT_RECON_MDD_TOLERANCE,
-                "reference_canonical": None,
-                "cagr_gap": None,
-                "mdd_gap": None,
-            }
-            _logger.warning(
-                "[EVAL] mhs-frozen-account reconciliation status=%s cagr_gap=%s mdd_gap=%s",
-                "missing_reference", None, None,
-            )
-        else:
-            base_cagr = reference.get("base_cagr")
-            base_mdd = reference.get("base_max_drawdown")
-            cagr_gap = None if base_cagr is None else unit_cagr - float(base_cagr)
-            mdd_gap = None if base_mdd is None else unit_mdd - abs(float(base_mdd))
-            status = "ok"
-            if (
-                cagr_gap is None or abs(cagr_gap) > ACCOUNT_RECON_CAGR_TOLERANCE
-                or mdd_gap is None or abs(mdd_gap) > ACCOUNT_RECON_MDD_TOLERANCE
-            ):
-                status = "mismatch"
-            reconciliation = {
-                "status": status,
-                "fixed_exposure": 1.0,
-                "capital": ACCOUNT_UNIT_REFERENCE_CAPITAL,
-                "order_filters": False,
-                "impact_y": 0.0,
-                "cagr": unit_cagr,
-                "mdd": unit_mdd,
-                "mdd_convention": "magnitude",
-                "mdd_definition": "3m_close_path",
-                "cagr_tolerance": ACCOUNT_RECON_CAGR_TOLERANCE,
-                "mdd_tolerance": ACCOUNT_RECON_MDD_TOLERANCE,
-                "reference_canonical": {
-                    "strategy_id": reference.get("strategy_id"),
-                    "run_dir": reference.get("run_dir"),
-                    "evaluation_start": reference.get("evaluation_start"),
-                    "evaluation_end": reference.get("evaluation_end"),
-                    "base_cagr": reference.get("base_cagr"),
-                    "base_max_drawdown": reference.get("base_max_drawdown"),
-                    "name_clip": reference.get("name_clip"),
-                    "exposure_multiplier": reference.get("exposure_multiplier"),
-                },
-                "cagr_gap": cagr_gap,
-                "mdd_gap": mdd_gap,
-            }
-            if status == "mismatch":
-                _logger.warning(
-                    "[EVAL] mhs-frozen-account reconciliation status=%s cagr_gap=%.4f mdd_gap=%.4f",
-                    status,
-                    float(cagr_gap) if cagr_gap is not None else float("nan"),
-                    float(mdd_gap) if mdd_gap is not None else float("nan"),
-                )
-    except Exception as exc:  # noqa: BLE001 -- reconciliation is disclosed-only and never fails the run
-        reconciliation = {"status": "failed", "error": str(exc)}
-    cagr, daily_mdd, final_equity = _account_headlines(result.daily_equity, capital)
-    mdd = -result.intraday_max_drawdown
-    moment_source = "bayesian_causal_unit_ledger" if policy_name == "growth" else "none"
-    exposures = result.daily_exposure.to_numpy(dtype="float64")
-    run_dir = _resolve_account_destination(start=start, end=end, policy=policy_name, capital=capital, execution=execution)
-    payload = {
-        "strategy_id": strategy.strategy_id,
-        "capital": capital,
-        "execution": {
-            "mode": execution,
-            "maker_fee_bps": None if execution == "taker" else ACCOUNT_MAKER_FEE_BPS,
-            "taker_fee_bps": ACCOUNT_TAKER_FEE_BPS,
-            "passive_window_bars": None if execution == "taker" else ACCOUNT_PASSIVE_WINDOW_BARS,
-            "maker_fill_fraction": result.maker_fill_fraction,
-        },
-        "policy": {
-            "kind": policy.kind,
-            "exposure_max": policy.exposure_max,
-            "exposure_step": policy.exposure_step,
-            "mean_haircut": policy.mean_haircut,
-            "prior_days": policy.prior_days,
-            "min_moment_days": policy.min_moment_days,
-            "shock_per_unit": policy.shock_per_unit,
-            "margin_reserve": policy.margin_reserve,
-            "initial_margin_cap": policy.initial_margin_cap,
-            "impact_y": policy.impact_y,
-        },
-        "venue_captured_at": rules.captured_at.isoformat(),
-        "venue_path": str(venue_path),
-        "evaluation_start": start.isoformat(),
-        "evaluation_end": end.isoformat(),
-        "cagr": cagr,
-        "mdd": mdd,
-        "daily_mdd": daily_mdd,
-        "final_equity": final_equity,
-        "liquidated_at": None if result.liquidated_at is None else result.liquidated_at.isoformat(),
-        "mean_exposure": float(exposures.mean()),
-        "min_exposure": float(exposures.min()),
-        "last_exposure": float(exposures[-1]),
-        "skipped_orders": result.skipped_orders,
-        "untraded_fraction": result.untraded_fraction,
-        "initial_margin_breaches": result.initial_margin_breaches,
-        "fee_paid": result.fee_paid,
-        "impact_paid": result.impact_paid,
-        "funding_paid": result.funding_paid,
-        "fallback_ladder_symbols": list(result.fallback_ladder_symbols),
-        "missing_filter_symbols": list(result.missing_filter_symbols),
-        "moment_source": moment_source,
-        "entry_anchor": "submit_bar",
-        "unit_reference": {
-            "capital": ACCOUNT_UNIT_REFERENCE_CAPITAL,
-            "cagr": unit_cagr,
-            "mdd": -unit_mdd,
-            "daily_mdd": unit_daily_mdd,
-            "maker_fill_fraction": unit.maker_fill_fraction,
-        },
-        "venue_rules_applied_retroactively": True,
-        "reconciliation": reconciliation,
-        "created_at": pd.Timestamp.now(tz="UTC").isoformat(),
-    }
-    (run_dir / "account.json").write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-    pd.DataFrame(
-        {"equity": result.daily_equity.to_numpy(dtype="float64"), "exposure": exposures},
-        index=result.daily_equity.index,
-    ).to_parquet(run_dir / "account_daily.parquet")
-    export_dest = getattr(args, "export_unit_returns", None)
-    if export_dest is not None:
-        _export_unit_returns(
-            equity=unit.daily_equity, strategy_id=strategy.strategy_id, execution=execution,
-            start=start, end=end, run_dir=run_dir, dest=Path(export_dest),
-        )
-    if run_dir.parent == FROZEN_BACKTESTS_DIR:
-        _append_backtest_index(
-            index_path=index_path,
-            kind="mhs_frozen_account", run_dir=run_dir, created_at=pd.Timestamp.now(tz="UTC"),
-            evaluation_start=start, evaluation_end=end,
-            strategy_id=strategy.strategy_id,
-            base_cagr=cagr, base_max_drawdown=result.intraday_max_drawdown,
-            execution=execution,
-        )
+        report = run_frozen_account(request)
+    except ValueError as exc:
+        raise SystemExit(f"invalid frozen account request: {exc}") from exc
+    except FrozenAccountError as exc:
+        raise SystemExit(str(exc)) from exc
     _logger.info(
         "[EVAL] mhs-frozen-account capital=%.0f policy=%s moment_source=%s cagr=%.4f mdd=%.4f liquidated=%s execution=%s maker_fill=%.3f",
-        capital, policy_name, moment_source, cagr, mdd, result.liquidated_at,
-        execution, result.maker_fill_fraction,
+        capital, policy_name, report.payload["moment_source"], report.payload["cagr"], report.payload["mdd"],
+        report.result.liquidated_at, execution, report.result.maker_fill_fraction,
     )

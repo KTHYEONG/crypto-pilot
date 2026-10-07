@@ -101,7 +101,6 @@ def test_file_size_budget() -> None:
         "tests/unit/live/test_executor.py": 193626,
         "tests/unit/live/test_data_refresh.py": 71709,
         "tests/unit/mhs/test_process_backtest.py": 140056,
-        "tests/unit/cli/commands/test_backtest.py": 81671,
         "tests/unit/mhs/evaluation/test_windows.py": 87424,
         # Existing fold replay and shared-reference regression suite; freeze its current size.
         "tests/unit/mhs/test_evaluation_folds.py": 62668,
@@ -304,6 +303,12 @@ def test_inventory_oracle_stays_out_of_production() -> None:
                 or (path.parent == facade.parent and module == "ledger")
                 for module in modules
             )
+            # `from src.mhs.execution import ledger` / `from . import ledger` bind the oracle module itself.
+            imports_package = isinstance(node, ast.ImportFrom) and (
+                node.module == "src.mhs.execution"
+                or (node.level == 1 and node.module is None and path.parent == facade.parent)
+            )
+            reaches_ledger = reaches_ledger or (imports_package and "ledger" in imported)
             if path != facade and (reaches_ledger or oracle in imported):
                 offenders.append((str(path), node.lineno))
 
@@ -381,8 +386,10 @@ def test_source_module_size_budget() -> None:
         "src/mhs/evidence.py": 1267,
         "src/mhs/deploy_gate.py": 723,
         "src/mhs/scaling.py": 892,
-        "src/application/mhs_supervisor.py": 1224,
-        "src/cli/commands/backtest.py": 1133,
+        "src/application/mhs_supervisor.py": 1218,
+        # Frozen account/exposure services stay co-located: two research workflows share
+        # the catalog seam and unit-ledger helpers; split only with a new service boundary.
+        "src/application/mhs_frozen_account.py": 812,
         "src/mhs/reporting/inventory.py": 741,
         "src/mhs/backtest/paths.py": 849,
         "src/mhs/backtest/journal.py": 1091,
@@ -474,7 +481,6 @@ def test_no_function_exceeds_length_budget() -> None:
         "src/live/scheduler.py::run_daemon": 354,
         "src/live/frozen_signal.py::run_frozen_signal_step": 312,
         "src/mhs/account_ledger.py::replay_account": 308,
-        "src/cli/commands/backtest.py::run_frozen_account_command": 284,
         "src/mhs/evaluation/windows.py::_book_outcome": 368,
         "src/mhs/execution/accumulator.py::_consume_append_ledger": 252,
         "src/mhs/execution/window_stream.py::_iter_mhs_execution_windows": 382,
