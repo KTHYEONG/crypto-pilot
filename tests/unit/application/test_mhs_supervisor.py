@@ -275,7 +275,7 @@ def test_fingerprint_helpers_are_deterministic(tmp_path) -> None:
     first = sup.request_fingerprint(start=start, end=end, data_root=None, tracking_error_threshold=None)
     second = sup.request_fingerprint(start=start, end=end, data_root=None, tracking_error_threshold=None)
     assert first == second
-    assert sup.find_reused_run(tmp_path / "missing.sqlite3", first) is None
+    assert sup.find_reused_run(tmp_path / "missing.sqlite3", first).reused is None
 
 
 def test_invalid_run_identity_rejected_before_launch(tmp_path, monkeypatch) -> None:
@@ -327,14 +327,18 @@ def test_code_identity_null_when_worker_unreadable(tmp_path, monkeypatch) -> Non
 
 
 def test_find_reused_run_skips_unusable_registry_entries(tmp_path) -> None:
+    import hashlib as _hashlib
     import sqlite3 as _sqlite3
+
+    from src.common.errors import DataIntegrityError
 
     start, end = _stamps()
     fingerprint = sup.request_fingerprint(start=start, end=end, data_root=None, tracking_error_threshold=None)
-    assert sup.find_reused_run(tmp_path / "absent.sqlite3", fingerprint) is None
+    assert sup.find_reused_run(tmp_path / "absent.sqlite3", fingerprint).reused is None
     corrupt = tmp_path / "corrupt.sqlite3"
     corrupt.write_text("not a database", encoding="utf-8")
-    assert sup.find_reused_run(corrupt, fingerprint) is None
+    with pytest.raises(DataIntegrityError):
+        sup.find_reused_run(corrupt, fingerprint)
     empty = tmp_path / "empty.sqlite3"
     conn = _sqlite3.connect(str(empty))
     try:
@@ -342,9 +346,9 @@ def test_find_reused_run_skips_unusable_registry_entries(tmp_path) -> None:
         conn.commit()
     finally:
         conn.close()
-    assert sup.find_reused_run(empty, fingerprint) is None
+    assert sup.find_reused_run(empty, fingerprint).reused is None
     registry = tmp_path / "registry.sqlite3"
-    from src.backtests.contracts import RunFinalization, RunRegistration
+    from src.backtests.contracts import ArtifactReference, RunFinalization, RunRegistration
     from src.backtests.registry import finalize_run, initialize_registry, register_run
 
     initialize_registry(registry)
@@ -356,34 +360,45 @@ def test_find_reused_run_skips_unusable_registry_entries(tmp_path) -> None:
             request={"fingerprint": "other", "window": "3m"}, managed_directory=None,
         ),
     )
-    assert sup.find_reused_run(registry, fingerprint) is None
+    assert sup.find_reused_run(registry, fingerprint).reused is None
+    managed_dir = tmp_path / "runs" / ("d" * 32)
+    managed_dir.mkdir(parents=True, exist_ok=True)
+    result_path = managed_dir / "result.json"
+    result_path.write_bytes(b'{"ok": true}')
+    digest = _hashlib.sha256(result_path.read_bytes()).hexdigest()
     register_run(
         registry,
         RunRegistration(
             run_id="d" * 32, strategy_id="process_inventory_3m",
             registered_at="2026-01-01T00:00:00+00:00",
-            request={"fingerprint": fingerprint, "window": "3m"}, managed_directory=None,
+            request={"fingerprint": fingerprint, "window": "3m"}, managed_directory=managed_dir,
         ),
     )
-    assert sup.find_reused_run(registry, fingerprint) is None
+    assert sup.find_reused_run(registry, fingerprint).reused is None
     finalize_run(
         registry,
         RunFinalization(
             run_id="d" * 32, status="completed", finalized_at="2026-01-02T00:00:00+00:00",
             primary_valid=True, terminal_certified=True, outcome={"ok": True},
         ),
-        (),
+        (
+            ArtifactReference(
+                run_id="d" * 32, role="result", path=result_path, sha256=digest,
+                byte_count=result_path.stat().st_size, managed=True, evidence_id=None,
+            ),
+        ),
     )
     found = sup.find_reused_run(registry, fingerprint)
-    assert found is not None
-    assert found[0] == "d" * 32
+    assert found.reused is not None
+    assert found.reused.run_id == "d" * 32
     conn = _sqlite3.connect(str(registry))
     try:
         with conn:
             conn.execute("UPDATE runs SET request_json = 'not-json' WHERE run_id = ?", ("d" * 32,))
     finally:
         conn.close()
-    assert sup.find_reused_run(registry, fingerprint) is None
+    with pytest.raises(DataIntegrityError):
+        sup.find_reused_run(registry, fingerprint)
 
 
 def test_corrupt_and_non_mapping_domain_stay_null(tmp_path, monkeypatch) -> None:
@@ -806,7 +821,9 @@ def test_sealed_manifest_upgrades_data_identity(tmp_path) -> None:
 
 
 def test_reused_run_rejected_after_input_data_change(tmp_path) -> None:
-    from src.backtests.contracts import RunFinalization, RunRegistration
+    import hashlib as _hashlib
+
+    from src.backtests.contracts import ArtifactReference, RunFinalization, RunRegistration
     from src.backtests.registry import finalize_run, initialize_registry, register_run
 
     start, end = _stamps()
@@ -817,12 +834,17 @@ def test_reused_run_rejected_after_input_data_change(tmp_path) -> None:
     assert sup.request_fingerprint(data_root=str(root), **kwargs) == first
     registry = tmp_path / "registry.sqlite3"
     initialize_registry(registry)
+    managed_dir = tmp_path / "runs" / ("e" * 32)
+    managed_dir.mkdir(parents=True, exist_ok=True)
+    result_path = managed_dir / "result.json"
+    result_path.write_bytes(b'{"ok": true}')
+    digest = _hashlib.sha256(result_path.read_bytes()).hexdigest()
     register_run(
         registry,
         RunRegistration(
             run_id="e" * 32, strategy_id="process_inventory_3m",
             registered_at="2026-01-01T00:00:00+00:00",
-            request={"fingerprint": first}, managed_directory=None,
+            request={"fingerprint": first}, managed_directory=managed_dir,
         ),
     )
     finalize_run(
@@ -831,14 +853,19 @@ def test_reused_run_rejected_after_input_data_change(tmp_path) -> None:
             run_id="e" * 32, status="completed", finalized_at="2026-01-02T00:00:00+00:00",
             primary_valid=True, terminal_certified=True, outcome={"ok": True},
         ),
-        (),
+        (
+            ArtifactReference(
+                run_id="e" * 32, role="result", path=result_path, sha256=digest,
+                byte_count=result_path.stat().st_size, managed=True, evidence_id=None,
+            ),
+        ),
     )
-    assert sup.find_reused_run(registry, first)[0] == "e" * 32
+    assert sup.find_reused_run(registry, first).reused.run_id == "e" * 32
     (root / "ohlcv" / "3m" / "AAAUSDT.parquet").write_bytes(b"frame-v2-restated")
     second = sup.request_fingerprint(data_root=str(root), **kwargs)
     assert second != first
-    assert sup.find_reused_run(registry, second) is None
-    assert sup.find_reused_run(registry, first)[0] == "e" * 32
+    assert sup.find_reused_run(registry, second).reused is None
+    assert sup.find_reused_run(registry, first).reused.run_id == "e" * 32
 
 
 def _write_manifest(root: Path, payload: object) -> None:
@@ -965,7 +992,9 @@ def test_supervised_launch_blocked_without_source_identity(tmp_path, monkeypatch
 
 def test_fingerprint_changes_with_source_identity(tmp_path) -> None:
     """Distinct source identities yield distinct fingerprints blocking reuse."""
-    from src.backtests.contracts import RunFinalization, RunRegistration
+    import hashlib as _hashlib
+
+    from src.backtests.contracts import ArtifactReference, RunFinalization, RunRegistration
     from src.backtests.registry import finalize_run, initialize_registry, register_run
 
     start, end = _stamps()
@@ -978,12 +1007,17 @@ def test_fingerprint_changes_with_source_identity(tmp_path) -> None:
     assert first != second
     registry = tmp_path / "registry.sqlite3"
     initialize_registry(registry)
+    managed_dir = tmp_path / "runs" / ("c" * 32)
+    managed_dir.mkdir(parents=True, exist_ok=True)
+    result_path = managed_dir / "result.json"
+    result_path.write_bytes(b'{"ok": true}')
+    digest = _hashlib.sha256(result_path.read_bytes()).hexdigest()
     register_run(
         registry,
         RunRegistration(
             run_id="c" * 32, strategy_id="process_inventory_3m",
             registered_at="2026-01-01T00:00:00+00:00",
-            request={"fingerprint": first}, managed_directory=None,
+            request={"fingerprint": first}, managed_directory=managed_dir,
         ),
     )
     finalize_run(
@@ -992,10 +1026,15 @@ def test_fingerprint_changes_with_source_identity(tmp_path) -> None:
             run_id="c" * 32, status="completed", finalized_at="2026-01-02T00:00:00+00:00",
             primary_valid=True, terminal_certified=True, outcome={"ok": True},
         ),
-        (),
+        (
+            ArtifactReference(
+                run_id="c" * 32, role="result", path=result_path, sha256=digest,
+                byte_count=result_path.stat().st_size, managed=True, evidence_id=None,
+            ),
+        ),
     )
-    assert sup.find_reused_run(registry, first)[0] == "c" * 32
-    assert sup.find_reused_run(registry, second) is None
+    assert sup.find_reused_run(registry, first).reused.run_id == "c" * 32
+    assert sup.find_reused_run(registry, second).reused is None
 
 
 def test_supervised_run_reports_wall_time_and_tree_pss(tmp_path, monkeypatch) -> None:
