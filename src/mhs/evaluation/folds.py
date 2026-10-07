@@ -23,6 +23,7 @@ from src.mhs.execution import (
     replay_execution_windows,
 )
 from src.mhs.execution.window_stream import MhsExecutionWindow
+from src.mhs.features import FeatureAdmission
 from src.mhs.parallel import (
     FORK_CONTEXT,
     assert_fork_admission,
@@ -367,13 +368,17 @@ def _fold_exposure_warmup(
     ]
 
 
-_TrainReferenceGroupKey = tuple[pd.Timestamp, int | None, tuple[tuple[str, float], ...] | None]
+_TrainReferenceGroupKey = tuple[
+    pd.Timestamp, int | None, tuple[tuple[str, float], ...] | None, tuple[str, ...] | None,
+]
 
 
 def _train_reference_group_key(
     fold: AnchoredPurgedFold,
     slow_horizon_override: int | None,
     committee_member_weights: Mapping[str, float] | None,
+    *,
+    committee_admission: FeatureAdmission | None = None,
 ) -> _TrainReferenceGroupKey:
     """Key under which folds share one train-reference replay.
 
@@ -383,13 +388,15 @@ def _train_reference_group_key(
     overrides are report-only for the reference and are deliberately excluded.
 
     Returns:
-        ``(train_start, slow_horizon_override, sorted (name, float) weight items or None)``.
+        ``(train_start, slow_horizon_override, sorted (name, float) weight items or None,
+        admitted tuple or None)``.
     """
     if committee_member_weights is None:
         weights_key: tuple[tuple[str, float], ...] | None = None
     else:
         weights_key = tuple(sorted((name, float(weight)) for name, weight in committee_member_weights.items()))
-    return (fold.train_start, slow_horizon_override, weights_key)
+    admitted_key = tuple(committee_admission.admitted) if committee_admission is not None else None
+    return (fold.train_start, slow_horizon_override, weights_key, admitted_key)
 
 
 @dataclass(frozen=True, slots=True)
@@ -422,6 +429,8 @@ def _fold_reference_targets(
     fold_index: int,
     slow_horizon_override: int | None,
     committee_member_weights: dict[str, float] | None,
+    *,
+    committee_admission: FeatureAdmission | None = None,
 ) -> tuple[pd.DataFrame, pd.DatetimeIndex, list[str]]:
     """Train-window decision path of one fold, without replay.
 
@@ -441,6 +450,7 @@ def _fold_reference_targets(
     target_weights, signal_available_at, minute_roster, _grid_1h = fold_weights._build_fold_target_weights(
         root, fold, request, funding_by_symbol, slow_horizon_override, committee_member_weights,
         decision_start=reference_start, decision_end=reference_end,
+        committee_admission=committee_admission,
     )
     return target_weights, signal_available_at, minute_roster
 
@@ -493,9 +503,12 @@ def _fold_train_reference_returns(
     fold_index: int,
     slow_horizon_override: int | None,
     committee_member_weights: dict[str, float] | None,
+    *,
+    committee_admission: FeatureAdmission | None = None,
 ) -> pd.Series:
     target_weights, signal_available_at, minute_roster = _fold_reference_targets(
         root, fold, request, funding_by_symbol, fold_index, slow_horizon_override, committee_member_weights,
+        committee_admission=committee_admission,
     )
     return _replay_fold_train_reference(
         root, fold, request, funding_by_symbol, initial_equity, fold_index,
@@ -521,8 +534,14 @@ def _build_shared_train_reference(
     initial_equity: float,
     slow_horizon_override: int | None,
     committee_member_weights: dict[str, float] | None,
+    *,
+    committee_admissions: Mapping[int, FeatureAdmission] | None = None,
 ) -> _SharedTrainReference | None:
     """Replay the train reference once, to the latest ``train_end`` of a fold group.
+
+    The horizon fold builds its targets with its OWN
+    admission ``committee_admissions[horizon_index]`` (cutoff = its train_end); a
+    missing admission fails inside the guarded build and returns None.
 
     The result is an optimization artifact, never evidence on its own: any failure of the
     shared build, replay or perf_01a certification returns None so each fold recomputes its
@@ -542,6 +561,13 @@ def _build_shared_train_reference(
     first_start = group_folds[0][1].train_start
     if any(fold.train_start != first_start for _, fold in group_folds):
         raise ValueError("shared train reference requires one common train_start")
+    if committee_admissions is not None:
+        _adm_tuples = set()
+        for idx, _fold in group_folds:
+            _adm = (committee_admissions or {}).get(idx)
+            _adm_tuples.add(tuple(_adm.admitted) if _adm is not None else None)
+        if len(_adm_tuples) > 1:
+            raise ValueError("shared train reference requires one common admitted tuple")
     horizon_index, horizon_fold = group_folds[0]
     for candidate_index, candidate_fold in group_folds[1:]:
         if candidate_fold.train_end > horizon_fold.train_end or (
@@ -553,6 +579,7 @@ def _build_shared_train_reference(
         target_weights, signal_available_at, minute_roster = _fold_reference_targets(
             root, horizon_fold, request, funding_by_symbol, horizon_index,
             slow_horizon_override, committee_member_weights,
+            committee_admission=(committee_admissions or {}).get(horizon_index),
         )
         daily_returns = _replay_fold_train_reference(
             root, horizon_fold, request, funding_by_symbol, initial_equity, horizon_index,
@@ -567,7 +594,10 @@ def _build_shared_train_reference(
     active = _active_reference_columns(target_weights)
     restricted = target_weights[[c for c in target_weights.columns if str(c) in active]] if active else target_weights.iloc[:, 0:0]
     shared = _SharedTrainReference(
-        group_key=_train_reference_group_key(horizon_fold, slow_horizon_override, committee_member_weights),
+        group_key=_train_reference_group_key(
+            horizon_fold, slow_horizon_override, committee_member_weights,
+            committee_admission=(committee_admissions or {}).get(horizon_index),
+        ),
         reference_start=horizon_fold.train_start + pd.Timedelta(hours=FOLD_PANEL_WARMUP_HOURS),
         horizon_end=horizon_fold.train_end,
         target_weights=restricted,
@@ -677,6 +707,8 @@ def _reference_from_shared(
     slow_horizon_override: int | None,
     committee_member_weights: dict[str, float] | None,
     shared: _SharedTrainReference,
+    *,
+    committee_admission: FeatureAdmission | None = None,
 ) -> pd.Series:
     """Fold k's train reference: the shared prefix when every reuse guard holds, else independent.
 
@@ -686,8 +718,12 @@ def _reference_from_shared(
     """
     own_target_weights, own_signal_available_at, minute_roster = _fold_reference_targets(
         root, fold, request, funding_by_symbol, fold_index, slow_horizon_override, committee_member_weights,
+        committee_admission=committee_admission,
     )
-    if _train_reference_group_key(fold, slow_horizon_override, committee_member_weights) != shared.group_key:
+    if _train_reference_group_key(
+        fold, slow_horizon_override, committee_member_weights,
+        committee_admission=committee_admission,
+    ) != shared.group_key:
         _logger.debug("[RISK] train_reference fold=%s source=independent reason=group_key", fold_index)
         return _replay_fold_train_reference(
             root, fold, request, funding_by_symbol, initial_equity, fold_index,
@@ -754,6 +790,8 @@ def _build_fold_validation_plan(
     funding_by_symbol: dict[str, pd.Series],
     slow_horizon_override: int | None,
     committee_member_weights: dict[str, float] | None,
+    *,
+    committee_admission: FeatureAdmission | None = None,
 ) -> _FoldValidationPlan:
     """Build one fold's validation decision path and prove it is replayable.
 
@@ -772,6 +810,7 @@ def _build_fold_validation_plan(
     """
     target_weights, signal_available_at, minute_roster, _grid_1h = fold_weights._build_fold_target_weights(
         root, fold, request, funding_by_symbol, slow_horizon_override, committee_member_weights,
+        committee_admission=committee_admission,
     )
     execution_grid = pd.date_range(
         fold.validation_start, fold.validation_end,
@@ -804,6 +843,7 @@ def _run_anchored_fold(
     funding_carry_override: tuple[int | None, int | None, str, float | None] | None = None,
     committee_member_weights: dict[str, float] | None = None,
     *,
+    committee_admission: FeatureAdmission | None = None,
     validation_plan: _FoldValidationPlan | None = None,
     shared_reference: _SharedTrainReference | None = None,
 ) -> MhsFoldReport:
@@ -829,13 +869,14 @@ def _run_anchored_fold(
         if validation_plan is None:
             plan = _build_fold_validation_plan(
                 root, fold, request, funding_by_symbol, slow_horizon_override, committee_member_weights,
+                committee_admission=committee_admission,
             )
         else:
             plan = validation_plan
         if shared_reference is None:
-            train_reference = _fold_train_reference_returns(root, fold, request, funding_by_symbol, initial_equity, fold_index, slow_horizon_override, committee_member_weights)
+            train_reference = _fold_train_reference_returns(root, fold, request, funding_by_symbol, initial_equity, fold_index, slow_horizon_override, committee_member_weights, committee_admission=committee_admission)
         else:
-            train_reference = _reference_from_shared(root, fold, request, funding_by_symbol, initial_equity, fold_index, slow_horizon_override, committee_member_weights, shared_reference)
+            train_reference = _reference_from_shared(root, fold, request, funding_by_symbol, initial_equity, fold_index, slow_horizon_override, committee_member_weights, shared_reference, committee_admission=committee_admission)
         if telemetry is not None:
             telemetry.record(f"anchored_fold_{fold_index}_sizing_reference", grid_bars=len(train_reference), window_start=str(train_reference.index[0]), window_end=str(train_reference.index[-1]))
         from src.mhs.research_go import _resolved_growth_envelope as _resolve_envelope
@@ -1027,6 +1068,8 @@ def _fold_validation_task(
     fold_index: int,
     slow_horizon_override: int | None,
     committee_member_weights: dict[str, float] | None,
+    *,
+    committee_admission: FeatureAdmission | None = None,
 ) -> _FoldValidationPlan | MhsFoldReport:
     """Phase V: build one fold's validation plan in a fork worker.
 
@@ -1038,6 +1081,7 @@ def _fold_validation_task(
     try:
         return _build_fold_validation_plan(
             root, fold, request, funding_by_symbol, slow_horizon_override, committee_member_weights,
+            committee_admission=committee_admission,
         )
     except (DataIntegrityError, RuntimeError, ValueError) as exc:
         return _fold_failure_report(fold, fold_index, exc)
@@ -1051,12 +1095,15 @@ def _shared_train_reference_task(
     initial_equity: float,
     slow_horizon_override: int | None,
     committee_member_weights: dict[str, float] | None,
+    *,
+    committee_admissions: Mapping[int, FeatureAdmission] | None = None,
 ) -> _SharedTrainReference | None:
     """Phase R: ``_build_shared_train_reference`` in a fork worker (funding via ``token``)."""
     funding_by_symbol: dict[str, pd.Series] = resolve_fork_shared(token)["fold_funding"]
     return _build_shared_train_reference(
         root, group_folds, request, funding_by_symbol, initial_equity,
         slow_horizon_override, committee_member_weights,
+        committee_admissions=committee_admissions,
     )
 
 
@@ -1073,6 +1120,8 @@ def _anchored_fold_task(
     committee_member_weights: dict[str, float] | None,
     validation_plan: _FoldValidationPlan,
     shared_reference: _SharedTrainReference | None,
+    *,
+    committee_admission: FeatureAdmission | None = None,
 ) -> MhsFoldReport:
     """Phase E: the module-global ``_run_anchored_fold`` (telemetry None) with the injected plan
     and optional shared reference, funding resolved from ``token``."""
@@ -1080,7 +1129,8 @@ def _anchored_fold_task(
     return _run_anchored_fold(
         root, fold, request, funding_by_symbol, initial_equity, fold_index, None,
         slow_horizon_override, fast_horizon_override, funding_carry_override,
-        committee_member_weights, validation_plan=validation_plan, shared_reference=shared_reference,
+        committee_member_weights, committee_admission=committee_admission,
+        validation_plan=validation_plan, shared_reference=shared_reference,
     )
 
 
@@ -1092,6 +1142,7 @@ def _submit_fold_validation_phase(
     request: MhsDiagnosticRequest,
     fold_slow_horizons: Mapping[int, int | None] | None,
     fold_committee_weights: Mapping[int, dict[str, float]] | None,
+    fold_committee_admission: Mapping[int, FeatureAdmission] | None = None,
 ) -> dict[Future[_FoldValidationPlan | MhsFoldReport], int]:
     """Submit phase V for every fold; returns futures keyed to fold indices.
 
@@ -1105,6 +1156,7 @@ def _submit_fold_validation_phase(
             token, root, fold, request, idx,
             (fold_slow_horizons or {}).get(idx),
             (fold_committee_weights or {}).get(idx),
+            committee_admission=(fold_committee_admission or {}).get(idx),
         )
         validation_futures[future] = idx
     return validation_futures
@@ -1122,6 +1174,7 @@ def _complete_anchored_folds(
     fold_fast_horizons: Mapping[int, tuple[int, str]] | None,
     fold_funding_carry: Mapping[int, tuple[int | None, int | None, str, float | None]] | None,
     fold_committee_weights: Mapping[int, dict[str, float]] | None,
+    fold_committee_admission: Mapping[int, FeatureAdmission] | None = None,
 ) -> tuple[MhsFoldReport, ...]:
     """Finish phases V → R → E and return one report per fold in fold-index order.
 
@@ -1148,6 +1201,7 @@ def _complete_anchored_folds(
             continue
         key = _train_reference_group_key(
             fold, (fold_slow_horizons or {}).get(idx), (fold_committee_weights or {}).get(idx),
+            committee_admission=(fold_committee_admission or {}).get(idx),
         )
         groups.setdefault(key, []).append(idx)
     shared_groups = sorted(
@@ -1171,6 +1225,7 @@ def _complete_anchored_folds(
             (fold_funding_carry or {}).get(idx),
             (fold_committee_weights or {}).get(idx),
             plans[idx], None,
+            committee_admission=(fold_committee_admission or {}).get(idx),
         )] = idx
     reference_futures: dict[Future[_SharedTrainReference | None], list[int]] = {}
     for group in shared_groups:
@@ -1180,6 +1235,7 @@ def _complete_anchored_folds(
             token, root, group_folds, request, initial_equity,
             (fold_slow_horizons or {}).get(group[0]),
             (fold_committee_weights or {}).get(group[0]),
+            committee_admissions={idx: (fold_committee_admission or {})[idx] for idx in group if idx in (fold_committee_admission or {})} or None,
         )] = group
     for reference_future in as_completed(reference_futures):
         group = reference_futures[reference_future]
@@ -1193,6 +1249,7 @@ def _complete_anchored_folds(
                 (fold_funding_carry or {}).get(idx),
                 (fold_committee_weights or {}).get(idx),
                 plans[idx], shared,
+                committee_admission=(fold_committee_admission or {}).get(idx),
             )] = idx
     for fold_future, idx in fold_e_futures.items():
         reports[idx] = fold_future.result()
@@ -1209,6 +1266,7 @@ def _run_folds_parallel(
     fold_fast_horizons: dict[int, tuple[int, str]] | None = None,
     fold_funding_carry: dict[int, tuple[int | None, int | None, str, float | None]] | None = None,
     fold_committee_weights: dict[int, dict[str, float]] | None = None,
+    fold_committee_admission: Mapping[int, FeatureAdmission] | None = None,
 ) -> tuple[MhsFoldReport, ...]:
     """Run all resolved anchored folds in phased V/R/E over a fork pool.
 
@@ -1246,10 +1304,12 @@ def _run_folds_parallel(
     ):
         validation_futures = _submit_fold_validation_phase(
             pool, token, root, folds, request, fold_slow_horizons, fold_committee_weights,
+            fold_committee_admission,
         )
         ordered = _complete_anchored_folds(
             pool, token, validation_futures, root, folds, request, initial_equity,
             fold_slow_horizons, fold_fast_horizons, fold_funding_carry, fold_committee_weights,
+            fold_committee_admission,
         )
     if telemetry is not None:
         for fold_report in ordered:

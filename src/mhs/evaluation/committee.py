@@ -22,9 +22,12 @@ from src.mhs.contracts import MhsBookReport
 from src.mhs.execution import mhs_ledger_pnl_multi_tier
 from src.mhs.features import (
     FEATURE_REGISTRY,
+    FeatureAdmission,
     FeatureSpec,
+    build_admitted_feature_books,
     build_feature_books,
     build_feature_books_by_boundary,
+    feature_admission_by_boundary,
     feature_registry_panel_columns,
     source_coverage_audit,
 )
@@ -54,6 +57,7 @@ from . import diagnostics
 
 _logger = logging.getLogger("MhsHorizonDiagnostic")
 
+
 def _committee_growth_headroom(
     gross_all: pd.DataFrame,
     tc_all: pd.DataFrame,
@@ -72,14 +76,15 @@ def _committee_growth_headroom(
     net = gross_all - tc_all * cost_bps
     weights = long_only_equal_risk_weights(net.loc[discovery_mask])
     discovery_net = score_weighted_net(
-        weights, gross_all.loc[discovery_mask], tc_all.loc[discovery_mask], cost_bps,
+        weights,
+        gross_all.loc[discovery_mask],
+        tc_all.loc[discovery_mask],
+        cost_bps,
     )
     reference_risk = float(discovery_net.std(ddof=1))
     if not np.isfinite(reference_risk) or reference_risk <= 0:
         return None
-    risk_grid = tuple(
-        sorted(reference_risk * m for m in COMMITTEE_GROWTH_RISK_GRID_MULTIPLIERS)
-    )
+    risk_grid = tuple(sorted(reference_risk * m for m in COMMITTEE_GROWTH_RISK_GRID_MULTIPLIERS))
     config = GrowthSizingConfig(
         risk_grid=risk_grid,
         reference_risk=reference_risk,
@@ -96,8 +101,7 @@ def _committee_growth_headroom(
     return {
         "reference_risk": reference_risk,
         "selected_risk": (
-            _statistics._finite_or_none(selected.selected_risk)
-            if selected.selected_risk is not None else None
+            _statistics._finite_or_none(selected.selected_risk) if selected.selected_risk is not None else None
         ),
         "median_log_growth": _statistics._finite_or_none(selected.median_log_growth),
         "mdd_breach_prob": _statistics._finite_or_none(selected.mdd_breach_prob),
@@ -107,6 +111,7 @@ def _committee_growth_headroom(
         "risk_constrained": headroom.risk_constrained,
         "discovery_bars": int(discovery_mask.sum()),
     }
+
 
 def _committee_member_books(
     close: pd.DataFrame,
@@ -139,8 +144,11 @@ def _committee_member_books(
             continue
         single = build_feature_books(
             [member_spec],
-            {col: close if col == "close" else (quote_vol if col == "quote_vol" else taker_buy_quote)
-             for col in member_spec.required_columns if col in ("close", "quote_vol", "taker_buy_quote")},
+            {
+                col: close if col == "close" else (quote_vol if col == "quote_vol" else taker_buy_quote)
+                for col in member_spec.required_columns
+                if col in ("close", "quote_vol", "taker_buy_quote")
+            },
             execution_mask,
             decision_grid,
             min_symbols=min_symbols,
@@ -189,11 +197,7 @@ def _committee_member_attribution(
 
         mdd = float((equity / equity.cummax() - 1.0).min()) if len(equity) > 0 else None
         sd = float(net_returns.std(ddof=1)) if len(net_returns) > 1 else float("nan")
-        sharpe = (
-            float(net_returns.mean() / sd * np.sqrt(periods_per_year))
-            if np.isfinite(sd) and sd > 0
-            else None
-        )
+        sharpe = float(net_returns.mean() / sd * np.sqrt(periods_per_year)) if np.isfinite(sd) and sd > 0 else None
         annual_turnover = float(turnover.mean() * periods_per_year) if len(turnover) > 0 else None
         net_ann = float(net_returns.mean() * periods_per_year) if len(net_returns) > 0 else None
 
@@ -282,18 +286,17 @@ def _committee_diagnostic(
     """
     if panels is None:
         panels = diagnostics._load_feature_panels(
-            root, start, end, grid_1h, aligned_symbols,
+            root,
+            start,
+            end,
+            grid_1h,
+            aligned_symbols,
             columns=feature_registry_panel_columns(
-                [
-                    spec for spec in FEATURE_REGISTRY
-                    if spec.name in set(COMMITTEE_MEMBERS)
-                ],
+                [spec for spec in FEATURE_REGISTRY if spec.name in set(COMMITTEE_MEMBERS)],
             ),
         )
     _assert_stage_rss_budget("committee_feature_panels", rss_budget_bytes, rss_reserve_bytes)
-    member_specs = [
-        spec for spec in FEATURE_REGISTRY if spec.name in set(COMMITTEE_MEMBERS)
-    ]
+    member_specs = [spec for spec in FEATURE_REGISTRY if spec.name in set(COMMITTEE_MEMBERS)]
 
     # B3: source-coverage pre-filter. Every required RAW source column present
     # in the panels is audited against the execution mask -- including an
@@ -317,12 +320,14 @@ def _committee_diagnostic(
             for year, cov in coverage.items():
                 if cov < FEATURE_MIN_COVERAGE:
                     failing_sources[column] = min(
-                        failing_sources.get(column, year), year,
+                        failing_sources.get(column, year),
+                        year,
                     )
         source_coverage[spec.name] = per_source
         _logger.debug(
             "[DATA] stage=committee_source_coverage member=%s excluded=%s min_coverage=%.3f",
-            spec.name, spec.name in source_excluded,
+            spec.name,
+            spec.name in source_excluded,
             min((c for cov in per_source.values() for c in cov.values()), default=1.0),
         )
         if failing_sources:
@@ -352,23 +357,34 @@ def _committee_diagnostic(
         if member_spec is None:
             continue
         _assert_stage_rss_budget(
-            f"committee_member_{name}", rss_budget_bytes, rss_reserve_bytes,
+            f"committee_member_{name}",
+            rss_budget_bytes,
+            rss_reserve_bytes,
         )
         single = build_feature_books(
-            [member_spec], panels, execution_mask, decision_grid, min_symbols=8,
+            [member_spec],
+            panels,
+            execution_mask,
+            decision_grid,
+            min_symbols=8,
         )
         if name not in single:
             continue
         book = single[name]
         (net_low, _), (net_high, _) = mhs_ledger_pnl_multi_tier(
-            book, opens, bar_funding, [bps_low, bps_high],
+            book,
+            opens,
+            bar_funding,
+            [bps_low, bps_high],
         )
         net_low_by_name[name] = net_low
         net_high_by_name[name] = net_high
         admitted.append(name)
         _logger.debug(
             "[ALGO] stage=committee_member member=%s net_low_mean=%.6f net_high_mean=%.6f",
-            name, float(net_low.mean()), float(net_high.mean()),
+            name,
+            float(net_low.mean()),
+            float(net_high.mean()),
         )
         del single, book
 
@@ -393,7 +409,10 @@ def _committee_diagnostic(
         net_low_panel = pd.DataFrame(net_low_by_name)
         net_high_panel = pd.DataFrame(net_high_by_name)
         gross_all, tc_all = decompose_cost(
-            net_low_panel, net_high_panel, bps_low, bps_high,
+            net_low_panel,
+            net_high_panel,
+            bps_low,
+            bps_high,
         )
 
     # B1: anchor the OOS block grid at COMMITTEE_OOS_START, never the raw
@@ -409,33 +428,33 @@ def _committee_diagnostic(
     skipped_blocks: list[dict[str, str]] = []
     if gross_all is not None:
         for i, t0 in enumerate(edges):
-            next_edge = (
-                edges[i + 1]
-                if i + 1 < len(edges)
-                else gross_all.index[-1] + pd.Timedelta(hours=1)
-            )
+            next_edge = edges[i + 1] if i + 1 < len(edges) else gross_all.index[-1] + pd.Timedelta(hours=1)
             train_rows = gross_all.index < (t0 - purge)
             if int(train_rows.sum()) < WALK_FORWARD_MIN_TRAIN_BARS:
-                skipped_blocks.append(
-                    {"block_start": t0.isoformat(), "reason": "insufficient_train"}
-                )
+                skipped_blocks.append({"block_start": t0.isoformat(), "reason": "insufficient_train"})
                 continue
             test_rows = (gross_all.index >= t0) & (gross_all.index < next_edge)
             if not bool(test_rows.any()):
-                skipped_blocks.append(
-                    {"block_start": t0.isoformat(), "reason": "no_test_bars"}
-                )
+                skipped_blocks.append({"block_start": t0.isoformat(), "reason": "no_test_bars"})
 
     per_tier: dict[str, dict[str, Any]] = {}
     for tier, cost_bps in MEASURED_EXECUTION_COST_TIERS_BPS.items():
         if gross_all is None:
             per_tier[tier] = {
-                "net_sharpe": None, "cagr": None, "mdd": None,
-                "logret": None, "bars": 0, "blocks": [],
+                "net_sharpe": None,
+                "cagr": None,
+                "mdd": None,
+                "logret": None,
+                "bars": 0,
+                "blocks": [],
             }
             continue
         wf = purged_walk_forward(
-            gross_all, tc_all, cost_bps, edges, purge,
+            gross_all,
+            tc_all,
+            cost_bps,
+            edges,
+            purge,
             min_train_bars=WALK_FORWARD_MIN_TRAIN_BARS,
             sizing_mode=sizing_mode,
         )
@@ -445,43 +464,44 @@ def _committee_diagnostic(
         total_logret = metrics["logret"]
         _logger.debug(
             "[EVAL] stage=committee_tier_summary tier=%s bars=%d sharpe=%s cagr=%s mdd=%s",
-            tier, len(wf), metrics["sharpe"], metrics["cagr"], metrics["mdd"],
+            tier,
+            len(wf),
+            metrics["sharpe"],
+            metrics["cagr"],
+            metrics["mdd"],
         )
         blocks: list[dict[str, Any]] = []
         for i, t0 in enumerate(edges):
-            next_edge = (
-                edges[i + 1] if i + 1 < len(edges)
-                else gross_all.index[-1] + pd.Timedelta(hours=1)
-            )
+            next_edge = edges[i + 1] if i + 1 < len(edges) else gross_all.index[-1] + pd.Timedelta(hours=1)
             block_wf = wf[(wf.index >= t0) & (wf.index < next_edge)]
             if block_wf.empty:
                 continue
             block_metrics = wealth_metrics(block_wf)
-            _block_rho1 = (
-                block_wf.autocorr(1) if len(block_wf) > 2 else float("nan")
+            _block_rho1 = block_wf.autocorr(1) if len(block_wf) > 2 else float("nan")
+            blocks.append(
+                {
+                    "block_start": t0.isoformat(),
+                    "bars": len(block_wf),
+                    "net_sharpe": _statistics._finite_or_none(block_metrics["sharpe"]),
+                    "cagr": _statistics._finite_or_none(block_metrics["cagr"]),
+                    "mdd": _statistics._finite_or_none(block_metrics["mdd"]),
+                    "logret": _statistics._finite_or_none(block_metrics["logret"]),
+                    "logret_share": (
+                        float(block_metrics["logret"] / total_logret)
+                        if np.isfinite(total_logret) and total_logret != 0 and np.isfinite(block_metrics["logret"])
+                        else None
+                    ),
+                    "return_autocorr_lag1": (float(_block_rho1) if np.isfinite(_block_rho1) else None),
+                }
             )
-            blocks.append({
-                "block_start": t0.isoformat(),
-                "bars": len(block_wf),
-                "net_sharpe": _statistics._finite_or_none(block_metrics["sharpe"]),
-                "cagr": _statistics._finite_or_none(block_metrics["cagr"]),
-                "mdd": _statistics._finite_or_none(block_metrics["mdd"]),
-                "logret": _statistics._finite_or_none(block_metrics["logret"]),
-                "logret_share": (
-                    float(block_metrics["logret"] / total_logret)
-                    if np.isfinite(total_logret)
-                    and total_logret != 0
-                    and np.isfinite(block_metrics["logret"])
-                    else None
-                ),
-                "return_autocorr_lag1": (
-                    float(_block_rho1) if np.isfinite(_block_rho1) else None
-                ),
-            })
             _logger.debug(
                 "[EVAL] stage=committee_block tier=%s block_start=%s bars=%d sharpe=%s cagr=%s mdd=%s rho1=%s",
-                tier, t0.isoformat(), len(block_wf),
-                block_metrics["sharpe"], block_metrics["cagr"], block_metrics["mdd"],
+                tier,
+                t0.isoformat(),
+                len(block_wf),
+                block_metrics["sharpe"],
+                block_metrics["cagr"],
+                block_metrics["mdd"],
                 _block_rho1,
             )
         per_tier[tier] = {
@@ -495,7 +515,9 @@ def _committee_diagnostic(
 
     growth_headroom = (
         _committee_growth_headroom(
-            gross_all, tc_all, MEASURED_EXECUTION_COST_TIERS_BPS["base"],
+            gross_all,
+            tc_all,
+            MEASURED_EXECUTION_COST_TIERS_BPS["base"],
         )
         if (growth_diagnostic and gross_all is not None)
         else None
@@ -531,10 +553,109 @@ def _committee_diagnostic(
     }
 
 
+def _committee_boundary_admission_and_weights(
+    close: pd.DataFrame,
+    quote_vol: pd.DataFrame,
+    taker_buy_quote: pd.DataFrame,
+    execution_mask: pd.DataFrame,
+    decision_grid: pd.DatetimeIndex,
+    min_symbols: int,
+    train_ends: Mapping[str, pd.Timestamp],
+    members: tuple[str, ...] | None = None,
+    *,
+    evidence_weighting: bool,
+) -> tuple[dict[str, FeatureAdmission], dict[str, dict[str, float]]]:
+    """Per-boundary committee admission and (optionally) evidence weights, from one feature build.
 
+    Every boundary admits members on rows strictly before its own train_end
+    (INV-WALK-FORWARD-INDEPENDENCE); the returned admission is the only member
+    set any book executing that boundary may use (I-FOLD-ADMISSION-PIT). With
+    ``evidence_weighting`` the admission is read from the same
+    ``build_feature_books_by_boundary`` call that fits the weights, so the two
+    can never disagree (I-COVERAGE-PIT); without it only the admission audit
+    runs and the weights mapping is empty.
 
-
-
+    Returns:
+        ``(admission_by_label, weights_by_label)``; ``weights_by_label[label]``
+        keys equal ``admission_by_label[label].admitted`` when weighting, else
+        ``{}`` overall.
+    """
+    _resolved = members or COMMITTEE_MEMBERS
+    _member_specs = [spec for spec in FEATURE_REGISTRY if spec.name in set(_resolved)]
+    _panels = {"close": close, "quote_vol": quote_vol, "taker_buy_quote": taker_buy_quote}
+    if not evidence_weighting:
+        admission_by_label = feature_admission_by_boundary(
+            _member_specs,
+            _panels,
+            execution_mask,
+            train_ends,
+        )
+        _distinct = {tuple(a.admitted) for a in admission_by_label.values()}
+        _counts = [len(a.admitted) for a in admission_by_label.values()]
+        _logger.info(
+            "[ALGO] committee_admission boundaries=%d evidence_weighting=%s distinct_member_sets=%d min_admitted=%d max_admitted=%d",
+            len(admission_by_label),
+            bool(evidence_weighting),
+            len(_distinct),
+            min(_counts, default=0),
+            max(_counts, default=0),
+        )
+        for _label, _adm in admission_by_label.items():
+            _excluded = [s.name for s in _member_specs if s.name not in set(_adm.admitted)]
+            _logger.debug(
+                "[ALGO] committee_admission boundary=%s cutoff=%s admitted=%s excluded=%s",
+                _label,
+                _adm.cutoff.isoformat(),
+                ",".join(_adm.admitted),
+                ",".join(_excluded),
+            )
+        return admission_by_label, {}
+    _books_by_boundary = build_feature_books_by_boundary(
+        _member_specs,
+        _panels,
+        execution_mask,
+        decision_grid,
+        train_ends,
+        min_symbols=min_symbols,
+    )
+    admission_by_label = {
+        label: FeatureAdmission(
+            cutoff=train_ends[label],
+            admitted=tuple(books.keys()),
+        )
+        for label, books in _books_by_boundary.items()
+    }
+    close_grid = close.reindex(decision_grid).ffill()
+    fwd_ret = np.log(close_grid).shift(-1) - np.log(close_grid)
+    weights_by_label: dict[str, dict[str, float]] = {}
+    for label, train_end in train_ends.items():
+        proxies: dict[str, pd.Series] = {}
+        for name, book in _books_by_boundary[label].items():
+            book_grid = book.reindex(decision_grid).fillna(0.0)
+            proxies[name] = (book_grid * fwd_ret).sum(axis=1)
+        # The proxy is observed at the NEXT decision, not its starting row.
+        train_mask = pd.Series(decision_grid, index=decision_grid).shift(-1) < train_end
+        weights_by_label[label] = train_evidence_weights(proxies, train_mask) if proxies else {}
+    _distinct = {tuple(a.admitted) for a in admission_by_label.values()}
+    _counts = [len(a.admitted) for a in admission_by_label.values()]
+    _logger.info(
+        "[ALGO] committee_admission boundaries=%d evidence_weighting=%s distinct_member_sets=%d min_admitted=%d max_admitted=%d",
+        len(admission_by_label),
+        bool(evidence_weighting),
+        len(_distinct),
+        min(_counts, default=0),
+        max(_counts, default=0),
+    )
+    for _label, _adm in admission_by_label.items():
+        _excluded = [s.name for s in _member_specs if s.name not in set(_adm.admitted)]
+        _logger.debug(
+            "[ALGO] committee_admission boundary=%s cutoff=%s admitted=%s excluded=%s",
+            _label,
+            _adm.cutoff.isoformat(),
+            ",".join(_adm.admitted),
+            ",".join(_excluded),
+        )
+    return admission_by_label, weights_by_label
 
 
 def _committee_evidence_weights_by_boundary(
@@ -554,27 +675,17 @@ def _committee_evidence_weights_by_boundary(
     training data strictly before its own boundary, so no fold sees future
     coverage or future fits (INV-WALK-FORWARD-INDEPENDENCE).
     """
-    _resolved = members or COMMITTEE_MEMBERS
-    _member_specs = [
-        spec for spec in FEATURE_REGISTRY
-        if spec.name in set(_resolved)
-    ]
-    _books_by_boundary = build_feature_books_by_boundary(
-        _member_specs,
-        {"close": close, "quote_vol": quote_vol, "taker_buy_quote": taker_buy_quote},
-        execution_mask, decision_grid, train_ends, min_symbols=min_symbols,
-    )
-    close_grid = close.reindex(decision_grid).ffill()
-    fwd_ret = np.log(close_grid).shift(-1) - np.log(close_grid)
-    result: dict[str, dict[str, float]] = {}
-    for label, train_end in train_ends.items():
-        proxies: dict[str, pd.Series] = {}
-        for name, book in _books_by_boundary[label].items():
-            book_grid = book.reindex(decision_grid).fillna(0.0)
-            proxies[name] = (book_grid * fwd_ret).sum(axis=1)
-        train_mask = pd.Series(decision_grid < train_end, index=decision_grid)
-        result[label] = train_evidence_weights(proxies, train_mask) if proxies else {}
-    return result
+    return _committee_boundary_admission_and_weights(
+        close,
+        quote_vol,
+        taker_buy_quote,
+        execution_mask,
+        decision_grid,
+        min_symbols,
+        train_ends,
+        members,
+        evidence_weighting=True,
+    )[1]
 
 
 def _committee_execution_book(
@@ -593,6 +704,8 @@ def _committee_execution_book(
     members: tuple[str, ...] | None = None,
     coverage_cutoff: pd.Timestamp | None = None,
     beta: pd.DataFrame | None = None,
+    *,
+    admission: FeatureAdmission | None = None,
 ) -> pd.DataFrame:
     """Build the k=5 committee capital book on the decision grid.
 
@@ -608,32 +721,62 @@ def _committee_execution_book(
     the raw book's own proxy return. ``target_gross`` rescales each decision row
     to an explicit gross. ``member_weights`` is an externally-fitted,
     already-normalized-or-not mapping this function applies and renormalizes over
-    admitted members. ``coverage_cutoff`` must match the boundary that produced
-    ``member_weights`` (I-COVERAGE-PIT) -- otherwise a member available when the
-    weights were fit can be silently dropped from the deployed book by a coverage
-    gap in a later OOS-only tail the fit itself never saw.
+    admitted members. ``admission`` (production path) is the boundary's frozen member set: books
+    are built for exactly those members with no in-window audit, and
+    ``member_weights`` (when given) must have been fit on that same boundary --
+    its keys must equal ``admission.admitted`` (I-COVERAGE-PIT). Without
+    ``admission`` the members are audited in place (``coverage_cutoff``
+    restricts that audit); that path is for report-only and legacy callers.
+
+    Raises:
+        ValueError: ``admission`` and ``coverage_cutoff`` both given (plus the
+            existing tranche/regime/carry errors).
+        CommitteeAdmissionIntegrityError: an admitted name outside the resolved
+            ``members``, or ``member_weights`` keys != ``admission.admitted``.
+        RuntimeError: no member admitted (existing message, unchanged).
     """
     if tranche_count < 1:
         raise ValueError(f"tranche_count must be >= 1, got {tranche_count}")
     if regime_adaptive_window is not None and regime_adaptive_window < 3:
-        raise ValueError(
-            f"regime_adaptive_window must be >= 3, got {regime_adaptive_window}"
-        )
+        raise ValueError(f"regime_adaptive_window must be >= 3, got {regime_adaptive_window}")
     _resolved = members or COMMITTEE_MEMBERS
-    _member_specs = [
-        spec for spec in FEATURE_REGISTRY
-        if spec.name in set(_resolved)
-    ]
-    _committee_books = build_feature_books(
-        _member_specs,
-        {"close": close, "quote_vol": quote_vol, "taker_buy_quote": taker_buy_quote},
-        execution_mask, decision_grid, min_symbols=min_symbols,
-        coverage_cutoff=coverage_cutoff,
-    )
-    if not _committee_books:
-        raise RuntimeError(
-            "committee_capital: no committee member admitted in this fold window"
+    if admission is not None and coverage_cutoff is not None:
+        raise ValueError("admission and coverage_cutoff are mutually exclusive")
+    if admission is not None:
+        from .integrity import CommitteeAdmissionIntegrityError
+
+        _resolved_set = set(_resolved) & {spec.name for spec in FEATURE_REGISTRY}
+        for _name in admission.admitted:
+            if _name not in _resolved_set:
+                raise CommitteeAdmissionIntegrityError(
+                    f"committee admission {list(admission.admitted)} outside resolved members {sorted(_resolved_set)}"
+                )
+        if member_weights is not None and set(member_weights.keys()) != set(admission.admitted):
+            raise CommitteeAdmissionIntegrityError(
+                f"committee member_weights keys {sorted(member_weights.keys())} != admission {list(admission.admitted)}"
+            )
+        if len(admission.admitted) == 0:
+            raise RuntimeError("committee_capital: no committee member admitted in this fold window")
+        _admission_specs = [spec for spec in FEATURE_REGISTRY if spec.name in set(admission.admitted)]
+        _committee_books = build_admitted_feature_books(
+            _admission_specs,
+            {"close": close, "quote_vol": quote_vol, "taker_buy_quote": taker_buy_quote},
+            execution_mask,
+            decision_grid,
+            min_symbols=min_symbols,
         )
+    else:
+        _member_specs = [spec for spec in FEATURE_REGISTRY if spec.name in set(_resolved)]
+        _committee_books = build_feature_books(
+            _member_specs,
+            {"close": close, "quote_vol": quote_vol, "taker_buy_quote": taker_buy_quote},
+            execution_mask,
+            decision_grid,
+            min_symbols=min_symbols,
+            coverage_cutoff=coverage_cutoff,
+        )
+    if not _committee_books:
+        raise RuntimeError("committee_capital: no committee member admitted in this fold window")
     if member_weights is not None:
         admitted = {n: max(0.0, member_weights.get(n, 0.0)) for n in _committee_books}
         total = sum(admitted.values())
@@ -683,7 +826,8 @@ def _committee_execution_book(
             raise ValueError(f"carry_weight must be in [0.0, 1.0), got {carry_weight}")
         unit_committee = scale_book_to_target_gross(result, 1.0)
         unit_carry = scale_book_to_target_gross(
-            carry_book.reindex(result.index).fillna(0.0), 1.0,
+            carry_book.reindex(result.index).fillna(0.0),
+            1.0,
         )
         result = (1.0 - carry_weight) * unit_committee + carry_weight * unit_carry
     if target_gross is None:

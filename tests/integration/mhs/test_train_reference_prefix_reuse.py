@@ -424,6 +424,9 @@ def test_corwin_schultz_keeps_bound(prefix_market, independent_refs, monkeypatch
 
 @pytest.mark.slow
 def test_committee_capital_keeps_bound_or_falls_back(tmp_path_factory, monkeypatch) -> None:
+    from src.mhs import research_go as _research_go
+    from src.mhs.features import FeatureAdmission
+
     root = tmp_path_factory.mktemp("prefix_tbq")
     _write_mhs_market(root, n_hours=4400, include_taker_buy_quote=True)
     _write_3m_cache(root)
@@ -435,10 +438,21 @@ def test_committee_capital_keeps_bound_or_falls_back(tmp_path_factory, monkeypat
     funding, _ = _load_funding_series(_dev_symbols())
     folds = _folds()
     group = tuple((idx, fold) for idx, fold in enumerate(folds))
-    shared = _build_shared_train_reference(str(root), group, request, funding, 1.0, None, None)
+    _members = _research_go._resolved_committee_members(request)
+    admissions = {idx: FeatureAdmission(fold.train_end, _members) for idx, fold in group}
+    shared = _build_shared_train_reference(
+        str(root), group, request, funding, 1.0, None, None,
+        committee_admissions=admissions,
+    )
     assert shared is not None
     for idx, fold in enumerate(folds):
-        used = _reference_from_shared(str(root), fold, request, funding, 1.0, idx, None, None, shared)
-        independent = _fold_train_reference_returns(str(root), fold, request, funding, 1.0, idx, None, None)
+        used = _reference_from_shared(
+            str(root), fold, request, funding, 1.0, idx, None, None, shared,
+            committee_admission=admissions[idx],
+        )
+        independent = _fold_train_reference_returns(
+            str(root), fold, request, funding, 1.0, idx, None, None,
+            committee_admission=admissions[idx],
+        )
         pd.testing.assert_index_equal(used.index, independent.index, exact=True)
         assert float((used - independent).abs().max()) <= TRAIN_REFERENCE_PREFIX_RETURN_ATOL

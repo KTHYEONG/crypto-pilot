@@ -36,6 +36,7 @@ from src.mhs.evidence import (  # noqa: F401 -- legacy monkeypatch seam
     year_restricted_correlation,
 )
 from src.mhs.execution import mhs_ledger_pnl
+from src.mhs.features import FeatureAdmission
 from src.mhs.funding import funding_carry_execution_book
 from src.mhs.horizons import efficiency_ratio, horizon_log_return, realized_vol
 from src.mhs.params import (
@@ -69,6 +70,18 @@ def _fold_weights_from_boundaries(
     so early folds cannot borrow fits that saw their validation data.
     """
     return {i: dict(weights_by_boundary[f"fold_{i}"]) for i, _fold in enumerate(folds)}
+
+
+def _fold_admission_from_boundaries(
+    admission_by_boundary: Mapping[str, FeatureAdmission], folds: Sequence[Any],
+) -> dict[int, FeatureAdmission]:
+    """Map each fold to its own boundary admission (I-FOLD-ADMISSION-PIT).
+
+    Fold ``i`` executes exactly the members admitted strictly before its own
+    ``train_end`` (label ``fold_i``) -- the set that fit its weights -- and never
+    the top-level admission.
+    """
+    return {i: admission_by_boundary[f"fold_{i}"] for i, _fold in enumerate(folds)}
 
 
 def _report_only_panel_diagnostics(ctx: PipelineContext) -> None:
@@ -121,6 +134,7 @@ def build_committee(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
 
     ctx._committee_weights_by_boundary = {}
     ctx._fold_committee_weights = None
+    ctx._fold_committee_admission = None
 
     # Build growth envelope payload for the report
     envelope = _resolved_growth_envelope(ctx.config)
@@ -133,22 +147,21 @@ def build_committee(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
         "horizon_years": envelope.horizon_years,
         "leverage_ceiling": envelope.leverage_ceiling,
     }
-    if ctx.config.committee_capital and ctx.config.committee_evidence_weighting:
+    if ctx.config.committee_capital:
+        _folds = resolved_anchored_folds(ctx.config)
         _train_ends = {"top_level": COMMITTEE_OOS_START}
-        _train_ends.update({
-            f"fold_{_i}": _f.train_end
-            for _i, _f in enumerate(resolved_anchored_folds(ctx.config))
-        })
-        ctx._committee_weights_by_boundary = committee._committee_evidence_weights_by_boundary(
-            ctx.close, ctx.quote_vol, ctx.taker_buy_quote, ctx.execution_mask, ctx.slow_grid, ctx.slow.min_symbols, _train_ends,
-            members=_research_go._resolved_committee_members(ctx.config),
+        _train_ends.update({f"fold_{_i}": _f.train_end for _i, _f in enumerate(_folds)})
+        _admission_by_boundary, _weights_by_boundary = committee._committee_boundary_admission_and_weights(
+            ctx.close, ctx.quote_vol, ctx.taker_buy_quote, ctx.execution_mask, ctx.slow_grid, ctx.slow.min_symbols,
+            _train_ends, members=_research_go._resolved_committee_members(ctx.config),
+            evidence_weighting=ctx.config.committee_evidence_weighting,
         )
-        # Each anchored-purged fold validates its OWN boundary mix
-        # (INV-WALK-FORWARD-INDEPENDENCE): the top-level deployed mix is used
-        # for the deployed blend only, never replicated across folds.
-        ctx._fold_committee_weights = _fold_weights_from_boundaries(
-            ctx._committee_weights_by_boundary, resolved_anchored_folds(ctx.config),
-        )
+        ctx._fold_committee_admission = _fold_admission_from_boundaries(_admission_by_boundary, _folds)
+        if ctx.config.committee_evidence_weighting:
+            ctx._committee_weights_by_boundary = _weights_by_boundary
+            ctx._fold_committee_weights = _fold_weights_from_boundaries(
+                ctx._committee_weights_by_boundary, _folds,
+            )
     if ctx.config.committee_capital:
         # RC-4: the reported blend is the committee execution book, not the
         # frozen momentum formula. Un-scaled copy feeds the concurrent replay
@@ -164,7 +177,6 @@ def build_committee(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
             member_weights=(ctx._committee_weights_by_boundary.get("top_level") if ctx.config.committee_evidence_weighting else None),
             carry_book=funding_carry_execution_book(ctx.bar_funding, ctx.execution_mask, FUNDING_CARRY_SLEEVE_LOOKBACK_HOURS, ctx.slow_grid, ctx.config.committee_tranche_count, ctx.slow.min_symbols) if ctx.config.funding_carry_sleeve else None, carry_weight=ctx.config.funding_carry_weight if ctx.config.funding_carry_sleeve else 0.0,
             members=_research_go._resolved_committee_members(ctx.config),
-            coverage_cutoff=COMMITTEE_OOS_START,
             beta=(
                 causal_market_beta(
                     ctx.log_close, ctx.eligible,
@@ -173,6 +185,7 @@ def build_committee(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
                 if ctx.config.beta_neutralize
                 else None
             ),
+            admission=_admission_by_boundary["top_level"],
         ).reindex(ctx.grid_1h).ffill().fillna(0.0)
         ctx.committee_execution_book = ctx.blend_1h
         # Build per-member attribution books (I5: observational only)

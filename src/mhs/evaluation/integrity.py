@@ -14,6 +14,7 @@ from src.mhs.execution.integrity import replay_ledger_certified as replay_ledger
 from src.mhs.params import PNL_VOL_TARGET_BURN_IN_DAYS
 from src.mhs.research_go import (
     GO_REASON_CAPITAL_BREACH,
+    GO_REASON_COMMITTEE_ADMISSION_NOT_PIT,
     GO_REASON_EXECUTION_GAP,
     GO_REASON_INVALID_PRIMARY,
     GO_REASON_NONFINITE_EQUITY,
@@ -21,6 +22,15 @@ from src.mhs.research_go import (
 )
 from src.mhs.resources import MhsResourceAdmissionError
 from src.mhs.types import ExecutionSpec
+
+
+class CommitteeAdmissionIntegrityError(DataIntegrityError):
+    """Committee member admission is missing, not point-in-time, or not the one that fit the weights.
+
+    Raised before any book is built so a fold can never execute a member set
+    decided on data after its own boundary; classified by type (never by
+    message keywords) to ``GO_REASON_COMMITTEE_ADMISSION_NOT_PIT``.
+    """
 
 
 def _assert_cache_required_ledger_valid(
@@ -56,6 +66,8 @@ def _classify_execution_failure(exc: BaseException) -> str:
     """
     if isinstance(exc, MhsResourceAdmissionError):
         return GO_REASON_RESOURCE_BREACH
+    if isinstance(exc, CommitteeAdmissionIntegrityError):
+        return GO_REASON_COMMITTEE_ADMISSION_NOT_PIT
     message = str(exc).lower()
     if "pre-trade equity" in message or "capital" in message or "equity must be" in message:
         return GO_REASON_CAPITAL_BREACH
