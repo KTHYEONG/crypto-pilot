@@ -1036,6 +1036,22 @@ def test_registry_path_is_mandatory(tmp_path, monkeypatch) -> None:
     assert list(tmp_path.iterdir()) == []
 
 
+def test_non_path_registry_rejected_before_registration(tmp_path, monkeypatch) -> None:
+    start, end = _stamps()
+    result = _result(tmp_path)
+    registry = tmp_path / "registry.sqlite3"
+    calls: list = []
+    _install_fake(monkeypatch)
+    monkeypatch.setattr(subprocess, "Popen", lambda *args, **kwargs: calls.append(args))
+    with pytest.raises(ValueError, match="registry_path must be a Path"):
+        sup.run_mhs_process_backtest(
+            start=start, end=end, data_root=None, result_output=result, poll_seconds=0.05,
+            registry_path=str(registry),  # type: ignore[arg-type]
+        )
+    assert calls == []
+    assert not registry.exists()
+
+
 def test_explicit_registry_receives_run_and_nothing_else(tmp_path, monkeypatch) -> None:
     from src.common.paths import BACKTESTS_DIR
 
