@@ -177,29 +177,52 @@ def test_staggered_listing_drift_stays_within_bound(prefix_market, tmp_path_fact
     assert calls["n"] == 0
 
 
+def _scale_prices_after(dest: Path, cutoff: pd.Timestamp) -> None:
+    for sub in ("1h", "3m"):
+        for path in sorted((dest / sub).glob("*.parquet")):
+            frame = pd.read_parquet(path)
+            mask = pd.to_datetime(frame["timestamp"], unit="ms", utc=True) > cutoff
+            for col in ("open", "high", "low", "close"):
+                if col in frame.columns:
+                    frame.loc[mask, col] = frame.loc[mask, col] * 1.37
+            frame.to_parquet(path)
+
+
+def _truncate_symbol_after(dest: Path, symbol: str, cutoff: pd.Timestamp) -> None:
+    for path in sorted(dest.glob(f"*/{symbol}.parquet")):
+        frame = pd.read_parquet(path)
+        frame.loc[pd.to_datetime(frame["timestamp"], unit="ms", utc=True) <= cutoff].to_parquet(path)
+
+
+def test_price_corruption_after_train_end_leaves_shared_prefix_unchanged(
+    prefix_market, independent_refs, tmp_path_factory, monkeypatch,
+) -> None:
+    """Certified shared replay over corrupted future prices still yields F0's uncorrupted reference via the slice path."""
+    root, request, funding = prefix_market
+    dest = _copy_market(root, tmp_path_factory, "corrupt_prices")
+    _scale_prices_after(dest, _TES[0])
+    _point_marks_at(dest, monkeypatch)
+    folds = _folds()
+    group = tuple((idx, fold) for idx, fold in enumerate(folds))
+    shared = _build_shared_train_reference(str(dest), group, request, funding, 1.0, None, None)
+    assert shared is not None
+    used = _reference_from_shared(str(dest), folds[0], request, funding, 1.0, 0, None, None, shared)
+    pd.testing.assert_index_equal(used.index, independent_refs[0].index, exact=True)
+    assert float((used - independent_refs[0]).abs().max()) <= TRAIN_REFERENCE_PREFIX_RETURN_ATOL
+
+
 def test_corrupting_data_after_train_end_leaves_used_reference_unchanged(
     prefix_market, independent_refs, tmp_path_factory, monkeypatch,
 ) -> None:
     root, request, funding = prefix_market
     dest = _copy_market(root, tmp_path_factory, "corrupt")
     te0 = _TES[0]
-    epoch = pd.Timestamp("1970-01-01", tz="UTC")
-    for sub in ("1h", "3m"):
-        for path in sorted((dest / sub).glob("*.parquet")):
-            frame = pd.read_parquet(path)
-            idx = pd.to_datetime(frame["timestamp"], unit="ms", utc=True)
-            mask = idx > te0
-            for col in ("open", "high", "low", "close"):
-                if col in frame.columns:
-                    frame.loc[mask, col] = frame.loc[mask, col] * 1.37
-            frame.to_parquet(path)
+    _scale_prices_after(dest, te0)
     syms = _dev_symbols()
     frame = pd.read_parquet(dest / "funding" / f"{syms[0]}.parquet")
     idx = pd.to_datetime(frame["timestamp"], unit="ms", utc=True)
     frame.loc[idx <= te0 + pd.Timedelta(days=2)].to_parquet(dest / "funding" / f"{syms[0]}.parquet")
-    frame2 = pd.read_parquet(dest / "funding" / f"{syms[1]}.parquet")
-    idx2 = pd.to_datetime(frame2["timestamp"], unit="ms", utc=True)
-    frame2.loc[idx2 <= te0 + pd.Timedelta(days=5)].to_parquet(dest / "funding" / f"{syms[1]}.parquet")
+    _truncate_symbol_after(dest, syms[1], te0 + pd.Timedelta(days=5))
     _point_marks_at(dest, monkeypatch)
     corrupt_funding, _ = _load_funding_series(syms)
     folds = _folds()
