@@ -713,3 +713,178 @@ def test_venue_rules_cli_prints_written_snapshot_path(tmp_path, monkeypatch, cap
     data_mod._venue_rules(argparse.Namespace())
 
     assert "v.json.gz" in capsys.readouterr().out
+
+
+def _settlement_cli_lake(root) -> None:
+    import pandas as pd
+
+    t0 = pd.Timestamp("2025-01-01T00:00:00Z")
+    stamps = [int((t0 + pd.Timedelta(minutes=3 * i)).value // 10**6) for i in range(20)]
+    flat = [int((t0 + pd.Timedelta(minutes=3 * (20 + i))).value // 10**6) for i in range(100)]
+    (root / "ohlcv" / "3m").mkdir(parents=True)
+    pd.DataFrame({
+        "timestamp": stamps + flat,
+        "open": [2.0] * 120, "high": [2.0] * 120, "low": [2.0] * 120,
+        "close": [2.0] * 120, "quote_vol": [10.0] * 20 + [0.0] * 100,
+    }).to_parquet(root / "ohlcv" / "3m" / "FLATUSDT.parquet", index=False)
+    (root / "ohlcv" / "1h").mkdir(parents=True)
+    hour = [int((t0 + pd.Timedelta(hours=i)).value // 10**6) for i in range(5)]
+    pd.DataFrame({
+        "timestamp": hour,
+        "open": [2.0] * 5, "high": [2.0] * 5, "low": [2.0] * 5,
+        "close": [2.0] * 5, "volume": [5.0] + [0.0] * 4,
+        "quote_vol": [10.0] + [0.0] * 4,
+    }).to_parquet(root / "ohlcv" / "1h" / "FLATUSDT.parquet", index=False)
+
+
+def test_build_settlement_registry_dry_run_writes_nothing(tmp_path, monkeypatch, caplog) -> None:
+    from src.common import paths as cfg
+    from src.mhs.instrument_settlements import (
+        EMPTY_SETTLEMENT_REGISTRY,
+        default_instrument_settlement_registry_path,
+    )
+
+    _settlement_cli_lake(tmp_path)
+    monkeypatch.setattr(cfg, "FUTURES_DATA_DIR", tmp_path, raising=False)
+    monkeypatch.setattr(
+        "src.mhs.instrument_settlements.load_instrument_settlement_registry",
+        lambda path=None: EMPTY_SETTLEMENT_REGISTRY,
+    )
+    committed = default_instrument_settlement_registry_path().read_bytes()
+    with caplog.at_level("INFO", logger="src.cli.commands.data"):
+        args = _mhs_parser().parse_args(
+            ["data", "build-settlement-registry", "--horizon", "2025-01-02T00:00:00Z"]
+        )
+        args.handler(args)
+    assert default_instrument_settlement_registry_path().read_bytes() == committed
+    assert not (tmp_path / "registry.jsonl").exists()
+    assert "stage=build_settlement_registry" in caplog.text
+
+
+def test_build_settlement_registry_write_replaces_registry(tmp_path, monkeypatch) -> None:
+    from src.common import paths as cfg
+    from src.mhs.instrument_settlements import (
+        EMPTY_SETTLEMENT_REGISTRY,
+        parse_instrument_settlement_registry,
+    )
+
+    _settlement_cli_lake(tmp_path)
+    monkeypatch.setattr(cfg, "FUTURES_DATA_DIR", tmp_path, raising=False)
+    monkeypatch.setattr(
+        "src.mhs.instrument_settlements.load_instrument_settlement_registry",
+        lambda path=None: EMPTY_SETTLEMENT_REGISTRY,
+    )
+    target = tmp_path / "committed.jsonl"
+    monkeypatch.setattr(
+        "src.mhs.instrument_settlements.default_instrument_settlement_registry_path",
+        lambda: target,
+    )
+    args = _mhs_parser().parse_args(
+        ["data", "build-settlement-registry", "--horizon", "2025-01-02T00:00:00Z", "--write"]
+    )
+    args.handler(args)
+    registry = parse_instrument_settlement_registry(target.read_bytes(), source=str(target))
+    assert [r.symbol for r in registry.settlements] == ["FLATUSDT"]
+
+
+def test_build_settlement_registry_bootstraps_without_committed(tmp_path, monkeypatch, caplog) -> None:
+    from src.common import paths as cfg
+    from src.common.errors import DataIntegrityError
+
+    _settlement_cli_lake(tmp_path)
+    monkeypatch.setattr(cfg, "FUTURES_DATA_DIR", tmp_path, raising=False)
+
+    def _missing(path=None):
+        raise DataIntegrityError("settlement registry unreadable: gone")
+
+    monkeypatch.setattr(
+        "src.mhs.instrument_settlements.load_instrument_settlement_registry", _missing,
+    )
+    monkeypatch.setattr(
+        "src.mhs.instrument_settlements.default_instrument_settlement_registry_path",
+        lambda: tmp_path / "absent.jsonl",
+    )
+    with caplog.at_level("INFO", logger="src.cli.commands.data"):
+        args = _mhs_parser().parse_args(
+            ["data", "build-settlement-registry", "--horizon", "2025-01-02T00:00:00Z"]
+        )
+        args.handler(args)
+    assert "NO_COMMITTED_REGISTRY" in caplog.text
+    assert not (tmp_path / "absent.jsonl").exists()
+
+
+def test_build_settlement_registry_refuses_corrupt_committed(tmp_path, monkeypatch) -> None:
+    import pytest
+
+    from src.common import paths as cfg
+    from src.common.errors import DataIntegrityError
+
+    _settlement_cli_lake(tmp_path)
+    monkeypatch.setattr(cfg, "FUTURES_DATA_DIR", tmp_path, raising=False)
+    corrupt = tmp_path / "corrupt.jsonl"
+    corrupt.write_bytes(b"{oops")
+    monkeypatch.setattr(
+        "src.mhs.instrument_settlements.default_instrument_settlement_registry_path",
+        lambda: corrupt,
+    )
+    args = _mhs_parser().parse_args(
+        ["data", "build-settlement-registry", "--horizon", "2025-01-02T00:00:00Z"]
+    )
+    with pytest.raises(DataIntegrityError):
+        args.handler(args)
+
+
+def test_build_settlement_registry_reports_unresolved_and_writes_output(
+    tmp_path, monkeypatch, caplog,
+) -> None:
+    import pandas as pd
+
+    from src.common import paths as cfg
+    from src.mhs.instrument_settlements import (
+        EMPTY_SETTLEMENT_REGISTRY,
+        parse_instrument_settlement_registry,
+    )
+
+    _settlement_cli_lake(tmp_path)
+    t0 = pd.Timestamp("2025-01-01T00:00:00Z")
+    stamps = [int((t0 + pd.Timedelta(minutes=3 * i)).value // 10**6) for i in range(10)]
+    pd.DataFrame({
+        "timestamp": stamps,
+        "open": [7.0] * 10, "high": [7.0] * 10, "low": [7.0] * 10,
+        "close": [7.0] * 10, "quote_vol": [10.0] * 2 + [0.0] * 8,
+    }).to_parquet(tmp_path / "ohlcv" / "3m" / "THINUSDT.parquet", index=False)
+    monkeypatch.setattr(cfg, "FUTURES_DATA_DIR", tmp_path, raising=False)
+    monkeypatch.setattr(
+        "src.mhs.instrument_settlements.load_instrument_settlement_registry",
+        lambda path=None: EMPTY_SETTLEMENT_REGISTRY,
+    )
+    with caplog.at_level("INFO", logger="src.cli.commands.data"):
+        args = _mhs_parser().parse_args(
+            ["data", "build-settlement-registry", "--horizon", "2025-01-02T00:00:00Z"]
+        )
+        args.handler(args)
+    assert "unresolved symbol=THINUSDT" in caplog.text
+    out = tmp_path / "candidate.jsonl"
+    args = _mhs_parser().parse_args(
+        ["data", "build-settlement-registry", "--horizon", "2025-01-02T00:00:00Z",
+         "--symbol", "FLATUSDT", "--output", str(out)]
+    )
+    args.handler(args)
+    registry = parse_instrument_settlement_registry(out.read_bytes(), source=str(out))
+    assert [r.symbol for r in registry.settlements] == ["FLATUSDT"]
+
+
+@pytest.mark.parametrize("horizon", ["2025-01-02", "2025-01-02T02:00:00+02:00"])
+def test_settlement_cli_rejects_non_utc_horizons(tmp_path, monkeypatch, horizon) -> None:
+    from src.common.errors import DataIntegrityError
+    from src.mhs.instrument_settlements import EMPTY_SETTLEMENT_REGISTRY
+
+    _settlement_cli_lake(tmp_path)
+    monkeypatch.setattr("src.common.paths.FUTURES_DATA_DIR", tmp_path)
+    monkeypatch.setattr(
+        "src.mhs.instrument_settlements.load_instrument_settlement_registry",
+        lambda: EMPTY_SETTLEMENT_REGISTRY,
+    )
+    args = _mhs_parser().parse_args(["data", "build-settlement-registry", "--horizon", horizon])
+    with pytest.raises(DataIntegrityError, match="UTC"):
+        args.handler(args)

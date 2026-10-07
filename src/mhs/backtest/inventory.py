@@ -6,6 +6,7 @@ import logging
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import suppress
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 import numpy as np
@@ -45,6 +46,7 @@ from src.mhs.execution.contracts import (
 )
 from src.mhs.execution.specs import _stress_cost_execution_spec
 from src.mhs.execution.window_stream import _iter_mhs_execution_windows
+from src.mhs.instrument_settlements import settlement_registry_for_root
 from src.mhs.marks import _load_funding_series
 from src.mhs.params import (
     CLI_GROWTH_ENVELOPE_DEFAULT,
@@ -63,6 +65,7 @@ from src.mhs.resources import (
     _TreeMemorySampler,
     resolve_mhs_memory_budget,
 )
+from src.mhs.settlement_evidence import assert_settlement_registry_complete
 from src.mhs.types import ExecutionSpec
 
 if TYPE_CHECKING:
@@ -675,6 +678,8 @@ def evaluate_process_inventory_backtest(
             else pd.DatetimeIndex(targets.index + pd.Timedelta(hours=1))
         )
         columns = list(targets.columns)
+        root = data_root or str(FUTURES_DATA_DIR / "ohlcv")
+        assert_settlement_registry_complete(Path(root), columns, audit_end=end, registry=settlement_registry_for_root(root))
         _admit_process_stage(
             stage="process_replay_entry",
             estimated_bytes=_estimate_panel_bytes(len(targets), len(columns), 4),
@@ -683,7 +688,6 @@ def evaluate_process_inventory_backtest(
             initial_swap_bytes=run_swap_baseline,
         )
         funding_by_symbol, funding_failures = _load_funding_series(columns)
-        root = data_root or str(FUTURES_DATA_DIR / "ohlcv")
         window_start = targets.index[0]
         window_end = _execution_fence(targets)
         base_spec = ExecutionSpec()

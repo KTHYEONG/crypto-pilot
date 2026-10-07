@@ -112,6 +112,31 @@ def synthetic_market(tmp_path_factory) -> tuple[Path, pd.Timestamp]:
         else:
             setattr(statistics, name, value)
 
+@pytest.fixture(autouse=True)
+def _synthetic_settlement_registry(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Explain synthetic fixture lakes to the settlement-registry audit (spec 34 part 1).
+
+    Every replay entry point audits its census; fixture archives stop at the
+    fixture end (a collection horizon, not a delisting). The lazy resolver
+    supplies an explicit truncation registry for synthetic roots and keeps
+    production behaviour for the canonical lake.
+    """
+    from tests.fixtures.settlement_audit import settlement_registry_for_test_root
+
+    monkeypatch.setattr(
+        "src.mhs.pipeline.stages.panel.settlement_registry_for_root",
+        settlement_registry_for_test_root,
+    )
+    monkeypatch.setattr(
+        "src.mhs.frozen_research_run.settlement_registry_for_root",
+        settlement_registry_for_test_root,
+    )
+    monkeypatch.setattr(
+        "src.mhs.backtest.inventory.settlement_registry_for_root",
+        settlement_registry_for_test_root,
+    )
+
+
 @pytest.fixture(scope="session")
 def mhs_report_cache() -> Iterator[DiagnosticReportCache]:
     cache = DiagnosticReportCache()

@@ -390,7 +390,8 @@ def test_source_module_size_budget() -> None:
         "src/mhs/reporting/inventory.py": 741,
         "src/mhs/backtest/paths.py": 849,
         "src/mhs/backtest/journal.py": 1091,
-        "src/mhs/backtest/inventory.py": 873,
+        # spec 34 part 1: I6 settlement-registry audit gate before the replay stream.
+        "src/mhs/backtest/inventory.py": 880,
         "src/mhs/evaluation/windows.py": 712,
         # Unified MhsDiagnosticRequest carries per-field CLI/validation metadata as the single schema source (spec 10 parts 2-3).
         # Freeze the existing fold lifecycle; further growth requires decomposition.
@@ -482,7 +483,8 @@ def test_no_function_exceeds_length_budget() -> None:
         "src/mhs/execution/accumulator.py::_consume_append_ledger": 252,
         "src/mhs/execution/window_stream.py::_iter_mhs_execution_windows": 382,
         "src/mhs/backtest/paths.py::run_process_paths": 261,
-        "src/mhs/backtest/inventory.py::evaluate_process_inventory_backtest": 289,
+        # spec 34 part 1: I6 settlement-registry audit gate before the replay stream.
+        "src/mhs/backtest/inventory.py::evaluate_process_inventory_backtest": 293,
         "src/mhs/discovery.py::select_horizon_by_discovery_qualification": 270,
         "src/mhs/pipeline/stages/committee.py::build_committee": 278,
     }
