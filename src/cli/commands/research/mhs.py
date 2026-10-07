@@ -51,10 +51,11 @@ def _run_mhs_horizon_diagnostic(args: argparse.Namespace) -> None:
         )
         return
 
-    from src.common.paths import DATA_DIR
+    from src.common.paths import BACKTESTS_DIR, DATA_DIR
     from src.mhs.contracts import MhsOutputTier
     from src.mhs.pipeline.config import resolve_cli_request
     from src.mhs.pipeline.orchestrator import run_mhs_diagnostic
+    from src.mhs.preregistration import PROCEDURE_REGISTRY_PATH
     from src.mhs.report.persist import persist_mhs_horizon_diagnostic_report
 
     request = resolve_cli_request(explicit)
@@ -62,14 +63,17 @@ def _run_mhs_horizon_diagnostic(args: argparse.Namespace) -> None:
         import pandas as pd
 
         from src.mhs.preregistration import register_procedure
-        registration = register_procedure(request, now=pd.Timestamp.now(tz="UTC"))
+        registration = register_procedure(
+            request, now=pd.Timestamp.now(tz="UTC"),
+            registry_path=PROCEDURE_REGISTRY_PATH, history_dir=BACKTESTS_DIR,
+        )
         _logger.info("[EVAL] procedure_registered digest=%s effective_start=%s", registration.procedure_digest, registration.effective_start.isoformat())
         return
     from src.common.logging import LOG_DIR, setup_logger
     from src.mhs.telemetry import TELEMETRY_LOGGER_NAME
 
     setup_logger(TELEMETRY_LOGGER_NAME, log_dir=LOG_DIR)
-    report = run_mhs_diagnostic(request)
+    report = run_mhs_diagnostic(request, procedure_registry=PROCEDURE_REGISTRY_PATH, history_dir=BACKTESTS_DIR)
     persist_start = time.perf_counter()
     from uuid import uuid4
 
@@ -79,6 +83,8 @@ def _run_mhs_horizon_diagnostic(args: argparse.Namespace) -> None:
         report, report_path,
         tier=MhsOutputTier(args.output_tier),
         request=request,
+        history_dir=BACKTESTS_DIR,
+        procedure_registry=PROCEDURE_REGISTRY_PATH,
     )
     _logger.info(
         "[SYS] stage=persist_report elapsed_ms=%d",
