@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import logging
+
 import pandas as pd
 
 import src.market_data.services.futures_collection as collector_module
+from src.market_data.binance.futures import BinanceKlinePermanentError
 from src.market_data.services.futures_collection import (
     DataCollector,
     _fetch_months_parallel,
@@ -930,3 +933,144 @@ def test_vision_downloader_not_constructed_for_recent_only_windows(tmp_path, mon
     collector.ensure_ohlcv_data("BTCUSDT", "1h", "2026-09-01", "2026-09-02")
     collector.ensure_funding_data("BTCUSDT", "2026-09-01", "2026-09-02")
     assert fetched == {"ohlcv": 1, "funding": 1}
+
+
+_WIRING_NOW = pd.Timestamp("2026-09-14T00:10:00Z")
+
+
+def _wiring_ms(ts: str) -> int:
+    return int(pd.Timestamp(ts).value // 10**6)
+
+
+def _wiring_klines(stamps: list[str], close: float = 1.0) -> pd.DataFrame:
+    return pd.DataFrame({
+        "timestamp": [_wiring_ms(s) for s in stamps],
+        "open": 1.0, "high": 2.0, "low": 1.0, "close": close, "volume": 1.0,
+        "quote_vol": 1.0, "taker_buy_base_volume": 0.5, "taker_buy_quote_volume": 0.5,
+    })
+
+
+def _wiring_collector(tmp_path, monkeypatch, vision: type) -> tuple[DataCollector, object, object]:
+    ohlcv_target = tmp_path / "futures" / "ohlcv" / "1h" / "XUSDT.parquet"
+    funding_target = tmp_path / "futures" / "funding" / "XUSDT.parquet"
+    funding_target.parent.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(collector_module, "_utc_now", lambda: _WIRING_NOW)
+    monkeypatch.setattr(collector_module, "BinanceVisionDownloader", vision)
+    monkeypatch.setattr(DataCollector, "_cache_path", lambda self, symbol, tf: ohlcv_target)
+    monkeypatch.setattr(collector_module, "funding_path", lambda symbol: funding_target)
+    return DataCollector(), ohlcv_target, funding_target
+
+
+class _FailingVision:
+    def fetch_klines_archive_monthly(self, symbol, timeframe, year, month):
+        raise RuntimeError(f"archive {year}-{month:02d} unavailable")
+
+    def fetch_funding_rate_monthly(self, symbol, year, month):
+        raise RuntimeError(f"archive {year}-{month:02d} unavailable")
+
+
+def test_ohlcv_rest_tail_overrides_cached_duplicate_bar(tmp_path, monkeypatch) -> None:
+    from src.market_data.storage.ohlcv import write_ohlcv
+
+    collector, cache, _ = _wiring_collector(tmp_path, monkeypatch, _FailingVision)
+    # Given: cached bar T=22:00 close=1.0; REST tail re-serves T (closed) with close=2.0
+    write_ohlcv(cache, _wiring_klines(["2026-09-13T20:00Z", "2026-09-13T21:00Z", "2026-09-13T22:00Z"]), timeframe="1h")
+    collector.client.fetch_ohlcv_with_taker = lambda *a, **k: _wiring_klines(
+        ["2026-09-13T22:00Z", "2026-09-13T23:00Z"], close=2.0
+    )
+    # When
+    collector.ensure_ohlcv_data("XUSDT", "1h", "2026-09-13T20:00:00Z", "2026-09-14T00:10:00Z")
+    # Then: REST wins (keep="last") and T is not duplicated (write_ohlcv does not dedupe 1h)
+    persisted = pd.read_parquet(cache)
+    t_ms = _wiring_ms("2026-09-13T22:00Z")
+    assert persisted["timestamp"].is_unique
+    assert persisted.loc[persisted["timestamp"] == t_ms, "close"].tolist() == [2.0]
+    assert persisted["timestamp"].max() == _wiring_ms("2026-09-13T23:00Z")
+
+
+def test_funding_cache_wins_over_refetched_duplicate_settlement(tmp_path, monkeypatch) -> None:
+    collector, _, target = _wiring_collector(tmp_path, monkeypatch, _FailingVision)
+    # Given: cache ends at T=16:00 (0.0001); the 00:00 settlement is missing, so the tail is stale
+    cached = ["2026-09-13T00:00Z", "2026-09-13T08:00Z", "2026-09-13T16:00Z"]
+    pd.DataFrame({"timestamp": [_wiring_ms(s) for s in cached], "funding_rate": [0.0001] * 3}).to_parquet(target, index=False)
+    rest_calls: list[tuple] = []
+
+    def _rest(*args, **kwargs) -> pd.DataFrame:
+        rest_calls.append(args)
+        return pd.DataFrame({
+            "timestamp": [_wiring_ms("2026-09-13T16:00Z"), _wiring_ms("2026-09-14T00:00Z")],
+            "funding_rate": [0.0009, 0.0002],
+        })
+
+    collector.client.fetch_funding_rate_history = _rest
+    # When
+    collector.ensure_funding_data("XUSDT", "2026-09-13T00:00:00Z", "2026-09-14T00:10:00Z")
+    # Then: cached rate at T survives (keep="first") and the newer settlement is appended
+    assert len(rest_calls) == 1
+    persisted = pd.read_parquet(target).set_index("timestamp")["funding_rate"]
+    assert persisted.index.is_unique
+    assert persisted.loc[_wiring_ms("2026-09-13T16:00Z")] == 0.0001
+    assert persisted.loc[_wiring_ms("2026-09-14T00:00Z")] == 0.0002
+    assert len(persisted) == 4
+
+
+def test_ohlcv_vision_month_failure_is_logged_and_run_completes(tmp_path, monkeypatch, caplog) -> None:
+    collector, cache, _ = _wiring_collector(tmp_path, monkeypatch, _FailingVision)
+    # Given: empty cache; July 2026 is before the archive cutoff (2026-07-31), so it is planned
+    collector.client.fetch_ohlcv_with_taker = lambda *a, **k: _wiring_klines(["2026-07-31T00:00Z", "2026-07-31T01:00Z"])
+    caplog.set_level(logging.WARNING, logger="DataCollector")
+    # When
+    collector.ensure_ohlcv_data("XUSDT", "1h", "2026-07-31T00:00:00Z", "2026-07-31T02:00:00Z")
+    # Then
+    warnings = [r for r in caplog.records if r.name == "DataCollector" and r.levelno == logging.WARNING]
+    assert any("Error fetching vision data for" in r.getMessage() for r in warnings)
+    assert pd.read_parquet(cache)["timestamp"].tolist() == [_wiring_ms("2026-07-31T00:00Z"), _wiring_ms("2026-07-31T01:00Z")]
+
+
+def test_funding_vision_month_failure_is_logged_and_run_completes(tmp_path, monkeypatch, caplog) -> None:
+    collector, _, target = _wiring_collector(tmp_path, monkeypatch, _FailingVision)
+    rest = [_wiring_ms("2026-07-31T00:00Z"), _wiring_ms("2026-07-31T08:00Z")]
+    collector.client.fetch_funding_rate_history = lambda *a, **k: pd.DataFrame(
+        {"timestamp": rest, "funding_rate": [0.0001, 0.0002]}
+    )
+    caplog.set_level(logging.WARNING, logger="DataCollector")
+    # When
+    collector.ensure_funding_data("XUSDT", "2026-07-31T00:00:00Z", "2026-07-31T16:00:00Z")
+    # Then
+    warnings = [r for r in caplog.records if r.name == "DataCollector" and r.levelno == logging.WARNING]
+    assert any("Error fetching vision funding data for" in r.getMessage() for r in warnings)
+    assert pd.read_parquet(target)["timestamp"].tolist() == rest
+
+
+def test_ohlcv_permanent_kline_error_is_logged_not_raised(tmp_path, monkeypatch, caplog) -> None:
+    july = ["2026-07-30T22:00Z", "2026-07-30T23:00Z"]
+
+    class _JulyVision:
+        def fetch_klines_archive_monthly(self, symbol, timeframe, year, month):
+            assert (year, month) == (2026, 7)
+            n = len(july)
+            return pd.DataFrame({
+                "timestamp": [_wiring_ms(s) for s in july], "open": [1.0] * n, "high": [1.0] * n,
+                "low": [1.0] * n, "close": [1.0] * n, "volume": [1.0] * n, "close_time": [0] * n,
+                "quote_vol": [1.0] * n, "no_trades": [1] * n, "taker_buy_base": [0.5] * n,
+                "taker_buy_quote": [0.5] * n, "ignore": [0] * n,
+            })
+
+    collector, cache, _ = _wiring_collector(tmp_path, monkeypatch, _JulyVision)
+    rest_calls: list[tuple] = []
+
+    def _rest(*args, **kwargs) -> pd.DataFrame:
+        rest_calls.append(args)
+        raise BinanceKlinePermanentError(
+            symbol="XUSDT", timeframe="1h", http_code=400, start_time_ms=0, end_time_ms=0, url="u",
+        )
+
+    collector.client.fetch_ohlcv_with_taker = _rest
+    caplog.set_level(logging.WARNING, logger="DataCollector")
+    # When
+    collector.ensure_ohlcv_data("XUSDT", "1h", "2026-07-30T22:00:00Z", "2026-08-01T00:00:00Z")
+    # Then
+    assert len(rest_calls) == 1
+    warnings = [r for r in caplog.records if r.name == "DataCollector" and r.levelno == logging.WARNING]
+    assert any("Permanent OHLCV API failure" in r.getMessage() for r in warnings)
+    assert pd.read_parquet(cache)["timestamp"].tolist() == [_wiring_ms(s) for s in july]
