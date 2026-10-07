@@ -335,6 +335,13 @@ def test_reconcile_mutating_derisk_with_booked_and_adopt(monkeypatch, tmp_path) 
         now=NOW,
     )
     assert out.derisk_reasons == ("reconciliation_breach",)
+    assert out.ledger_state.derisk_since == NOW
+    assert load_ledger(tmp_path / "l.json").derisk_since == NOW
+    records = [json.loads(line) for line in audit.path.read_text().splitlines()]
+    entered = [record for record in records if record["event"] == "derisk_entered"]
+    assert len(entered) == 1
+    assert entered[0]["force_close_auto_adopt"] == "off"
+    assert entered[0]["reasons"] == ["reconciliation_breach"]
 
 
 def test_reconcile_mutating_raise_when_derisk_disabled(monkeypatch, tmp_path) -> None:
@@ -460,17 +467,25 @@ def test_paper_absent_halts(tmp_path) -> None:
     settings = _paper_settings(tmp_path, "abs")
     audit = AuditLog(tmp_path / "audit.jsonl")
     state = LedgerState(positions={"AAAUSDT": Decimal("1")}, cash_usdt=Decimal("1000"))
-    with pytest.raises(DataIntegrityError, match="absent"):
+    ledger_path = tmp_path / "l.json"
+    save_ledger(ledger_path, state)
+    before = ledger_path.read_bytes()
+    with pytest.raises(DataIntegrityError, match="absent.*AAAUSDT"):
         _settle_paper_funding_and_delistings(
             settings,
             audit,
             ledger_state=state,
-            ledger_path=tmp_path / "l.json",
+            ledger_path=ledger_path,
             exchange_info={"symbols": []},
             run_id="20260824",
             decision_time=DECISION,
             now=NOW,
         )
+    assert ledger_path.read_bytes() == before
+    records = [json.loads(line) for line in audit.path.read_text().splitlines()]
+    assert [(record["event"], record["symbols"]) for record in records] == [
+        ("held_symbol_absent", ["AAAUSDT"])
+    ]
 
 
 @pytest.mark.parametrize("evidence", ["missing", "traded"])
@@ -703,3 +718,31 @@ def test_tax_fail_soft_paths(monkeypatch, tmp_path) -> None:
     assert records[0]["error"] == "watermark"
     assert records[1]["stage"] == "retention_gap"
     assert records[2]["error"] == "io"
+
+
+def test_observability_tail_failures_never_halt_live_cycle(monkeypatch, tmp_path) -> None:
+    from tests.unit.live._runner_stubs import StubOrderClient
+    from tests.unit.live.test_runner_risk_gates import _live_risk_env, _risk_artifact
+
+    artifact = _risk_artifact(tmp_path)
+    posted = _live_risk_env(monkeypatch, tmp_path, StubOrderClient())
+    settings = _live_settings(tmp_path, "tail")
+    save_ledger(Path(settings.ledger_path), LedgerState(positions={}, equity_high_water_mark=Decimal(0)))
+
+    def _raise(message: str):
+        def _fail(*a, **k):
+            raise OSError(message)
+
+        return _fail
+
+    monkeypatch.setattr(runner_mod, "append_portfolio_state", _raise("portfolio disk"))
+    monkeypatch.setattr(runner_mod, "collect_and_persist_live_tax", _raise("tax disk"))
+    report = runner_mod.run_shadow_cycle(settings, DECISION, artifact, now=NOW)
+    assert report.status == "COMPLETE"
+    assert report.intent_count == len(posted) == 2
+    records = [json.loads(line) for line in (tmp_path / "shadow_cycle.jsonl").read_text().splitlines()]
+    events = [record["event"] for record in records]
+    tail = ["portfolio_state_write_failed", "tax_ledger_write_failed", "cycle_complete"]
+    assert [event for event in events if event in tail] == tail
+    errors = {record["event"]: record.get("error") for record in records if record["event"] in tail[:2]}
+    assert errors == {"portfolio_state_write_failed": "portfolio disk", "tax_ledger_write_failed": "tax disk"}

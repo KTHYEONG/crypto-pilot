@@ -109,7 +109,8 @@ data/
   ├── venue_rules/                            # 바이낸스 유지증거금(MMR/cum) 브래킷 스냅샷
   ├── state/                                  # 24/7 라이브 영속 상태
   │   ├── live_fills/                         # 실제 체결 내역 (월별 파티션)
-  │   ├── live_tax_ledger/                    # 체결·소득 사실 원장 JSONL (Decimal, KST 연도·이동평균 요약, 세율 계산 없음)
+  │   ├── live_tax_ledger/                    # 모의(paper/shadow) 체결·소득 사실 원장 JSONL (Decimal, KST 연도·이동평균 요약, 세율 계산 없음)
+  │   ├── tax_ledger/<testnet|mainnet>/       # 라이브 거래소 계정 단위 세금 원장 (run id 교체와 무관, LIVE_TAX_LEDGER_DIR 명시 시 우선)
   │   └── live_orderbook/                     # 일별 5-depth 호가창 스냅샷
   └── manifest.json                           # SHA-256 지문 및 결손(NaN) 감사 매니페스트
 ```

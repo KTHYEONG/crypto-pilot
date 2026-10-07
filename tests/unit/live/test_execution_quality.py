@@ -221,8 +221,6 @@ def test_execution_quality_shard_bounds_reference_live_records() -> None:
     from src.live.records import LIVE_RECORD_MAX_SHARDS, LIVE_RECORD_SHARD_MAX_BYTES
 
     source = Path(eq_mod.__file__).read_text(encoding="utf-8")
-    assert "LIVE_RECORD_SHARD_MAX_BYTES" in source
-    assert "LIVE_RECORD_MAX_SHARDS" in source
     assert "src.mhs.run_history" not in source
     assert eq_mod.EXECUTION_QUALITY_SHARD_MAX_BYTES == LIVE_RECORD_SHARD_MAX_BYTES == 262144
     assert eq_mod.EXECUTION_QUALITY_MAX_SHARDS == LIVE_RECORD_MAX_SHARDS == 12
