@@ -18,7 +18,6 @@ COMPLEXITY_CEILINGS: Final[dict[str, int]] = {
     "src/backtests/migration.py::_migrate_run_source": 16,
     "src/backtests/migration.py::verify_legacy_history_migration": 26,
     "src/capture/config.py::__post_init__": 16,
-    "src/cli/commands/backtest.py::run_frozen_account_command": 24,
     "src/live/data_refresh.py::refresh_live_market_data": 34,
     "src/live/execution_quality.py::summarize_execution_quality": 19,
     "src/live/executor.py::_poll_active": 16,
