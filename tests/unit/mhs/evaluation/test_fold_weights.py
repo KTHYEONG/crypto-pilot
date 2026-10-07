@@ -127,7 +127,17 @@ def test_build_fold_target_weights_threads_panel_quarantine_to_loader(monkeypatc
 
     monkeypatch.setattr(fold_weights, "load_base_panel", _fake_loader)
     request = MhsDiagnosticRequest()
+    from src.mhs import research_go as _research_go
+    from src.mhs.features import FeatureAdmission as _FeatureAdmission
+
     dt = pd.Timestamp("2026-09-05", tz="UTC")
+    _admission = (
+        _FeatureAdmission(
+            dt - pd.Timedelta(days=400), _research_go._resolved_committee_members(request),
+        )
+        if request.committee_capital
+        else None
+    )
     fold = AnchoredPurgedFold(
         train_start=dt - pd.Timedelta(days=500), train_end=dt - pd.Timedelta(days=400),
         validation_start=dt - pd.Timedelta(days=30), validation_end=dt,
@@ -136,7 +146,7 @@ def test_build_fold_target_weights_threads_panel_quarantine_to_loader(monkeypatc
     quarantine = PanelQuarantine(protected=frozenset({"BTCUSDT"}))
 
     with pytest.raises(_StopError):
-        fold_weights._build_fold_target_weights("root", fold, request, {}, require_minute_roster=False, panel_quarantine=quarantine)
+        fold_weights._build_fold_target_weights("root", fold, request, {}, require_minute_roster=False, panel_quarantine=quarantine, committee_admission=_admission)
 
     assert captured["quarantine"] is quarantine
 
@@ -161,7 +171,17 @@ def test_build_fold_target_weights_threads_request_data_policy_to_loader(monkeyp
 
     monkeypatch.setattr(fold_weights, "load_base_panel", _fake_loader)
     request = MhsDiagnosticRequest(data_policy="zombie_mask_v1")
+    from src.mhs import research_go as _research_go_dp
+    from src.mhs.features import FeatureAdmission as _FeatureAdmissionDp
+
     dt = pd.Timestamp("2026-09-05", tz="UTC")
+    _admission_dp = (
+        _FeatureAdmissionDp(
+            dt - pd.Timedelta(days=400), _research_go_dp._resolved_committee_members(request),
+        )
+        if request.committee_capital
+        else None
+    )
     fold = AnchoredPurgedFold(
         train_start=dt - pd.Timedelta(days=500), train_end=dt - pd.Timedelta(days=400),
         validation_start=dt - pd.Timedelta(days=30), validation_end=dt,
@@ -169,7 +189,7 @@ def test_build_fold_target_weights_threads_request_data_policy_to_loader(monkeyp
     )
 
     with pytest.raises(_StopError):
-        fold_weights._build_fold_target_weights("root", fold, request, {}, require_minute_roster=False)
+        fold_weights._build_fold_target_weights("root", fold, request, {}, require_minute_roster=False, committee_admission=_admission_dp)
 
     assert captured["data_policy"] == "zombie_mask_v1"
 
@@ -257,11 +277,19 @@ def _committee_fold_panel():
 
 
 def _run_fold_target(request, base_panel, fold, funding):
+    from src.mhs import research_go as _research_go
     from src.mhs.evaluation.fold_weights import _build_fold_target_weights
+    from src.mhs.features import FeatureAdmission
 
+    admission = (
+        FeatureAdmission(fold.train_end, _research_go._resolved_committee_members(request))
+        if request.committee_capital
+        else None
+    )
     return _build_fold_target_weights(
         "root", fold, request, funding,
         base_panel=base_panel, require_minute_roster=False, panel_warmup_hours=24,
+        committee_admission=admission,
     )
 
 
@@ -393,3 +421,270 @@ def test_non_committee_fold_preserves_execution_order(monkeypatch) -> None:
         "fast_book", "execution_mask", "fast_tilt", "fast_execution",
         "slow_execution", "causal_beta", "slow_neutralize", "trend_position", "crash_tilt",
     ]
+
+
+# --- I-FOLD-ADMISSION-PIT: train-end-frozen committee fold admission ---------
+# Fixture per docs/specs/28_committee_fold_admission_pit_spec.md: in-memory
+# full-history synthetic panel (40 symbols, t(4) returns, taker_buy_quote),
+# long enough for train + purge + >=600h validation + FOLD_PANEL_WARMUP_HOURS.
+# Admission comes from production code on the full-history panels; targets are
+# built with base_panel=<full panel> and require_minute_roster=False.
+# T is the midpoint of the validation window floored to the day.
+
+_PIT_N_ROWS = 3600
+_PIT_TRAIN_END_POS = 2000
+_PIT_VALIDATION_START_POS = 2100
+_PIT_VALIDATION_END_POS = 2820  # 720h validation window
+_PIT_SYMBOLS = tuple(f"SYM{i:02d}" for i in range(40))
+
+
+def _pit_market(seed: int = 0):
+    import numpy as np
+    import pandas as pd
+
+    from src.mhs.evidence import AnchoredPurgedFold
+    from tests.fixtures.mhs_requests import research_baseline
+
+    idx = pd.date_range("2021-01-01", periods=_PIT_N_ROWS, freq="h", tz="UTC")
+    rng = np.random.default_rng(seed)
+    rets = rng.standard_t(df=4, size=(_PIT_N_ROWS, len(_PIT_SYMBOLS))) * 0.005
+    close = pd.DataFrame(
+        100.0 * np.exp(np.cumsum(rets, axis=0)), index=idx, columns=list(_PIT_SYMBOLS),
+    )
+    quote_vol = pd.DataFrame(
+        1e6 * (1.0 + 0.05 * rng.standard_normal((_PIT_N_ROWS, len(_PIT_SYMBOLS)))),
+        index=idx, columns=list(_PIT_SYMBOLS),
+    ).clip(lower=1e5)
+    taker_buy_quote = quote_vol * 0.55
+    panel = {
+        "close": close,
+        "open": close.copy(),
+        "quote_vol": quote_vol,
+        "taker_buy_quote": taker_buy_quote,
+    }
+    request = research_baseline(committee_capital=True, committee_member_set="flow_momentum")
+    fold = AnchoredPurgedFold(
+        idx[0],
+        idx[_PIT_TRAIN_END_POS],
+        idx[_PIT_VALIDATION_START_POS],
+        idx[_PIT_VALIDATION_END_POS],
+        24,
+        24,
+    )
+    funding = {s: pd.Series(0.0, index=idx) for s in _PIT_SYMBOLS}
+    midpoint = fold.validation_start + (fold.validation_end - fold.validation_start) / 2
+    decision_t = midpoint.floor("D")
+    return panel, fold, funding, request, decision_t
+
+
+def _pit_admission(panel, fold, request):
+    import pandas as pd
+
+    from src.mhs import research_go as _research_go
+    from src.mhs.evaluation.committee import _committee_boundary_admission_and_weights
+    from src.mhs.marks import _pit_execution_mask
+    from src.mhs.panel import liquid_half_eligibility
+    from src.mhs.params import (
+        UNIVERSE_ELIGIBILITY_LOOKBACK_BARS,
+        UNIVERSE_ELIGIBILITY_MIN_HISTORY_BARS,
+    )
+
+    eligible = liquid_half_eligibility(
+        panel["quote_vol"],
+        lookback_bars=UNIVERSE_ELIGIBILITY_LOOKBACK_BARS,
+        min_history_bars=UNIVERSE_ELIGIBILITY_MIN_HISTORY_BARS,
+    )
+    execution_mask = _pit_execution_mask(
+        panel["quote_vol"], eligible, request.execution_universe_size,
+    )
+    decision_grid = pd.date_range(
+        panel["close"].index[0], panel["close"].index[-1], freq="24h", tz="UTC",
+    )
+    admission_by_label, _ = _committee_boundary_admission_and_weights(
+        panel["close"], panel["quote_vol"], panel["taker_buy_quote"],
+        execution_mask, decision_grid, 8, {"fold": fold.train_end},
+        members=_research_go._resolved_committee_members(request),
+        evidence_weighting=False,
+    )
+    return admission_by_label["fold"]
+
+
+def _pit_targets(panel, fold, funding, request, admission, **kwargs):
+    from src.mhs.evaluation.fold_weights import _build_fold_target_weights
+
+    return _build_fold_target_weights(
+        "root", fold, request, funding,
+        base_panel=panel, require_minute_roster=False,
+        committee_admission=admission, **kwargs,
+    )
+
+
+def test_committee_fold_requires_admission() -> None:
+    import pytest
+
+    from src.mhs.evaluation.fold_weights import _build_fold_target_weights
+    from src.mhs.evaluation.integrity import CommitteeAdmissionIntegrityError
+
+    _, fold, funding, request, _ = _pit_market()
+    # Fails closed before any panel I/O: root does not exist and there is no
+    # base_panel, so a load error would surface first without the guard.
+    with pytest.raises(CommitteeAdmissionIntegrityError):
+        _build_fold_target_weights(
+            "/nonexistent/panel/root", fold, request, funding,
+            base_panel=None, require_minute_roster=False, committee_admission=None,
+        )
+
+
+def test_admission_cutoff_after_validation_start_fails_closed() -> None:
+    import pandas as pd
+    import pytest
+
+    from src.mhs.evaluation.integrity import CommitteeAdmissionIntegrityError
+    from src.mhs.features import FeatureAdmission
+
+    panel, fold, funding, request, _ = _pit_market()
+    admission = _pit_admission(panel, fold, request)
+    late = FeatureAdmission(
+        fold.validation_start + pd.Timedelta(hours=1), admission.admitted,
+    )
+    with pytest.raises(CommitteeAdmissionIntegrityError):
+        _pit_targets(panel, fold, funding, request, late)
+
+
+def test_admission_cutoff_must_equal_train_end() -> None:
+    import pandas as pd
+    import pytest
+
+    from src.mhs.evaluation.integrity import CommitteeAdmissionIntegrityError
+    from src.mhs.features import FeatureAdmission
+
+    panel, fold, funding, request, _ = _pit_market()
+    admission = _pit_admission(panel, fold, request)
+    # PIT (before validation_start) but a different boundary than the one that
+    # fit the member weights: still rejected (I-COVERAGE-PIT).
+    other_boundary = FeatureAdmission(
+        fold.train_end - pd.Timedelta(hours=24), admission.admitted,
+    )
+    with pytest.raises(CommitteeAdmissionIntegrityError):
+        _pit_targets(panel, fold, funding, request, other_boundary)
+    # cutoff == train_end succeeds.
+    targets, *_ = _pit_targets(panel, fold, funding, request, admission)
+    assert not targets.empty
+    assert targets.ne(0.0).any().any()
+
+
+def test_admission_without_committee_capital_rejected() -> None:
+    import pytest
+
+    from tests.fixtures.mhs_requests import research_baseline
+
+    panel, fold, funding, _, _ = _pit_market()
+    plain_request = research_baseline()
+    assert not plain_request.committee_capital
+    committee_request_panel, _, _, committee_request, _ = _pit_market()
+    admission = _pit_admission(committee_request_panel, fold, committee_request)
+    with pytest.raises(ValueError, match="committee_admission"):
+        _pit_targets(panel, fold, funding, plain_request, admission)
+
+
+def test_fold_targets_invariant_to_post_t_source_outage() -> None:
+    import numpy as np
+    import pandas as pd
+
+    panel, fold, funding, request, decision_t = _pit_market()
+    admission = _pit_admission(panel, fold, request)
+    base_targets, *_ = _pit_targets(panel, fold, funding, request, admission)
+
+    perturbed = {name: frame.copy() for name, frame in panel.items()}
+    post_t = perturbed["taker_buy_quote"].index > decision_t
+    perturbed["taker_buy_quote"].loc[post_t, list(_PIT_SYMBOLS[:20])] = np.nan
+
+    perturbed_admission = _pit_admission(perturbed, fold, request)
+    assert perturbed_admission == admission
+    perturbed_targets, *_ = _pit_targets(
+        perturbed, fold, funding, request, perturbed_admission,
+    )
+
+    base_pre = base_targets[base_targets.index <= decision_t]
+    perturbed_pre = perturbed_targets[perturbed_targets.index <= decision_t]
+    assert len(base_pre) > 0
+    assert base_pre.ne(0.0).any().any()
+    pd.testing.assert_frame_equal(perturbed_pre, base_pre, check_exact=True)
+
+    base_post = base_targets[base_targets.index > decision_t]
+    perturbed_post = perturbed_targets[perturbed_targets.index > decision_t]
+    assert len(base_post) > 0
+    assert not perturbed_post.equals(base_post)
+
+
+def test_fold_targets_invariant_to_truncation_at_t() -> None:
+    import pandas as pd
+
+    panel, fold, funding, request, decision_t = _pit_market()
+    admission = _pit_admission(panel, fold, request)
+    full_targets, *_ = _pit_targets(panel, fold, funding, request, admission)
+    truncated_targets, *_ = _pit_targets(
+        panel, fold, funding, request, admission, decision_end=decision_t,
+    )
+    pd.testing.assert_frame_equal(
+        truncated_targets, full_targets[full_targets.index <= decision_t],
+        check_exact=True,
+    )
+
+
+def test_fold_targets_invariant_to_post_t_value_corruption() -> None:
+    import numpy as np
+    import pandas as pd
+
+    panel, fold, funding, request, decision_t = _pit_market()
+    admission = _pit_admission(panel, fold, request)
+    base_targets, *_ = _pit_targets(panel, fold, funding, request, admission)
+
+    rng = np.random.default_rng(1234)
+    corrupted = {name: frame.copy() for name, frame in panel.items()}
+    for name, frame in corrupted.items():
+        post_t = frame.index > decision_t
+        noise = np.exp(0.01 * rng.standard_normal((int(post_t.sum()), frame.shape[1])))
+        corrupted[name].loc[post_t] = frame.loc[post_t] * noise
+
+    corrupted_admission = _pit_admission(corrupted, fold, request)
+    assert corrupted_admission == admission
+    corrupted_targets, *_ = _pit_targets(
+        corrupted, fold, funding, request, corrupted_admission,
+    )
+    pd.testing.assert_frame_equal(
+        corrupted_targets[corrupted_targets.index <= decision_t],
+        base_targets[base_targets.index <= decision_t],
+        check_exact=True,
+    )
+
+
+def test_fold_executes_boundary_admission_verbatim() -> None:
+    import pytest
+
+    from src.mhs.evaluation.integrity import CommitteeAdmissionIntegrityError
+    from src.mhs.features import FeatureAdmission
+
+    panel, fold, funding, request, _ = _pit_market()
+    admission = _pit_admission(panel, fold, request)
+    # The fold panel (912h warmup) is shorter than the 1006-row warmup of
+    # xs_idio_mom_336h, so the old in-window audit always dropped it; the
+    # train-end-frozen boundary admission keeps it.
+    assert "xs_idio_mom_336h" in admission.admitted
+    base_targets, *_ = _pit_targets(panel, fold, funding, request, admission)
+
+    reduced = FeatureAdmission(
+        admission.cutoff,
+        tuple(name for name in admission.admitted if name != "xs_idio_mom_336h"),
+    )
+    assert len(reduced.admitted) == len(admission.admitted) - 1
+    reduced_targets, *_ = _pit_targets(panel, fold, funding, request, reduced)
+    assert not reduced_targets.equals(base_targets)
+
+    mismatched_weights = dict.fromkeys(reduced.admitted, 1.0)
+    assert set(mismatched_weights) != set(admission.admitted)
+    with pytest.raises(CommitteeAdmissionIntegrityError):
+        _pit_targets(
+            panel, fold, funding, request, admission,
+            committee_member_weights=mismatched_weights,
+        )

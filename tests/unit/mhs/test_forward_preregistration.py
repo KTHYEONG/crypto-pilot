@@ -711,3 +711,24 @@ def test_cli_opt_out_and_research_request_share_identity() -> None:
         {"flags": dataclasses.asdict(req), "params_snapshot": snapshot}
     )
     assert procedure_identity_digest(cfg) == procedure_identity_digest(req)
+
+
+def test_procedure_digest_binds_admission_procedure(monkeypatch) -> None:
+    # D6: the params snapshot (including COMMITTEE_ADMISSION_PROCEDURE) is part
+    # of the preregistered procedure payload, so an admission-procedure change
+    # re-keys the digest and old registrations must never be reused.
+    from src.mhs import params as mhs_params
+    from src.mhs.preregistration import procedure_identity_digest, procedure_payload
+
+    request = research_baseline()
+    assert procedure_payload(request)["params_snapshot"]["COMMITTEE_ADMISSION_PROCEDURE"] == (
+        mhs_params.COMMITTEE_ADMISSION_PROCEDURE
+    )
+    base = procedure_identity_digest(request)
+    monkeypatch.setattr(
+        mhs_params, "COMMITTEE_ADMISSION_PROCEDURE", "boundary_frozen_warmup_excluded_v2"
+    )
+    assert procedure_identity_digest(request) != base
+    assert procedure_payload(request)["params_snapshot"]["COMMITTEE_ADMISSION_PROCEDURE"] == (
+        "boundary_frozen_warmup_excluded_v2"
+    )

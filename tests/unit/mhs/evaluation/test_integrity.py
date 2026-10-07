@@ -742,3 +742,32 @@ def test_train_reference_missing_funding_evidence_is_counted() -> None:
     )
     with pytest.raises(DataIntegrityError, match="funding_incomplete_terminal=1"):
         integrity._assert_train_reference_ledger_certified(replay, 3)
+
+
+def test_committee_admission_error_classifies_to_dedicated_code() -> None:
+    # I-FOLD-ADMISSION-PIT: CommitteeAdmissionIntegrityError is classified by
+    # type (never by message keywords) to the dedicated data-integrity code.
+    from src.common.errors import DataIntegrityError
+    from src.mhs.evaluation.integrity import (
+        CommitteeAdmissionIntegrityError,
+        _classify_execution_failure,
+    )
+    from src.mhs.research_go import (
+        GO_REASON_CAPITAL_BREACH,
+        GO_REASON_COMMITTEE_ADMISSION_NOT_PIT,
+        GO_REASON_DATA_INTEGRITY_CODES,
+    )
+
+    assert issubclass(CommitteeAdmissionIntegrityError, DataIntegrityError)
+    message = "committee_capital admission gap: missing members at boundary"
+    assert "capital" in message
+    assert "gap" in message
+    assert "missing" in message
+    assert (
+        _classify_execution_failure(CommitteeAdmissionIntegrityError(message))
+        == GO_REASON_COMMITTEE_ADMISSION_NOT_PIT
+    )
+    assert GO_REASON_COMMITTEE_ADMISSION_NOT_PIT in GO_REASON_DATA_INTEGRITY_CODES
+    # The same message on the plain error keeps its keyword-based code, proving
+    # the dedicated code comes from the isinstance check ahead of every keyword rule.
+    assert _classify_execution_failure(DataIntegrityError(message)) == GO_REASON_CAPITAL_BREACH

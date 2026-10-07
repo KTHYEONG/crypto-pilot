@@ -308,8 +308,10 @@ def test_direct_owner_fold_target_weights() -> None:
     import numpy as np
     import pandas as pd
 
+    from src.mhs import research_go as _research_go
     from src.mhs.evaluation.fold_weights import _build_fold_target_weights
     from src.mhs.evidence import AnchoredPurgedFold
+    from src.mhs.features import FeatureAdmission
 
     n = 2000
     idx = pd.date_range("2021-01-01", periods=n, freq="1h", tz="UTC")
@@ -332,6 +334,9 @@ def test_direct_owner_fold_target_weights() -> None:
     targets, signal_at, roster, grid = _build_fold_target_weights(
         "root", fold, req, funding, base_panel=base_panel,
         require_minute_roster=False, panel_warmup_hours=24,
+        committee_admission=FeatureAdmission(
+            fold.train_end, _research_go._resolved_committee_members(req),
+        ),
     )
     assert not targets.empty
     assert len(signal_at) == len(targets)
