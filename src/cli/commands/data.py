@@ -424,17 +424,21 @@ def _seal_mhs_inputs(args: argparse.Namespace) -> None:
     """
     from pathlib import Path
 
-    from src.mhs.data_provenance import mhs_sealable_input_paths, seal_mhs_input_manifest
+    from src.mhs.data_provenance import (
+        mhs_input_layout_for_lake,
+        mhs_sealable_input_paths,
+        seal_mhs_input_manifest,
+    )
 
-    data_root = Path(args.data_root)
+    layout = mhs_input_layout_for_lake(Path(args.lake_root))
     # 봉인 가능한 전체 심볼만 열거한다(부분 심볼은 원천에서 제외됨).
-    paths = mhs_sealable_input_paths(data_root=data_root, execution_timeframe=args.execution_timeframe)
+    paths = mhs_sealable_input_paths(layout=layout, execution_timeframe=args.execution_timeframe)
     if not paths:
         raise SystemExit(
             f"[DATA] stage=seal_mhs_inputs status=NO_SEALABLE_INPUTS "
-            f"data_root={args.data_root} execution_timeframe={args.execution_timeframe}",
+            f"lake_root={args.lake_root} execution_timeframe={args.execution_timeframe}",
         )
-    digest = seal_mhs_input_manifest(paths, data_root=data_root, output_path=Path(args.output))
+    digest = seal_mhs_input_manifest(paths, layout=layout, output_path=Path(args.output))
     _logger.info("[DATA] stage=seal_mhs_inputs files=%d digest=%s path=%s", len(paths), digest, args.output)
 
 
@@ -562,7 +566,7 @@ def add_data_commands(data_parser: argparse.ArgumentParser) -> None:
 
     # 명시적 봉인 명령만 등록한다(진단 실행의 자동 봉인 금지).
     seal_inputs = collect.add_parser("seal-mhs-inputs", help="Seal the complete MHS input corpus into a canonical manifest")
-    seal_inputs.add_argument("--data-root", default=str(FUTURES_DATA_DIR))
+    seal_inputs.add_argument("--lake-root", default=str(FUTURES_DATA_DIR), help="Futures lake root containing ohlcv/ and funding/")
     seal_inputs.add_argument("--execution-timeframe", choices=["3m"], default="3m")
     seal_inputs.add_argument("--output", default=str(FUTURES_DATA_DIR / "mhs_execution" / "input_manifest.json"))
     seal_inputs.set_defaults(handler=_seal_mhs_inputs)

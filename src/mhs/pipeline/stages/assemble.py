@@ -18,6 +18,7 @@ from pathlib import Path
 
 from src.live.execution_quality import load_execution_quality_records
 from src.mhs.data_provenance import (
+    resolve_mhs_input_layout,
     resolve_required_mhs_input_paths,
     validate_forward_execution_observations,
     validate_mhs_input_manifest,
@@ -75,16 +76,16 @@ def assemble_report(ctx: PipelineContext, telemetry: StageTelemetry) -> MhsHoriz
 
     # Input provenance (INV-INPUT-SEAL): sealed manifest validated
     # metadata-only against the required panel/execution roster.
-    data_root = Path(ctx.root or ".")
+    layout = resolve_mhs_input_layout(ctx.config.data_root)
     required_paths = resolve_required_mhs_input_paths(
-        data_root=data_root,
+        layout=layout,
         panel_symbols=list(ctx.symbols),
         execution_symbols=list(ctx.execution_symbols),
         execution_timeframe=ctx.config.execution_timeframe,
     )
     manifest_path = Path(ctx.config.input_manifest_path) if ctx.config.input_manifest_path else None
     ctx.input_provenance = validate_mhs_input_manifest(
-        manifest_path, data_root=data_root, required_paths=required_paths,
+        manifest_path, layout=layout, required_paths=required_paths,
     )
     ctx.forward_provenance = None
     if ctx.config.forward_execution_quality_dir is not None and ctx.config.forward_strategy_digest is not None:
