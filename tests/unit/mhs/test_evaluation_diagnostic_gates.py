@@ -13,8 +13,9 @@ from src.mhs.diagnostic_run import run_mhs_horizon_diagnostic
 import src.mhs.marks as marks
 import src.mhs.pipeline.stages.book as book_stage
 import src.mhs.statistics as statistics
+from src.common.errors import DataIntegrityError
 from src.mhs.discovery import DiscoveryQualificationResult
-from src.mhs.marks import _load_funding_series
+from src.mhs.marks import _load_funding_series, clear_mhs_market_data_caches
 from src.quant.universe.pit_universe import symbol_partition
 from tests.unit.mhs.test_evaluation_appresearch import (  # noqa: F401
     _FOLD,
@@ -41,6 +42,7 @@ from tests.unit.mhs.test_evaluation_appresearch import (  # noqa: F401
     _slow_book_panel_inputs,
     _synthetic_ledger,
     _write_3m_cache,
+    _write_mhs_market,
     _write_quote_volume_market,
 )
 
@@ -165,26 +167,34 @@ def test_mhs_execution_coverage_gate_default_off_bit_identical(mhs_market, monke
         assert getattr(default_report, field) == getattr(explicit_off, field)
 
 @pytest.mark.slow
-def test_mhs_execution_coverage_gate_on_fails_closed_early(mhs_market, monkeypatch) -> None:
+def test_mhs_execution_coverage_gate_on_fails_closed_early(tmp_path, monkeypatch) -> None:
     # SCENARIO_MHS_DIAGNOSTIC_EXECUTION_COVERAGE_GATE_ON_FAILS_CLOSED_EARLY:
-    # an out-of-contract execution_timeframe fails closed before any replay
-    # window executes -- regardless of execution_coverage_gate, which is no
-    # longer what triggers this case.
-    root, end = mhs_market
+    # with the gate on, dynamic gap exclusion that removes every roster
+    # member fails closed before any replay window executes.
+    root = tmp_path / "market"
+    end = _write_mhs_market(root)
+    monkeypatch.setattr(marks, "funding_path", lambda sym: root / "funding" / f"{sym}.parquet")
+    clear_mhs_market_data_caches()
     books_called: list[str] = []
     monkeypatch.setattr(concurrency_mod, "_run_books_concurrent", lambda *a, **k: books_called.append("books"),
     )
     base = {
         "start": str(_START), "end": str(end), "data_root": str(root),
-        "execution_timeframe": "5m", "log_run": False,
+        "execution_timeframe": "3m", "log_run": False,
         "execution_universe_size": 8,
     }
     request = research_baseline(**base)
-    with pytest.raises(ValueError, match="unknown execution_timeframe"):
+    with pytest.raises(DataIntegrityError, match="dynamic gap exclusion removed every roster member"):
         run_mhs_horizon_diagnostic(
             dataclasses.replace(request, execution_coverage_gate=True, committee_target_gross=None),
         )
     assert books_called == []
+
+    off_report = run_mhs_horizon_diagnostic(
+        dataclasses.replace(request, execution_coverage_gate=False, committee_target_gross=None),
+    )
+    assert off_report.status == "COMPLETE"
+    assert off_report.fill_source == "NOT_RUN_NO_EXECUTION_DATA"
 
 @pytest.mark.slow
 def test_mhs_diagnostic_relevance_gate_passes_where_full_scope_blocked(mhs_market, monkeypatch) -> None:

@@ -20,7 +20,8 @@ from tests.integration.mhs._report_cache import (
     DiagnosticRunSpec,
     report_cache_group_violations,
 )
-from tests.integration.mhs._tiers import fork_worker_cap, heavy_tier_violations
+from src.common.paths import FUTURES_DATA_DIR
+from tests.integration.mhs._tiers import MARKET_LAKE_MARKER, fork_worker_cap, heavy_tier_violations, market_lake_skip_reason
 
 
 def _load_horizon_diagnostic_helpers():
@@ -79,6 +80,14 @@ def _mhs_module_xdist_fork_worker_cap() -> Iterator[None]:
 def _mhs_parallel_parity_uncap(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
     if request.node.get_closest_marker("mhs_parallel_parity") is not None:
         monkeypatch.setattr(psutil, "cpu_count", _HOST_CPU_COUNT)
+
+
+@pytest.fixture(autouse=True)
+def _requires_market_lake_skip(request: pytest.FixtureRequest) -> None:
+    if request.node.get_closest_marker(MARKET_LAKE_MARKER) is not None:
+        reason = market_lake_skip_reason(FUTURES_DATA_DIR / "ohlcv")
+        if reason is not None:
+            pytest.skip(reason)
 
 
 @pytest.fixture(scope="module")

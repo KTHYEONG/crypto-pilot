@@ -20,7 +20,8 @@ from src.mhs.contracts import MhsDiagnosticRequest
 from src.mhs.evaluation.books import _book_structure_trace
 from src.mhs.evaluation.folds import _run_anchored_fold
 from src.mhs.evidence import AnchoredPurgedFold
-from src.mhs.marks import _load_funding_series
+from src.mhs.marks import _load_funding_series, clear_mhs_market_data_caches
+from tests.fixtures.mhs_fold_market import COMPLETING_FOLD, write_completing_fold_market
 from src.mhs.report.artifacts import (
     _build_replay_artifact_reference,
     _verify_ledger_artifact,
@@ -43,63 +44,23 @@ from src.mhs.scaling import (
 from src.quant.universe.pit_universe import symbol_partition
 
 START = pd.Timestamp("2021-01-01", tz="UTC")
-N_HOURS = 3000
 DEV_SYMBOLS = [
     sym for sym in ("MHSAUSDT", "MHSBUSDT", "MHSCUSDT", "MHSDUSDT", "MHSEUSDT",
                     "MHSGUSDT", "MHSHUSDT", "MHSIUSDT", "MHSJUSDT", "MHSLUSDT")
     if symbol_partition(sym) == "dev"
 ][:8]
 
-OPT_FOLD = AnchoredPurgedFold(
-    pd.Timestamp("2021-01-01", tz="UTC"),
-    pd.Timestamp("2021-01-31", tz="UTC"),
-    pd.Timestamp("2021-02-10", tz="UTC"),
-    pd.Timestamp("2021-04-19 08:00", tz="UTC"),
-    168,
-    168,
-)
-
-
-def _write_mhs_market(root: Path, symbols: list[str], n_hours: int = N_HOURS) -> pd.Timestamp:
-    hourly = pd.date_range(START, periods=n_hours, freq="1h", tz="UTC")
-    end = hourly[-1]
-    rng = np.random.default_rng(20260807)
-    epoch = (hourly - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta("1ms")
-    hour_dir, minute_dir = root / "1h", root / "1m"
-    funding_dir = root / "funding"
-    for d in (hour_dir, minute_dir, funding_dir):
-        d.mkdir(parents=True, exist_ok=True)
-    minute_idx = pd.date_range(START, end, freq="1min", tz="UTC")
-    minute_epoch = (minute_idx - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta("1ms")
-    n_min = len(minute_idx)
-    for i, sym in enumerate(symbols):
-        drift = 1e-5 * (i - len(symbols) / 2.0)
-        sym_n = n_hours
-        prices = 100.0 * np.exp(np.cumsum(rng.normal(drift, 0.002, sym_n)))
-        pd.DataFrame({
-            "timestamp": epoch, "open": prices, "high": prices * 1.001,
-            "low": prices * 0.999, "close": prices, "quote_vol": [1000.0] * sym_n,
-        }).to_parquet(hour_dir / f"{sym}.parquet")
-        minute_prices = 100.0 * np.exp(np.cumsum(rng.normal(drift, 0.002, n_min)))
-        pd.DataFrame({
-            "timestamp": minute_epoch, "open": minute_prices,
-            "high": minute_prices * 1.0005, "low": minute_prices * 0.9995,
-            "close": minute_prices, "quote_vol": [1000.0] * n_min,
-        }).to_parquet(minute_dir / f"{sym}.parquet")
-        pd.DataFrame({
-            "timestamp": epoch, "funding_rate": [0.00005] * sym_n, "datetime": hourly,
-        }).to_parquet(funding_dir / f"{sym}.parquet")
-    return end
-
 
 @pytest.fixture(scope="module")
 def fold_market(tmp_path_factory) -> tuple[Path, pd.Timestamp]:
     root = tmp_path_factory.mktemp("mhs_opt_market")
-    end = _write_mhs_market(root, DEV_SYMBOLS)
+    end = write_completing_fold_market(root)
     originals = {"funding_path": marks.funding_path}
     marks.funding_path = lambda sym: root / "funding" / f"{sym}.parquet"
+    clear_mhs_market_data_caches()
     yield root, end
     marks.funding_path = originals["funding_path"]
+    clear_mhs_market_data_caches()
 
 
 @pytest.fixture(scope="module")
@@ -144,7 +105,7 @@ class TestMemoryBudget:
         root, end = fold_market
         recorder = _StageRecorder(log_run=False)
         report = _run_anchored_fold(
-            str(root), OPT_FOLD, _request(root, end, max_rss_bytes=int(2.5 * 1024**3)),
+            str(root), COMPLETING_FOLD, _request(root, end, max_rss_bytes=int(2.5 * 1024**3)),
             funding, 1.0, 0, recorder,
         )
         assert report.strict is not None
@@ -162,7 +123,7 @@ class TestMemoryBudget:
     def test_budget_breach_classified_not_invalid_primary(self, fold_market, funding) -> None:
         root, end = fold_market
         report = _run_anchored_fold(
-            str(root), OPT_FOLD, _request(root, end, max_rss_bytes=1),
+            str(root), COMPLETING_FOLD, _request(root, end, max_rss_bytes=1),
             funding, 1.0, 0,
         )
         assert GO_REASON_RESOURCE_BREACH in report.failures
@@ -215,7 +176,7 @@ class TestSignalQualityMechanisms:
     def test_fold_quality_metrics_finite_from_valid_primary(self, fold_market, funding) -> None:
         root, end = fold_market
         report = _run_anchored_fold(
-            str(root), OPT_FOLD, _request(root, end),
+            str(root), COMPLETING_FOLD, _request(root, end),
             funding, 1.0, 0,
         )
         assert report.primary_valid is True
@@ -352,8 +313,8 @@ class TestFoldIntegrity:
 
     def test_fold_state_isolation_two_sequential_runs(self, fold_market, funding) -> None:
         root, end = fold_market
-        first = _run_anchored_fold(str(root), OPT_FOLD, _request(root, end), funding, 1.0, 0)
-        second = _run_anchored_fold(str(root), OPT_FOLD, _request(root, end), funding, 1.0, 1)
+        first = _run_anchored_fold(str(root), COMPLETING_FOLD, _request(root, end), funding, 1.0, 0)
+        second = _run_anchored_fold(str(root), COMPLETING_FOLD, _request(root, end), funding, 1.0, 1)
         for report in (first, second):
             assert report.strict is not None
             assert report.primary_valid is True
@@ -362,7 +323,7 @@ class TestFoldIntegrity:
 
     def test_ledger_artifact_null_integrity_verification(self, fold_market, funding, tmp_path) -> None:
         root, end = fold_market
-        report = _run_anchored_fold(str(root), OPT_FOLD, _request(root, end), funding, 1.0, 0)
+        report = _run_anchored_fold(str(root), COMPLETING_FOLD, _request(root, end), funding, 1.0, 0)
         assert report.strict is not None
         tables = _build_replay_category_tables(report.strict)
         unified = _write_unified_artifact_tables({"strict": tables}, tmp_path)

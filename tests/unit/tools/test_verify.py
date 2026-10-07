@@ -14,6 +14,7 @@ import psutil
 import pytest
 
 from tools.verify import (
+    PERIODIC_SLOW_GATE,
     _HEAVY_TIMEOUT_SECONDS,
     _check_diff_coverage,
     _collect_deferred_heavy,
@@ -23,6 +24,8 @@ from tools.verify import (
     _integration_targets,
     _is_integration_target,
     _marker_expression,
+    _slow_deferral_lines,
+    _slow_marked_files,
     _test_node_targets,
     run_cmd,
 )
@@ -522,6 +525,115 @@ def test_exit_five_without_deferred_tests_remains_failure(
     out, err = capsys.readouterr()
     assert "DEFERRED |" not in out
     assert json.loads(err)["status"] == "FAIL"
+
+
+def test_slow_marked_files_matches_code_forms_only(tmp_path: Path) -> None:
+    deco = tmp_path / "test_deco.py"
+    deco.write_text("import pytest\n@pytest.mark.slow\ndef test_a():\n    assert True\n", encoding="utf-8")
+    single = tmp_path / "test_single.py"
+    single.write_text("import pytest\npytestmark = pytest.mark.slow\ndef test_a():\n    assert True\n", encoding="utf-8")
+    multi = tmp_path / "test_multi.py"
+    multi.write_text(
+        "import pytest\npytestmark = [pytest.mark.slow, pytest.mark.requires_market_lake]\n"
+        "def test_a():\n    assert True\n",
+        encoding="utf-8",
+    )
+    stringy = tmp_path / "test_stringy.py"
+    stringy.write_text('x = "@pytest.mark.slow"\ndef test_a():\n    assert True\n', encoding="utf-8")
+    broken = tmp_path / "test_broken.py"
+    broken.write_text("def broken(:\n", encoding="utf-8")
+    missing = tmp_path / "test_missing.py"
+    unreadable = tmp_path / "test_unreadable.py"
+    unreadable.write_bytes(b"\xff")
+    assert _slow_marked_files([
+        str(deco), str(single), str(multi), str(stringy), str(broken), str(missing), str(unreadable),
+        f"{deco}::Test::test_a",
+    ]) == sorted([str(deco), str(single), str(multi)])
+
+
+def test_slow_deferral_lines_contract() -> None:
+    assert _slow_deferral_lines([]) == ([], [])
+    lines, diags = _slow_deferral_lines(["tests/unit/mhs/test_x.py"])
+    assert PERIODIC_SLOW_GATE in lines[0]
+    assert lines[1] == "DEFERRED | slow: tests/unit/mhs/test_x.py"
+    assert diags[0]["file"] == "tests/unit/mhs/test_x.py"
+    assert diags[0]["error"] == "deferred slow: tests/unit/mhs/test_x.py"
+
+
+def test_default_run_lists_slow_target_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import json as _json
+
+    target = tmp_path / "tests" / "integration" / "mhs" / "test_h.py"
+    target.parent.mkdir(parents=True)
+    target.write_text(
+        "import pytest\npytestmark = pytest.mark.slow\ndef test_one():\n    assert True\n",
+        encoding="utf-8",
+    )
+    _run_main_with_fake(
+        monkeypatch, tmp_path,
+        ["verify", "--files", str(target), "--skip-lint", "--skip-mypy", "--no-cov"],
+        [], 5,
+    )
+    import tools.verify as verify_mod
+
+    verify_mod.main()
+    out, err = capsys.readouterr()
+    assert PERIODIC_SLOW_GATE in out
+    assert f"DEFERRED | slow: {target}" in out
+    payload = _json.loads(err.strip().splitlines()[-1])
+    assert payload["status"] == "PASS"
+    assert any("deferred slow:" in d["error"] for d in payload["diagnostics"])
+
+
+def test_run_slow_suppresses_slow_deferral(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    target = tmp_path / "tests" / "integration" / "mhs" / "test_h.py"
+    target.parent.mkdir(parents=True)
+    target.write_text(
+        "import pytest\npytestmark = pytest.mark.slow\ndef test_one():\n    assert True\n",
+        encoding="utf-8",
+    )
+    _, calls = _run_main_with_fake(
+        monkeypatch, tmp_path,
+        ["verify", "--files", str(target), "--skip-lint", "--skip-mypy", "--no-cov", "--run-slow"],
+        [], 0,
+    )
+    import tools.verify as verify_mod
+
+    verify_mod.main()
+    out, _ = capsys.readouterr()
+    assert "DEFERRED | slow:" not in out
+    pytest_cmds = [c for c in calls if "--collect-only" not in c]
+    m_indices = [i for i, x in enumerate(pytest_cmds[0]) if x == "-m"]
+    assert pytest_cmds[0][m_indices[-1] + 1] == "slow"
+
+
+@pytest.mark.parametrize("pytest_exit", [1, 124, 0])
+def test_slow_deferral_survives_failure_diagnostics(tmp_path, monkeypatch, capsys, pytest_exit):
+    import tools.verify as verify_mod
+
+    target = tmp_path / "test_slow.py"
+    target.write_text("import pytest\npytestmark = pytest.mark.slow\n", encoding="utf-8")
+    _run_main_with_fake(
+        monkeypatch, tmp_path,
+        ["verify", "--files", str(target), "--skip-lint", "--skip-mypy"],
+        [], pytest_exit,
+    )
+    if pytest_exit == 0:
+        monkeypatch.setattr(verify_mod, "_coverage_args", lambda *a: ["--cov=src"])
+        monkeypatch.setattr(verify_mod, "_check_diff_coverage", lambda *a: ([{"error": "uncovered"}], 0))
+        monkeypatch.setattr(sys, "argv", [
+            "verify", "--files", str(target), "src/example.py", "--skip-lint", "--skip-mypy",
+        ])
+    with pytest.raises(SystemExit) as exc:
+        verify_mod.main()
+    assert exc.value.code == 1
+    out, err = capsys.readouterr()
+    assert out.index(f"DEFERRED | slow: {target}") < out.index("FAIL |")
+    assert any(d["error"] == f"deferred slow: {target}" for d in json.loads(err)["diagnostics"])
 
 
 @pytest.mark.parametrize("exit_code", [2, 124])

@@ -7,6 +7,7 @@ from pathlib import Path
 import pandas as pd
 import src.mhs.marks as marks
 from src.mhs.marks import clear_mhs_market_data_caches
+from tests.fixtures.mhs_fold_market import write_completing_fold_market
 from tests.unit.mhs.test_evaluation_appresearch import (
     _write_3m_cache,
     _write_mhs_market,
@@ -58,6 +59,9 @@ def _mhs_shared_roots(tmp_path_factory: pytest.TempPathFactory):
                 root = base / "market_tbq"
                 end = _write_mhs_market(root, include_taker_buy_quote=True)
                 _write_3m_cache(root)
+            elif key == "fold":
+                root = base / "market_completing_fold"
+                end = write_completing_fold_market(root)
             else:
                 raise KeyError(key)
             cache[key] = (root, end)
@@ -104,6 +108,15 @@ def mhs_market_funding_vary(_mhs_shared_roots, monkeypatch):
     # funding roots between tests.
     clear_mhs_market_data_caches()
     return root, end
+
+@pytest.fixture
+def mhs_completing_fold_market(_mhs_shared_roots, monkeypatch):
+    """Module-shared completing-fold market with funding redirected."""
+    root, end = _mhs_shared_roots("fold")
+    monkeypatch.setattr(marks, "funding_path", lambda sym: root / "funding" / f"{sym}.parquet")
+    clear_mhs_market_data_caches()
+    return root, end
+
 
 @pytest.fixture
 def mhs_market_with_taker_buy_quote(_mhs_shared_roots, monkeypatch):

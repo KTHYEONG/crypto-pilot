@@ -8,6 +8,27 @@ from typing import Final
 
 from tests.integration.mhs._report_cache import CollectedItem
 
+MARKET_LAKE_MARKER: Final[str] = "requires_market_lake"
+
+
+def market_lake_skip_reason(lake_root: Path) -> str | None:
+    """Skip reason for lake-dependent acceptance tests, or None when the lake is usable.
+
+    Absence is an environment fact, not a data anomaly: only a lake root whose ``1h``
+    directory holds no ``*.parquet`` (including a missing root) is skipped. A partially
+    populated lake returns None so the test runs and fails loudly.
+
+    Args:
+        lake_root: The default MHS lake root (``FUTURES_DATA_DIR / "ohlcv"``).
+    Returns:
+        ``"requires_market_lake: no 1h parquet under <lake_root>; run on a host with the MHS lake"``
+        when absent, else None.
+    """
+    if not list((lake_root / "1h").glob("*.parquet")):
+        return f"requires_market_lake: no 1h parquet under {lake_root}; run on a host with the MHS lake"
+    return None
+
+
 HEAVY_DIAGNOSTIC_FIXTURES: Final[frozenset[str]] = frozenset({
     "canonical_report_run",
     "report",

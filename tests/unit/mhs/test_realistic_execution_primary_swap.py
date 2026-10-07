@@ -12,7 +12,6 @@ from __future__ import annotations
 
 from tests.fixtures.mhs_requests import research_baseline
 import json
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -24,17 +23,16 @@ from src.mhs.contracts import (
     MhsResearchGoResult,
 )
 from src.mhs.diagnostic_run import run_mhs_horizon_diagnostic
-import src.mhs.marks as marks
 from src.mhs.evaluation.books import _book_weights
 from src.mhs.evaluation.diagnostics import _phase_diagnostics
 from src.mhs.evaluation.folds import _run_anchored_fold
 from src.mhs.evaluation.windows import _book_outcome
 from src.mhs.evidence import (
-    AnchoredPurgedFold,
     DeploymentReadinessResult,
     PhaseDiagnosticResult,
     TailSensitivityResult,
 )
+from tests.fixtures.mhs_fold_market import COMPLETING_FOLD
 from src.mhs.execution import strategy_aware_execution_replay
 from src.mhs.execution.contracts import (
     StrategyExecutionReplayResult,
@@ -56,15 +54,6 @@ pytestmark = pytest.mark.slow
 
 _START = pd.Timestamp("2021-01-01", tz="UTC")
 
-_FOLD = AnchoredPurgedFold(
-    pd.Timestamp("2021-01-01", tz="UTC"),
-    pd.Timestamp("2021-01-31", tz="UTC"),
-    pd.Timestamp("2021-02-10", tz="UTC"),
-    pd.Timestamp("2021-04-19 08:00", tz="UTC"),
-    168,
-    168,
-)
-
 _DEV_SYMBOLS = [
     s for s in (
         "MHSAUSDT", "MHSBUSDT", "MHSCUSDT", "MHSDUSDT", "MHSEUSDT",
@@ -72,59 +61,6 @@ _DEV_SYMBOLS = [
     )
     if symbol_partition(s) == "dev"
 ]
-
-
-def _write_mhs_market(root: Path) -> pd.Timestamp:
-    symbols = _DEV_SYMBOLS
-    n_hours = 2700
-    hourly = pd.date_range(_START, periods=n_hours, freq="1h", tz="UTC")
-    end = hourly[-1]
-    rng = np.random.default_rng(20260807)
-    epoch = (hourly - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta("1ms")
-    hdir = root / "1h"
-    mdir = root / "1m"
-    fdir = root / "funding"
-    for d in (hdir, mdir, fdir):
-        d.mkdir(parents=True, exist_ok=True)
-    minute_idx = pd.date_range(_START, end, freq="1min", tz="UTC")
-    minute_epoch = (minute_idx - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta("1ms")
-    for i, sym in enumerate(symbols):
-        drift = 1e-5 * (i - len(symbols) / 2.0)
-        prices = 100.0 * np.exp(np.cumsum(rng.normal(drift, 0.002, n_hours)))
-        pd.DataFrame(
-            {"timestamp": epoch, "open": prices, "high": prices * 1.001,
-             "low": prices * 0.999, "close": prices, "quote_vol": [1000.0] * n_hours,
-             "volume": [1000.0] * n_hours},
-        ).to_parquet(hdir / f"{sym}.parquet")
-        # 1m fills track the same underlying instrument as the 1h close within
-        # a tight intra-hour noise band (mirrors real exchange data); an
-        # unrelated random walk would diverge unboundedly from `prices` over
-        # the fixture's window and spuriously trip fill_mark_parity_mask
-        # (I1). Draws the identical rng.normal(..., len(minute_idx)) shape as
-        # before so `prices`'s own draws stay at the same rng-stream
-        # position -- only this local formula changes.
-        minute_noise = rng.normal(0.0, 0.0003, len(minute_idx))
-        hourly_level = np.repeat(prices, 60)[: len(minute_idx)]
-        mp = hourly_level * np.exp(minute_noise)
-        pd.DataFrame(
-            {"timestamp": minute_epoch, "open": mp, "high": mp * 1.0005,
-             "low": mp * 0.9995, "close": mp, "quote_vol": [1000.0] * len(minute_idx)},
-        ).to_parquet(mdir / f"{sym}.parquet")
-        pd.DataFrame(
-            {"timestamp": epoch, "funding_rate": [0.00005] * n_hours, "datetime": hourly},
-        ).to_parquet(fdir / f"{sym}.parquet")
-    return end
-
-
-@pytest.fixture
-def mhs_market(tmp_path, monkeypatch):
-    root = tmp_path / "market"
-    end = _write_mhs_market(root)
-    monkeypatch.setattr(marks, "funding_path", lambda sym: root / "funding" / f"{sym}.parquet")
-    # Retained loaders are stateless; the shared invalidation entry point
-    # keeps runs isolated when fixtures redirect data roots between tests.
-    marks.clear_mhs_market_data_caches()
-    return root, end
 
 
 def _build_book_outcome_args(mhs_market) -> dict[str, object]:
@@ -225,9 +161,9 @@ def test_toplevel_book_primary_is_immediate_taker(mhs_market) -> None:
     assert report.stress.ledger.fee_charge.sum() > report.primary.ledger.fee_charge.sum()
 
 
-def test_fold_primary_is_immediate_taker(mhs_market) -> None:
+def test_fold_primary_is_immediate_taker(mhs_completing_fold_market) -> None:
     """SCENARIO_MHS_REALISTIC_EXECUTION_FOLD_PRIMARY_IS_IMMEDIATE_TAKER_03."""
-    root, end = mhs_market
+    root, end = mhs_completing_fold_market
     symbols = _DEV_SYMBOLS[:8]
     funding_by_symbol, _ = _load_funding_series(symbols)
     request = research_baseline(
@@ -235,11 +171,11 @@ def test_fold_primary_is_immediate_taker(mhs_market) -> None:
         execution_timeframe="3m", log_run=False,
     )
     fold_report = _run_anchored_fold(
-        str(root), _FOLD, request, funding_by_symbol, 1.0, 0, None,
+        str(root), COMPLETING_FOLD, request, funding_by_symbol, 1.0, 0, None,
     )
-    if fold_report.strict is None or fold_report.stress is None:
-        assert fold_report.failures, "fold must either complete or report typed failures"
-        return
+    assert fold_report.failures == ()
+    assert fold_report.strict is not None
+    assert fold_report.stress is not None
     assert fold_report.strict.fill_source == "OHLCV_IMMEDIATE_TAKER"
     assert fold_report.strict.ledger.fill_source == "OHLCV_IMMEDIATE_TAKER"
     assert fold_report.stress.fill_source == "OHLCV_IMMEDIATE_TAKER"
