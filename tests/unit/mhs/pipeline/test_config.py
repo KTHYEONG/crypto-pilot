@@ -403,3 +403,14 @@ def test_resolver_preserves_context_fields_and_validates_partition() -> None:
     assert request.data_root == "/research"
     with pytest.raises(ValueError, match="unknown partition"):
         resolve_cli_request({"partition": "invalid"})
+
+
+def test_unmapped_inert_rule_fails_closed(monkeypatch):
+    """A new inert-dependent rule without a CLI activity condition is rejected, not gated on trend_sleeve."""
+    import src.mhs.validation as validation_mod
+
+    rules = validation_mod.INERT_DEPENDENT_RULES
+    extra = dataclasses.replace(rules[-1], field="future_dependent_field", flag="--future-dependent-field")
+    monkeypatch.setattr(validation_mod, "INERT_DEPENDENT_RULES", (*rules, extra))
+    with pytest.raises(RuntimeError, match="future_dependent_field"):
+        _resolve(["--trend-sleeve"])

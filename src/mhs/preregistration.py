@@ -176,9 +176,17 @@ def _read_events(registry_path: Path) -> list[dict[str, Any]]:
     for i, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
         if not line.strip():
             continue
-        event = json.loads(line)
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise DataIntegrityError(f"procedure registry line {i} is not valid JSON") from exc
         if not isinstance(event, dict) or event.get("event") not in (EVENT_REGISTRATION, EVENT_EVALUATION):
             raise DataIntegrityError(f"procedure registry line {i} is not a known event")
+        if event["event"] == EVENT_EVALUATION:
+            try:
+                _utc(event["resolved_end"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise DataIntegrityError(f"procedure registry line {i} has no valid resolved_end") from exc
         events.append(event)
     return events
 

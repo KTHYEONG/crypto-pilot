@@ -188,3 +188,18 @@ def test_evaluation_events_survive_the_move(tmp_path: Path, registry_paths) -> N
     assert prereg.consulted_data_horizon(tmp_path / "history") == pd.Timestamp(
         "2026-12-31T23:59:59+00:00"
     )
+
+
+@pytest.mark.parametrize(
+    ("line", "message"),
+    [
+        ("{not json", "line 1 is not valid JSON"),
+        (json.dumps({"event": "evaluation", "procedure_hash": "a" * 32}), "line 1 has no valid resolved_end"),
+        (json.dumps({"event": "evaluation", "resolved_end": "not-a-date"}), "line 1 has no valid resolved_end"),
+    ],
+)
+def test_corrupt_procedure_events_fail_closed_as_integrity_errors(tmp_path: Path, line: str, message: str) -> None:
+    registry = tmp_path / "procedures.jsonl"
+    registry.write_text(line + "\n", encoding="utf-8")
+    with pytest.raises(DataIntegrityError, match=message):
+        prereg.consulted_data_horizon(tmp_path / "history", registry)
