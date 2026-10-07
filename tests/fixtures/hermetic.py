@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 
-def escaped_file_handlers(temp_root: Path) -> list[tuple[str, Path]]:
+def escaped_file_handlers(temp_root: Path, *extra_roots: Path) -> list[tuple[str, Path]]:
     """List file handlers attached anywhere in the logging tree whose file escapes ``temp_root``.
 
     Scans the root logger and every registered ``logging.Logger`` (placeholders skipped) for
@@ -20,11 +20,13 @@ def escaped_file_handlers(temp_root: Path) -> list[tuple[str, Path]]:
 
     Args:
         temp_root: This process's partitioned pytest temp root.
+        extra_roots: Further hermetic roots, e.g. the session ``basetemp``: under xdist the controller owns
+            ``basetemp``, so worker ``tmp_path`` directories live outside the worker's own temp root.
     Returns:
         ``(logger_name, resolved_path)`` pairs outside ``temp_root.resolve()``, sorted by logger name then path;
         the root logger is reported as ``"root"``. Empty when hermetic.
     """
-    resolved_temp = temp_root.resolve()
+    resolved_roots = tuple(root.resolve() for root in (temp_root, *extra_roots))
     null_device = Path(os.devnull).resolve()
     offenders: list[tuple[str, Path]] = []
     loggers: list[tuple[str, logging.Logger]] = [("root", logging.getLogger())]
@@ -38,7 +40,7 @@ def escaped_file_handlers(temp_root: Path) -> list[tuple[str, Path]]:
                 resolved = Path(handler.baseFilename).resolve()
                 if resolved == null_device:
                     continue
-                if not resolved.is_relative_to(resolved_temp):
+                if not any(resolved.is_relative_to(root) for root in resolved_roots):
                     offenders.append((logger_name, resolved))
     offenders.sort(key=lambda item: (item[0], str(item[1])))
     return offenders
@@ -60,6 +62,8 @@ def assert_storage_roots_hermetic(
     Args:
         roots: Label -> resolved-at-import root (e.g. ``{"BACKTESTS_DIR": ...}``).
         temp_root: This process's partitioned pytest temp root.
+        extra_roots: Further hermetic roots, e.g. the session ``basetemp``: under xdist the controller owns
+            ``basetemp``, so worker ``tmp_path`` directories live outside the worker's own temp root.
         preimported_src_modules: ``src`` modules already in ``sys.modules`` when
             conftest started, reported verbatim to locate the early importer.
     Raises:

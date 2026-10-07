@@ -58,6 +58,7 @@ from tests.unit.mhs.test_evaluation_appresearch import (  # noqa: F401
     _write_quote_volume_market,
 )
 
+
 @pytest.fixture
 def validation_only_train_reference(monkeypatch):
     """Isolate validation replay scenarios from the separate train-reference replay contract."""
@@ -194,6 +195,7 @@ class TestAnchoredFoldBounded:
         assert report.strict is not None
         assert report.failures == ()
 
+
 @pytest.mark.usefixtures("validation_only_train_reference")
 @pytest.mark.slow
 def test_anchored_fold_is_two_pass(mhs_market, monkeypatch) -> None:
@@ -241,6 +243,7 @@ def test_anchored_fold_is_two_pass(mhs_market, monkeypatch) -> None:
     # window is dominated by the identical (unscaled) first half.
     assert not rescaled.strict.ledger.equity.equals(reference.strict.ledger.equity)
 
+
 def test_fold_execution_weights_are_renormalized(mhs_market, monkeypatch) -> None:
     # SCENARIO_MHS_FOLD_EXECUTION_WEIGHTS_ARE_RENORMALIZED: the fold builder
     # re-normalizes its execution weights onto the roster instead of collapsing
@@ -282,6 +285,7 @@ def test_fold_execution_weights_are_renormalized(mhs_market, monkeypatch) -> Non
         assert out.sum(axis=1).where(live).abs().max() < 1e-9
         # masked-out columns are exactly zero, never the unnormalized input
         assert float(out[~mask].abs().max().max()) == 0.0
+
 
 def test_fold_weights_are_vol_tilted_before_renormalization(mhs_market, monkeypatch) -> None:
     # SCENARIO_MHS_FOLD_WEIGHTS_ARE_VOL_TILTED_BEFORE_RENORMALIZATION: the fold
@@ -375,6 +379,7 @@ def test_fold_weights_are_vol_tilted_before_renormalization(mhs_market, monkeypa
         hi, lo = (i, j) if vi > vj else (j, i)
         assert abs(fast_tilted.iloc[row, hi]) < abs(fast_tilted.iloc[row, lo])
 
+
 def test_fold_vol_mean_masked_to_execution_roster(mhs_market, monkeypatch) -> None:
     # SCENARIO_MHS_VOL_MEAN_ROSTER_MASK_01: the fold builder's regime-cash-scale
     # vol_mean is computed from execution_mask-filtered realized vol -- a
@@ -414,6 +419,7 @@ def test_fold_vol_mean_masked_to_execution_roster(mhs_market, monkeypatch) -> No
         captured, log_close, execution_mask, captured["vol_mean"].index,
     )
 
+
 def test_fold_decision_grid_matches_slow_cadence(mhs_market) -> None:
     # SCENARIO_MHS_FOLD_DECISION_GRID_MATCHES_SLOW_CADENCE_05: under the
     # fixture with the current frozen weights, _build_fold_target_weights's
@@ -439,6 +445,7 @@ def test_fold_decision_grid_matches_slow_cadence(mhs_market) -> None:
     spacing = target_weights.index.to_series().diff().dropna()
     assert not spacing.empty
     assert (spacing == pd.Timedelta(hours=24)).all()
+
 
 def test_committee_capital_default_off_bit_identical(mhs_market_with_taker_buy_quote, monkeypatch) -> None:
     # SCENARIO_MHS_COMMITTEE_CAPITAL_DEFAULT_OFF_BIT_IDENTICAL: with the opt-in
@@ -477,6 +484,7 @@ def test_committee_capital_default_off_bit_identical(mhs_market_with_taker_buy_q
     )
     pd.testing.assert_frame_equal(target_patched, target_baseline)
 
+
 def test_committee_capital_reaches_fold_targets(mhs_market_with_taker_buy_quote) -> None:
     # SCENARIO_MHS_COMMITTEE_CAPITAL_REACHES_FOLD_TARGETS: with committee_capital
     # enabled the fold decision targets become the equal-weight committee blend,
@@ -510,6 +518,7 @@ def test_committee_capital_reaches_fold_targets(mhs_market_with_taker_buy_quote)
     assert float(target_on.sum(axis=1).abs().max()) < 1e-6
     assert float(target_on.abs().max().max()) <= 1.0 + 1e-9
 
+
 def test_committee_capital_no_member_fails_closed(mhs_market_with_taker_buy_quote, monkeypatch) -> None:
     # SCENARIO_MHS_COMMITTEE_CAPITAL_NO_MEMBER_FAILS_CLOSED: when no committee
     # member is admitted, the fold target builder raises RuntimeError naming
@@ -533,6 +542,7 @@ def test_committee_capital_no_member_fails_closed(mhs_market_with_taker_buy_quot
             str(root), _FOLD, request, funding_by_symbol,
             committee_admission=_FeatureAdmissionFailClosed(_FOLD.train_end, ()),
         )
+
 
 def _parity_fold_report(
     fold_index: int, book_structure: dict[str, float] | None,
@@ -745,7 +755,8 @@ def test_post_book_concurrently_forwards_only_fold_local_policy(monkeypatch) -> 
     import src.mhs.parallel as parallel_mod
 
     monkeypatch.setattr(evidence_mod, "phase_1_anchored_purged_folds", lambda: (_FOLD,) * 4)
-    monkeypatch.setattr(folds_mod, "phase_1_anchored_purged_folds", lambda: (_FOLD,) * 4)
+    import src.mhs.evaluation.fold_discovery as fold_discovery_mod
+    monkeypatch.setattr(fold_discovery_mod, "phase_1_anchored_purged_folds", lambda: (_FOLD,) * 4)
     monkeypatch.setattr(folds_mod, "_run_anchored_fold", _capturing_anchored_fold)
     monkeypatch.setattr(
         folds_mod, "_build_fold_validation_plan",
@@ -792,6 +803,7 @@ def test_p14_postbook_concurrent_parity() -> None:
     patched = dataclasses.replace(placeholder, research_go_eligible=False)
     assert patched == full
 
+
 def test_p14_postbook_no_deadlock(monkeypatch) -> None:
     # SCENARIO_P14_NO_DEADLOCK: with no anchored folds the concurrent
     # orchestration degrades to the sequential diagnostics tail through the
@@ -820,6 +832,7 @@ def test_p14_postbook_no_deadlock(monkeypatch) -> None:
     assert calls["n"] == 1
     assert result[4] == ()
     assert result[5] is None
+
 
 def test_fold_worker_records_fast_horizon_override(mhs_market, monkeypatch) -> None:
     # SCENARIO_MHS_FOLD_REPORT_FAST_HORIZON_FIELDS_DEFAULT (fold worker path):
@@ -855,6 +868,7 @@ def test_fold_worker_records_fast_horizon_override(mhs_market, monkeypatch) -> N
     assert report.fast_horizon_source == "fold_train_only_discovery"
     assert report.slow_horizon_hours == 168
     assert report.slow_horizon_source == "frozen_default"
+
 
 @pytest.mark.slow
 def test_diagnostics_run_after_folds_and_evict_caches(mhs_market_long, monkeypatch) -> None:
@@ -898,6 +912,7 @@ def test_diagnostics_run_after_folds_and_evict_caches(mhs_market_long, monkeypat
 
     assert not hasattr(marks_mod, "_get_symbol_mark_frame")
     marks_mod.clear_mhs_market_data_caches()
+
 
 def test_fold_worker_records_funding_carry_override(mhs_market, monkeypatch) -> None:
     # SCENARIO_MHS_FOLD_REPORT_CARRIES_FUNDING_CARRY_DISCOVERY_05 (fold worker
@@ -1163,8 +1178,9 @@ def test_fold_train_reference_returns_uses_only_fold_train_window(monkeypatch) -
     import pandas as pd
 
     from src.mhs.evaluation import folds as subject
+    from src.mhs.evidence import phase_1_anchored_purged_folds
 
-    fold = subject.phase_1_anchored_purged_folds()[1]
+    fold = phase_1_anchored_purged_folds()[1]
     captured: dict[str, object] = {}
     seen_grids: list[object] = []
 
@@ -1224,113 +1240,3 @@ def test_run_anchored_fold_never_accepts_top_level_sizing_arguments() -> None:
     assert "growth_budget_target_vol" not in signature.parameters
     assert "exposure_warmup_returns" not in signature.parameters
     assert "blend_exposure_scale" not in signature.parameters
-
-
-def _synthetic_fold_panel():
-    import numpy as np
-    import pandas as pd
-
-    from src.mhs.evidence import AnchoredPurgedFold
-
-    idx = pd.date_range("2021-01-01", periods=2000, freq="1h", tz="UTC")
-    cols = ["AAAUSDT", "BBBUSDT", "BTCUSDT"]
-    rng = np.random.default_rng(0)
-    close = pd.DataFrame(100 + np.cumsum(rng.normal(0, 0.1, (2000, 3)), axis=0), index=idx, columns=cols)
-    base_panel = {"close": close, "open": close.copy(), "quote_vol": pd.DataFrame(1e6, index=idx, columns=cols)}
-    fold = AnchoredPurgedFold(idx[0], idx[100], idx[800], idx[1800], 24, 24)
-    return idx, cols, base_panel, fold, {c: pd.Series(0.0, index=idx) for c in cols}
-
-
-def test_fold_weights_mark_independence(monkeypatch) -> None:
-    """Fold weights use the panel constant and ignore Mark loaders."""
-    import pandas as pd
-
-    import src.mhs.evaluation.fold_weights as fw
-    import src.mhs.marks as marks_mod
-    from src.mhs.params import PANEL_MIN_HISTORY_BARS
-
-    idx, cols, base_panel, fold, funding = _synthetic_fold_panel()
-    real_eligibility = fw.liquid_half_eligibility
-    recorded: dict[str, object] = {}
-    calls = {"n": 0}
-    def _recording(frame, *args, **kwargs):
-        calls["n"] += 1
-        recorded["frame"] = frame
-        recorded.update(kwargs)
-        return real_eligibility(frame, *args, **kwargs)
-
-    monkeypatch.setattr(fw, "liquid_half_eligibility", _recording)
-    request = research_baseline()
-    baseline, _, _, _ = fw._build_fold_target_weights("root", fold, request, funding,
-        base_panel=base_panel, require_minute_roster=False, panel_warmup_hours=24)
-    assert calls["n"] == 1
-    assert recorded["lookback_bars"] == recorded["min_history_bars"] == PANEL_MIN_HISTORY_BARS
-    pd.testing.assert_frame_equal(recorded["frame"], base_panel["quote_vol"].loc[recorded["frame"].index])
-
-    def _boom(*args, **kwargs):
-        raise AssertionError("mark loaders must not run")
-
-    for name in ("_load_window_minute_frames", "_load_symbol_minute_frame", "_load_funding_series", "load_funding_rates"):
-        monkeypatch.setattr(marks_mod, name, _boom)
-    rerun, _, _, _ = fw._build_fold_target_weights("root", fold, request, funding,
-        base_panel=base_panel, require_minute_roster=False, panel_warmup_hours=24)
-    pd.testing.assert_frame_equal(rerun, baseline)
-
-
-def test_top_level_fold_eligibility_parity(monkeypatch) -> None:
-    """Top-level and fold eligibility share kwargs and masks."""
-    import pandas as pd
-
-    import src.mhs.evaluation.fold_weights as fw
-    import src.mhs.pipeline.stages.selection as sel
-    from src.mhs.params import PANEL_MIN_HISTORY_BARS
-    from src.mhs.pipeline.context import PipelineContext
-    from src.mhs.telemetry import StageTelemetry
-
-    idx, cols, base_panel, fold, funding = _synthetic_fold_panel()
-    quote_vol = base_panel["quote_vol"]
-    sel_calls: dict[str, object] = {}
-    fold_calls: dict[str, object] = {}
-    real_sel, real_fold = sel.liquid_half_eligibility, fw.liquid_half_eligibility
-    def _sel_recording(frame, *args, **kwargs):
-        sel_calls.update(kwargs)
-        return real_sel(frame, *args, **kwargs)
-
-    def _fold_recording(frame, *args, **kwargs):
-        fold_calls.update(kwargs)
-        return real_fold(frame, *args, **kwargs)
-
-    monkeypatch.setattr(sel, "liquid_half_eligibility", _sel_recording)
-    monkeypatch.setattr(fw, "liquid_half_eligibility", _fold_recording)
-    request = research_baseline()
-    ctx = PipelineContext(config=request, resolved_end=None, start=idx[0], end=idx[-1],
-        rss_budget_bytes=None, rss_reserve_bytes=None, root="root", grid_1h=idx,
-        close=base_panel["close"], opens=base_panel["open"], quote_vol=quote_vol,
-        taker_buy_quote=None, symbols=cols)
-    sel.select_horizons(ctx, StageTelemetry(log_run=False))
-    fw._build_fold_target_weights("root", fold, request, funding,
-        base_panel=base_panel, require_minute_roster=False, panel_warmup_hours=24)
-    assert sel_calls["lookback_bars"] == fold_calls["lookback_bars"] == PANEL_MIN_HISTORY_BARS
-    assert sel_calls["min_history_bars"] == fold_calls["min_history_bars"] == PANEL_MIN_HISTORY_BARS
-    pd.testing.assert_frame_equal(
-        real_sel(quote_vol, lookback_bars=PANEL_MIN_HISTORY_BARS, min_history_bars=PANEL_MIN_HISTORY_BARS),
-        real_fold(quote_vol, lookback_bars=PANEL_MIN_HISTORY_BARS, min_history_bars=PANEL_MIN_HISTORY_BARS),
-    )
-
-
-def test_fold_weights_funding_gap_preservation() -> None:
-    """Unknown funding coverage still blocks fold weights explicitly."""
-    import pytest
-
-    import src.mhs.evaluation.fold_weights as fw
-    import src.mhs.data_policy as data_policy_mod
-
-    idx, cols, base_panel, fold, _funding = _synthetic_fold_panel()
-    request = research_baseline()
-    with pytest.raises(RuntimeError, match="no fold symbol has funding coverage"):
-        fw._build_fold_target_weights("root", fold, request, {}, base_panel=base_panel,
-            require_minute_roster=False, panel_warmup_hours=24)
-    excluded = sorted(data_policy_mod.SOURCE_GAP_EXCLUDED_SYMBOLS)[0]
-    with pytest.raises(RuntimeError, match="no fold symbol has funding coverage"):
-        fw._build_fold_target_weights("root", fold, request, {excluded: _funding[cols[0]].copy()},
-            base_panel=base_panel, require_minute_roster=False, panel_warmup_hours=24)

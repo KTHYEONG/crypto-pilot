@@ -172,10 +172,8 @@ def test_SCENARIO_MHS_TRIAL_POOL_DISCLOSURE_IN_REPORT_AND_HISTORY(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from src.mhs.contracts import MhsResearchGoResult
-    from src.mhs.run_history import (
-        append_run_history_record,
-        trial_pool_disclosure,
-    )
+    from src.mhs.run_history import append_run_history_record
+    from src.mhs.trial_pool_disclosure import trial_pool_disclosure
 
     recorder = _StageRecorder(log_run=False)
     ctx = _bare_context(recorder)
