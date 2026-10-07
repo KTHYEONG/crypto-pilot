@@ -231,17 +231,27 @@ def _resolve_fingerprint(args: argparse.Namespace, start: pd.Timestamp, end: pd.
 
 
 def run_mhs_backtest(args: argparse.Namespace) -> None:
-    """Run the canonical three-minute process evaluation under source supervision.
+    """Run the canonical three-minute process evaluation, or reuse a verified equivalent run.
+
+    Reuse is offered only for the default run-directory layout. An explicit
+    destination is a demand for files at that path, and a reused run cannot
+    satisfy it. A fingerprint match is reused only after the registry
+    certifies that the run completed validly and its recorded artifacts still
+    verify on disk. Any refused match falls through to a fresh supervised run,
+    so stale or failed history can never end the command successfully.
 
     Args:
         args: Parsed dates, evidence paths, policy and resource controls.
     Returns:
-        None after successful worker completion and outcome persistence.
+        None after a verified reuse or a completed fresh run. On success,
+        stdout carries exactly the result envelope path.
     Raises:
-        SystemExit: Arguments are invalid or observed execution is non-success.
+        SystemExit: Arguments are invalid, the registry fails integrity
+            checks, or the observed fresh execution is non-success.
         OSError: Launch or outcome persistence fails.
     """
     from src.application.mhs_supervisor import find_reused_run, run_mhs_process_backtest
+    from src.common.errors import DataIntegrityError
 
     if getattr(args, "execution_timeframe", "3m") != "3m":
         raise SystemExit(f"execution-timeframe must be 3m, got {getattr(args, 'execution_timeframe', None)!r}")
@@ -251,13 +261,22 @@ def run_mhs_backtest(args: argparse.Namespace) -> None:
     registry_path = Path(args.registry_path) if getattr(args, "registry_path", None) else BACKTESTS_DIR / "registry.sqlite3"
     retention_policy = _resolve_retention_policy(args)
     fingerprint = _resolve_fingerprint(args, start, end, budget)
-    if not getattr(args, "force", False):
-        reused = find_reused_run(registry_path, fingerprint)
-        if reused is not None:
-            existing_id, validity = reused
+    explicit_destination = args.output is not None or args.targets_output is not None
+    if not getattr(args, "force", False) and explicit_destination:
+        _logger.info("[DATA] backtest mhs reuse_skipped reason=explicit_destination")
+    elif not getattr(args, "force", False):
+        try:
+            lookup = find_reused_run(registry_path, fingerprint)
+        except DataIntegrityError as exc:
+            _logger.error("[DATA] backtest mhs reuse_lookup_failed registry=%s", registry_path, exc_info=True)
+            raise SystemExit(f"registry integrity failure: {exc}") from exc
+        if lookup.reused is not None:
+            reused = lookup.reused
             _logger.info(
-                "[EVAL] backtest mhs reuse run_id=%s validity=%s", existing_id, validity,
+                "[DATA] backtest mhs reuse run_id=%s result_path=%s targets_path=%s finalized_at=%s evidence_retained=%s",
+                reused.run_id, reused.result_path, reused.targets_path, reused.finalized_at, reused.evidence_retained,
             )
+            print(str(reused.result_path))  # noqa: T201 -- prints only the reused result path
             return
     result_output, targets_output = _resolve_destinations(args)
     run_id = result_output.parent.name if getattr(args, "output", None) is None else uuid.uuid4().hex
@@ -289,6 +308,7 @@ def run_mhs_backtest(args: argparse.Namespace) -> None:
             evaluation_start=start, evaluation_end=end, strategy_id="process_inventory_3m",
             base_cagr=base.get("cagr"), base_max_drawdown=base.get("max_drawdown"),
         )
+    print(str(result_output))  # noqa: T201 -- prints only the finalized result path
 
 
 def _frozen_strategy(breadth: int, variant: str = "primary") -> FrozenMhsStrategySpec:

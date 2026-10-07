@@ -27,6 +27,9 @@ def _install_supervisor(monkeypatch, status: str = "completed") -> dict:
 
     def _fake(**kwargs):
         seen.update(kwargs)
+        result = kwargs["result_output"]
+        result.parent.mkdir(parents=True, exist_ok=True)
+        result.write_text('{"financial": {"base": {}}}', encoding="utf-8")
         return MhsSupervisedRun(
             status=status, command=("worker",), exit_code=0, signal_number=None,
             start="s", end="e", data_root=None, result_output_path="o",
@@ -43,30 +46,48 @@ def _install_supervisor(monkeypatch, status: str = "completed") -> dict:
     return seen
 
 
-def _seed_finalized_run(registry: Path, fingerprint: str) -> str:
-    from src.backtests.contracts import RunFinalization, RunRegistration
+def _seed_finalized_run(
+    registry: Path, fingerprint: str, *, status: str = "completed", delete_artifacts: bool = False,
+) -> tuple[str, Path]:
+    import hashlib as _hashlib
+
+    from src.backtests.contracts import ArtifactReference, RunFinalization, RunRegistration
     from src.backtests.registry import finalize_run, initialize_registry, register_run
 
     initialize_registry(registry)
     run_id = uuid.uuid4().hex
+    run_dir = registry.parent / "runs" / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    result_path = run_dir / "result.json"
+    result_path.write_bytes(b'{"ok": true, "run": "%s"}' % run_id.encode())
+    digest = _hashlib.sha256(result_path.read_bytes()).hexdigest()
     register_run(
         registry,
         RunRegistration(
             run_id=run_id, strategy_id="process_inventory_3m",
             registered_at="2026-01-01T00:00:00+00:00",
             request={"fingerprint": fingerprint, "window": "3m"},
-            managed_directory=None,
+            managed_directory=run_dir,
         ),
     )
     finalize_run(
         registry,
         RunFinalization(
-            run_id=run_id, status="completed", finalized_at="2026-01-02T00:00:00+00:00",
+            run_id=run_id, status=status, finalized_at="2026-01-02T00:00:00+00:00",  # type: ignore[arg-type]
             primary_valid=True, terminal_certified=True, outcome={"ok": True},
         ),
-        (),
+        (
+            ArtifactReference(
+                run_id=run_id, role="result", path=result_path, sha256=digest,
+                byte_count=result_path.stat().st_size, managed=True, evidence_id=None,
+            ),
+        ),
     )
-    return run_id
+    if delete_artifacts:
+        import shutil as _shutil
+
+        _shutil.rmtree(run_dir)
+    return run_id, result_path
 
 
 def test_resolve_destinations_creates_single_result_path(tmp_path, monkeypatch) -> None:
@@ -82,7 +103,7 @@ def test_resolve_destinations_creates_single_result_path(tmp_path, monkeypatch) 
     assert not (result.parent / "run.json").exists()
 
 
-def test_equivalent_finalized_request_reuses_without_launch(tmp_path, monkeypatch, caplog) -> None:
+def test_equivalent_finalized_request_reuses_without_launch(tmp_path, monkeypatch, caplog, capsys) -> None:
     monkeypatch.setattr(backtest_mod, "BACKTESTS_DIR", tmp_path)
     registry = tmp_path / "registry.sqlite3"
     probe = _parse(["backtest", "mhs"])
@@ -90,7 +111,9 @@ def test_equivalent_finalized_request_reuses_without_launch(tmp_path, monkeypatc
     end = backtest_mod._utc_timestamp(None, "end", PROCESS_EVALUATION_CEILING)
     budget = backtest_mod._resolve_budget(probe)
     fingerprint = _resolve_fingerprint(probe, start, end, budget)
-    existing = _seed_finalized_run(registry, fingerprint)
+    existing, result_path = _seed_finalized_run(registry, fingerprint)
+    runs_root = tmp_path / "runs"
+    before = set(runs_root.iterdir()) if runs_root.is_dir() else set()
 
     def _boom(**kwargs):
         raise AssertionError("supervisor must not launch on reuse")
@@ -100,7 +123,88 @@ def test_equivalent_finalized_request_reuses_without_launch(tmp_path, monkeypatc
     monkeypatch.setattr(supmod, "run_mhs_process_backtest", _boom)
     with caplog.at_level("INFO"):
         run_mhs_backtest(_parse(["backtest", "mhs"]))
-    assert any(existing in r.getMessage() for r in caplog.records)
+    captured = capsys.readouterr()
+    assert captured.out == str(result_path) + "\n"
+    assert any(existing in r.getMessage() and str(result_path) in r.getMessage() for r in caplog.records)
+    after = set(runs_root.iterdir()) if runs_root.is_dir() else set()
+    assert after == before
+    assert not (tmp_path / "index.jsonl").exists()
+
+
+def test_failed_equivalent_run_falls_through_to_fresh_execution(tmp_path, monkeypatch, caplog) -> None:
+    monkeypatch.setattr(backtest_mod, "BACKTESTS_DIR", tmp_path)
+    registry = tmp_path / "registry.sqlite3"
+    probe = _parse(["backtest", "mhs"])
+    start = backtest_mod._utc_timestamp(None, "start", DISCOVERY_START)
+    end = backtest_mod._utc_timestamp(None, "end", PROCESS_EVALUATION_CEILING)
+    budget = backtest_mod._resolve_budget(probe)
+    fingerprint = _resolve_fingerprint(probe, start, end, budget)
+    existing, _ = _seed_finalized_run(registry, fingerprint, status="failed")
+    seen = _install_supervisor(monkeypatch)
+    with caplog.at_level("WARNING"):
+        run_mhs_backtest(_parse(["backtest", "mhs"]))
+    assert seen["run_id"] != existing
+    assert any(existing in r.getMessage() and "reuse_rejected" in r.getMessage() for r in caplog.records)
+
+
+def test_leaked_run_with_deleted_directory_falls_through_to_fresh_execution(tmp_path, monkeypatch, caplog) -> None:
+    monkeypatch.setattr(backtest_mod, "BACKTESTS_DIR", tmp_path)
+    registry = tmp_path / "registry.sqlite3"
+    probe = _parse(["backtest", "mhs"])
+    start = backtest_mod._utc_timestamp(None, "start", DISCOVERY_START)
+    end = backtest_mod._utc_timestamp(None, "end", PROCESS_EVALUATION_CEILING)
+    budget = backtest_mod._resolve_budget(probe)
+    fingerprint = _resolve_fingerprint(probe, start, end, budget)
+    existing, _ = _seed_finalized_run(registry, fingerprint, delete_artifacts=True)
+    seen = _install_supervisor(monkeypatch)
+    with caplog.at_level("WARNING"):
+        run_mhs_backtest(_parse(["backtest", "mhs"]))
+    assert seen["run_id"] != existing
+    assert any(
+        existing in r.getMessage() and "artifact_missing" in r.getMessage() for r in caplog.records
+    )
+
+
+def test_corrupt_registry_aborts_before_any_destination(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(backtest_mod, "BACKTESTS_DIR", tmp_path)
+    registry = tmp_path / "registry.sqlite3"
+    registry.write_bytes(b"not a sqlite database")
+    runs_root = tmp_path / "runs"
+    before = set(runs_root.iterdir()) if runs_root.is_dir() else set()
+
+    def _boom(**kwargs):
+        raise AssertionError("supervisor must not launch on corrupt registry")
+
+    import src.application.mhs_supervisor as supmod
+
+    monkeypatch.setattr(supmod, "run_mhs_process_backtest", _boom)
+    with pytest.raises(SystemExit) as excinfo:
+        run_mhs_backtest(_parse(["backtest", "mhs"]))
+    assert str(excinfo.value.code).startswith("registry integrity failure")
+    after = set(runs_root.iterdir()) if runs_root.is_dir() else set()
+    assert after == before
+
+
+def test_explicit_destination_skips_reuse(tmp_path, monkeypatch, caplog) -> None:
+    monkeypatch.setattr(backtest_mod, "BACKTESTS_DIR", tmp_path)
+    registry = tmp_path / "registry.sqlite3"
+    probe = _parse(["backtest", "mhs"])
+    start = backtest_mod._utc_timestamp(None, "start", DISCOVERY_START)
+    end = backtest_mod._utc_timestamp(None, "end", PROCESS_EVALUATION_CEILING)
+    budget = backtest_mod._resolve_budget(probe)
+    fingerprint = _resolve_fingerprint(probe, start, end, budget)
+    _seed_finalized_run(registry, fingerprint)
+    seen = _install_supervisor(monkeypatch)
+    with caplog.at_level("INFO"):
+        run_mhs_backtest(_parse(["backtest", "mhs", "--output", str(tmp_path / "fresh.json")]))
+    assert seen["result_output"] == tmp_path / "fresh.json"
+    assert any("reuse_skipped reason=explicit_destination" in r.getMessage() for r in caplog.records)
+    seen_targets = _install_supervisor(monkeypatch)
+    with caplog.at_level("INFO"):
+        run_mhs_backtest(
+            _parse(["backtest", "mhs", "--targets-output", str(tmp_path / "fresh.parquet")])
+        )
+    assert seen_targets["targets_output"] == tmp_path / "fresh.parquet"
 
 
 def test_force_bypasses_reuse_with_fresh_identity(tmp_path, monkeypatch) -> None:
@@ -111,11 +215,32 @@ def test_force_bypasses_reuse_with_fresh_identity(tmp_path, monkeypatch) -> None
     end = backtest_mod._utc_timestamp(None, "end", PROCESS_EVALUATION_CEILING)
     budget = backtest_mod._resolve_budget(probe)
     fingerprint = _resolve_fingerprint(probe, start, end, budget)
-    existing = _seed_finalized_run(registry, fingerprint)
+    existing, _ = _seed_finalized_run(registry, fingerprint)
     seen = _install_supervisor(monkeypatch)
     run_mhs_backtest(_parse(["backtest", "mhs", "--force"]))
     assert seen["run_id"] != existing
     uuid.UUID(hex=seen["run_id"])
+
+
+def test_completed_fresh_run_prints_result_path(tmp_path, monkeypatch, capsys) -> None:
+    monkeypatch.setattr(backtest_mod, "BACKTESTS_DIR", tmp_path)
+    seen = _install_supervisor(monkeypatch)
+    run_mhs_backtest(_parse(["backtest", "mhs"]))
+    captured = capsys.readouterr()
+    assert captured.out == str(seen["result_output"]) + "\n"
+
+
+def test_index_failure_does_not_print_success_path(tmp_path, monkeypatch, capsys) -> None:
+    monkeypatch.setattr(backtest_mod, "BACKTESTS_DIR", tmp_path)
+    _install_supervisor(monkeypatch)
+
+    def _fail_index(**kwargs):
+        raise OSError("index persistence failed")
+
+    monkeypatch.setattr(backtest_mod, "append_backtest_index", _fail_index)
+    with pytest.raises(OSError, match="index persistence failed"):
+        run_mhs_backtest(_parse(["backtest", "mhs"]))
+    assert capsys.readouterr().out == ""
 
 
 def test_fingerprint_excludes_output_paths(tmp_path, monkeypatch) -> None:
