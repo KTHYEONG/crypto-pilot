@@ -88,6 +88,149 @@ def _rebalance_fold_weights(
     return _scaling._apply_rebalance_deadband(scaled, seed_row=seed_row)
 
 
+def _validate_fold_committee_admission(
+    request: MhsDiagnosticRequest, fold: AnchoredPurgedFold, committee_admission: FeatureAdmission | None
+) -> None:
+    if request.committee_capital:
+        if committee_admission is None:
+            raise integrity.CommitteeAdmissionIntegrityError(
+                "committee_capital requires committee_admission (fold train_end boundary)"
+            )
+        if committee_admission.cutoff > fold.validation_start:
+            raise integrity.CommitteeAdmissionIntegrityError(
+                f"committee admission cutoff {committee_admission.cutoff} after validation_start {fold.validation_start}"
+            )
+        if committee_admission.cutoff != fold.train_end:
+            raise integrity.CommitteeAdmissionIntegrityError(
+                f"committee admission cutoff {committee_admission.cutoff} != fold train_end {fold.train_end}"
+            )
+    elif committee_admission is not None:
+        raise ValueError("committee_admission requires committee_capital")
+
+
+def _funding_aligned_fold_panels(
+    close: pd.DataFrame,
+    opens: pd.DataFrame,
+    quote_vol: pd.DataFrame,
+    taker_buy_quote: pd.DataFrame | None,
+    funding_by_symbol: dict[str, pd.Series],
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame | None, pd.DataFrame]:
+    """Restrict fold panels to symbols with observed, causally aligned funding.
+
+    Returns:
+        ``(close, opens, quote_vol, taker_buy_quote, bar_funding)`` on the aligned symbol set.
+    Raises:
+        RuntimeError: no symbol has funding coverage, or none survives causal alignment.
+    """
+    grid_1h = close.index
+    symbols = list(close.columns)
+    funded = [s for s in symbols if s in funding_by_symbol and s not in integrity.SOURCE_GAP_EXCLUDED_SYMBOLS]
+    if not funded:
+        raise RuntimeError("no fold symbol has funding coverage")
+    close = close[funded]
+    opens = opens[funded]
+    quote_vol = quote_vol[funded]
+    if taker_buy_quote is not None:
+        taker_buy_quote = taker_buy_quote[funded]
+    bar_period = grid_1h[1] - grid_1h[0]
+    funding_window = {
+        s: funding_by_symbol[s].loc[
+            (funding_by_symbol[s].index >= grid_1h[0]) & (funding_by_symbol[s].index < grid_1h[-1] + bar_period)
+        ]
+        for s in funded
+    }
+    bar_funding = bar_funding_panel(funding_window, grid_1h)
+    del funding_window
+    aligned_symbols = list(bar_funding.columns)
+    if not aligned_symbols:
+        raise RuntimeError("no fold symbol has causally aligned funding coverage")
+    close = close[aligned_symbols]
+    opens = opens[aligned_symbols]
+    quote_vol = quote_vol[aligned_symbols]
+    bar_funding = bar_funding[aligned_symbols]
+    if taker_buy_quote is not None:
+        taker_buy_quote = taker_buy_quote[aligned_symbols]
+    return close, opens, quote_vol, taker_buy_quote, bar_funding
+
+
+def _committee_fold_blend(
+    close: pd.DataFrame,
+    quote_vol: pd.DataFrame,
+    taker_buy_quote: pd.DataFrame | None,
+    execution_mask: pd.DataFrame,
+    bar_funding: pd.DataFrame,
+    slow_grid: pd.DatetimeIndex,
+    min_symbols: int,
+    grid_1h: pd.DatetimeIndex,
+    request: MhsDiagnosticRequest,
+    committee_member_weights: dict[str, float] | None,
+    causal_beta: pd.DataFrame | None,
+    committee_admission: FeatureAdmission | None,
+) -> pd.DataFrame:
+    return (
+        committee._committee_execution_book(
+            close,
+            quote_vol,
+            taker_buy_quote,
+            execution_mask,
+            slow_grid,
+            min_symbols,
+            _research_go._resolved_committee_tranche_count(request),
+            regime_adaptive_window=(
+                COMMITTEE_REGIME_ADAPTIVE_WINDOW if request.committee_regime_adaptive_tranche else None
+            ),
+            target_gross=request.committee_target_gross,
+            member_weights=committee_member_weights,
+            carry_book=funding_carry_execution_book(
+                bar_funding,
+                execution_mask,
+                FUNDING_CARRY_SLEEVE_LOOKBACK_HOURS,
+                slow_grid,
+                request.committee_tranche_count,
+                min_symbols,
+            )
+            if request.funding_carry_sleeve
+            else None,
+            carry_weight=request.funding_carry_weight if request.funding_carry_sleeve else 0.0,
+            members=_research_go._resolved_committee_members(request),
+            beta=causal_beta,
+            admission=committee_admission,
+        )
+        .reindex(grid_1h)
+        .fillna(0.0)
+    )
+
+
+def _fold_minute_roster(
+    root: str,
+    target_weights: pd.DataFrame,
+    request: MhsDiagnosticRequest,
+    vs: pd.Timestamp,
+    ve: pd.Timestamp,
+    require_minute_roster: bool,
+) -> list[str]:
+    execution_symbols = sorted(target_weights.columns[target_weights.ne(0.0).any(axis=0)])
+    absent = set(_missing_execution_sources(root, execution_symbols, request.execution_timeframe))
+    minute_roster = [s for s in execution_symbols if s not in absent]
+    # 라이브 경로는 target weights만 emit하고 분단위 실행 리플레이를 하지 않으므로
+    # minute roster 불변식은 백테스트(replay) 경로에서만 강제한다.
+    if require_minute_roster and not minute_roster:
+        raise RuntimeError("no fold decision symbol has minute execution data")
+    if require_minute_roster:
+        targeted_missing = sorted(
+            s
+            for s in execution_symbols
+            if s in absent and bool((target_weights[s].notna() & target_weights[s].ne(0.0)).any())
+        )
+        if targeted_missing:
+            raise DataIntegrityError(
+                f"fold execution source missing for {len(targeted_missing)} targeted symbol(s) "
+                f"[{', '.join(targeted_missing)}] timeframe={request.execution_timeframe} "
+                f"root={root} decision_window=[{vs.isoformat()}, {ve.isoformat()}]"
+            )
+    return minute_roster
+
+
 def _build_fold_target_weights(
     root: str,
     fold: AnchoredPurgedFold,
@@ -142,21 +285,7 @@ def _build_fold_target_weights(
     vs, ve = _resolve_effective_fold_window(fold, decision_start, decision_end)
     if apply_rebalance_deadband is False and request.rebalance_filter != "per_symbol_deadband":
         raise ValueError("apply_rebalance_deadband=False requires rebalance_filter='per_symbol_deadband'")
-    if request.committee_capital:
-        if committee_admission is None:
-            raise integrity.CommitteeAdmissionIntegrityError(
-                "committee_capital requires committee_admission (fold train_end boundary)"
-            )
-        if committee_admission.cutoff > fold.validation_start:
-            raise integrity.CommitteeAdmissionIntegrityError(
-                f"committee admission cutoff {committee_admission.cutoff} after validation_start {fold.validation_start}"
-            )
-        if committee_admission.cutoff != fold.train_end:
-            raise integrity.CommitteeAdmissionIntegrityError(
-                f"committee admission cutoff {committee_admission.cutoff} != fold train_end {fold.train_end}"
-            )
-    elif committee_admission is not None:
-        raise ValueError("committee_admission requires committee_capital")
+    _validate_fold_committee_admission(request, fold, committee_admission)
     panel_start = max(ts, vs - pd.Timedelta(hours=panel_warmup_hours))
     _panel_columns = (
         ("close", "open", "quote_vol", "taker_buy_quote")
@@ -181,34 +310,10 @@ def _build_fold_target_weights(
     close, opens, quote_vol = panel["close"], panel["open"], panel["quote_vol"]
     taker_buy_quote = panel["taker_buy_quote"] if request.committee_capital else None
     del panel
+    close, opens, quote_vol, taker_buy_quote, bar_funding = _funding_aligned_fold_panels(
+        close, opens, quote_vol, taker_buy_quote, funding_by_symbol
+    )
     grid_1h = close.index
-    symbols = list(close.columns)
-    funded = [s for s in symbols if s in funding_by_symbol and s not in integrity.SOURCE_GAP_EXCLUDED_SYMBOLS]
-    if not funded:
-        raise RuntimeError("no fold symbol has funding coverage")
-    close = close[funded]
-    opens = opens[funded]
-    quote_vol = quote_vol[funded]
-    if taker_buy_quote is not None:
-        taker_buy_quote = taker_buy_quote[funded]
-    bar_period = grid_1h[1] - grid_1h[0]
-    funding_window = {
-        s: funding_by_symbol[s].loc[
-            (funding_by_symbol[s].index >= grid_1h[0]) & (funding_by_symbol[s].index < grid_1h[-1] + bar_period)
-        ]
-        for s in funded
-    }
-    bar_funding = bar_funding_panel(funding_window, grid_1h)
-    del funding_window
-    aligned_symbols = list(bar_funding.columns)
-    if not aligned_symbols:
-        raise RuntimeError("no fold symbol has causally aligned funding coverage")
-    close = close[aligned_symbols]
-    opens = opens[aligned_symbols]
-    quote_vol = quote_vol[aligned_symbols]
-    bar_funding = bar_funding[aligned_symbols]
-    if taker_buy_quote is not None:
-        taker_buy_quote = taker_buy_quote[aligned_symbols]
 
     eligible = liquid_half_eligibility(
         quote_vol,
@@ -308,37 +413,9 @@ def _build_fold_target_weights(
                 min_symbols=slow.min_symbols,
             )
     if request.committee_capital:
-        blend_1h = (
-            committee._committee_execution_book(
-                close,
-                quote_vol,
-                taker_buy_quote,
-                execution_mask,
-                slow_grid,
-                slow.min_symbols,
-                _research_go._resolved_committee_tranche_count(request),
-                regime_adaptive_window=(
-                    COMMITTEE_REGIME_ADAPTIVE_WINDOW if request.committee_regime_adaptive_tranche else None
-                ),
-                target_gross=request.committee_target_gross,
-                member_weights=committee_member_weights,
-                carry_book=funding_carry_execution_book(
-                    bar_funding,
-                    execution_mask,
-                    FUNDING_CARRY_SLEEVE_LOOKBACK_HOURS,
-                    slow_grid,
-                    request.committee_tranche_count,
-                    slow.min_symbols,
-                )
-                if request.funding_carry_sleeve
-                else None,
-                carry_weight=request.funding_carry_weight if request.funding_carry_sleeve else 0.0,
-                members=_research_go._resolved_committee_members(request),
-                beta=causal_beta,
-                admission=committee_admission,
-            )
-            .reindex(grid_1h)
-            .fillna(0.0)
+        blend_1h = _committee_fold_blend(
+            close, quote_vol, taker_buy_quote, execution_mask, bar_funding, slow_grid, slow.min_symbols,
+            grid_1h, request, committee_member_weights, causal_beta, committee_admission,
         )
         del close, taker_buy_quote
     else:
@@ -385,24 +462,6 @@ def _build_fold_target_weights(
 
     if target_weights.empty:
         raise RuntimeError("fold decision grid is empty")
-    execution_symbols = sorted(target_weights.columns[target_weights.ne(0.0).any(axis=0)])
-    absent = set(_missing_execution_sources(root, execution_symbols, request.execution_timeframe))
-    minute_roster = [s for s in execution_symbols if s not in absent]
-    # 라이브 경로는 target weights만 emit하고 분단위 실행 리플레이를 하지 않으므로
-    # minute roster 불변식은 백테스트(replay) 경로에서만 강제한다.
-    if require_minute_roster and not minute_roster:
-        raise RuntimeError("no fold decision symbol has minute execution data")
-    if require_minute_roster:
-        targeted_missing = sorted(
-            s
-            for s in execution_symbols
-            if s in absent and bool((target_weights[s].notna() & target_weights[s].ne(0.0)).any())
-        )
-        if targeted_missing:
-            raise DataIntegrityError(
-                f"fold execution source missing for {len(targeted_missing)} targeted symbol(s) "
-                f"[{', '.join(targeted_missing)}] timeframe={request.execution_timeframe} "
-                f"root={root} decision_window=[{vs.isoformat()}, {ve.isoformat()}]"
-            )
+    minute_roster = _fold_minute_roster(root, target_weights, request, vs, ve, require_minute_roster)
     signal_available_at = target_weights.index + pd.Timedelta(hours=1)
     return target_weights, signal_available_at, minute_roster, grid_1h

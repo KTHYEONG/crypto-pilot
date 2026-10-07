@@ -60,8 +60,6 @@ COMPLEXITY_CEILINGS: Final[dict[str, int]] = {
     "src/mhs/backtest/selection.py::choose_refit_policy": 21,
     "src/mhs/deploy_gate.py::evaluate_continuous_growth_survival": 17,
     "src/mhs/discovery.py::select_horizon_by_discovery_qualification": 28,
-    "src/mhs/evaluation/committee.py::_committee_diagnostic": 21,
-    "src/mhs/evaluation/fold_weights.py::_build_fold_target_weights": 19,
     "src/mhs/evaluation/windows.py::_book_outcome": 25,
     "src/mhs/execution/accumulator.py::_consume_append_ledger": 26,
     "src/mhs/execution/batch.py::replay_execution_window_batch_isolated": 17,

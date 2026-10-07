@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+import src.application.mhs_reuse as reuse
 import src.application.mhs_supervisor as sup
 from src.backtests.contracts import ArtifactReference, RunFinalization, RunRegistration
 from src.backtests.registry import finalize_run, initialize_registry, register_run
@@ -788,7 +789,7 @@ def test_unreadable_artifact_paths_reject(tmp_path, monkeypatch) -> None:
     assert lookup.reused is None
     assert lookup.rejections[0].reason == "artifact_unreadable"
     monkeypatch.setattr(_os, "stat", real_stat)
-    monkeypatch.setattr(sup, "_hash_file", lambda path: (_ for _ in ()).throw(OSError("hash boom")))
+    monkeypatch.setattr(reuse, "_hash_file", lambda path: (_ for _ in ()).throw(OSError("hash boom")))
     lookup = sup.find_reused_run(registry, fingerprint)
     assert lookup.reused is None
     assert lookup.rejections[0].reason == "artifact_unreadable"
