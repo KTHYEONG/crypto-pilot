@@ -1023,16 +1023,9 @@ def _validate_positive_interval(value: float | None, label: str) -> None:
 
 
 def _validate_supervised_request(
-    *,
-    start: pd.Timestamp,
-    end: pd.Timestamp,
-    result_output: Path,
-    targets_output: Path | None,
-    tracking_error_threshold: float | None,
-    timeout_seconds: float | None,
-    poll_seconds: float,
-    retention_policy: RetentionPolicy | None,
-    run_id: str | None,
+    *, start: pd.Timestamp, end: pd.Timestamp, result_output: Path, targets_output: Path | None,
+    tracking_error_threshold: float | None, timeout_seconds: float | None, poll_seconds: float,
+    retention_policy: RetentionPolicy | None, run_id: str | None, registry_path: Path,
 ) -> tuple[Path, str]:
     """Validate supervised controls and resolve fresh destinations before registration.
 
@@ -1051,6 +1044,8 @@ def _validate_supervised_request(
         not isinstance(targets_output, Path) or targets_output.suffix != ".parquet"
     ):
         raise ValueError("targets_output must be a parquet path")
+    if not isinstance(registry_path, Path):
+        raise ValueError("registry_path must be a Path")
     _validate_positive_interval(poll_seconds, "poll_seconds")
     if timeout_seconds is not None:
         _validate_positive_interval(timeout_seconds, "timeout_seconds")
@@ -1097,13 +1092,12 @@ def run_mhs_process_backtest(
         OSError: Worker launch (or log creation) failed; raised after the
             ``failed`` envelope is published, retention is skipped.
     """
-    resolved_registry = Path(registry_path)
     log_path, resolved_run_id = _validate_supervised_request(
         start=start, end=end, result_output=result_output, targets_output=targets_output,
         tracking_error_threshold=tracking_error_threshold, timeout_seconds=timeout_seconds,
-        poll_seconds=poll_seconds, retention_policy=retention_policy, run_id=run_id,
+        poll_seconds=poll_seconds, retention_policy=retention_policy, run_id=run_id, registry_path=registry_path,
     )
-    evidence_root = resolved_registry.resolve().parent / "evidence"
+    evidence_root = registry_path.resolve().parent / "evidence"
     budget = resolve_mhs_memory_budget(memory_budget)
     source_digest = _code_identity()
     if not isinstance(source_digest, str) or re.fullmatch(r"[0-9a-f]{64}", source_digest) is None:
@@ -1114,9 +1108,9 @@ def run_mhs_process_backtest(
         memory_budget=budget,
         code_digest=source_digest,
     )
-    initialize_registry(resolved_registry)
+    initialize_registry(registry_path)
     register_run(
-        resolved_registry,
+        registry_path,
         RunRegistration(
             run_id=resolved_run_id,
             strategy_id=PROCESS_INVENTORY_CERTIFICATION_LEVEL,
@@ -1140,7 +1134,7 @@ def run_mhs_process_backtest(
         "--replay-tree-pss-bytes", str(budget.replay_tree_pss_bytes),
         "--min-available-bytes", str(budget.min_available_bytes),
         "--evidence-root", str(evidence_root),
-        "--registry-path", str(resolved_registry),
+        "--registry-path", str(registry_path),
         "--run-id", resolved_run_id,
         "--procedure-code-digest", source_digest,
     ]
@@ -1212,7 +1206,7 @@ def run_mhs_process_backtest(
     )
     _publish_envelope(
         start=start, end=end, data_root=data_root, fingerprint=fingerprint,
-        registry_path=resolved_registry, run_id=resolved_run_id, run=run,
+        registry_path=registry_path, run_id=resolved_run_id, run=run,
         evidence_root=evidence_root, result_output=result_output,
         targets_output=targets_output, staging=staging, log_path=log_path,
         command=tuple(scoped_command),
@@ -1220,5 +1214,5 @@ def run_mhs_process_backtest(
     if launch_exc is not None:
         raise launch_exc
     if retention_policy is not None:
-        _run_retention(resolved_registry, resolved_run_id, evidence_root, retention_policy)
+        _run_retention(registry_path, resolved_run_id, evidence_root, retention_policy)
     return run
