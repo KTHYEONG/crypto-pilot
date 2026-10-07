@@ -58,28 +58,20 @@ def resolve_cli_request(explicit: Mapping[str, Any]) -> MhsDiagnosticRequest:
     )
     trend_sleeve = bool(_get("trend_sleeve"))
 
-    derived = {
-        "committee_capital": committee_capital,
-        "committee_tranche_smoothing": smoothing,
-        "committee_regime_adaptive_tranche": committee_regime_adaptive_tranche,
-        "committee_target_gross_active": committee_capital,
-        "funding_carry_sleeve": funding_carry_sleeve,
-        "trend_sleeve": trend_sleeve,
+    # CLI activity of each INERT_DEPENDENT_RULES field; a rule missing here fails closed rather
+    # than inheriting another rule's gate.
+    activity = {
+        "committee_member_set": committee_capital,
+        "committee_tranche_count": smoothing or committee_regime_adaptive_tranche,
+        "committee_target_gross": committee_capital,
+        "funding_carry_weight": funding_carry_sleeve,
+        "trend_sleeve_gross": trend_sleeve,
     }
 
     def _active(field: str) -> bool:
-        if field == "committee_member_set":
-            return bool(derived["committee_capital"])
-        if field == "committee_tranche_count":
-            return bool(
-                derived["committee_tranche_smoothing"]
-                or derived["committee_regime_adaptive_tranche"]
-            )
-        if field == "committee_target_gross":
-            return bool(derived["committee_target_gross_active"])
-        if field == "funding_carry_weight":
-            return bool(derived["funding_carry_sleeve"])
-        return bool(derived["trend_sleeve"])
+        if field not in activity:
+            raise RuntimeError(f"no CLI activity condition for inert-dependent field {field!r}")
+        return bool(activity[field])
 
     def _stated(field: str) -> bool:
         return field in explicit and not (
