@@ -549,11 +549,11 @@ def test_settlement_records_pre_mutation_equity() -> None:
     assert idx == len(acc.fill_qty) - 1
     q0, p0, fb0 = acc.fill_qty[0], acc.fill_price[0], acc.fill_fee_bps[0]
     cash_after_first = 1000.0 - q0 * p0 - fb0 / 1e4 * abs(q0) * p0
-    expected_pre = cash_after_first + q0 * 100.0
+    expected_pre = cash_after_first + q0 * event.settlement_price
     assert acc.fill_pre_trade_equity[idx] == pytest.approx(expected_pre)
     post_cash = cash_after_first - acc.fill_qty[idx] * 90.0 - 5.0 / 1e4 * abs(acc.fill_qty[idx]) * 90.0
-    assert abs(expected_pre - post_cash) > 1.0
-    assert abs(float(acc.fill_pre_trade_equity[idx]) - post_cash) > 1.0
+    assert expected_pre - post_cash == pytest.approx(5.0 / 1e4 * abs(q0) * 90.0)
+    assert float(acc.fill_pre_trade_equity[idx]) > post_cash
 
 
 def test_unknown_reason_fails_closed_without_mutation() -> None:
@@ -943,4 +943,3 @@ def test_reconcile_tripwire_still_fires() -> None:
     acc.accounting_state.cash += 1e-6 * 1000.0
     with pytest.raises(DataIntegrityError, match="causal accounting diverged"):
         acc.finalize()
-

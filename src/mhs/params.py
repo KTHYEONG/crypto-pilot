@@ -491,6 +491,10 @@ SETTLEMENT_PRICE_ENVELOPE_LOOKBACK: pd.Timedelta = pd.Timedelta(hours=24)
 # Trailing flat run length that marks a delisted (forward-filled) tail; mirrors the live min-flat-bars rule.
 SETTLEMENT_AUDIT_MIN_TRAILING_FLAT_BARS: int = 3
 
+# --- spec 34: instrument lifecycle settlement (part 2 engine) ---
+SETTLEMENT_PRICE_STRESS_HAIRCUT_BPS: float = 450.0
+INSTRUMENT_LIFECYCLE_PROCEDURE: str = "pit_registry_settlement_v1"
+
 # --- continuous process backtest -------------------------------------------------
 # 한 번의 연속 인과 경로에서 매월 재적합한다(분기 폴드 개별 재생 대체).
 PROCESS_REFIT_FREQUENCY: str = "MS"

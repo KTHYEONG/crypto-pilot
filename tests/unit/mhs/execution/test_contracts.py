@@ -169,3 +169,52 @@ class TestAlignFundingRates:
         assert _align_funding_rates.__module__ == "src.mhs.execution.contracts"
 
 
+
+
+def test_settlement_event_ordering_enforced() -> None:
+    import pandas as pd
+    import pytest
+    from src.common.errors import DataIntegrityError
+    from src.mhs.execution.contracts import InstrumentSettlementEvent
+    base = {
+        "event_id": "A:1",
+        "symbol": "AUSDT",
+        "effective_at": pd.Timestamp("2022-01-14 02:03", tz="UTC"),
+        "available_at": pd.Timestamp("2022-01-14 02:03", tz="UTC"),
+        "settlement_price": 1.0,
+        "fee_bps": 0.0,
+        "source_digest": "sha256:x",
+    }
+    with pytest.raises(DataIntegrityError, match="announced_at"):
+        InstrumentSettlementEvent(announced_at=pd.Timestamp("2022-01-14 03:00", tz="UTC"), last_trade_at=pd.Timestamp("2022-01-14 02:00", tz="UTC"), **base)
+    with pytest.raises(DataIntegrityError, match="last_trade_at"):
+        InstrumentSettlementEvent(announced_at=pd.Timestamp("2022-01-10", tz="UTC"), last_trade_at=pd.Timestamp("2022-01-14 03:00", tz="UTC"), **base)
+
+
+def test_settlement_event_defaults_preserve_legacy_construction() -> None:
+    import pandas as pd
+    from src.mhs.execution.contracts import InstrumentSettlementEvent
+    e = InstrumentSettlementEvent(event_id="A:1", symbol="AUSDT", effective_at=pd.Timestamp("2022-01-14 02:03", tz="UTC"), available_at=pd.Timestamp("2022-01-14 02:03", tz="UTC"), settlement_price=1.0, fee_bps=0.0, source_digest="sha256:x")
+    assert e.announced_at is None
+    assert e.last_trade_at is None
+    assert e.price_source == "venue"
+
+
+def test_settlement_unknown_price_source_rejected() -> None:
+    import pandas as pd
+    import pytest
+    from src.common.errors import DataIntegrityError
+    from src.mhs.execution.contracts import InstrumentSettlementEvent
+    with pytest.raises(DataIntegrityError, match="price_source"):
+        InstrumentSettlementEvent(event_id="A:1", symbol="AUSDT", effective_at=pd.Timestamp("2022-01-14 02:03", tz="UTC"), available_at=pd.Timestamp("2022-01-14 02:03", tz="UTC"), settlement_price=1.0, fee_bps=0.0, source_digest="sha256:x", price_source="other")
+
+
+def test_settlement_naive_event_time_rejected() -> None:
+    import pandas as pd
+    import pytest
+    from src.common.errors import DataIntegrityError
+    from src.mhs.execution.contracts import InstrumentSettlementEvent
+    with pytest.raises(DataIntegrityError, match="timezone-aware UTC"):
+        InstrumentSettlementEvent(event_id="A:1", symbol="AUSDT", effective_at=pd.Timestamp("2022-01-14 02:03", tz="UTC"), available_at=pd.Timestamp("2022-01-14 02:03", tz="UTC"), settlement_price=1.0, fee_bps=0.0, source_digest="sha256:x", announced_at=pd.Timestamp("2022-01-10 00:00"), last_trade_at=pd.Timestamp("2022-01-14 02:00", tz="UTC"))
+    with pytest.raises(DataIntegrityError, match="valid timestamp"):
+        InstrumentSettlementEvent(event_id="A:1", symbol="AUSDT", effective_at=pd.Timestamp("2022-01-14 02:03", tz="UTC"), available_at=pd.Timestamp("2022-01-14 02:03", tz="UTC"), settlement_price=1.0, fee_bps=0.0, source_digest="sha256:x", announced_at="2022-01-10", last_trade_at=pd.Timestamp("2022-01-14 02:00", tz="UTC"))

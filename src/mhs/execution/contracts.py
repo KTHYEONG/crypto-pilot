@@ -391,6 +391,9 @@ class InstrumentSettlementEvent:
 
     The source binds the contractual settlement time, price and fee. Publication
     timing prevents a later announcement from generating an earlier fictional fill.
+    ``announced_at`` and ``last_trade_at`` default to ``effective_at``.
+    ``price_source`` other than ``curated``/``venue`` marks a proxy price subject to the stress
+    haircut. ``venue`` is reserved for direct test/legacy constructions.
     """
 
     event_id: str
@@ -400,6 +403,9 @@ class InstrumentSettlementEvent:
     settlement_price: float
     fee_bps: float
     source_digest: str
+    announced_at: pd.Timestamp | None = None
+    last_trade_at: pd.Timestamp | None = None
+    price_source: Literal["flat_1h_klines", "twap30_proxy", "curated", "venue"] = "venue"
 
     def __post_init__(self) -> None:
         if not isinstance(self.event_id, str) or not self.event_id:
@@ -420,6 +426,22 @@ class InstrumentSettlementEvent:
         fee = float(self.fee_bps)
         if not np.isfinite(fee) or fee < 0.0:
             raise DataIntegrityError("fee_bps must be a finite nonnegative fee")
+        for name in ("announced_at", "last_trade_at"):
+            value = getattr(self, name)
+            if value is None:
+                continue
+            if not isinstance(value, pd.Timestamp) or pd.isna(value):
+                raise DataIntegrityError(f"settlement {name} must be a valid timestamp")
+            if value.tzinfo is None or value.utcoffset() != _datetime.timedelta(0):
+                raise DataIntegrityError(f"settlement {name} must be timezone-aware UTC")
+        announced = self.announced_at if self.announced_at is not None else self.effective_at
+        last_trade = self.last_trade_at if self.last_trade_at is not None else self.effective_at
+        if announced > last_trade:
+            raise DataIntegrityError("settlement announced_at must not exceed last_trade_at")
+        if last_trade > self.effective_at:
+            raise DataIntegrityError("settlement last_trade_at must not exceed effective_at")
+        if self.price_source not in ("flat_1h_klines", "twap30_proxy", "curated", "venue"):
+            raise DataIntegrityError(f"unknown settlement price_source {self.price_source!r}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -540,6 +562,7 @@ class StrategyExecutionReplayResult:
     funding_coverage_gaps: tuple[FundingCoverageGap, ...] = ()
     terminal_positions: tuple[TerminalPositionEvidence, ...] = ()
     ledger_available_at: pd.DatetimeIndex | None = None
+    settlement_events: tuple[InstrumentSettlementEvent, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

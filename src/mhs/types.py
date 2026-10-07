@@ -158,6 +158,8 @@ class ExecutionSpec:
     probe is a diagnostic-only overlay: when ``min_notional_probe_usdt > 0``
     each intent's dollar size at ``reference_equity_usdt`` is accumulated into
     a dropped-fraction report metric without touching the ledger.
+    ``settlement_price_haircut_bps`` widens proxy-priced delisting settlements
+    against the held side; base specs keep 0 and stress specs carry the registered haircut.
     """
 
     maker_fee_bps: float = 2.0
@@ -178,6 +180,7 @@ class ExecutionSpec:
     reference_equity_usdt: float = 2000.0
     name_drift_trim_max_weight: float | None = None
     name_drift_trim_interval_hours: int = NAME_DRIFT_TRIM_INTERVAL_HOURS
+    settlement_price_haircut_bps: float = 0.0
 
     def __post_init__(self) -> None:
         if self.name_drift_trim_max_weight is not None and not (0.0 < self.name_drift_trim_max_weight < 1.0):
@@ -208,6 +211,14 @@ class ExecutionSpec:
             raise ValueError(f"min_notional_probe_usdt must be >= 0, got {self.min_notional_probe_usdt}")
         if self.reference_equity_usdt <= 0:
             raise ValueError(f"reference_equity_usdt must be > 0, got {self.reference_equity_usdt}")
+        import math
+
+        if not math.isfinite(float(self.settlement_price_haircut_bps)) or not (
+            0.0 <= float(self.settlement_price_haircut_bps) < 1e4
+        ):
+            raise ValueError(
+                f"settlement_price_haircut_bps must be finite in [0, 1e4), got {self.settlement_price_haircut_bps!r}"
+            )
 
     def one_way_taker_bps(self) -> float:
         """One-way all-in taker cost in bps (fee + slippage)."""

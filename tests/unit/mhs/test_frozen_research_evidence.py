@@ -420,3 +420,12 @@ def test_evaluate_maker_stress_insensitive_when_fully_passive() -> None:
         execution_bound="OHLCV_STRICT_PROXY",
     )
     pd.testing.assert_series_equal(evidence.base.ledger.equity, evidence.stress.ledger.equity)
+
+
+def test_frozen_evidence_guard_tolerates_haircut_only() -> None:
+    import dataclasses
+    from src.application.mhs_frozen_account import frozen_execution_specs
+    base, stress = frozen_execution_specs()
+    assert dataclasses.replace(stress, taker_fee_bps=base.taker_fee_bps, taker_slippage_bps=base.taker_slippage_bps, settlement_price_haircut_bps=base.settlement_price_haircut_bps) == base
+    bad = dataclasses.replace(stress, passive_timeout_minutes=60)
+    assert dataclasses.replace(bad, taker_fee_bps=base.taker_fee_bps, taker_slippage_bps=base.taker_slippage_bps, settlement_price_haircut_bps=base.settlement_price_haircut_bps) != base

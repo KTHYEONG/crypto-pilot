@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import gc
 from collections.abc import Callable, Iterator, Mapping
 from typing import Literal
@@ -11,6 +12,7 @@ import pandas as pd
 
 from src.common.errors import DataIntegrityError
 from src.mhs.execution.contracts import ExecutionReplayWindow, align_funding_with_knowledge, funding_coverage_gaps
+from src.mhs.instrument_settlements import InstrumentSettlementRegistry, settlement_registry_for_root
 from src.mhs.marks import _build_window_frames, _load_window_minute_frames, _missing_execution_sources
 from src.mhs.parallel import collect_window_garbage
 from src.mhs.resources import (
@@ -20,7 +22,34 @@ from src.mhs.resources import (
 )
 from src.mhs.types import ExecutionSpec
 
+from .settlement import settled_before_piece, settlement_events_for_piece
+
 MhsExecutionWindow = ExecutionReplayWindow
+
+
+def _single_panel_execution_window(
+    target_weights: pd.DataFrame, signal_available_at: pd.DatetimeIndex,
+    highs: pd.DataFrame, lows: pd.DataFrame, closes: pd.DataFrame,
+    marks: pd.DataFrame | None, bar_funding: pd.DataFrame,
+) -> ExecutionReplayWindow:
+    """Wrap a validated caller-owned panel in the shared window contract."""
+    symbols = list(target_weights.columns)
+    grid = closes.index
+    return ExecutionReplayWindow(
+        window_start=grid[0], window_end=grid[-1], columns=tuple(symbols), symbols=tuple(symbols),
+        minute_grid=grid, highs=highs[symbols], lows=lows[symbols], closes=closes[symbols],
+        marks=marks[symbols] if marks is not None else None, bar_funding=bar_funding[symbols],
+        target_weights=target_weights, signal_available_at=signal_available_at,
+    )
+
+
+def _resolve_settlement_registry(
+    settlement_registry: InstrumentSettlementRegistry | None, root: str,
+) -> InstrumentSettlementRegistry:
+    """Resolve the window-stream registry without branching at the call site."""
+    if settlement_registry is not None:
+        return settlement_registry
+    return settlement_registry_for_root(root)
 
 
 def _resolve_ns_vectorized(
@@ -172,13 +201,27 @@ def _materialize_execution_piece(
     window_start: pd.Timestamp,
     window_end: pd.Timestamp,
     logical_partition: tuple[int, int],
+    settlement_registry: InstrumentSettlementRegistry | None = None,
+    replay_start: pd.Timestamp | None = None,
+    replay_end: pd.Timestamp | None = None,
     initial_swap_bytes: int | None = None,
 ) -> ExecutionReplayWindow:
-    """Materialize completed three-minute trade OHLCV, funding and publication evidence for one replay piece. Emit no external mark plane; the execution engine uses the same trade close series for inventory valuation.
+    """Materialize completed three-minute trade OHLCV, funding and publication evidence for one replay piece. Emit no external mark plane; the execution engine uses the same trade close series for inventory valuation. Every window carries the evidenced settlement events of its roster so all replay paths settle delisted inventory identically; symbols delivered before the piece with exact-zero targets leave the roster.
 
     Args:
         initial_swap_bytes: Observed run-entry process-tree swap baseline; existing swapped pages are not classified as growth.
     """
+    from src.mhs.instrument_settlements import EMPTY_SETTLEMENT_REGISTRY as _EMPTY_REG
+
+    _reg = settlement_registry if settlement_registry is not None else _EMPTY_REG
+    _rs = replay_start if replay_start is not None else piece_grid[0]
+    _re = replay_end if replay_end is not None else piece_grid[-1] + (piece_grid[1] - piece_grid[0] if len(piece_grid) > 1 else pd.Timedelta(minutes=3))
+    drop = settled_before_piece(_reg, roster, piece_grid, piece_weights)
+    if drop:
+        roster = [s for s in roster if s not in drop]
+        if len(piece_weights.columns):
+            keep = [c for c in piece_weights.columns if c not in drop]
+            piece_weights = piece_weights.reindex(columns=keep)
     bars = len(piece_grid)
     estimated = int(allocation.fixed_bytes) + bars * int(allocation.bytes_per_bar) + int(allocation.decoder_bytes)
     assert_mhs_allocation_budget(
@@ -224,6 +267,10 @@ def _materialize_execution_piece(
             quote_volumes[s] = np.nan
     quote_volumes = quote_volumes.reindex(columns=roster)
     bar_available_at = piece_grid + minute_period
+    settlement_events = settlement_events_for_piece(
+        _reg, roster, piece_grid, quote_volumes,
+        replay_start=_rs, replay_end=_re,
+    )
     window = ExecutionReplayWindow(
         window_start=window_start,
         window_end=window_end,
@@ -243,6 +290,7 @@ def _materialize_execution_piece(
         logical_partition=logical_partition,
         funding_coverage_gaps=coverage_gaps,
         funding_knowledge_source=funding_alignment.knowledge_source,
+        settlement_events=settlement_events,
     )
     del symbol_frames
     del aligned
@@ -266,8 +314,9 @@ def _iter_mhs_execution_windows(
     reserve_bytes: int | None = None,
     execution_bound_count: int = 2,
     initial_swap_bytes: int | None = None,
+    settlement_registry: InstrumentSettlementRegistry | None = None,
 ) -> Iterator[MhsExecutionWindow]:
-    """Stream chronologically completed three-minute trade bars and funding knowledge for an exact target path. The OHLCV mode leaves `ExecutionReplayWindow.marks` absent so the shared accounting engine values positions from 3m closes; bar completion remains the earliest publication time. Rosters always cover carried inventory — live requirements when supplied, otherwise every column targeted so far.
+    """Stream chronologically completed three-minute trade bars and funding knowledge for an exact target path. The OHLCV mode leaves `ExecutionReplayWindow.marks` absent so the shared accounting engine values positions from 3m closes; bar completion remains the earliest publication time. Rosters always cover carried inventory — live requirements when supplied, otherwise every column targeted so far. Every window carries the evidenced settlement events of its roster so all replay paths settle delisted inventory identically; symbols delivered before the piece with exact-zero targets leave the roster.
 
     Raises:
         DataIntegrityError: A column with at least one finite non-zero target has no
@@ -351,6 +400,12 @@ def _iter_mhs_execution_windows(
     bound_count = int(execution_bound_count)
     minimum_bars = _minimum_mhs_execution_bars(timeout_ns_delta, step_ns)
     budgeted = budget_bytes is not None or reserve_bytes is not None
+    materialize = functools.partial(
+        _materialize_execution_piece,
+        settlement_registry=_resolve_settlement_registry(settlement_registry, root),
+        replay_start=start,
+        replay_end=end,
+    )
     prev_active: set[str] = set()
     for wi, (i0, i1) in enumerate(bounds):
         w_weights = target_weights.iloc[i0:i1]
@@ -385,7 +440,7 @@ def _iter_mhs_execution_windows(
             legacy_alloc = _estimate_mhs_execution_allocation(
                 n_symbols=len(roster), n_columns=len(columns), bound_count=bound_count
             )
-            window = _materialize_execution_piece(
+            window = materialize(
                 piece_grid=minute_grid,
                 piece_weights=w_weights,
                 piece_signals=w_signals,
@@ -463,7 +518,7 @@ def _iter_mhs_execution_windows(
             piece_allocation = _estimate_mhs_execution_allocation(
                 n_symbols=len(roster), n_columns=len(columns), bound_count=bound_count
             )
-            window = _materialize_execution_piece(
+            window = materialize(
                 piece_grid=full_grid,
                 piece_weights=w_weights,
                 piece_signals=w_signals,
@@ -515,7 +570,7 @@ def _iter_mhs_execution_windows(
                     n_columns=len(columns),
                     bound_count=bound_count,
                 )
-                window = _materialize_execution_piece(
+                window = materialize(
                     piece_grid=piece_grid,
                     piece_weights=empty_weights,
                     piece_signals=empty_signals,
@@ -552,7 +607,7 @@ def _iter_mhs_execution_windows(
             )
             piece_grid = full_grid[g0 : g1 + 1]
             piece_end = grid_end if (g1 == n_full - 1 and d1 == n_dec) else piece_grid[-1] + step
-            window = _materialize_execution_piece(
+            window = materialize(
                 piece_grid=piece_grid,
                 piece_weights=piece_weights,
                 piece_signals=piece_signals,
@@ -593,7 +648,7 @@ def _iter_mhs_execution_windows(
                     n_symbols=len(roster), n_columns=len(columns), bound_count=bound_count
                 )
                 piece_end = grid_end if tail_end == n_full - 1 else tail_grid[-1] + step
-                window = _materialize_execution_piece(
+                window = materialize(
                     piece_grid=tail_grid,
                     piece_weights=empty_weights,
                     piece_signals=empty_signals,

@@ -409,3 +409,28 @@ def test_first_active_ordinals_marks_never_targeted_at_end() -> None:
         ws._first_active_ordinals(frame), np.array([1, 3], dtype=np.int64)
     )
     assert list(ws._piece_roster(("AUSDT", "BUSDT"), piece_active=frozenset({"BUSDT"}), previous_active=frozenset({"AUSDT"}), requirement=frozenset())) == ["AUSDT", "BUSDT"]
+
+
+def test_settled_symbol_leaves_target_only_roster(tmp_path, monkeypatch) -> None:
+    """Target-only mode drops a delivered symbol with exact-zero later targets."""
+    import pandas as pd
+    from src.mhs.instrument_settlements import InstrumentSettlementRecord, assemble_instrument_settlement_registry
+    _patch_budget(monkeypatch, 200)
+    dec = pd.date_range(START, periods=4, freq="12h", tz="UTC")
+    targets = _targets(dec, [{"AUSDT": 0.5}, {"AUSDT": 0.0}, {"AUSDT": 0.0}, {"BUSDT": 0.2}])
+    delivery = dec[1].floor("3min")
+    last_trade = delivery - pd.Timedelta(minutes=3)
+    end = START + pd.Timedelta(days=3)
+    _write_lake(tmp_path, 3, zero_vol={"AUSDT": (last_trade, delivery)})
+    announced = last_trade - pd.Timedelta(days=7)
+    record = InstrumentSettlementRecord(symbol="AUSDT", event_id=f"AUSDT:{int(delivery.value // 1_000_000)}", announced_at=announced, announcement_source="proxy_lead", announcement_evidence="", last_trade_at=last_trade, delivery_at=delivery, settlement_price=100.0, price_source="twap30_proxy", price_evidence="lake", fee_bps=5.0, evidence_digest="sha256:x", verified_at=delivery)
+    registry = assemble_instrument_settlement_registry([record], [])
+    spec = ExecutionSpec()
+    funding = {s: pd.Series(0.0, index=pd.date_range(START, end, freq="3min", tz="UTC")) for s in SYMBOLS}
+    windows = list(ws._iter_mhs_execution_windows(targets, dec + pd.Timedelta(hours=1), str(tmp_path), "3m", START, end, funding, spec, settlement_registry=registry))
+    assert windows
+    assert any("AUSDT" in w.symbols for w in windows[:1])
+    assert all("AUSDT" not in w.symbols for w in windows[1:])
+    from src.mhs.execution import replay_execution_windows
+    result = replay_execution_windows(iter(windows), 1000.0, "OHLCV_IMMEDIATE_TAKER", spec)
+    assert result.ledger.primary_valid

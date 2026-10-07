@@ -978,3 +978,13 @@ def test_admission_procedure_is_part_of_trial_identity() -> None:
     }
     stripped = {"flags": {"committee_capital": True}, "params_snapshot": stripped_snapshot}
     assert trial_identity_key(base) != trial_identity_key(stripped)
+
+
+def test_lifecycle_procedure_is_part_of_trial_identity() -> None:
+    from src.mhs.live_strategy import capture_params_snapshot
+    from src.mhs.run_history import trial_identity_key
+    snapshot = capture_params_snapshot()
+    assert snapshot["INSTRUMENT_LIFECYCLE_PROCEDURE"] == "pit_registry_settlement_v1"
+    base = {"flags": {}, "params_snapshot": snapshot}
+    stripped = {"flags": {}, "params_snapshot": {k: v for k, v in snapshot.items() if k != "INSTRUMENT_LIFECYCLE_PROCEDURE"}}
+    assert trial_identity_key(base) != trial_identity_key(stripped)

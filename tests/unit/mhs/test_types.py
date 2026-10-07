@@ -58,3 +58,22 @@ def test_SCENARIO_MHS_FAIR_07_SPEC_DEFAULTS_ARE_BIT_IDENTICAL() -> None:
         ExecutionSpec(min_notional_probe_usdt=-1.0)
     with pytest.raises(ValueError, match="reference_equity_usdt"):
         ExecutionSpec(reference_equity_usdt=0.0)
+
+
+def test_settlement_haircut_validation() -> None:
+    import pytest
+    from src.mhs.types import ExecutionSpec
+    for bad in (-1.0, float("nan"), 1e4):
+        with pytest.raises(ValueError, match="settlement_price_haircut_bps"):
+            ExecutionSpec(settlement_price_haircut_bps=bad)
+    assert ExecutionSpec(settlement_price_haircut_bps=0.0).settlement_price_haircut_bps == 0.0
+    assert ExecutionSpec(settlement_price_haircut_bps=450.0).settlement_price_haircut_bps == 450.0
+
+
+def test_stress_builders_carry_haircut() -> None:
+    from src.application.mhs_frozen_account import frozen_execution_specs
+    from src.mhs.execution.specs import _stress_cost_execution_spec
+    assert _stress_cost_execution_spec().settlement_price_haircut_bps == 450.0
+    base, stress = frozen_execution_specs()
+    assert base.settlement_price_haircut_bps == 0.0
+    assert stress.settlement_price_haircut_bps == 450.0
