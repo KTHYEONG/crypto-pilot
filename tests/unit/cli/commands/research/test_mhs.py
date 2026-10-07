@@ -67,7 +67,7 @@ def test_mhs_diagnostic_output_tier_flag_threaded_to_persist(monkeypatch) -> Non
     defaults = {action.dest: action.default for action in parser._actions}
     assert defaults["output_tier"] == "compact"
 
-    monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda config: _fake_report())
+    monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda config, **kwargs: _fake_report())
 
     def _spy_persist(*args, **kwargs):
         captured.update(kwargs)
@@ -103,7 +103,7 @@ def test_mhs_diagnostic_touch_flag_threaded_to_request(monkeypatch) -> None:
         return request
 
     monkeypatch.setattr("src.mhs.pipeline.config.resolve_cli_request", _spy)
-    monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda config: _fake_report())
+    monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda config, **kwargs: _fake_report())
     monkeypatch.setattr("src.mhs.report.persist.persist_mhs_horizon_diagnostic_report", lambda *a, **k: None)
 
     sub = argparse.ArgumentParser().add_subparsers()
@@ -141,7 +141,7 @@ def test_mhs_diagnostic_fold_safe_horizon_flag_threaded_to_request(monkeypatch) 
         return request
 
     monkeypatch.setattr("src.mhs.pipeline.config.resolve_cli_request", _spy)
-    monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda config: _fake_report())
+    monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda config, **kwargs: _fake_report())
     monkeypatch.setattr("src.mhs.report.persist.persist_mhs_horizon_diagnostic_report", lambda *a, **k: None)
 
     sub = argparse.ArgumentParser().add_subparsers()
@@ -179,7 +179,7 @@ def test_mhs_diagnostic_ladder_flag_threaded_to_request(monkeypatch) -> None:
         return request
 
     monkeypatch.setattr("src.mhs.pipeline.config.resolve_cli_request", _spy)
-    monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda config: _fake_report())
+    monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda config, **kwargs: _fake_report())
     monkeypatch.setattr("src.mhs.report.persist.persist_mhs_horizon_diagnostic_report", lambda *a, **k: None)
 
     sub = argparse.ArgumentParser().add_subparsers()
@@ -217,7 +217,7 @@ def test_mhs_diagnostic_crash_tilt_alpha_flag_threaded_to_request(monkeypatch) -
         return request
 
     monkeypatch.setattr("src.mhs.pipeline.config.resolve_cli_request", _spy)
-    monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda config: _fake_report())
+    monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda config, **kwargs: _fake_report())
     monkeypatch.setattr("src.mhs.report.persist.persist_mhs_horizon_diagnostic_report", lambda *a, **k: None)
 
     sub = argparse.ArgumentParser().add_subparsers()
@@ -259,7 +259,7 @@ def test_mhs_diagnostic_trend_sleeve_flags_threaded_to_request(monkeypatch) -> N
         return request
 
     monkeypatch.setattr("src.mhs.pipeline.config.resolve_cli_request", _spy)
-    monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda config: _fake_report())
+    monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda config, **kwargs: _fake_report())
     monkeypatch.setattr("src.mhs.report.persist.persist_mhs_horizon_diagnostic_report", lambda *a, **k: None)
 
     sub = argparse.ArgumentParser().add_subparsers()
@@ -310,7 +310,7 @@ def test_mhs_diagnostic_alpha_engine_flags_threaded_to_request(monkeypatch) -> N
         return request
 
     monkeypatch.setattr("src.mhs.pipeline.config.resolve_cli_request", _spy)
-    monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda config: _fake_report())
+    monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda config, **kwargs: _fake_report())
     monkeypatch.setattr("src.mhs.report.persist.persist_mhs_horizon_diagnostic_report", lambda *a, **k: None)
 
     sub = argparse.ArgumentParser().add_subparsers()
@@ -370,7 +370,7 @@ def test_mhs_diagnostic_multi_feature_flag_threaded_to_request(monkeypatch) -> N
         return request
 
     monkeypatch.setattr("src.mhs.pipeline.config.resolve_cli_request", _spy)
-    monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda config: _fake_report())
+    monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda config, **kwargs: _fake_report())
     monkeypatch.setattr("src.mhs.report.persist.persist_mhs_horizon_diagnostic_report", lambda *a, **k: None)
 
     sub = argparse.ArgumentParser().add_subparsers()
@@ -411,7 +411,7 @@ def test_mhs_diagnostic_committee_flag_threaded_to_request(monkeypatch) -> None:
         return request
 
     monkeypatch.setattr("src.mhs.pipeline.config.resolve_cli_request", _spy)
-    monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda config: _fake_report())
+    monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda config, **kwargs: _fake_report())
     monkeypatch.setattr("src.mhs.report.persist.persist_mhs_horizon_diagnostic_report", lambda *a, **k: None)
 
     sub = argparse.ArgumentParser().add_subparsers()
@@ -455,7 +455,7 @@ def test_mhs_diagnostic_committee_kelly_sizing_defaults_on_and_opt_out(monkeypat
         return request
 
     monkeypatch.setattr("src.mhs.pipeline.config.resolve_cli_request", _spy)
-    monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda config: _fake_report())
+    monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda config, **kwargs: _fake_report())
     monkeypatch.setattr("src.mhs.report.persist.persist_mhs_horizon_diagnostic_report", lambda *a, **k: None)
 
     sub = argparse.ArgumentParser().add_subparsers()
@@ -501,7 +501,7 @@ def test_mhs_diagnostic_committee_growth_diagnostic_flag_threaded_to_request(mon
         return request
 
     monkeypatch.setattr("src.mhs.pipeline.config.resolve_cli_request", _spy)
-    monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda config: _fake_report())
+    monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda config, **kwargs: _fake_report())
     monkeypatch.setattr("src.mhs.report.persist.persist_mhs_horizon_diagnostic_report", lambda *a, **k: None)
 
     sub = argparse.ArgumentParser().add_subparsers()
@@ -589,7 +589,7 @@ def test_mhs_diagnostic_committee_capital_defaults_on_and_opt_out(monkeypatch) -
         return request
 
     monkeypatch.setattr("src.mhs.pipeline.config.resolve_cli_request", _spy)
-    monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda config: _fake_report())
+    monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda config, **kwargs: _fake_report())
     monkeypatch.setattr("src.mhs.report.persist.persist_mhs_horizon_diagnostic_report", lambda *a, **k: None)
 
     sub = argparse.ArgumentParser().add_subparsers()
@@ -636,7 +636,7 @@ def test_mhs_diagnostic_committee_tranche_smoothing_flag_threaded_to_request(mon
         return request
 
     monkeypatch.setattr("src.mhs.pipeline.config.resolve_cli_request", _spy)
-    monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda config: _fake_report())
+    monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda config, **kwargs: _fake_report())
     monkeypatch.setattr("src.mhs.report.persist.persist_mhs_horizon_diagnostic_report", lambda *a, **k: None)
 
     sub = argparse.ArgumentParser().add_subparsers()
@@ -683,7 +683,7 @@ def test_mhs_diagnostic_committee_regime_adaptive_tranche_defaults_on_and_opt_ou
         return request
 
     monkeypatch.setattr("src.mhs.pipeline.config.resolve_cli_request", _spy)
-    monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda config: _fake_report())
+    monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda config, **kwargs: _fake_report())
     monkeypatch.setattr("src.mhs.report.persist.persist_mhs_horizon_diagnostic_report", lambda *a, **k: None)
 
     sub = argparse.ArgumentParser().add_subparsers()
@@ -729,7 +729,7 @@ def test_mhs_diagnostic_execution_coverage_gate_flag_threaded(monkeypatch) -> No
         return request
 
     monkeypatch.setattr("src.mhs.pipeline.config.resolve_cli_request", _spy)
-    monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda config: _fake_report())
+    monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda config, **kwargs: _fake_report())
     monkeypatch.setattr("src.mhs.report.persist.persist_mhs_horizon_diagnostic_report", lambda *a, **k: None)
 
     sub = argparse.ArgumentParser().add_subparsers()
@@ -763,7 +763,7 @@ def test_mhs_diagnostic_persist_stage_logged(monkeypatch, caplog) -> None:
     add_mhs_commands(sub)
     parser = sub.choices["mhs-horizon-diagnostic"]
 
-    monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda config: _fake_report())
+    monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda config, **kwargs: _fake_report())
     monkeypatch.setattr("src.mhs.report.persist.persist_mhs_horizon_diagnostic_report", lambda *a, **k: None)
 
     args = parser.parse_args([])
@@ -789,7 +789,7 @@ def test_mhs_diagnostic_persist_receives_request_object(monkeypatch) -> None:
         return req
 
     monkeypatch.setattr("src.mhs.pipeline.config.resolve_cli_request", _spy)
-    monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda config: _fake_report())
+    monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda config, **kwargs: _fake_report())
 
     def _spy_persist(*args, **kwargs):
         captured.update(kwargs)
@@ -826,7 +826,7 @@ def test_mhs_diagnostic_execution_timeframe_3m_default(monkeypatch) -> None:
         return request
 
     monkeypatch.setattr("src.mhs.pipeline.config.resolve_cli_request", _spy)
-    monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda config: _fake_report())
+    monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda config, **kwargs: _fake_report())
     monkeypatch.setattr("src.mhs.report.persist.persist_mhs_horizon_diagnostic_report", lambda *a, **k: None)
 
     sub = argparse.ArgumentParser().add_subparsers()
@@ -867,7 +867,7 @@ def test_cli_flags_threaded(monkeypatch) -> None:
         return request
 
     monkeypatch.setattr("src.mhs.pipeline.config.resolve_cli_request", _spy)
-    monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda config: _fake_report())
+    monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda config, **kwargs: _fake_report())
     monkeypatch.setattr("src.mhs.report.persist.persist_mhs_horizon_diagnostic_report", lambda *a, **k: None)
 
     sub = argparse.ArgumentParser().add_subparsers()
@@ -927,7 +927,7 @@ def test_mhs_diagnostic_leverage_frontier_scan_short_circuit_scenario_mhs_levera
     from src.mhs.params import LEVERAGE_FRONTIER_SCAN_MULTIPLES
     import src.mhs.leverage_scan as leverage_scan
 
-    def _boom(config):
+    def _boom(config, **kwargs):
         raise AssertionError("full pipeline must not run")
 
     monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", _boom)
@@ -1111,7 +1111,7 @@ def test_research_diagnostic_output_has_data_boundary(monkeypatch) -> None:
         captured["target"] = Path(target)
         return captured["target"]
 
-    monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda config: _fake_report())
+    monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda config, **kwargs: _fake_report())
     monkeypatch.setattr("src.mhs.report.persist.persist_mhs_horizon_diagnostic_report", _spy_persist)
 
     sub = argparse.ArgumentParser().add_subparsers()
@@ -1165,7 +1165,7 @@ def test_cli_attaches_telemetry_log_before_running(monkeypatch) -> None:
         return logging.getLogger(name)
 
     monkeypatch.setattr(app_logging, "setup_logger", _spy_setup)
-    monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda config: (calls.append(("run",)), _fake_report())[1])
+    monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", lambda config, **kwargs: (calls.append(("run",)), _fake_report())[1])
     monkeypatch.setattr("src.mhs.report.persist.persist_mhs_horizon_diagnostic_report", lambda *a, **k: None)
 
     sub = argparse.ArgumentParser().add_subparsers()
@@ -1194,3 +1194,40 @@ def test_registration_path_opens_no_telemetry_log(monkeypatch) -> None:
     parser = sub.choices["mhs-horizon-diagnostic"]
     _run_mhs_horizon_diagnostic(parser.parse_args(["--register-procedure"]))
     assert calls == []
+
+
+def test_cli_resolves_operator_storage_defaults(monkeypatch) -> None:
+    """CLI resolves operator storage defaults for diagnostic and persist."""
+    import argparse
+    import os
+
+    import src.common.paths as paths_mod
+    import src.mhs.preregistration as prereg_mod
+
+    run_kwargs: dict = {}
+    persist_kwargs: dict = {}
+    persist_args: tuple = ()
+
+    def _fake_run(config, **kwargs):
+        run_kwargs.update(kwargs)
+        return _fake_report()
+
+    def _spy_persist(*args, **kwargs):
+        nonlocal persist_args
+        persist_args = args
+        persist_kwargs.update(kwargs)
+        return None
+
+    monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", _fake_run)
+    monkeypatch.setattr("src.mhs.report.persist.persist_mhs_horizon_diagnostic_report", _spy_persist)
+
+    sub = argparse.ArgumentParser().add_subparsers()
+    add_mhs_commands(sub)
+    parser = sub.choices["mhs-horizon-diagnostic"]
+    _run_mhs_horizon_diagnostic(parser.parse_args([]))
+
+    assert run_kwargs == {"procedure_registry": prereg_mod.PROCEDURE_REGISTRY_PATH, "history_dir": paths_mod.BACKTESTS_DIR}
+    assert persist_kwargs["history_dir"] == paths_mod.BACKTESTS_DIR
+    assert persist_kwargs["procedure_registry"] == prereg_mod.PROCEDURE_REGISTRY_PATH
+    assert str(persist_args[1]).startswith(str(paths_mod.DATA_DIR / "research" / "mhs"))
+    assert str(paths_mod.BACKTESTS_DIR).startswith(os.environ["PYTEST_DEBUG_TEMPROOT"])

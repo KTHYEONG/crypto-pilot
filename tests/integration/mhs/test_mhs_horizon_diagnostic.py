@@ -234,7 +234,7 @@ report = run_mhs_horizon_diagnostic(
         max_rss_bytes=int(sys.argv[5]),
     ),
 )
-persist_mhs_horizon_diagnostic_report(report, out)
+persist_mhs_horizon_diagnostic_report(report, out, history_dir=out.parent / "history")
 payload = json.loads(out.read_text())
 sys.stdout.write(json.dumps({
     "status": report.status,

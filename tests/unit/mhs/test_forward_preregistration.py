@@ -494,17 +494,24 @@ def test_deploy_gate_from_report_evaluates_registered_forward_folds(tmp_path, mo
     assert result.metrics["oos_ann_log_growth_lcb"] > 0.0
 
 
-def test_orchestrator_forward_branch_verifies_digest_and_records_look_before_running(monkeypatch) -> None:
+def test_orchestrator_forward_branch_verifies_digest_and_records_look_before_running(tmp_path, monkeypatch) -> None:
     import src.mhs.pipeline.orchestrator as orch
     from src.mhs.preregistration import ProcedureRegistration
 
     registration = ProcedureRegistration("d" * 32, _utc("2026-01-15"), _utc("2025-12-31 23:59:59"), {})
     recorded: dict[str, object] = {}
-    monkeypatch.setattr(orch._prereg, "find_registration", lambda digest: registration)
+    reads = []
+
+    def find_registration(digest, registry_path):
+        reads.append((digest, registry_path))
+        return registration
+
+    monkeypatch.setattr(orch._prereg, "find_registration", find_registration)
     monkeypatch.setattr(orch._prereg, "procedure_identity_digest", lambda request: "d" * 32)
     monkeypatch.setattr(
         orch._prereg, "record_forward_evaluation",
-        lambda reg, end, *, now: recorded.update(end=end, digest=reg.procedure_digest, now_tz=str(now.tzinfo)),
+        lambda reg, end, *, now, registry_path=None: recorded.update(
+            end=end, digest=reg.procedure_digest, now_tz=str(now.tzinfo), registry_path=registry_path),
     )
     # partition=holdout은 기록 직후 파이프라인 진입 전에 실패하므로 무거운 리플레이 없이 분기를 검증한다.
     from src.mhs.contracts import MhsDiagnosticRequest
@@ -512,14 +519,72 @@ def test_orchestrator_forward_branch_verifies_digest_and_records_look_before_run
     config = MhsDiagnosticRequest(start="2021-01-01", end="2026-06-30", forward_registration_digest="d" * 32, partition="holdout")
 
     with pytest.raises(RuntimeError, match="dev-only"):
-        orch.run_mhs_diagnostic(config)
-    assert recorded == {"end": _utc("2026-06-30"), "digest": "d" * 32, "now_tz": "UTC"}
+        orch.run_mhs_diagnostic(config, procedure_registry=tmp_path / "p.jsonl")
+    assert recorded["end"] == _utc("2026-06-30")
+    assert recorded["digest"] == "d" * 32
+    assert recorded["now_tz"] == "UTC"
+    assert recorded["registry_path"] == tmp_path / "p.jsonl"
+    assert reads == [("d" * 32, tmp_path / "p.jsonl")]
 
     recorded.clear()
     monkeypatch.setattr(orch._prereg, "procedure_identity_digest", lambda request: "e" * 32)
     with pytest.raises(DataIntegrityError, match="registered procedure digest"):
-        orch.run_mhs_diagnostic(config)
+        orch.run_mhs_diagnostic(config, procedure_registry=tmp_path / "p.jsonl")
     assert recorded == {}
+
+
+def test_orchestrator_forward_branch_requires_procedure_registry_before_io(monkeypatch) -> None:
+    import src.mhs.pipeline.orchestrator as orch
+    from src.mhs.contracts import MhsDiagnosticRequest
+
+    calls: list = []
+    monkeypatch.setattr(orch._prereg, "find_registration", lambda *a, **k: calls.append(1))
+    monkeypatch.setattr(orch._prereg, "record_forward_evaluation", lambda *a, **k: calls.append(1))
+    monkeypatch.setattr(orch, "clear_mhs_market_data_caches", lambda: calls.append("cache"))
+
+    config = MhsDiagnosticRequest(
+        start="2021-01-01", end="2026-06-30",
+        forward_registration_digest="d" * 32, partition="holdout",
+    )
+    with pytest.raises(TypeError):
+        orch.run_mhs_diagnostic(config)
+    assert calls == []
+
+
+def test_non_forward_run_ignores_procedure_registry(monkeypatch) -> None:
+    import src.mhs.pipeline.orchestrator as orch
+    from src.mhs.contracts import MhsDiagnosticRequest
+
+    monkeypatch.setattr(orch._prereg, "find_registration", lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not read")))
+    monkeypatch.setattr(orch._prereg, "record_forward_evaluation", lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not append")))
+    config = MhsDiagnosticRequest(start="2021-01-01", end="2024-06-30", partition="holdout")
+
+    with pytest.raises(RuntimeError, match="dev-only"):
+        orch.run_mhs_diagnostic(config)
+
+
+def test_write_functions_require_explicit_destinations(tmp_path) -> None:
+    import src.mhs.preregistration as prereg_mod
+    from src.mhs.preregistration import (
+        ProcedureRegistration as _Reg,
+        record_forward_evaluation,
+        register_procedure,
+    )
+
+    request = _request()
+    now = _utc("2026-09-17")
+
+    with pytest.raises(TypeError):
+        register_procedure(request, now=now)  # type: ignore[call-arg]
+    with pytest.raises(TypeError):
+        register_procedure(request, now=now, registry_path=tmp_path / "r.jsonl")  # type: ignore[call-arg]
+    _reg = _Reg("d" * 32, now, _utc("2026-06-30 23:59:59"), {})
+    with pytest.raises(TypeError):
+        record_forward_evaluation(_reg, _utc("2026-12-31"), now=now)  # type: ignore[call-arg]
+    with pytest.raises(TypeError):
+        record_forward_evaluation(_reg, _utc("2026-12-31"), now=now, registry_path=None)  # type: ignore[arg-type]
+    assert list(tmp_path.iterdir()) == []
+    assert not hasattr(prereg_mod, "_IMPORT_TIME_REGISTRY_PATH")
 
 
 def test_cli_register_procedure_registers_without_running_pipeline(monkeypatch) -> None:
@@ -531,11 +596,14 @@ def test_cli_register_procedure_registers_without_running_pipeline(monkeypatch) 
     calls: dict[str, object] = {}
     registration = prereg.ProcedureRegistration("d" * 32, _utc("2026-09-17"), _utc("2026-06-30 23:59:59"), {})
 
-    def fake_register(request, *, now):
-        calls.update(forward_field=request.forward_registration_digest, now_tz=str(now.tzinfo))
+    def fake_register(request, *, now, registry_path, history_dir):
+        calls.update(
+            forward_field=request.forward_registration_digest, now_tz=str(now.tzinfo),
+            registry_path=registry_path, history_dir=history_dir,
+        )
         return registration
 
-    def forbidden_run(config):
+    def forbidden_run(config, **kwargs):
         raise AssertionError("registration must not run the pipeline")
 
     monkeypatch.setattr(prereg, "register_procedure", fake_register)
@@ -546,7 +614,12 @@ def test_cli_register_procedure_registers_without_running_pipeline(monkeypatch) 
 
     mhs_cli._run_mhs_horizon_diagnostic(args)
 
-    assert calls == {"forward_field": None, "now_tz": "UTC"}
+    import src.common.paths as paths_mod
+
+    assert calls["forward_field"] is None
+    assert calls["now_tz"] == "UTC"
+    assert calls["registry_path"] == prereg.PROCEDURE_REGISTRY_PATH
+    assert calls["history_dir"] == paths_mod.BACKTESTS_DIR
 
 
 def test_run_folds_parallel_resolves_folds_from_the_request(monkeypatch) -> None:

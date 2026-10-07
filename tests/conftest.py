@@ -50,7 +50,7 @@ os.environ["CRYPTO_PILOT_BACKTESTS_DIR"] = str(_PROC_TEMP_ROOT / "backtests")
 # Developer-tree paths that must be byte-identical before and after a test session. A test that
 # writes here pollutes real state, logs or the backtest registry, so the session fails loudly.
 _REPO_ROOT = Path(__file__).resolve().parents[1]
-_GUARDED_TREES: tuple[str, ...] = ("data/state", "data/live_capture", "data/backtests", "logs")
+_GUARDED_TREES: tuple[str, ...] = ("data/state", "data/live_capture", "data/backtests", "logs", "data/research", "docs/decisions")
 
 
 def _snapshot_guarded_trees() -> dict[str, tuple[int, int]]:

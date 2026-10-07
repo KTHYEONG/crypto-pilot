@@ -1,9 +1,9 @@
 """MHS run-history trial set over the canonical SQLite registry.
 
 Every research look is persisted as one ``history_records`` row of the
-``mhs_legacy_horizon`` namespace in ``registry.sqlite3`` (canonical location:
-``BACKTESTS_DIR``); admitted trial identities accumulate monotonically in the
-``trials`` table, which no retention step deletes (I-MONOTONE-TRIALS).
+``mhs_legacy_horizon`` namespace in ``registry.sqlite3``. Reads default to the
+canonical operator registry (read-only default); writes require an explicit
+destination directory, so ad-hoc callers can never inflate operator evidence.
 
 The trial set behind the Deflated Sharpe Ratio denominator is defined here
 exactly once: ``is_trial_record`` decides admission (outcome-blind) and
@@ -69,10 +69,13 @@ TRIAL_POOL_WINDOW_TOLERANCE: pd.Timedelta = (
 
 
 def canonical_history_registry() -> Path:
-    """Return the sole persistent registry for MHS trial-history provenance.
+    """Return the operator run-history registry used as the READ default.
+
+    Readers called with ``history_dir=None`` resolve here. Write paths never call this: the application boundary
+    passes the operator directory (``BACKTESTS_DIR``) explicitly.
 
     Returns:
-        The backtest registry path used for trial denominators and window outcomes.
+        ``BACKTESTS_DIR / "registry.sqlite3"`` (``BACKTESTS_DIR`` honours ``CRYPTO_PILOT_BACKTESTS_DIR``).
     """
     from src.common.paths import BACKTESTS_DIR
 
@@ -82,9 +85,11 @@ def canonical_history_registry() -> Path:
 def _resolve_history_registry(history_dir: Path | str | None) -> Path:
     """Registry file for one run-history location.
 
-    ``None`` selects the canonical registry; any explicit location maps to
-    ``<location>/registry.sqlite3`` so test and fixture histories stay isolated
-    from the canonical registry by construction.
+    ``None`` selects the canonical registry (read-only default for readers);
+    any explicit location maps to ``<location>/registry.sqlite3`` so test and
+    fixture histories stay isolated from the canonical registry by construction.
+    Write paths never pass ``None``: ``append_run_history_record`` rejects it
+    before any filesystem access.
     """
     if history_dir is None:
         return canonical_history_registry()
@@ -252,8 +257,25 @@ def consulted_registry_horizon(registry: Path) -> pd.Timestamp | None:
     return max(ends) if ends else None
 
 
-def append_run_history_record(record: Mapping[str, Any], history_dir: Path | str | None) -> Path:
-    """Persist one legacy-horizon summary into the unified transactional registry. Args: raw history record and compatibility history location. Returns: the registry file path. Raises: sqlite3.Error or OSError if durable persistence fails."""
+def append_run_history_record(record: Mapping[str, Any], history_dir: Path | str) -> Path:
+    """Persist one legacy-horizon summary into ``<history_dir>/registry.sqlite3``.
+
+    The destination is mandatory because run history is DSR trial evidence: a write that silently resolved the
+    operator registry would let any ad-hoc process (scratch script, foreign pytest file, subprocess without the
+    storage redirect) inflate the operator's trial denominator and consulted horizon.
+
+    Args:
+        record: JSON-serializable history record.
+        history_dir: Directory whose ``registry.sqlite3`` receives the record; initialized when absent. Operator
+            callers pass ``BACKTESTS_DIR``.
+    Returns:
+        The registry file written.
+    Raises:
+        TypeError: ``history_dir`` is ``None`` or not ``str``/``Path``; raised before any filesystem access.
+        sqlite3.Error, OSError: Durable persistence failed.
+    """
+    if history_dir is None or not isinstance(history_dir, (str, Path)):
+        raise TypeError("history_dir must be a str or pathlib.Path")
     from src.backtests.registry import initialize_registry
 
     registry = _resolve_history_registry(history_dir)
@@ -491,6 +513,8 @@ def _parse_utc_timestamp(value: Any) -> pd.Timestamp | None:
 def derive_trials_attempted(history_dir: Path | str | None = None) -> tuple[int, str]:
     """Audit-trials denominator for the DSR from the run-history registry.
 
+    ``history_dir=None`` reads the canonical operator registry (read-only default).
+
     Counts the distinct identity keys of records admitted by ``is_trial_record``
     (the same predicate and key ``window_trial_sharpes`` uses -- I-SAME-TRIAL-SET),
     unioned with the monotone ``trials`` ledger so retention never lowers the
@@ -538,6 +562,8 @@ def window_trial_sharpes(
     window: tuple[str, str], history_dir: Path | str | None = None
 ) -> tuple[float, ...]:
     """Annualized blend Sharpe outcomes recorded for one evaluation window.
+
+    ``history_dir=None`` reads the canonical operator registry (read-only default).
 
     A registry record qualifies when ``is_trial_record`` admits it, its ``start``
     matches exactly, and its ``resolved_end`` lies within
@@ -653,6 +679,8 @@ def trial_pool_disclosure(
     window: tuple[str, str], history_dir: Path | str | None = None
 ) -> dict[str, Any]:
     """Observational disclosure of how the DSR trial pool was assembled.
+
+    ``history_dir=None`` reads the canonical operator registry (read-only default).
 
     Every registry record falls into exactly one bucket -- admitted trial, or
     excluded by exactly one registered ground (incomplete status /

@@ -64,11 +64,11 @@ def run_folds(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
     """Run the fold pool and all post-book statistical diagnostics."""
     # Distinct annualized trial outcomes recorded for exactly this window; the
     # DSR pool divides them by sqrt(PERIODS_PER_YEAR_1H) downstream.
-    ctx.trials_attempted, ctx.trials_attempted_source = derive_trials_attempted()
-    ctx.trial_sharpes = window_trial_sharpes((str(ctx.start), str(ctx.resolved_end)))
+    ctx.trials_attempted, ctx.trials_attempted_source = derive_trials_attempted(ctx.history_dir)
+    ctx.trial_sharpes = window_trial_sharpes((str(ctx.start), str(ctx.resolved_end)), ctx.history_dir)
     # Observational trial-pool accounting (exclusion grounds, ledger size);
     # disclosure only -- it never emits a GO reason code.
-    ctx.trial_pool = trial_pool_disclosure((str(ctx.start), str(ctx.resolved_end)))
+    ctx.trial_pool = trial_pool_disclosure((str(ctx.start), str(ctx.resolved_end)), ctx.history_dir)
     ctx.deflated_sharpe_ratio = None
     # Observational disclosure of the defaults' selection window overlap.
     ctx.selection_overlap_fraction = selection_overlap_fraction(ctx.start, ctx.end)

@@ -87,7 +87,7 @@ def test_horizon_diagnostic_delegates_to_orchestrator(monkeypatch) -> None:
     calls: list[MhsDiagnosticRequest] = []
     sentinel = object()
 
-    def _spy(request: MhsDiagnosticRequest):
+    def _spy(request: MhsDiagnosticRequest, **kwargs):
         calls.append(request)
         return sentinel
 

@@ -21,11 +21,13 @@ def test_programmatic_entry_delegates_to_orchestrator_unchanged(monkeypatch) -> 
     sentinel = object()
     seen: dict[str, object] = {}
 
-    def _fake(request):
+    def _fake(request, **kwargs):
         seen["request"] = request
+        seen["kwargs"] = kwargs
         return sentinel
 
     monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", _fake)
     request = MhsDiagnosticRequest()
     assert run_mhs_horizon_diagnostic(request) is sentinel
     assert seen["request"] is request
+    assert seen["kwargs"] == {"procedure_registry": None, "history_dir": None}

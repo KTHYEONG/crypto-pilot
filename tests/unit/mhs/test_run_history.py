@@ -829,22 +829,97 @@ def test_canonical_registry_points_to_backtests_dir() -> None:
     assert canonical_history_registry() == BACKTESTS_DIR / "registry.sqlite3"
 
 
-def test_persisted_research_observation_uses_registry(tmp_path, monkeypatch) -> None:
-    """Report persistence appends via the canonical registry without sibling dirs."""
+def test_persist_appends_to_explicit_history_dir_only(tmp_path, monkeypatch) -> None:
+    """Persist appends to explicit history dir only."""
     import src.mhs.report.persist as persist_mod
     import src.mhs.run_history as rh
 
     canonical_home = tmp_path / "canonical-home"
     canonical_home.mkdir()
     monkeypatch.setattr(rh, "canonical_history_registry", lambda: canonical_home / "registry.sqlite3")
-    monkeypatch.setattr(persist_mod, "canonical_history_registry", lambda: canonical_home / "registry.sqlite3")
     monkeypatch.setattr(persist_mod, "_persist_mhs_report_compact", lambda report, target: target)
     monkeypatch.setattr(persist_mod, "build_mhs_run_history_record", lambda *a, **k: _trial_record("persisted", {"u": 9}))
     target = tmp_path / "reports" / "report.json"
-    result = persist_mod.persist_mhs_report(object(), target)  # type: ignore[arg-type]
+    result = persist_mod.persist_mhs_report(object(), target, history_dir=tmp_path / "explicit")  # type: ignore[arg-type]
     assert result == target
     assert not (target.parent / "mhs_run_history").exists()
-    assert (canonical_home / "registry.sqlite3").is_file()
+    assert (tmp_path / "explicit" / "registry.sqlite3").is_file()
+    assert not (canonical_home / "registry.sqlite3").exists()
+
+
+def test_append_without_destination_raises_before_io(tmp_path, monkeypatch) -> None:
+    """Append without destination raises before io."""
+    import src.mhs.run_history as rh
+
+    home = tmp_path / "home"
+    monkeypatch.setattr(rh, "canonical_history_registry", lambda: home / "registry.sqlite3")
+    rec = {"run_id": "x"}
+
+    with pytest.raises(TypeError):
+        rh.append_run_history_record(rec)  # type: ignore[call-arg]
+    with pytest.raises(TypeError):
+        rh.append_run_history_record(rec, None)  # type: ignore[arg-type]
+    with pytest.raises(TypeError):
+        rh.append_run_history_record(rec, 7)  # type: ignore[arg-type]
+    assert not (home / "registry.sqlite3").exists()
+
+
+def test_programmatic_dsr_reads_and_persist_share_explicit_history(tmp_path, monkeypatch) -> None:
+    """A programmatic look reads its trial evidence and appends to the same store."""
+    import dataclasses
+
+    import src.mhs.pipeline.orchestrator as orch
+    import src.mhs.pipeline.stages.fold as fold
+    import src.mhs.run_history as rh
+    from src.mhs.contracts import MhsDiagnosticRequest
+    from src.mhs.diagnostic_run import run_mhs_horizon_diagnostic
+    from src.mhs.preregistration import consulted_data_horizon
+    from src.mhs.report.persist import persist_mhs_report
+    from tests.unit.mhs.test_evaluation_appresearch import _build_compact_report
+
+    history = tmp_path / "history"
+    window = ("2021-01-01T00:00:00+00:00", "2024-06-30T00:00:00+00:00")
+    for index in range(2):
+        append_run_history_record(
+            _trial_record(str(index), {"u": index}, start=window[0], resolved_end=window[1]), history,
+        )
+
+    def reject_canonical():
+        raise AssertionError("an explicit run must never open the canonical registry")
+
+    monkeypatch.setattr(rh, "canonical_history_registry", reject_canonical)
+
+    class StopReplayError(Exception):
+        """Stop after the real fold-stage evidence reads, before expensive replays."""
+
+    def stop_replay(*args, **kwargs):
+        raise StopReplayError
+
+    monkeypatch.setattr(fold.concurrency, "_run_post_book_concurrently", stop_replay)
+    base = _build_compact_report()
+
+    def evidence_stage(ctx, telemetry):
+        assert ctx.history_dir == history
+        with pytest.raises(StopReplayError):
+            fold.run_folds(ctx, telemetry)
+        assert ctx.trials_attempted == SEARCH_TRIALS_ATTEMPTED + 2
+        assert ctx.trial_sharpes == (2.0, 2.0)
+        assert ctx.trial_pool["ledger_size"] == 2
+        return dataclasses.replace(
+            base, start=str(ctx.start), end=str(ctx.end), resolved_end=str(ctx.resolved_end),
+            trials_attempted=ctx.trials_attempted, trial_pool=ctx.trial_pool,
+            blend=base.books["fast_reversal"],
+        )
+
+    monkeypatch.setattr(orch, "run_stages", evidence_stage)
+    report = run_mhs_horizon_diagnostic(
+        MhsDiagnosticRequest(start=window[0], end=window[1], log_run=False), history_dir=history,
+    )
+    target = tmp_path / "reports" / "report.json"
+    assert persist_mhs_report(report, target, history_dir=history) == target
+    assert derive_trials_attempted(history)[0] == SEARCH_TRIALS_ATTEMPTED + 3
+    assert trial_pool_disclosure(window, history)["n_history_records"] == 3
+    assert consulted_data_horizon(history, tmp_path / "procedures.jsonl").tzinfo is not None
 
 
 def test_registry_failure_stays_observational(tmp_path, monkeypatch, caplog) -> None:
@@ -860,7 +935,7 @@ def test_registry_failure_stays_observational(tmp_path, monkeypatch, caplog) -> 
     monkeypatch.setattr(persist_mod, "append_run_history_record", _boom)
     target = tmp_path / "report.json"
     with caplog.at_level("WARNING"):
-        result = persist_mod.persist_mhs_report(object(), target)  # type: ignore[arg-type]
+        result = persist_mod.persist_mhs_report(object(), target, history_dir=tmp_path / "history")  # type: ignore[arg-type]
     assert result == target
     assert any("run-history" in r.message for r in caplog.records)
 

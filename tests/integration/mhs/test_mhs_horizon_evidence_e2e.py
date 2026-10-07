@@ -44,7 +44,7 @@ class TestTypedArtifactRoundtrip:
         from src.mhs.report.persist import persist_mhs_horizon_diagnostic_report
 
         out = tmp_path / "mhs_report.json"
-        persist_mhs_horizon_diagnostic_report(report, out, tier=MhsOutputTier.FULL)
+        persist_mhs_horizon_diagnostic_report(report, out, history_dir=tmp_path / "history", tier=MhsOutputTier.FULL)
         artifact_dir = out.parent / "mhs_report_artifacts" / "_full"
 
         parquet_files = list(artifact_dir.glob("*.parquet"))
@@ -80,7 +80,7 @@ class TestTypedArtifactRoundtrip:
         from src.mhs.report.persist import persist_mhs_horizon_diagnostic_report
 
         out = tmp_path / "mhs_report.json"
-        persist_mhs_horizon_diagnostic_report(report, out, tier=MhsOutputTier.FULL)
+        persist_mhs_horizon_diagnostic_report(report, out, history_dir=tmp_path / "history", tier=MhsOutputTier.FULL)
         report_json = out.parent / "mhs_report_artifacts" / "_full" / "report.json"
         payload = json.loads(report_json.read_text())
         ledger_ref = payload["blend"]["primary"]["ledger"]
@@ -168,7 +168,7 @@ class TestTypedArtifactRoundtrip:
         )
         patched = replace(report, folds=(fold_report,))
         out = tmp_path / "fold_report.json"
-        persist_mhs_horizon_diagnostic_report(patched, out, tier=MhsOutputTier.FULL)
+        persist_mhs_horizon_diagnostic_report(patched, out, history_dir=tmp_path / "history", tier=MhsOutputTier.FULL)
         artifact_dir = out.parent / "fold_report_artifacts" / "_full"
         parquet_files = list(artifact_dir.glob("*.parquet"))
         assert len(parquet_files) == 5
@@ -194,7 +194,7 @@ class TestFullModeBackwardCompat:
 
         out = tmp_path / "mhs_report.json"
         report_json = persist_mhs_horizon_diagnostic_report(
-            report, out, tier=MhsOutputTier.FULL,
+            report, out, history_dir=tmp_path / "history", tier=MhsOutputTier.FULL,
         )
         assert report_json is not None
         artifact_dir = out.parent / "mhs_report_artifacts" / "_full"
