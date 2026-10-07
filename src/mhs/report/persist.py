@@ -40,7 +40,7 @@ from src.mhs.report.artifacts import (
 )
 from src.mhs.report.schema import MhsHorizonDiagnosticReport
 from src.mhs.resources import _peak_rss_bytes
-from src.mhs.run_history import append_run_history_record, canonical_history_registry
+from src.mhs.run_history import append_run_history_record
 
 logger = logging.getLogger("MhsHorizonDiagnostic")
 
@@ -49,27 +49,39 @@ def persist_mhs_report(
     report: MhsHorizonDiagnosticReport,
     target: str | Path,
     *,
+    history_dir: Path,
     tier: MhsOutputTier = MhsOutputTier.COMPACT,
     request: MhsDiagnosticRequest | None = None,
+    procedure_registry: Path | None = None,
 ) -> Path | None:
-    """Persist the MHS diagnostic in the requested output tier.
+    """Persist the MHS diagnostic in the requested output tier and record the look in run history.
 
-    COMPACT (default) writes a git-committable stripped summary JSON at ``target``
-    plus a daily-resampled ``daily_ledger.parquet`` under the sibling
-    ``*_artifacts`` directory; per-fill detail is intentionally dropped.
-    FULL writes the lossless 5-category unified Parquet audit tables and a
-    verbose checksummed JSON under ``*_artifacts/_full/`` (gitignored), keeping
-    the pre-tiering behaviour byte-for-byte otherwise.
+    COMPACT (default) writes a git-committable stripped summary JSON at ``target`` plus a daily-resampled
+    ``daily_ledger.parquet`` under the sibling ``*_artifacts`` directory; per-fill detail is intentionally dropped.
+    FULL writes the lossless 5-category unified Parquet audit tables and a verbose checksummed JSON under
+    ``*_artifacts/_full/`` (gitignored).
 
-    After either persistence path completes -- including a COMPACT resample
-    failure that returns ``None`` -- one lightweight run-history record is
-    appended to ``<target.parent>/mhs_run_history/``. History logging is
-    observational: a failure there is swallowed via ``logger.warning`` and
-    never changes the returned persisted path.
+    After either path completes -- including a COMPACT resample failure that returns ``None`` -- exactly one
+    run-history record is appended to ``<history_dir>/registry.sqlite3``. The append is observational: its failure
+    is logged and never changes the returned path. The destination itself is mandatory and validated before any
+    artifact is written, so a caller that never chose a registry fails loudly instead of writing the operator's.
 
-    Returns the persisted JSON path, or ``None`` when a COMPACT resample
-    failure is escalated past the compact artifacts (fail-closed policy).
+    Args:
+        report: Assembled diagnostic report.
+        target: Summary JSON destination.
+        history_dir: Run-history directory; the CLI passes ``BACKTESTS_DIR`` for the operator registry.
+        tier: Output tier.
+        request: Request recorded in the history flags and used for the deploy-gate verdict.
+        procedure_registry: Procedure registry read by the deploy-gate verdict of forward-registered requests;
+            ``None`` reads the canonical registry (read-only default).
+    Returns:
+        The persisted JSON path, or ``None`` when a COMPACT resample failure is escalated past the compact artifacts.
+    Raises:
+        TypeError: ``history_dir`` is not a ``pathlib.Path``; raised before ``target.parent`` is created.
+        DataIntegrityError: COMPACT ledger equity is non-finite or non-positive.
     """
+    if not isinstance(history_dir, Path):
+        raise TypeError("history_dir must be a pathlib.Path")
     target = Path(target)
     target.parent.mkdir(parents=True, exist_ok=True)
     persisted: Path | None
@@ -79,13 +91,13 @@ def persist_mhs_report(
         persisted = _persist_mhs_report_compact(report, target)
     try:
         append_run_history_record(
-            build_mhs_run_history_record(report, request, tier, persisted),
-            canonical_history_registry().parent,
+            build_mhs_run_history_record(report, request, tier, persisted, procedure_registry=procedure_registry),
+            history_dir,
         )
     except Exception:  # noqa: BLE001 - observational; never break the research result
         logger.warning(
             "[EVAL] run-history record append failed path=%s",
-            canonical_history_registry(),
+            history_dir / "registry.sqlite3",
             exc_info=True,
         )
     return persisted
@@ -150,12 +162,14 @@ def _fold_summary(fold: MhsFoldReport) -> dict[str, Any]:
 
 
 def _deploy_gate_record(
-    report: MhsHorizonDiagnosticReport, request: MhsDiagnosticRequest | None
+    report: MhsHorizonDiagnosticReport,
+    request: MhsDiagnosticRequest | None,
+    procedure_registry: Path | None = None,
 ) -> dict[str, Any] | None:
     """JSON-serializable deploy-gate verdict for the run-history record."""
     if request is None:
         return None
-    gate = deploy_gate_from_report(report, request)
+    gate = deploy_gate_from_report(report, request, registry_path=procedure_registry)
     return {
         "go": bool(gate.go),
         "reason_codes": list(gate.reason_codes),
@@ -168,8 +182,10 @@ def build_mhs_run_history_record(
     request: MhsDiagnosticRequest | None,
     output_tier: MhsOutputTier,
     persisted_path: Path | None,
+    *,
+    procedure_registry: Path | None = None,
 ) -> dict[str, Any]:
-    """Curated, structured summary of one MHS run."""
+    """Curated, structured summary of one MHS run; ``procedure_registry`` is forwarded to the deploy-gate read."""
     from src.mhs.live_strategy import capture_params_snapshot
 
     record: dict[str, Any] = {
@@ -182,7 +198,7 @@ def build_mhs_run_history_record(
         "resolved_end": report.resolved_end,
         "flags": dataclasses.asdict(request) if request is not None else None,
         "live_parity_blockers": list(live_parity_blockers(request)) if request is not None else None,
-        "deploy_gate": _deploy_gate_record(report, request),
+        "deploy_gate": _deploy_gate_record(report, request, procedure_registry),
         "params_snapshot": capture_params_snapshot(),
         "perf": {
             "run_elapsed_seconds": report.run_elapsed_seconds,

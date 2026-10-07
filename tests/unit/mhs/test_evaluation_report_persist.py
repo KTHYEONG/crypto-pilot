@@ -141,7 +141,7 @@ def test_compact_json_stripped_and_wired(tmp_path) -> None:
     report = _build_compact_report()
     out = tmp_path / "mhs_report.json"
     persisted = persist_mhs_horizon_diagnostic_report(
-        report, out, tier=MhsOutputTier.COMPACT,
+        report, out, history_dir=tmp_path / "history", tier=MhsOutputTier.COMPACT,
     )
     assert persisted == out
     payload = json.loads(out.read_text())
@@ -164,7 +164,7 @@ def test_compact_size_budget(tmp_path) -> None:
     # budgets (daily ledger < 500KB, JSON < 20KB) for a small replay workload.
     report = _build_compact_report()
     out = tmp_path / "mhs_report.json"
-    persist_mhs_horizon_diagnostic_report(report, out, tier=MhsOutputTier.COMPACT)
+    persist_mhs_horizon_diagnostic_report(report, out, history_dir=tmp_path / "history", tier=MhsOutputTier.COMPACT)
     artifact_dir = out.parent / "mhs_report_artifacts"
     daily_path = artifact_dir / "daily_ledger.parquet"
     assert daily_path.exists()
@@ -187,7 +187,7 @@ def test_compact_failure_escalates_past_artifacts(tmp_path, monkeypatch) -> None
     monkeypatch.setattr(persist_mod, "_daily_resample_ledger", _boom)
     out = tmp_path / "mhs_report.json"
     persisted = persist_mhs_horizon_diagnostic_report(
-        report, out, tier=MhsOutputTier.COMPACT,
+        report, out, history_dir=tmp_path / "history", tier=MhsOutputTier.COMPACT,
     )
     assert persisted is None
     assert not out.exists()
@@ -210,14 +210,12 @@ def test_persist_wires_run_history_append_for_compact_and_full(tmp_path, monkeyp
 
     monkeypatch.setattr(persist_mod, "append_run_history_record", _spy_append)
     out = tmp_path / "mhs_report.json"
-    persist_mhs_horizon_diagnostic_report(report, out, tier=MhsOutputTier.COMPACT)
-    persist_mhs_horizon_diagnostic_report(report, out, tier=MhsOutputTier.FULL)
+    persist_mhs_horizon_diagnostic_report(report, out, history_dir=tmp_path / "history", tier=MhsOutputTier.COMPACT)
+    persist_mhs_horizon_diagnostic_report(report, out, history_dir=tmp_path / "history", tier=MhsOutputTier.FULL)
 
     assert len(calls) == 2
     assert [tier for tier, _ in calls] == ["compact", "full"]
-    from src.mhs.run_history import canonical_history_registry
-
-    assert all(history_dir == str(canonical_history_registry().parent) for _, history_dir in calls)
+    assert all(history_dir == str(tmp_path / "history") for _, history_dir in calls)
 
 def test_persist_still_appends_when_compact_resample_fails(tmp_path, monkeypatch) -> None:
     """SCENARIO_MHS_RESULT_LOG_05 (COMPACT-None branch): the COMPACT path that
@@ -237,7 +235,7 @@ def test_persist_still_appends_when_compact_resample_fails(tmp_path, monkeypatch
     monkeypatch.setattr(persist_mod, "append_run_history_record", _spy_append)
     out = tmp_path / "mhs_report.json"
     persisted = persist_mhs_horizon_diagnostic_report(
-        report, out, tier=MhsOutputTier.COMPACT,
+        report, out, history_dir=tmp_path / "history", tier=MhsOutputTier.COMPACT,
     )
 
     assert persisted is None
@@ -251,7 +249,7 @@ def test_persist_isolates_history_append_failure(tmp_path, monkeypatch) -> None:
     out = tmp_path / "mhs_report.json"
 
     baseline = persist_mhs_horizon_diagnostic_report(
-        report, out, tier=MhsOutputTier.COMPACT,
+        report, out, history_dir=tmp_path / "history", tier=MhsOutputTier.COMPACT,
     )
 
     def _boom(record, history_dir):
@@ -259,10 +257,49 @@ def test_persist_isolates_history_append_failure(tmp_path, monkeypatch) -> None:
 
     monkeypatch.setattr(persist_mod, "append_run_history_record", _boom)
     isolated = persist_mhs_horizon_diagnostic_report(
-        report, out, tier=MhsOutputTier.COMPACT,
+        report, out, history_dir=tmp_path / "history", tier=MhsOutputTier.COMPACT,
     )
 
     assert isolated == baseline
+
+
+def test_persist_without_history_dir_raises_before_any_artifact(tmp_path, monkeypatch) -> None:
+    """Persist without history dir raises before any artifact."""
+    report = _build_compact_report()
+    target = tmp_path / "r" / "report.json"
+    calls: list = []
+    monkeypatch.setattr(persist_mod, "append_run_history_record", lambda *a, **k: calls.append(1))
+
+    with pytest.raises(TypeError):
+        persist_mhs_horizon_diagnostic_report(report, target)  # type: ignore[call-arg]
+    with pytest.raises(TypeError):
+        persist_mhs_horizon_diagnostic_report(report, target, history_dir=None)  # type: ignore[arg-type]
+    with pytest.raises(TypeError):
+        persist_mhs_horizon_diagnostic_report(report, target, history_dir=str(tmp_path))  # type: ignore[arg-type]
+    assert not (tmp_path / "r").exists()
+    assert calls == []
+
+
+def test_persist_forwards_procedure_registry_to_deploy_gate(tmp_path, monkeypatch) -> None:
+    """Persist forwards procedure registry to deploy gate."""
+    from src.mhs.contracts import MhsDiagnosticRequest
+
+    report = _build_compact_report()
+    seen: dict = {}
+    real_gate = persist_mod.deploy_gate_from_report
+
+    def _spy_gate(rep, req, **kwargs):
+        seen.update(kwargs)
+        return real_gate(rep, req, **kwargs)
+
+    monkeypatch.setattr(persist_mod, "deploy_gate_from_report", _spy_gate)
+    monkeypatch.setattr(persist_mod, "append_run_history_record", lambda *a, **k: None)
+    out = tmp_path / "mhs_report.json"
+    persist_mhs_horizon_diagnostic_report(
+        report, out, history_dir=tmp_path / "history",
+        request=MhsDiagnosticRequest(), procedure_registry=tmp_path / "p.jsonl",
+    )
+    assert seen.get("registry_path") == tmp_path / "p.jsonl"
 
 
 def test_run_history_record_discloses_live_parity_blockers() -> None:

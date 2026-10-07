@@ -44,7 +44,7 @@ def test_persist_mhs_report_dispatches_compact_by_default(
     _patch_history(monkeypatch)
 
     target = tmp_path / "report.json"
-    result = persist_mhs_report(report=object(), target=target)  # type: ignore[arg-type]
+    result = persist_mhs_report(report=object(), target=target, history_dir=tmp_path)  # type: ignore[arg-type]
 
     assert calls == ["compact"]
     assert result == target
@@ -66,7 +66,7 @@ def test_persist_mhs_report_dispatches_full_when_requested(
     _patch_history(monkeypatch)
 
     target = tmp_path / "report.json"
-    persist_mhs_report(report=object(), target=target, tier=MhsOutputTier.FULL)  # type: ignore[arg-type]
+    persist_mhs_report(report=object(), target=target, history_dir=tmp_path, tier=MhsOutputTier.FULL)  # type: ignore[arg-type]
 
     assert calls == ["full"]
 
@@ -87,7 +87,7 @@ def test_persist_mhs_report_swallows_run_history_failure(
     monkeypatch.setattr(persist_mod, "append_run_history_record", _boom)
 
     target = tmp_path / "report.json"
-    result = persist_mhs_report(report=object(), target=target)  # type: ignore[arg-type]
+    result = persist_mhs_report(report=object(), target=target, history_dir=tmp_path)  # type: ignore[arg-type]
 
     assert result == target
 
@@ -203,7 +203,7 @@ def test_persist_mhs_report_full_lightweight_json_and_parquet(tmp_path: Path) ->
 
     report, _ = _build_report(with_touch_ladder=True)
     target = tmp_path / "mhs_horizon_diagnostic.json"
-    persisted = persist_mhs_report(report, target, tier=MhsOutputTier.FULL)
+    persisted = persist_mhs_report(report, target, history_dir=tmp_path, tier=MhsOutputTier.FULL)
     assert persisted == tmp_path / "mhs_horizon_diagnostic_artifacts" / "_full" / "report.json"
     assert persisted.exists()
 
@@ -224,5 +224,4 @@ def test_persist_mhs_report_full_lightweight_json_and_parquet(tmp_path: Path) ->
     loaded_ledger = load_mhs_replay_artifact(artifact_dir, "fast_reversal_primary", "ledger")
     assert not loaded_ledger.empty
     assert "equity" in loaded_ledger.columns
-
 

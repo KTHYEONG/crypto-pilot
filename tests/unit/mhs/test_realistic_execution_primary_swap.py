@@ -274,7 +274,7 @@ def test_compact_payload_strips_patient_reference(tmp_path) -> None:
         execution_symbols=("A",), run_elapsed_seconds=0.1,
     )
     out = tmp_path / "mhs_report.json"
-    persist_mhs_horizon_diagnostic_report(report, out, tier=MhsOutputTier.COMPACT)
+    persist_mhs_horizon_diagnostic_report(report, out, history_dir=tmp_path / "history", tier=MhsOutputTier.COMPACT)
     payload = json.loads(out.read_text())
     book_payload = payload["books"]["fast_reversal"]
     assert book_payload["patient_reference_naive_sharpe"] == -0.7

@@ -132,3 +132,21 @@ def test_training_may_precede_registration_while_judging_cannot(tmp_path: Path) 
             now=pd.Timestamp("2026-10-01", tz="UTC"), journal_path=journal,
             legacy_history_dir=history, legacy_registry_path=registry,
         )
+
+
+def test_process_registration_requires_legacy_sources(tmp_path: Path) -> None:
+    """Process registration requires legacy sources."""
+    journal = _journal(tmp_path / "j.db")
+    before = journal.read_bytes()
+    plan = _plan()
+
+    with pytest.raises(TypeError):
+        register_process_procedure(plan, now=REG_NOW, journal_path=journal)  # type: ignore[call-arg]
+    with pytest.raises(TypeError):
+        register_process_procedure(
+            plan, now=REG_NOW, journal_path=journal, legacy_history_dir=None,  # type: ignore[arg-type]
+            legacy_registry_path=tmp_path / "reg.jsonl",
+        )
+    assert journal.read_bytes() == before
+    with pytest.raises(DataIntegrityError):
+        load_process_evaluation_plan(journal)

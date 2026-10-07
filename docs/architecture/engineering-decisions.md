@@ -62,3 +62,8 @@
 * **Decision**: 일일 결정 창(22:45~02:00 UTC) 동안 CI 배포를 유예하여 사이클 완결을 보장하고, 수집기 진입점 AST 지문이 동일하면 데몬 컨테이너만 선택적으로 재생성합니다.
 * **Why**: 장중 배포로 인한 주문 제출 지연(최대 85분) 발생 시 CAGR이 -48%p까지 붕괴하는 현상을 실측했으며, 매 배포마다 수집기가 재기동되어 청산 틱이 유실되는 문제를 방지하기 위함입니다.
 * **Trade-off**: 결정 창 구간에 트리거된 CI 배포는 익일 02:00 이후로 지연 실행됩니다.
+
+### ADR-09: Application/CLI boundary owns operator storage defaults
+* **Decision**: Application/CLI boundary owns operator storage defaults; library write functions require an explicit destination; read-only defaults are documented and never feed a write.
+* **Why**: Silent canonical-default writes let ad-hoc processes inflate operator DSR trial evidence and consulted horizons; explicit destinations fail loudly while reads keep a documented canonical default.
+* **Trade-off**: Every library write call site must thread its destination; CLI/ops handlers pass the operator paths explicitly.

@@ -8,6 +8,7 @@ for long-lived state (panel, config, grids, telemetry).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import pandas as pd
@@ -169,3 +170,6 @@ class PipelineContext:
 
     # Telemetry
     telemetry: StageTelemetry = field(default_factory=lambda: StageTelemetry(log_run=False))
+
+    # Run-history directory threading DSR reads; None = canonical read default.
+    history_dir: Path | None = None

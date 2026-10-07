@@ -190,3 +190,69 @@ def test_live_session_has_no_escaped_file_handlers() -> None:
 
     temp_root = Path(os.environ["PYTEST_DEBUG_TEMPROOT"])
     assert escaped_file_handlers(temp_root) == []
+
+
+def test_subprocess_child_without_destination_cannot_write(tmp_path: Path) -> None:
+    import subprocess
+    import sys
+
+    repo_root = Path(__file__).resolve().parents[2]
+    child_bt = tmp_path / "child_bt"
+    child_logs = tmp_path / "child_logs"
+    out = tmp_path / "out"
+    probe = (
+        "import pandas as pd\n"
+        "from pathlib import Path as _P\n"
+        f"out=_P(r'{out}')\n"
+        "from src.mhs.run_history import append_run_history_record\n"
+        "from src.mhs.report.persist import persist_mhs_report\n"
+        "from src.mhs.preregistration import ProcedureRegistration, record_forward_evaluation, register_procedure\n"
+        "from src.mhs.contracts import MhsDiagnosticRequest\n"
+        "now=pd.Timestamp('2026-09-17', tz='UTC')\n"
+        "reg=ProcedureRegistration('d'*32, now, pd.Timestamp('2026-06-30 23:59:59+00:00', tz='UTC'), {})\n"
+        "end=pd.Timestamp('2026-12-31', tz='UTC')\n"
+        "rec={'run_id':'x'}\n"
+        "calls=[\n"
+        "lambda: append_run_history_record(rec),\n"
+        "lambda: append_run_history_record(rec, None),\n"
+        "lambda: persist_mhs_report(object(), out/'r.json'),\n"
+        "lambda: persist_mhs_report(object(), out/'r.json', history_dir=None),\n"
+        "lambda: record_forward_evaluation(reg, end, now=now),\n"
+        "lambda: register_procedure(MhsDiagnosticRequest(), now=now),\n"
+        "]\n"
+        "for _fn in calls:\n"
+        " try:\n"
+        "  _fn()\n"
+        " except Exception as _e:\n"
+        "  print(type(_e).__name__)\n"
+    )
+    env = {
+        **os.environ,
+        "CRYPTO_PILOT_BACKTESTS_DIR": str(child_bt),
+        "CRYPTO_PILOT_LOG_DIR": str(child_logs),
+    }
+    result = subprocess.run([sys.executable, "-c", probe], cwd=repo_root, capture_output=True, text=True, env=env, timeout=120)  # noqa: S603
+    assert result.returncode == 0, result.stderr
+    lines = [line for line in result.stdout.strip().splitlines() if line]
+    assert lines == ["TypeError"] * 6
+    assert not child_bt.exists()
+    assert not child_logs.exists()
+    assert not out.exists()
+
+
+def test_cli_default_resolves_operator_path() -> None:
+    import subprocess
+    import sys
+
+    repo_root = Path(__file__).resolve().parents[2]
+    probe = (
+        "import src.common.paths as p, src.common.logging as l, src.mhs.preregistration as pr;"
+        " print(str(p.BACKTESTS_DIR)); print(str(l.LOG_DIR)); print(str(pr.PROCEDURE_REGISTRY_PATH))"
+    )
+    env = {k: v for k, v in os.environ.items() if k not in ("CRYPTO_PILOT_BACKTESTS_DIR", "CRYPTO_PILOT_LOG_DIR")}
+    result = subprocess.run([sys.executable, "-c", probe], cwd=repo_root, capture_output=True, text=True, env=env, timeout=120)  # noqa: S603
+    assert result.returncode == 0, result.stderr
+    lines = result.stdout.strip().splitlines()
+    assert lines[0] == str(repo_root / "data" / "backtests")
+    assert lines[1] == str(repo_root / "logs")
+    assert lines[2] == str(repo_root / "data" / "backtests" / "procedure_registry.jsonl")

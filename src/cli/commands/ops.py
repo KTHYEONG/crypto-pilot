@@ -61,6 +61,23 @@ def _run_backtests_verify_history_migration(args: argparse.Namespace) -> None:
     )
 
 
+def _run_procedure_registry_migrate(args: argparse.Namespace) -> None:
+    from src.common.errors import DataIntegrityError
+    from src.mhs.preregistration import migrate_legacy_procedure_registry
+
+    try:
+        moved = migrate_legacy_procedure_registry(
+            legacy_path=Path(args.legacy_path), target_path=Path(args.target_path)
+        )
+    except DataIntegrityError as exc:
+        logger.error("[DATA] ops procedure-registry-migrate failed error=%s", exc)
+        raise SystemExit(1) from exc
+    logger.info(
+        "[DATA] ops procedure-registry-migrate moved=%s legacy=%s target=%s",
+        moved, args.legacy_path, args.target_path,
+    )
+
+
 def _run_daemon_idle_gate(args: argparse.Namespace) -> None:
     from src.application.ops.daemon_idle_gate import main as gate_main
 
@@ -119,6 +136,13 @@ def add_ops_commands(parser: argparse.ArgumentParser) -> None:
     verify.add_argument("--registry-path", type=str, required=True, help="Target registry SQLite path")
     verify.add_argument("--history-directory", type=str, required=True, help="Explicit legacy history directory")
     verify.set_defaults(handler=_run_backtests_verify_history_migration)
+    proc = subparsers.add_parser(
+        "procedure-registry-migrate",
+        help="Move the legacy docs-tree procedure registry to the backtests root exactly once",
+    )
+    proc.add_argument("--legacy-path", type=str, required=True, help="Legacy procedure registry JSONL")
+    proc.add_argument("--target-path", type=str, required=True, help="Target procedure registry JSONL")
+    proc.set_defaults(handler=_run_procedure_registry_migrate)
     provision = subparsers.add_parser("provision-env", help="Provision VPS runtime secrets from the workstation SSOT")
     provision.add_argument("--host", type=str, default="or-vps", help="SSH host for the VPS runtime")
     provision.add_argument(

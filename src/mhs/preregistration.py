@@ -34,8 +34,9 @@ logger = logging.getLogger("MhsPreregistration")
 # Runtime evidence, never documentation: the registry lives beside the run-history
 # registry under the gitignored backtests root so it can never be tracked.
 PROCEDURE_REGISTRY_PATH: Path = BACKTESTS_DIR / "procedure_registry.jsonl"
+"""Operator procedure registry (``BACKTESTS_DIR / "procedure_registry.jsonl"``): CLI write default and read default."""
 LEGACY_PROCEDURE_REGISTRY_PATH: Path = BASE_DIR / "docs" / "decisions" / "mhs_procedure_registry.jsonl"
-_IMPORT_TIME_REGISTRY_PATH: Path = PROCEDURE_REGISTRY_PATH
+"""Pre-2026-10 location under the documentation tree; only ``migrate_legacy_procedure_registry`` writes or deletes it."""
 EVENT_REGISTRATION: str = "registration"
 EVENT_EVALUATION: str = "evaluation"
 # 실행 창·실행 제어 필드는 절차(알파 결정 경로)가 아니므로 digest에서 제외한다.
@@ -97,14 +98,15 @@ def procedure_identity_digest(request: Any) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
 
 
-def _canonical_procedure_registry_path(registry_path: Path) -> Path:
-    """Resolve a registry argument against the current canonical module global.
-
-    Default arguments bind at import time, so a caller relying on the default
-    must still follow a re-pointed ``PROCEDURE_REGISTRY_PATH``; explicit
-    non-canonical paths (tests, tools) are honoured verbatim and never migrate.
-    """
-    return PROCEDURE_REGISTRY_PATH if registry_path == _IMPORT_TIME_REGISTRY_PATH else registry_path
+def _reject_unmigrated_legacy(registry_path: Path) -> None:
+    """Fail closed when the canonical registry is read while legacy evidence still exists."""
+    if registry_path.resolve() == PROCEDURE_REGISTRY_PATH.resolve() and LEGACY_PROCEDURE_REGISTRY_PATH.is_file():
+        raise DataIntegrityError(
+            f"procedure registry is unmigrated: legacy {LEGACY_PROCEDURE_REGISTRY_PATH} still exists; "
+            f"target {PROCEDURE_REGISTRY_PATH} must not be read as absent evidence; "
+            f"run ops procedure-registry-migrate --legacy-path {LEGACY_PROCEDURE_REGISTRY_PATH} "
+            f"--target-path {PROCEDURE_REGISTRY_PATH}"
+        )
 
 
 def _fsync_directory(directory: Path) -> None:
@@ -117,30 +119,29 @@ def _fsync_directory(directory: Path) -> None:
 
 def migrate_legacy_procedure_registry(
     *,
-    legacy_path: Path | None = None,
-    target_path: Path | None = None,
+    legacy_path: Path,
+    target_path: Path,
 ) -> bool:
     """Move the pre-2026-10 procedure registry out of the documentation tree exactly once.
 
-    The registry is append-only runtime evidence (every registration and forward
-    evaluation advances later consulted horizons), so it must never be silently
-    forked, duplicated or dropped: with only the legacy file present it is moved
-    byte-for-byte to the canonical location; with both present the evidence is
-    ambiguous and the caller must stop.
+    The registry is append-only runtime evidence (every registration and forward evaluation advances later
+    consulted horizons), so it must never be silently forked, duplicated or dropped. Migration is an explicit
+    operator action (``ops procedure-registry-migrate``); no read or append triggers it.
 
     Args:
-        legacy_path: Legacy file; ``None`` = ``LEGACY_PROCEDURE_REGISTRY_PATH`` read at call time.
-        target_path: Canonical file; ``None`` = ``PROCEDURE_REGISTRY_PATH`` read at call time.
-
+        legacy_path: Legacy registry file.
+        target_path: Destination registry file.
     Returns:
         True iff a file was moved by this call.
-
     Raises:
-        DataIntegrityError: both files exist (message names both paths), or the
-            moved bytes do not hash identically to the source.
+        TypeError: Either path is not a ``pathlib.Path``; raised before any filesystem access.
+        DataIntegrityError: Both files exist (message names both paths), or the moved bytes do not hash
+            identically to the source.
     """
-    legacy = LEGACY_PROCEDURE_REGISTRY_PATH if legacy_path is None else legacy_path
-    target = PROCEDURE_REGISTRY_PATH if target_path is None else target_path
+    if not isinstance(legacy_path, Path) or not isinstance(target_path, Path):
+        raise TypeError("legacy_path and target_path must be pathlib.Path")
+    legacy = legacy_path
+    target = target_path
     if not legacy.is_file():
         return False
     if target.exists():
@@ -166,10 +167,9 @@ def migrate_legacy_procedure_registry(
     return True
 
 
-def _read_events(registry_path: Path) -> list[dict[str, Any]]:
-    path = _canonical_procedure_registry_path(registry_path)
-    if path == PROCEDURE_REGISTRY_PATH:
-        migrate_legacy_procedure_registry()
+def _read_events(registry_path: Path | None = None) -> list[dict[str, Any]]:
+    path = PROCEDURE_REGISTRY_PATH if registry_path is None else registry_path
+    _reject_unmigrated_legacy(path)
     if not path.exists():
         return []
     events: list[dict[str, Any]] = []
@@ -191,20 +191,22 @@ def _read_events(registry_path: Path) -> list[dict[str, Any]]:
     return events
 
 
-def _append_event(registry_path: Path, event: dict[str, Any]) -> None:
-    path = _canonical_procedure_registry_path(registry_path)
-    if path == PROCEDURE_REGISTRY_PATH:
-        migrate_legacy_procedure_registry()
+def _append_event(registry_path: Path | None, event: dict[str, Any]) -> None:
+    if registry_path is None or not isinstance(registry_path, Path):
+        raise TypeError("registry_path must be a pathlib.Path")
+    path = registry_path
+    _reject_unmigrated_legacy(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open(mode="a", encoding="utf-8") as fh:
         fh.write(json.dumps(event, sort_keys=True, ensure_ascii=False) + "\n")
 
 
-def load_registrations(registry_path: Path = PROCEDURE_REGISTRY_PATH) -> tuple[ProcedureRegistration, ...]:
-    """Registration events in file order.
+def load_registrations(registry_path: Path | None = None) -> tuple[ProcedureRegistration, ...]:
+    """Registration events in file order; ``None`` reads ``PROCEDURE_REGISTRY_PATH`` at call time (read default).
 
     Raises:
-        DataIntegrityError: an unknown event or a malformed registration event.
+        DataIntegrityError: Unknown/malformed event, or the canonical registry is read while the legacy file
+            still exists (unmigrated evidence must never be mistaken for absent evidence).
     """
     registrations: list[ProcedureRegistration] = []
     for event in _read_events(registry_path):
@@ -224,11 +226,11 @@ def load_registrations(registry_path: Path = PROCEDURE_REGISTRY_PATH) -> tuple[P
     return tuple(registrations)
 
 
-def find_registration(digest: str, registry_path: Path = PROCEDURE_REGISTRY_PATH) -> ProcedureRegistration:
-    """Registration for ``digest``.
+def find_registration(digest: str, registry_path: Path | None = None) -> ProcedureRegistration:
+    """Registration for ``digest``; ``None`` reads ``PROCEDURE_REGISTRY_PATH`` at call time (read default).
 
     Raises:
-        DataIntegrityError: the digest is not registered.
+        DataIntegrityError: The digest is not registered, or as ``load_registrations``.
     """
     for registration in load_registrations(registry_path):
         if registration.procedure_digest == digest:
@@ -237,7 +239,7 @@ def find_registration(digest: str, registry_path: Path = PROCEDURE_REGISTRY_PATH
 
 
 def consulted_data_horizon(
-    history_dir: Path | None = None, registry_path: Path = PROCEDURE_REGISTRY_PATH, *, journal_path: Path | None = None
+    history_dir: Path | None = None, registry_path: Path | None = None, *, journal_path: Path | None = None
 ) -> pd.Timestamp:
     """Latest data timestamp any research look may have consulted (I-SOURCE-COMPLETE).
 
@@ -251,10 +253,10 @@ def consulted_data_horizon(
     after import into the registry.
 
     Args:
-        history_dir: Run-history location resolved exactly like
-            ``append_run_history_record`` (``None`` = canonical registry under
-            ``BACKTESTS_DIR``; a directory = ``<dir>/registry.sqlite3``).
-        registry_path: Procedure registry (registration/evaluation JSONL events).
+        history_dir: Run-history directory; ``None`` reads the canonical operator
+            registry (read-only default), otherwise ``<dir>/registry.sqlite3``.
+        registry_path: Procedure registry (registration/evaluation JSONL events);
+            ``None`` reads ``PROCEDURE_REGISTRY_PATH`` at call time (read-only default).
         journal_path: Process research journal; when given it must exist.
     Returns:
         A tz-aware UTC timestamp, never earlier than ``MHS_FINAL_OOS_CUTOFF_2026H1``.
@@ -287,21 +289,28 @@ def register_procedure(
     request: Any,
     *,
     now: pd.Timestamp,
-    registry_path: Path = PROCEDURE_REGISTRY_PATH,
-    history_dir: Path | None = None,
+    registry_path: Path,
+    history_dir: Path,
 ) -> ProcedureRegistration:
     """Freeze one procedure before the data that will judge it exists.
+
+    Both stores are explicit: the registration event is written to ``registry_path`` and its frozen data horizon is
+    derived from ``history_dir``; letting either default would let an ad-hoc caller register against, or into, the
+    operator's evidence.
 
     Args:
         request: Alpha-relevant request flags whose identity is frozen.
         now: Trusted tz-aware UTC registration clock.
         registry_path: Procedure registry receiving the registration event.
-        history_dir: Run-history registry location (``None`` = canonical registry).
+        history_dir: Run-history directory whose registry bounds the consulted data horizon.
     Raises:
+        TypeError: ``registry_path`` or ``history_dir`` is not a ``pathlib.Path``; raised before any read or write.
         ValueError: ``now`` is naive or the request already references a registration.
-        DataIntegrityError: the procedure is already registered, ``now`` does not
-            follow the consulted data horizon, or any consulted source is corrupt.
+        DataIntegrityError: Already registered, ``now`` does not follow the consulted horizon, a consulted source
+            is corrupt, or the canonical registry is used while the legacy file still exists.
     """
+    if not isinstance(registry_path, Path) or not isinstance(history_dir, Path):
+        raise TypeError("registry_path and history_dir must be pathlib.Path")
     if now.tzinfo is None:
         raise ValueError("now must be tz-aware")
     if getattr(request, "forward_registration_digest", None) is not None:
@@ -325,8 +334,8 @@ def register_process_procedure(
     *,
     now: pd.Timestamp,
     journal_path: Path,
-    legacy_history_dir: Path | None = None,
-    legacy_registry_path: Path = PROCEDURE_REGISTRY_PATH,
+    legacy_history_dir: Path,
+    legacy_registry_path: Path,
 ) -> ProcessEvaluationPlan:
     """Register a complete process procedure and permitted looks before judging data exists.
 
@@ -334,14 +343,17 @@ def register_process_procedure(
         plan: Strict process definition, fixed family budget and future look schedule.
         now: Trusted UTC registration time.
         journal_path: Durable process research journal.
-        legacy_history_dir: Run-history registry location (``None`` = canonical registry).
-        legacy_registry_path: Existing forward registration/evaluation history.
+        legacy_history_dir: Run-history directory bounding the persisted horizon (required).
+        legacy_registry_path: Existing forward registration/evaluation history (required).
     Returns:
         An immutable plan referencing the persisted process registration identity.
     Raises:
+        TypeError: A non-``Path`` source; raised before any I/O.
         ValueError: ``now`` is naive.
         DataIntegrityError: Procedure/family identity, consultation history or future schedule conflicts.
     """
+    if not isinstance(legacy_history_dir, Path) or not isinstance(legacy_registry_path, Path):
+        raise TypeError("legacy_history_dir and legacy_registry_path must be pathlib.Path")
     if now.tzinfo is None:
         raise ValueError("now must be tz-aware")
     if process_procedure_digest(plan.procedure) != plan.procedure_digest:
@@ -362,13 +374,17 @@ def record_forward_evaluation(
     resolved_end: pd.Timestamp,
     *,
     now: pd.Timestamp,
-    registry_path: Path = PROCEDURE_REGISTRY_PATH,
+    registry_path: Path,
 ) -> None:
     """Append one evaluation event; every forward look advances later registrations' data horizon.
 
     Raises:
+        TypeError: ``registry_path`` is not a ``pathlib.Path``; raised before any read or write.
         ValueError: ``now`` or ``resolved_end`` is naive.
+        DataIntegrityError: The canonical registry is used while the legacy file still exists.
     """
+    if not isinstance(registry_path, Path):
+        raise TypeError("registry_path must be a pathlib.Path")
     if now.tzinfo is None or resolved_end.tzinfo is None:
         raise ValueError("timestamps must be tz-aware")
     _append_event(registry_path, {"event": EVENT_EVALUATION,
