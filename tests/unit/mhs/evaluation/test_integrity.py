@@ -175,7 +175,7 @@ def test_funding_gap_terminal_symbols_excludes_symbol_with_later_fill() -> None:
 
 def test_funding_gap_terminal_symbols_ignores_delist_settlement_as_recovery_evidence() -> None:
     # 2026-09-15 실측(mhs_symbol_lifespan_pit_roster 후속): OMNIUSDT/BAKEUSDT/AIAUSDT가
-    # _settle_idle_holdings의 delist_settlement 체결을 "재개"로 오판해 folds_passed가
+    # 유휴 보유 정산 경로(현 _book_delist_settlement)의 delist_settlement 체결을 "재개"로 오판해 folds_passed가
     # 16/16 -> 14/16으로 퇴행했던 회귀. delist_settlement는 그 자체가 종료 처분이지
     # 정상 거래 재개의 증거가 아니다.
     from src.mhs.evaluation.integrity import _funding_gap_terminal_symbols
