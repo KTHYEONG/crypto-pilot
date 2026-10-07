@@ -198,6 +198,41 @@ def test_load_funding_series_missing_and_loaded(tmp_path, monkeypatch) -> None:
     assert series["B"].equals(loaded)
 
 
+def test_missing_execution_sources_returns_sorted_absent_symbols(tmp_path) -> None:
+    """Symbols without a 3m parquet are reported sorted and de-duplicated."""
+    three = tmp_path / "3m"
+    three.mkdir(parents=True)
+    (three / "A.parquet").touch()
+    (three / "C.parquet").touch()
+
+    assert marks._missing_execution_sources(str(tmp_path), ["C", "B", "A", "B", "D"], "3m") == ("B", "D")
+
+
+def test_missing_execution_sources_empty_input(tmp_path) -> None:
+    """Empty candidates never report a missing source."""
+    assert marks._missing_execution_sources(str(tmp_path), [], "3m") == ()
+
+
+def test_execution_source_path_matches_loader_layout(tmp_path) -> None:
+    """A parquet written at the canonical path loads and reports no absence."""
+    import pandas as pd
+
+    from src.mhs.marks import _execution_source_path
+
+    grid = pd.date_range("2022-01-01", periods=4, freq="3min", tz="UTC")
+    ts_ms = [int(ts.value // 1_000_000) for ts in grid]
+    frame = pd.DataFrame(
+        {"timestamp": ts_ms, "high": 101.0, "low": 99.0, "close": 100.0},
+    )
+    path = _execution_source_path(str(tmp_path), "A", "3m")
+    (tmp_path / "3m").mkdir(parents=True, exist_ok=True)
+    frame.to_parquet(path)
+
+    frames = marks._load_window_minute_frames(str(tmp_path), ["A"], grid[0], grid[-1], "3m")
+    assert "A" in frames
+    assert marks._missing_execution_sources(str(tmp_path), ["A"], "3m") == ()
+
+
 def test_clear_market_data_caches_keeps_retained_loaders_stateless(tmp_path, monkeypatch) -> None:
     """Retired mark caches are gone; retained loaders always read the lake file."""
     import pandas as pd

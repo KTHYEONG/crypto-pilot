@@ -369,16 +369,154 @@ def test_window_ipc_numpy_restore_corruption_is_fail_closed(tmp_path) -> None:
         _load_window_from_ipc(str(corrupt))
 
 
-def test_missing_active_execution_file_stays_in_roster(tmp_path) -> None:
+def _write_3m_execution_file(root, symbol: str, start, end) -> None:
     import pandas as pd
+
+    grid = pd.date_range(start, end, freq="3min", tz="UTC")
+    (root / "3m").mkdir(parents=True, exist_ok=True)
+    frame = pd.DataFrame(
+        {
+            "timestamp": ((grid - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta("1ms")).astype("int64"),
+            "high": 101.0,
+            "low": 99.0,
+            "close": 100.0,
+            "quote_vol": 1000.0,
+        },
+    )
+    frame.to_parquet(root / "3m" / f"{symbol}.parquet")
+
+
+def _full_range_funding(columns, start, end) -> dict:
+    import pandas as pd
+
+    grid = pd.date_range(start, end, freq="3min", tz="UTC")
+    return {s: pd.Series(0.0, index=grid) for s in columns}
+
+
+def _two_symbol_daily_targets():
+    import pandas as pd
+
+    start = pd.Timestamp("2021-01-01", tz="UTC")
+    idx = pd.date_range(start, periods=3, freq="24h", tz="UTC")
+    weights = pd.DataFrame(
+        {"AAAUSDT": [0.5, 0.5, 0.0], "BBBUSDT": [-0.5, -0.5, 0.0]}, index=idx,
+    )
+    return start, start + pd.Timedelta(days=3), idx, weights
+
+
+def test_targeted_symbol_without_execution_source_fails_closed(tmp_path) -> None:
+    import pandas as pd
+    import pytest
+
+    from src.common.errors import DataIntegrityError
+    from src.mhs.evaluation import integrity
     from src.mhs.evaluation.windows import _iter_mhs_execution_windows
     from src.mhs.types import ExecutionSpec
-    idx = pd.DatetimeIndex([pd.Timestamp('2025-01-01', tz='UTC')])
-    weights = pd.DataFrame({'MISSUSDT': [1.0]}, index=idx)
-    windows = list(_iter_mhs_execution_windows(weights, idx, str(tmp_path), '3m', idx[0], idx[0]+pd.Timedelta(minutes=9), {}, ExecutionSpec(), funding_failures={'MISSUSDT': 'missing'}))
-    assert windows[0].symbols == ('MISSUSDT',)
-    assert windows[0].closes['MISSUSDT'].isna().all()
-    assert windows[0].quote_volumes['MISSUSDT'].isna().all()
+
+    start, end, idx, weights = _two_symbol_daily_targets()
+    _write_3m_execution_file(tmp_path, "AAAUSDT", start, end)
+    signals = idx + pd.Timedelta(hours=1)
+    with pytest.raises(DataIntegrityError, match="execution source missing for 1 targeted symbol") as excinfo:
+        list(_iter_mhs_execution_windows(weights, signals, str(tmp_path), "3m", start, end, {}, ExecutionSpec()))
+    exc = excinfo.value
+    assert str(exc).startswith("execution source missing for 1 targeted symbol(s)")
+    assert f"BBBUSDT (first_target={idx[0].isoformat()}" in str(exc)
+    assert "AAAUSDT" not in str(exc)
+    assert integrity._classify_execution_failure(exc) == "RELEVANT_EXECUTION_DATA_GAP"
+
+
+def test_execution_source_preflight_runs_before_materialization(tmp_path, monkeypatch) -> None:
+    import pandas as pd
+    import pytest
+
+    import src.mhs.execution.window_stream as window_stream
+    from src.common.errors import DataIntegrityError
+    from src.mhs.evaluation.windows import _iter_mhs_execution_windows
+    from src.mhs.types import ExecutionSpec
+
+    start, end, idx, weights = _two_symbol_daily_targets()
+    _write_3m_execution_file(tmp_path, "AAAUSDT", start, end)
+    signals = idx + pd.Timedelta(hours=1)
+    calls: list[str] = []
+
+    def _spy(**kwargs):
+        calls.append("materialize")
+        raise AssertionError("pre-flight must raise before any window is materialized")
+
+    monkeypatch.setattr(window_stream, "_materialize_execution_piece", _spy)
+    with pytest.raises(DataIntegrityError, match="execution source missing"):
+        next(_iter_mhs_execution_windows(weights, signals, str(tmp_path), "3m", start, end, {}, ExecutionSpec()))
+    assert calls == []
+
+
+@pytest.mark.parametrize("untargeted_value", [0.0, float("nan")])
+def test_untargeted_symbol_without_execution_source_is_invisible(tmp_path, untargeted_value) -> None:
+    import pandas as pd
+
+    from src.mhs.evaluation.windows import _iter_mhs_execution_windows
+    from src.mhs.execution.batch import replay_execution_windows
+    from src.mhs.types import ExecutionSpec
+
+    start, end, idx, weights = _two_symbol_daily_targets()
+    weights = weights.assign(ZZZUSDT=untargeted_value)
+    signals = idx + pd.Timedelta(hours=1)
+    funding = _full_range_funding(weights.columns, start, end)
+    spec = ExecutionSpec()
+
+    _write_3m_execution_file(tmp_path, "AAAUSDT", start, end)
+    _write_3m_execution_file(tmp_path, "BBBUSDT", start, end)
+    windows_without = list(_iter_mhs_execution_windows(weights, signals, str(tmp_path), "3m", start, end, funding, spec))
+    _write_3m_execution_file(tmp_path, "ZZZUSDT", start, end)
+    windows_with = list(_iter_mhs_execution_windows(weights, signals, str(tmp_path), "3m", start, end, funding, spec))
+
+    for w in (*windows_without, *windows_with):
+        assert "ZZZUSDT" not in w.symbols
+    assert [w.symbols for w in windows_without] == [w.symbols for w in windows_with]
+    without = replay_execution_windows(windows_without, 1.0, "OHLCV_IMMEDIATE_TAKER", spec)
+    with_file = replay_execution_windows(windows_with, 1.0, "OHLCV_IMMEDIATE_TAKER", spec)
+    pd.testing.assert_series_equal(without.ledger.equity, with_file.ledger.equity)
+    pd.testing.assert_series_equal(without.ledger.fee_charge, with_file.ledger.fee_charge)
+    pd.testing.assert_series_equal(without.ledger.funding_charge, with_file.ledger.funding_charge)
+    pd.testing.assert_frame_equal(without.simulated_fills, with_file.simulated_fills)
+
+
+def test_all_execution_sources_present_is_unchanged(tmp_path) -> None:
+    import pandas as pd
+
+    from src.mhs.evaluation.windows import _iter_mhs_execution_windows
+    from src.mhs.execution.integrity import replay_ledger_certified
+    from src.mhs.execution.batch import replay_execution_windows
+    from src.mhs.types import ExecutionSpec
+
+    start, end, idx, weights = _two_symbol_daily_targets()
+    _write_3m_execution_file(tmp_path, "AAAUSDT", start, end)
+    _write_3m_execution_file(tmp_path, "BBBUSDT", start, end)
+    signals = idx + pd.Timedelta(hours=1)
+    funding = _full_range_funding(weights.columns, start, end)
+    spec = ExecutionSpec()
+    windows = list(_iter_mhs_execution_windows(weights, signals, str(tmp_path), "3m", start, end, funding, spec))
+    result = replay_execution_windows(windows, 1.0, "OHLCV_IMMEDIATE_TAKER", spec)
+    assert set(result.simulated_fills["symbol"]) >= {"AAAUSDT", "BBBUSDT"}
+    assert result.data_gaps == ()
+    assert replay_ledger_certified(result) is True
+
+
+def test_present_file_without_rows_in_range_keeps_gap_evidence(tmp_path) -> None:
+    import pandas as pd
+
+    from src.mhs.evaluation.windows import _iter_mhs_execution_windows
+    from src.mhs.execution.batch import replay_execution_windows
+    from src.mhs.types import ExecutionSpec
+
+    start, end, idx, weights = _two_symbol_daily_targets()
+    _write_3m_execution_file(tmp_path, "AAAUSDT", start, end)
+    _write_3m_execution_file(tmp_path, "BBBUSDT", start - pd.Timedelta(days=30), start - pd.Timedelta(days=20))
+    signals = idx + pd.Timedelta(hours=1)
+    funding = _full_range_funding(weights.columns, start, end)
+    spec = ExecutionSpec()
+    windows = list(_iter_mhs_execution_windows(weights, signals, str(tmp_path), "3m", start, end, funding, spec))
+    result = replay_execution_windows(windows, 1.0, "OHLCV_IMMEDIATE_TAKER", spec)
+    assert any(g.code == "MISSING_DECISION_MARK" and g.symbol == "BBBUSDT" for g in result.ledger.data_gaps)
 
 
 def test_window_spill_root_prefers_env_and_defaults_to_repo_tmp(tmp_path, monkeypatch) -> None:

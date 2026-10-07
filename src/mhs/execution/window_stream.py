@@ -11,7 +11,7 @@ import pandas as pd
 
 from src.common.errors import DataIntegrityError
 from src.mhs.execution.contracts import ExecutionReplayWindow, align_funding_with_knowledge, funding_coverage_gaps
-from src.mhs.marks import _build_window_frames, _load_window_minute_frames
+from src.mhs.marks import _build_window_frames, _load_window_minute_frames, _missing_execution_sources
 from src.mhs.parallel import collect_window_garbage
 from src.mhs.resources import (
     MhsExecutionAllocation,
@@ -267,7 +267,16 @@ def _iter_mhs_execution_windows(
     execution_bound_count: int = 2,
     initial_swap_bytes: int | None = None,
 ) -> Iterator[MhsExecutionWindow]:
-    """Stream chronologically completed three-minute trade bars and funding knowledge for an exact target path. The OHLCV mode leaves `ExecutionReplayWindow.marks` absent so the shared accounting engine values positions from 3m closes; bar completion remains the earliest publication time. Rosters always cover carried inventory — live requirements when supplied, otherwise every column targeted so far."""
+    """Stream chronologically completed three-minute trade bars and funding knowledge for an exact target path. The OHLCV mode leaves `ExecutionReplayWindow.marks` absent so the shared accounting engine values positions from 3m closes; bar completion remains the earliest publication time. Rosters always cover carried inventory — live requirements when supplied, otherwise every column targeted so far.
+
+    Raises:
+        DataIntegrityError: A column with at least one finite non-zero target has no
+            execution source file under ``root``: "execution source missing for <n>
+            targeted symbol(s): <SYM> (first_target=<iso>), ... timeframe=<tf>
+            root=<root> replay=[<start iso>, <end iso>)". Raised before the first window
+            is materialized: replaying a target on a symbol that was never collected
+            would drop its P&L, fees and funding from the ledger (phantom performance).
+    """
     if len(target_weights) != len(signal_available_at):
         raise DataIntegrityError("signal_available_at must align with target_weights")
     if start >= end:
@@ -311,6 +320,18 @@ def _iter_mhs_execution_windows(
 
     decision_times = pd.DatetimeIndex(target_weights.index)
     first_active = _first_active_ordinals(target_weights)
+    targeted = [c for c, o in zip(columns, first_active, strict=True) if int(o) < len(target_weights)]
+    missing = _missing_execution_sources(root, targeted, timeframe)
+    if missing:
+        ordinal_by_symbol = {c: int(o) for c, o in zip(columns, first_active, strict=True)}
+        details = ", ".join(
+            f"{sym} (first_target={decision_times[ordinal_by_symbol[sym]].isoformat()})"
+            for sym in missing
+        )
+        raise DataIntegrityError(
+            f"execution source missing for {len(missing)} targeted symbol(s): {details} "
+            f"timeframe={timeframe} root={root} replay=[{start.isoformat()}, {end.isoformat()})"
+        )
     max_window = pd.Timedelta(days=31)
     bounds: list[tuple[int, int]] = []
     i0 = 0
