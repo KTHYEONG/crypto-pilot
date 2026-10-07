@@ -122,10 +122,13 @@ def _trend_choppy_log_px(n_hours: int):
 
 @pytest.fixture
 def mhs_market(tmp_path, monkeypatch):
+    from tests.fixtures.settlement_audit import patch_settlement_registry_for_fixture
+
     root = tmp_path / "market"
     n_hours = 2700
     end = _write_market(root, n_hours, _random_walk_log_px(n_hours))
     monkeypatch.setattr(marks, "funding_path", lambda sym: root / "funding" / f"{sym}.parquet")
+    patch_settlement_registry_for_fixture(monkeypatch, root)
     # Retained loaders are stateless; the shared invalidation entry point
     # keeps runs isolated when fixtures redirect data roots between tests.
     marks.clear_mhs_market_data_caches()

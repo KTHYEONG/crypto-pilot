@@ -8,6 +8,7 @@ import pandas as pd
 import src.mhs.marks as marks
 from src.mhs.marks import clear_mhs_market_data_caches
 from tests.fixtures.mhs_fold_market import write_completing_fold_market
+from tests.fixtures.settlement_audit import patch_settlement_registry_for_fixture
 from tests.unit.mhs.test_evaluation_appresearch import (
     _write_3m_cache,
     _write_mhs_market,
@@ -73,6 +74,7 @@ def _mhs_shared_roots(tmp_path_factory: pytest.TempPathFactory):
 def mhs_market_long(_mhs_shared_roots, monkeypatch):
     root, end = _mhs_shared_roots("long")
     monkeypatch.setattr(marks, "funding_path", lambda sym: root / "funding" / f"{sym}.parquet")
+    patch_settlement_registry_for_fixture(monkeypatch, root)
     # Retained loaders are stateless and read the lake directly; the shared
     # invalidation entry point keeps runs isolated when fixtures redirect
     # funding roots between tests.
@@ -83,6 +85,7 @@ def mhs_market_long(_mhs_shared_roots, monkeypatch):
 def mhs_market(_mhs_shared_roots, monkeypatch):
     root, end = _mhs_shared_roots("default")
     monkeypatch.setattr(marks, "funding_path", lambda sym: root / "funding" / f"{sym}.parquet")
+    patch_settlement_registry_for_fixture(monkeypatch, root)
     # Retained loaders are stateless and read the lake directly; the shared
     # invalidation entry point keeps runs isolated when fixtures redirect
     # funding roots between tests.
@@ -93,6 +96,7 @@ def mhs_market(_mhs_shared_roots, monkeypatch):
 def mhs_market_with_btc(_mhs_shared_roots, monkeypatch):
     root, end = _mhs_shared_roots("btc")
     monkeypatch.setattr(marks, "funding_path", lambda sym: root / "funding" / f"{sym}.parquet")
+    patch_settlement_registry_for_fixture(monkeypatch, root)
     # Retained loaders are stateless and read the lake directly; the shared
     # invalidation entry point keeps runs isolated when fixtures redirect
     # funding roots between tests.
@@ -103,6 +107,7 @@ def mhs_market_with_btc(_mhs_shared_roots, monkeypatch):
 def mhs_market_funding_vary(_mhs_shared_roots, monkeypatch):
     root, end = _mhs_shared_roots("fund")
     monkeypatch.setattr(marks, "funding_path", lambda sym: root / "funding" / f"{sym}.parquet")
+    patch_settlement_registry_for_fixture(monkeypatch, root)
     # Retained loaders are stateless and read the lake directly; the shared
     # invalidation entry point keeps runs isolated when fixtures redirect
     # funding roots between tests.
@@ -114,6 +119,7 @@ def mhs_completing_fold_market(_mhs_shared_roots, monkeypatch):
     """Module-shared completing-fold market with funding redirected."""
     root, end = _mhs_shared_roots("fold")
     monkeypatch.setattr(marks, "funding_path", lambda sym: root / "funding" / f"{sym}.parquet")
+    patch_settlement_registry_for_fixture(monkeypatch, root)
     clear_mhs_market_data_caches()
     return root, end
 
@@ -122,6 +128,7 @@ def mhs_completing_fold_market(_mhs_shared_roots, monkeypatch):
 def mhs_market_with_taker_buy_quote(_mhs_shared_roots, monkeypatch):
     root, end = _mhs_shared_roots("tbq")
     monkeypatch.setattr(marks, "funding_path", lambda sym: root / "funding" / f"{sym}.parquet")
+    patch_settlement_registry_for_fixture(monkeypatch, root)
     # Retained loaders are stateless and read the lake directly; the shared
     # invalidation entry point keeps runs isolated when fixtures redirect
     # funding roots between tests.

@@ -27,6 +27,7 @@ from src.mhs.frozen_research_evidence import (
     evaluate_frozen_mhs_research,
 )
 from src.mhs.frozen_research_universe import build_frozen_pit_roster
+from src.mhs.instrument_settlements import settlement_registry_for_root
 from src.mhs.marks import _load_funding_series
 from src.mhs.panel import load_base_panel
 from src.mhs.resources import (
@@ -35,6 +36,7 @@ from src.mhs.resources import (
     assert_mhs_stage_allocation,
     resolve_mhs_memory_budget,
 )
+from src.mhs.settlement_evidence import assert_settlement_registry_complete
 from src.mhs.source_gaps import active_intervals
 from src.mhs.types import ExecutionSpec
 
@@ -282,6 +284,11 @@ def _load_frozen_source(
     close_1h = panel["close"]
     quote_1h = panel["quote_vol"]
     census = tuple(close_1h.columns)
+    assert_settlement_registry_complete(
+        Path(root), census,
+        audit_end=request.evaluation_end + pd.Timedelta(days=1),
+        registry=settlement_registry_for_root(root),
+    )
     daily_close = close_1h.resample("1D").last().astype("float64")
     daily_quote_volume = quote_1h.resample("1D").sum(min_count=1).astype("float64")
     grid_1h = close_1h.index
