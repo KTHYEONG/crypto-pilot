@@ -158,11 +158,11 @@ def _isolate_telemetry_logger():
 
 
 @pytest.fixture(autouse=True, scope="session")
-def _no_escaped_file_handlers():
+def _no_escaped_file_handlers(tmp_path_factory: pytest.TempPathFactory):
     yield
     from tests.fixtures.hermetic import escaped_file_handlers
 
-    offenders = escaped_file_handlers(_PROC_TEMP_ROOT)
+    offenders = escaped_file_handlers(_PROC_TEMP_ROOT, tmp_path_factory.getbasetemp())
     if offenders:
         details = "; ".join(f"{name}={path}" for name, path in offenders)
         raise AssertionError(f"escaped file handlers outside temp root: {details}")

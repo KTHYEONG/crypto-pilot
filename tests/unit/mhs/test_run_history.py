@@ -27,9 +27,9 @@ from src.mhs.run_history import (
     derive_trials_attempted,
     is_trial_record,
     trial_identity_key,
-    trial_pool_disclosure,
     window_trial_sharpes,
 )
+from src.mhs.trial_pool_disclosure import trial_pool_disclosure
 
 _DEFAULT_WINDOW = ("2021-01-01T00:00:00+00:00", "2025-12-31T23:59:59+00:00")
 
@@ -692,7 +692,7 @@ def test_empty_initialized_registry_is_absence_not_corruption(tmp_path) -> None:
 
 def test_disclosure_degrades_observationally_on_corrupt_registry(tmp_path, caplog) -> None:
     """Disclosure is observational only: it warns and never raises into the run."""
-    from src.mhs.run_history import _EMPTY_DISCLOSURE
+    from src.mhs.trial_pool_disclosure import _EMPTY_DISCLOSURE
 
     history_dir = tmp_path / "history"
     history_dir.mkdir()

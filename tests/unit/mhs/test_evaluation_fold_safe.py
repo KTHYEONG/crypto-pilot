@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 import src.mhs.evaluation.books as books_mod
 import src.mhs.evaluation.concurrency as concurrency_mod
-import src.mhs.evaluation.folds as folds_mod
+import src.mhs.evaluation.fold_discovery as fold_discovery_mod
 from src.mhs.diagnostic_run import run_mhs_horizon_diagnostic
 from src.mhs.contracts import MhsFoldReport
 from src.mhs.discovery import DiscoveryQualificationResult, fold_train_only_discovery_qualification
@@ -90,9 +90,7 @@ def test_fold_safe_horizon_flag_off_is_byte_identical(mhs_completing_fold_market
         calls["n"] += 1
         return real_fn(*args, **kwargs)
 
-    import src.mhs.evaluation.folds as folds_mod
-
-    monkeypatch.setattr(folds_mod, "fold_train_only_discovery_qualification", counting)
+    monkeypatch.setattr(fold_discovery_mod, "fold_train_only_discovery_qualification", counting)
     report = _run_anchored_fold(str(root), COMPLETING_FOLD, request, funding_by_symbol, 1.0, 0, None)
     assert report.strict is not None
     assert report.failures == ()
@@ -171,7 +169,7 @@ def test_fold_safe_horizon_records_source(mhs_completing_fold_market, monkeypatc
             return _admitted_selection(72)
         return _admitted_selection(360)
 
-    monkeypatch.setattr(folds_mod, "fold_train_only_discovery_qualification", _admit_by_family)
+    monkeypatch.setattr(fold_discovery_mod, "fold_train_only_discovery_qualification", _admit_by_family)
 
     def _spy_books(*args, **kwargs):
         captured["top_level_slow"] = args[5]
@@ -270,7 +268,7 @@ def test_fold_safe_funding_carry_parent_wiring(mhs_market_funding_vary, monkeypa
             return _admitted_selection(72)
         return _admitted_selection(None)
 
-    monkeypatch.setattr(folds_mod, "fold_train_only_discovery_qualification", _admit_funding_only)
+    monkeypatch.setattr(fold_discovery_mod, "fold_train_only_discovery_qualification", _admit_funding_only)
     admitted = _run(captured)
     n_folds = len(phase_1_anchored_purged_folds())
     assert set(admitted) == set(range(n_folds))
@@ -285,7 +283,7 @@ def test_fold_safe_funding_carry_parent_wiring(mhs_market_funding_vary, monkeypa
     def _always_none(*args: object, **kwargs: object) -> object:
         return _admitted_selection(None)
 
-    monkeypatch.setattr(folds_mod, "fold_train_only_discovery_qualification", _always_none)
+    monkeypatch.setattr(fold_discovery_mod, "fold_train_only_discovery_qualification", _always_none)
     fail_closed = _run(captured)
     assert set(fail_closed) == set(range(n_folds))
     for lookback, sign, source, corr in fail_closed.values():

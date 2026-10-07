@@ -255,10 +255,10 @@ def test_toplevel_vol_mean_masked_to_execution_roster(mhs_market, monkeypatch) -
 
     monkeypatch.setattr(scaling, "_regime_cash_scale", spy)
     monkeypatch.setattr(concurrency_mod, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
-    import src.mhs.evaluation.folds as folds_mod
     import src.mhs.evidence as evidence_mod
 
-    monkeypatch.setattr(folds_mod, "phase_1_anchored_purged_folds", lambda: ())
+    import src.mhs.evaluation.fold_discovery as fold_discovery_mod
+    monkeypatch.setattr(fold_discovery_mod, "phase_1_anchored_purged_folds", lambda: ())
     monkeypatch.setattr(evidence_mod, "phase_1_anchored_purged_folds", lambda: ())
     request = research_baseline(
         start=str(_START), end=str(end), data_root=str(root),
@@ -345,10 +345,10 @@ def test_realized_execution_roster_size_exposed(mhs_market, monkeypatch) -> None
     funding_by_symbol, _ = _load_funding_series(symbols)
     universe_size = 8
     monkeypatch.setattr(concurrency_mod, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))
-    import src.mhs.evaluation.folds as folds_mod
     import src.mhs.evidence as evidence_mod
 
-    monkeypatch.setattr(folds_mod, "phase_1_anchored_purged_folds", lambda: ())
+    import src.mhs.evaluation.fold_discovery as fold_discovery_mod
+    monkeypatch.setattr(fold_discovery_mod, "phase_1_anchored_purged_folds", lambda: ())
     monkeypatch.setattr(evidence_mod, "phase_1_anchored_purged_folds", lambda: ())
     request = research_baseline(
         start=str(_START), end=str(end), data_root=str(root),

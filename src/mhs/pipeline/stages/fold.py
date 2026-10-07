@@ -40,10 +40,10 @@ from src.mhs.pipeline.context import PipelineContext
 from src.mhs.resources import _assert_stage_rss_budget
 from src.mhs.run_history import (
     derive_trials_attempted,
-    trial_pool_disclosure,
     window_trial_sharpes,
 )
 from src.mhs.telemetry import StageTelemetry
+from src.mhs.trial_pool_disclosure import trial_pool_disclosure
 
 
 def _committee_weight_leak_fraction(validation_start: str, validation_end: str) -> float:

@@ -101,9 +101,6 @@ def test_file_size_budget() -> None:
         "tests/unit/live/test_executor.py": 193626,
         "tests/unit/live/test_data_refresh.py": 71709,
         "tests/unit/mhs/test_process_backtest.py": 140056,
-        "tests/unit/mhs/evaluation/test_windows.py": 87424,
-        # Existing fold replay and shared-reference regression suite; freeze its current size.
-        "tests/unit/mhs/test_evaluation_folds.py": 62668,
     }
     measured = {
         str(path): path.stat().st_size
@@ -193,7 +190,7 @@ def test_evaluation_facade_preserves_public_surface() -> None:
 
     wanted.discard("run_mhs_horizon_diagnostic")  # moved to diagnostic_run (P2)
     # Submodules in evaluation package (P2 split); callers import concrete component owners
-    wanted.difference_update({"books", "committee", "concurrency", "fold_weights", "folds"})
+    wanted.difference_update({"books", "committee", "concurrency", "fold_weights", "folds", "integrity"})
     missing = sorted(n for n in wanted if not hasattr(ev, n))
     assert missing == [], f"facade dropped names: {missing}"
 
@@ -236,7 +233,7 @@ def test_evaluation_modules_respect_size_budget() -> None:
     allowlist: dict[str, int] = {
         "src/mhs/evaluation/windows.py": 712,
         # Fold validation, shared train-reference reuse and fork scheduling form one lifecycle.
-        "src/mhs/evaluation/folds.py": 1262,
+        "src/mhs/evaluation/folds.py": 1084,
     }
     measured = {
         str(path): len(path.read_text(encoding="utf-8").splitlines())
@@ -386,7 +383,7 @@ def test_source_module_size_budget() -> None:
         "src/mhs/evidence.py": 1267,
         "src/mhs/deploy_gate.py": 723,
         "src/mhs/scaling.py": 892,
-        "src/application/mhs_supervisor.py": 1218,
+        "src/application/mhs_supervisor.py": 1214,
         # Frozen account/exposure services stay co-located: two research workflows share
         # the catalog seam and unit-ledger helpers; split only with a new service boundary.
         "src/application/mhs_frozen_account.py": 812,
@@ -397,7 +394,7 @@ def test_source_module_size_budget() -> None:
         "src/mhs/evaluation/windows.py": 712,
         # Unified MhsDiagnosticRequest carries per-field CLI/validation metadata as the single schema source (spec 10 parts 2-3).
         # Freeze the existing fold lifecycle; further growth requires decomposition.
-        "src/mhs/evaluation/folds.py": 1262,
+        "src/mhs/evaluation/folds.py": 1084,
         # Declare-once request schema: each MHS option is exactly one field plus CLI metadata.
         "src/mhs/contracts.py": 898,
         # Checkpoint advancement, retention and the loop stay co-located for review;
@@ -487,7 +484,6 @@ def test_no_function_exceeds_length_budget() -> None:
         "src/mhs/backtest/paths.py::run_process_paths": 261,
         "src/mhs/backtest/inventory.py::evaluate_process_inventory_backtest": 289,
         "src/mhs/discovery.py::select_horizon_by_discovery_qualification": 270,
-        "src/mhs/evaluation/committee.py::_committee_diagnostic": 282,
         "src/mhs/pipeline/stages/committee.py::build_committee": 278,
     }
     measured: dict[str, int] = {}

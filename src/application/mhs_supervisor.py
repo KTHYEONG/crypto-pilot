@@ -7,7 +7,6 @@ an atomic outcome report.
 
 from __future__ import annotations
 
-import datetime
 import hashlib
 import json
 import logging
@@ -25,11 +24,29 @@ import uuid
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, TextIO, cast
+from typing import Literal, TextIO
 
 import pandas as pd
 
 from src.application.mhs_backtest import require_fresh_destinations
+from src.application.mhs_reuse import (
+    ReusedRun as ReusedRun,
+)
+from src.application.mhs_reuse import (
+    ReuseLookup as ReuseLookup,
+)
+from src.application.mhs_reuse import (
+    ReuseRejection as ReuseRejection,
+)
+from src.application.mhs_reuse import (
+    ReuseRejectionReason as ReuseRejectionReason,
+)
+from src.application.mhs_reuse import (
+    _hash_file,
+)
+from src.application.mhs_reuse import (
+    find_reused_run as find_reused_run,
+)
 from src.backtests.contracts import (
     ArtifactReference,
     JsonValue,
@@ -40,7 +57,6 @@ from src.backtests.contracts import (
 )
 from src.backtests.registry import finalize_run, initialize_registry, register_run
 from src.backtests.retention import apply_retention, plan_retention
-from src.common.errors import DataIntegrityError
 from src.common.paths import FUTURES_DATA_DIR
 from src.mhs.process import ProcessExecutionPolicy
 from src.mhs.reporting.inventory import PROCESS_INVENTORY_CERTIFICATION_LEVEL
@@ -383,414 +399,6 @@ def request_fingerprint(
     return hashlib.sha256(encoded).hexdigest()
 
 
-ReuseRejectionReason = Literal[
-    "not_finalized",
-    "status_not_completed",
-    "primary_not_valid",
-    "terminal_not_certified",
-    "unmanaged_run",
-    "result_unrecorded",
-    "evidence_unrecorded",
-    "artifact_missing",
-    "artifact_size_mismatch",
-    "artifact_digest_mismatch",
-    "artifact_unreadable",
-]
-"""Closed set of reasons a fingerprint-matching run is not admissible for reuse."""
-
-
-@dataclass(frozen=True, slots=True)
-class ReuseRejection:
-    """One fingerprint-matching run that was examined and refused for reuse.
-
-    Attributes:
-        run_id: Registry identity of the refused run.
-        reason: First failed admissibility check, in contract order.
-        detail: Short machine-readable context (stored status, offending
-            artifact ``role:path``, or observed vs recorded size); None when
-            the reason is self-describing.
-    """
-
-    run_id: str
-    reason: ReuseRejectionReason
-    detail: str | None
-
-
-@dataclass(frozen=True, slots=True)
-class ReusedRun:
-    """Verified prior execution whose recorded evidence can stand in for a fresh run.
-
-    Attributes:
-        run_id: Registry identity of the admitted run.
-        finalized_at: Stored UTC ISO8601 finalization timestamp.
-        result_path: Absolute path of the verified result envelope.
-        targets_path: Absolute path of the verified exact-target parquet, or
-            None when the run recorded no ``targets`` artifact.
-        evidence_retained: False when retention reclaimed any of the run's
-            managed detail rows (``retained = 0``); the compact envelope stays
-            authoritative either way.
-    """
-
-    run_id: str
-    finalized_at: str
-    result_path: Path
-    targets_path: Path | None
-    evidence_retained: bool
-
-
-@dataclass(frozen=True, slots=True)
-class ReuseLookup:
-    """Outcome of one equivalent-run lookup.
-
-    Attributes:
-        reused: The admitted run, or None when a fresh execution is required.
-        rejections: Every examined, refused candidate in examination order.
-    """
-
-    reused: ReusedRun | None
-    rejections: tuple[ReuseRejection, ...]
-
-
-_RUN_STATUS_LITERALS: frozenset[str] = frozenset(
-    {"completed", "failed", "timed_out", "signaled", "resource_rejected", "interrupted"}
-)
-_SHA256_RE = re.compile(r"[0-9a-fA-F]{64}\Z")
-
-
-def _parse_reuse_finalized_at(value: object, run_id: str, registry_path: Path) -> datetime.datetime:
-    import datetime as _datetime
-    if not isinstance(value, str) or not value:
-        raise DataIntegrityError(f"corrupt finalization finalized_at for run {run_id} in {registry_path}")
-    text = value.strip()
-    if text.endswith("Z"):
-        text = text[:-1] + "+00:00"
-    try:
-        parsed = _datetime.datetime.fromisoformat(text)
-    except ValueError as exc:
-        raise DataIntegrityError(
-            f"corrupt finalization finalized_at for run {run_id} in {registry_path}"
-        ) from exc
-    if parsed.tzinfo is None or parsed.utcoffset() != _datetime.timedelta(0):
-        raise DataIntegrityError(
-            f"corrupt finalization finalized_at for run {run_id} in {registry_path}"
-        )
-    return parsed
-
-
-def _reuse_table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
-    return {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}  # noqa: S608
-
-
-def find_reused_run(registry_path: Path, fingerprint: str) -> ReuseLookup:
-    """Find the newest finalized run whose evidence can replace a fresh execution.
-
-    A fingerprint match only proves that the request was equivalent. It does
-    not prove that the earlier execution succeeded or that its evidence still
-    exists. Reuse is therefore admitted only for a run that completed with
-    certified financial validity and whose recorded artifacts still exist
-    byte-for-byte. Otherwise a failed, interrupted, financially invalid,
-    deleted or tampered run could stand in silently as the answer to the
-    request. Refusals are expected lifecycle states of a prunable local
-    registry, so they become a fresh run, never an error. Corruption of the
-    registry ledger itself fails closed, because absent evidence and
-    unreadable evidence must never look the same.
-
-    Admissibility, checked in this order (the first failure is the reason):
-    a finalization row exists; ``status == "completed"``;
-    ``primary_valid == 1``; ``terminal_certified == 1``;
-    ``managed_directory`` is not NULL; exactly one ``result`` row exists and
-    has ``retained = 1``; when the outcome records an ``evidence_id``, at
-    least one artifact row carries it; every ``retained = 1`` artifact row,
-    result first, is a regular file whose size equals ``byte_count`` and
-    whose streamed SHA-256 equals ``sha256``. Rows with ``retained = 0``
-    were reclaimed by retention and are not verified on disk.
-
-    Args:
-        registry_path: Execution registry SQLite file.
-        fingerprint: ``request_fingerprint`` of the request being served.
-    Returns:
-        The newest admissible run by ``finalized_at`` (ties: larger ``run_id``),
-        plus a rejection for every candidate examined before it and for every
-        unfinalized candidate. Returns an empty lookup when the registry file is
-        absent or has no ``runs`` table.
-    Side effects:
-        Writes nothing to the registry or the filesystem. Emits one
-        ``WARNING`` ``[DATA]`` line per rejection.
-    Raises:
-        DataIntegrityError: The path exists but is not a regular file or not a
-            readable SQLite database; ``runs`` exists while ``finalizations`` or
-            ``artifacts`` (or a required column) is missing; any
-            ``request_json`` is not a JSON object; a candidate's finalization or
-            artifact rows are outside their contract domains; or a candidate has
-            more than one ``result`` row.
-        sqlite3.OperationalError: Transient lock or busy failures, unchanged.
-    """
-    import os
-    import stat as _stat
-
-    if not os.path.lexists(registry_path):
-        return ReuseLookup(None, ())
-    if not registry_path.is_file():
-        raise DataIntegrityError(f"registry path is not a regular file: {registry_path}")
-    try:
-        conn = sqlite3.connect(registry_path.absolute().as_uri() + "?mode=ro", uri=True, timeout=5.0)
-    except sqlite3.OperationalError:
-        raise
-    except (sqlite3.DatabaseError, OSError) as exc:
-        raise DataIntegrityError(f"registry is unreadable: {registry_path}") from exc
-    try:
-        try:
-            conn.execute("BEGIN")
-            tables = {
-                str(row[0])
-                for row in conn.execute(
-                    "SELECT name FROM sqlite_master WHERE type = 'table'"
-                ).fetchall()
-            }
-            if "runs" not in tables:
-                conn.execute("ROLLBACK")
-                return ReuseLookup(None, ())
-            for required in ("finalizations", "artifacts"):
-                if required not in tables:
-                    raise DataIntegrityError(
-                        f"registry is missing table {required}: {registry_path}"
-                    )
-            runs_cols = _reuse_table_columns(conn, "runs")
-            finals_cols = _reuse_table_columns(conn, "finalizations")
-            artifacts_cols = _reuse_table_columns(conn, "artifacts")
-            if not {"run_id", "request_json", "managed_directory"}.issubset(runs_cols):
-                raise DataIntegrityError(f"registry runs table has missing columns: {registry_path}")
-            if not {
-                "run_id", "finalized_at", "status", "primary_valid",
-                "terminal_certified", "outcome_json",
-            }.issubset(finals_cols):
-                raise DataIntegrityError(
-                    f"registry finalizations table has missing columns: {registry_path}"
-                )
-            if not {
-                "run_id", "role", "path", "sha256", "byte_count",
-                "managed", "evidence_id", "retained",
-            }.issubset(artifacts_cols):
-                raise DataIntegrityError(
-                    f"registry artifacts table has missing columns: {registry_path}"
-                )
-            run_rows = conn.execute(
-                "SELECT run_id, request_json, managed_directory FROM runs"
-            ).fetchall()
-            decoded: list[tuple[str, dict[str, object], str | None]] = []
-            for raw_run_id, raw_request, managed in run_rows:
-                run_id = str(raw_run_id)
-                try:
-                    parsed_request = json.loads(str(raw_request))
-                except (ValueError, TypeError) as exc:
-                    raise DataIntegrityError(
-                        f"corrupt run request {run_id} in {registry_path}"
-                    ) from exc
-                if not isinstance(parsed_request, dict):
-                    raise DataIntegrityError(
-                        f"run request {run_id} is not a JSON object in {registry_path}"
-                    )
-                decoded.append((run_id, parsed_request, None if managed is None else str(managed)))
-            candidates_managed: dict[str, str | None] = {}
-            for run_id, request, managed in decoded:
-                value = request.get("fingerprint")
-                if isinstance(value, str) and value == fingerprint:
-                    candidates_managed[run_id] = managed
-            if not candidates_managed:
-                conn.execute("ROLLBACK")
-                return ReuseLookup(None, ())
-            candidate_ids = sorted(candidates_managed)
-            placeholders = ",".join("?" for _ in candidate_ids)
-            final_rows = conn.execute(
-                f"SELECT run_id, finalized_at, status, primary_valid, terminal_certified, outcome_json"  # noqa: S608
-                f" FROM finalizations WHERE run_id IN ({placeholders})",
-                candidate_ids,
-            ).fetchall()
-            artifact_rows = conn.execute(
-                f"SELECT run_id, role, path, sha256, byte_count, managed, evidence_id, retained"  # noqa: S608
-                f" FROM artifacts WHERE run_id IN ({placeholders})",
-                candidate_ids,
-            ).fetchall()
-            conn.execute("ROLLBACK")
-        except sqlite3.OperationalError:
-            raise
-        except DataIntegrityError:
-            with suppress(sqlite3.Error):
-                conn.execute("ROLLBACK")
-            raise
-        except sqlite3.DatabaseError as exc:
-            with suppress(sqlite3.Error):
-                conn.execute("ROLLBACK")
-            raise DataIntegrityError(f"registry is unreadable: {registry_path}") from exc
-    finally:
-        conn.close()
-
-    finals_by_run: dict[str, tuple[object, ...]] = {}
-    for row in final_rows:
-        finals_by_run[str(row[0])] = row
-    artifacts_by_run: dict[str, list[tuple[object, ...]]] = {run_id: [] for run_id in candidate_ids}
-    for row in artifact_rows:
-        artifacts_by_run.setdefault(str(row[0]), []).append(row)
-
-    for run_id, row in finals_by_run.items():
-        _, finalized_at, status, primary_valid, terminal_certified, outcome_json = row
-        if str(status) not in _RUN_STATUS_LITERALS:
-            raise DataIntegrityError(f"corrupt finalization status for run {run_id} in {registry_path}")
-        if primary_valid not in (0, 1, None):
-            raise DataIntegrityError(
-                f"corrupt finalization primary_valid for run {run_id} in {registry_path}"
-            )
-        if terminal_certified not in (0, 1, None):
-            raise DataIntegrityError(
-                f"corrupt finalization terminal_certified for run {run_id} in {registry_path}"
-            )
-        _parse_reuse_finalized_at(finalized_at, run_id, registry_path)
-        try:
-            outcome = json.loads(str(outcome_json))
-        except (ValueError, TypeError) as exc:
-            raise DataIntegrityError(
-                f"corrupt finalization outcome for run {run_id} in {registry_path}"
-            ) from exc
-        if not isinstance(outcome, dict):
-            raise DataIntegrityError(
-                f"finalization outcome for run {run_id} is not a JSON object in {registry_path}"
-            )
-        evidence_value = outcome.get("evidence_id", None)
-        if evidence_value is not None and not (
-            isinstance(evidence_value, str) and evidence_value != ""
-        ):
-            raise DataIntegrityError(
-                f"corrupt finalization evidence_id for run {run_id} in {registry_path}"
-            )
-    for run_id in candidate_ids:
-        for row in artifacts_by_run.get(run_id, []):
-            _, role, path, sha256, byte_count, _managed, _evidence_id, retained = row
-            if not isinstance(path, str) or not Path(path).is_absolute() or "\x00" in path:
-                raise DataIntegrityError(
-                    f"corrupt artifact path for run {run_id} in {registry_path}"
-                )
-            if not isinstance(sha256, str) or _SHA256_RE.match(sha256) is None:
-                raise DataIntegrityError(
-                    f"corrupt artifact sha256 for run {run_id} in {registry_path}"
-                )
-            if isinstance(byte_count, bool) or not isinstance(byte_count, int) or byte_count < 0:
-                raise DataIntegrityError(
-                    f"corrupt artifact byte_count for run {run_id} in {registry_path}"
-                )
-            if retained not in (0, 1):
-                raise DataIntegrityError(
-                    f"corrupt artifact retained flag for run {run_id} in {registry_path}"
-                )
-        result_count = sum(1 for row in artifacts_by_run.get(run_id, []) if str(row[1]) == "result")
-        if result_count > 1:
-            raise DataIntegrityError(f"duplicate result artifacts for run {run_id} in {registry_path}")
-
-    def _reject(run_id: str, reason: ReuseRejectionReason, detail: str | None) -> ReuseRejection:
-        rejection = ReuseRejection(run_id=run_id, reason=reason, detail=detail)
-        _logger.warning("[DATA] reuse_rejected run_id=%s reason=%s detail=%s", run_id, reason, detail)
-        return rejection
-
-    rejections: list[ReuseRejection] = []
-    unfinalized = sorted(run_id for run_id in candidate_ids if run_id not in finals_by_run)
-    for run_id in unfinalized:
-        rejections.append(_reject(run_id, "not_finalized", None))  # noqa: PERF401 -- logging side effect per rejection
-    finalized_ids = [run_id for run_id in candidate_ids if run_id in finals_by_run]
-    ordered = sorted(
-        finalized_ids,
-        key=lambda rid: (_parse_reuse_finalized_at(finals_by_run[rid][1], rid, registry_path), rid),
-        reverse=True,
-    )
-    for run_id in ordered:
-        _, finalized_at, status, primary_valid, terminal_certified, outcome_json = finals_by_run[run_id]
-        managed = candidates_managed[run_id]
-        rows = artifacts_by_run.get(run_id, [])
-        outcome = json.loads(str(outcome_json))
-        evidence_value = outcome.get("evidence_id", None)
-        evidence_id: str | None = (
-            str(evidence_value) if isinstance(evidence_value, str) and evidence_value != "" else None
-        )
-        if str(status) != "completed":
-            rejections.append(_reject(run_id, "status_not_completed", str(status)))
-            continue
-        if primary_valid != 1:
-            rejections.append(_reject(run_id, "primary_not_valid", None))
-            continue
-        if terminal_certified != 1:
-            rejections.append(_reject(run_id, "terminal_not_certified", None))
-            continue
-        if managed is None:
-            rejections.append(_reject(run_id, "unmanaged_run", None))
-            continue
-        result_rows = [row for row in rows if str(row[1]) == "result"]
-        if not result_rows:
-            rejections.append(_reject(run_id, "result_unrecorded", "no_result_row"))
-            continue
-        result_row = result_rows[0]
-        if int(cast(int, result_row[7])) != 1:
-            rejections.append(_reject(run_id, "result_unrecorded", "result_retained=0"))
-            continue
-        if evidence_id is not None and not any(
-            (None if row[6] is None else str(row[6])) == evidence_id for row in rows
-        ):
-            rejections.append(_reject(run_id, "evidence_unrecorded", evidence_id))
-            continue
-        retained_rows = [row for row in rows if int(cast(int, row[7])) == 1]
-        retained_rows.sort(key=lambda row: (str(row[1]), str(row[2])))
-        retained_rows.sort(key=lambda row: 0 if str(row[1]) == "result" else 1)
-        failure: ReuseRejection | None = None
-        for row in retained_rows:
-            role = str(row[1])
-            path_text = str(row[2])
-            recorded_sha = str(row[3]).lower()
-            recorded_size = int(cast(int, row[4]))
-            label = f"{role}:{path_text}"
-            try:
-                file_stat = os.stat(path_text)
-            except FileNotFoundError:
-                failure = _reject(run_id, "artifact_missing", label)
-                break
-            except NotADirectoryError:
-                failure = _reject(run_id, "artifact_missing", label)
-                break
-            except OSError:
-                failure = _reject(run_id, "artifact_unreadable", label)
-                break
-            if not _stat.S_ISREG(file_stat.st_mode):
-                failure = _reject(run_id, "artifact_missing", label)
-                break
-            if int(file_stat.st_size) != recorded_size:
-                failure = _reject(
-                    run_id, "artifact_size_mismatch",
-                    f"{label} observed={int(file_stat.st_size)} recorded={recorded_size}",
-                )
-                break
-            try:
-                digest, _ = _hash_file(Path(path_text))
-            except OSError:
-                failure = _reject(run_id, "artifact_unreadable", label)
-                break
-            if digest.lower() != recorded_sha:
-                failure = _reject(run_id, "artifact_digest_mismatch", label)
-                break
-        if failure is not None:
-            rejections.append(failure)
-            continue
-        targets_rows = [
-            row for row in rows if str(row[1]) == "targets" and int(cast(int, row[7])) == 1
-        ]
-        targets_rows.sort(key=lambda row: str(row[2]))
-        evidence_retained = all(int(cast(int, row[7])) == 1 for row in rows)
-        reused = ReusedRun(
-            run_id=run_id,
-            finalized_at=str(finalized_at),
-            result_path=Path(str(result_row[2])),
-            targets_path=Path(str(targets_rows[0][2])) if targets_rows else None,
-            evidence_retained=bool(evidence_retained),
-        )
-        return ReuseLookup(reused, tuple(rejections))
-    return ReuseLookup(None, tuple(rejections))
-
-
 def _read_compact_flags(primary: Path) -> tuple[bool | None, bool | None, dict[str, bool | None], str | None]:
     """Combine tier financial flags from a compact summary, leaving missing evidence null."""
     try:
@@ -824,17 +432,6 @@ def _read_compact_flags(primary: Path) -> tuple[bool | None, bool | None, dict[s
         else:
             combined[flag] = None
     return combined["primary_valid"], combined["terminal_certified"], tier_flags, evidence_id
-
-
-def _hash_file(path: Path) -> tuple[str, int]:
-    """Stream content identity and size without parsing evidence payloads."""
-    digest = hashlib.sha256()
-    size = 0
-    with open(path, "rb") as handle:
-        for chunk in iter(lambda: handle.read(1 << 20), b""):
-            digest.update(chunk)
-            size += len(chunk)
-    return digest.hexdigest(), size
 
 
 def _local_artifact(run_id: str, role: str, raw_path: str | None, evidence_root: Path) -> ArtifactReference | None:

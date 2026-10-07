@@ -64,7 +64,7 @@ def test_mhs_horizon_diagnostic_parses_into_mhs_handler(monkeypatch) -> None:
 
     monkeypatch.setattr(
         "src.mhs.pipeline.orchestrator.run_mhs_diagnostic",
-        lambda config: captured.append(config) or _Report(),
+        lambda config, **kwargs: captured.append(config) or _Report(),
     )
     monkeypatch.setattr(
         "src.mhs.report.persist.persist_mhs_horizon_diagnostic_report",

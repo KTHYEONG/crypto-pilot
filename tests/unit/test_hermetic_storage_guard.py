@@ -175,8 +175,11 @@ def test_escaped_file_handler_is_reported(tmp_path: Path) -> None:
     logger_b.addHandler(handler_b)
     logger_b.addHandler(stream_handler)
     try:
-        offenders = escaped_file_handlers(proc_root)
+        probes = (name_a, name_b)
+        offenders = [item for item in escaped_file_handlers(proc_root) if item[0] in probes]
         assert offenders == [(name_a, (outside / "a.log").resolve())]
+        widened = [item for item in escaped_file_handlers(proc_root, outside) if item[0] in probes]
+        assert widened == []
     finally:
         for logger, handler in ((logger_a, handler_a), (logger_b, handler_b), (logger_b, stream_handler)):
             with contextlib.suppress(Exception):
@@ -185,11 +188,11 @@ def test_escaped_file_handler_is_reported(tmp_path: Path) -> None:
                 handler.close()
 
 
-def test_live_session_has_no_escaped_file_handlers() -> None:
+def test_live_session_has_no_escaped_file_handlers(tmp_path_factory: pytest.TempPathFactory) -> None:
     from tests.fixtures.hermetic import escaped_file_handlers
 
     temp_root = Path(os.environ["PYTEST_DEBUG_TEMPROOT"])
-    assert escaped_file_handlers(temp_root) == []
+    assert escaped_file_handlers(temp_root, tmp_path_factory.getbasetemp()) == []
 
 
 def test_subprocess_child_without_destination_cannot_write(tmp_path: Path) -> None:

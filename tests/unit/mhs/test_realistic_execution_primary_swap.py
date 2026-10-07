@@ -200,7 +200,6 @@ def test_report_fill_source_is_immediate_taker(mhs_market, monkeypatch) -> None:
         execution_go_eligible=False, pilot_go_eligible=False, scale_go_eligible=False,
     )
     import src.mhs.evaluation.concurrency as concurrency_mod
-    import src.mhs.evaluation.folds as folds_mod
     import src.mhs.evidence as evidence_mod
 
     monkeypatch.setattr(
@@ -213,7 +212,8 @@ def test_report_fill_source_is_immediate_taker(mhs_market, monkeypatch) -> None:
     )
     # The replay/fold stages consume these via the concurrency leaf; patch
     # there too so injection holds regardless of import order.
-    monkeypatch.setattr(folds_mod, "phase_1_anchored_purged_folds", lambda: ())
+    import src.mhs.evaluation.fold_discovery as fold_discovery_mod
+    monkeypatch.setattr(fold_discovery_mod, "phase_1_anchored_purged_folds", lambda: ())
     monkeypatch.setattr(evidence_mod, "phase_1_anchored_purged_folds", lambda: ())
     request = research_baseline(
         start=str(_START), end=str(end), data_root=str(root),
