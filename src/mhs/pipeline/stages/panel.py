@@ -13,15 +13,20 @@ through ``ctx``; ``request`` -> ``ctx.config``, ``debug_log`` -> the
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import src.mhs.evaluation.guards as guards
 from src.common.paths import FUTURES_DATA_DIR
 from src.mhs.data_policy import SOURCE_GAP_EXCLUDED_SYMBOLS
+from src.mhs.evidence import resolved_anchored_folds
 from src.mhs.execution import bar_funding_panel
+from src.mhs.instrument_settlements import settlement_registry_for_root
 from src.mhs.marks import _load_funding_series
 from src.mhs.panel import load_base_panel
 from src.mhs.params import PANEL_MIN_HISTORY_BARS
 from src.mhs.pipeline.context import PipelineContext
 from src.mhs.resources import _resolve_ram_budget, _StageRecorder
+from src.mhs.settlement_evidence import assert_settlement_registry_complete
 from src.mhs.telemetry import StageTelemetry, Tag
 
 
@@ -50,6 +55,12 @@ def load_panel(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
     ctx.taker_buy_quote = panel["taker_buy_quote"] if ctx.config.committee_capital else None
     ctx.grid_1h = ctx.close.index
     ctx.symbols = list(ctx.close.columns)
+    fold_ends = [fold.validation_end for fold in resolved_anchored_folds(ctx.config)]
+    audit_end = max([ctx.end, *fold_ends])
+    assert_settlement_registry_complete(
+        Path(ctx.root), ctx.symbols, audit_end=audit_end,
+        registry=settlement_registry_for_root(ctx.root),
+    )
     ctx.recorder.record("base_1h_panel", grid_bars=len(ctx.grid_1h), n_symbols=len(ctx.symbols))
     telemetry.log(
         Tag.DATA, "base_1h_panel",

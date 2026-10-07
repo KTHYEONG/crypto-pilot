@@ -472,6 +472,25 @@ LIVE_FROZEN_WARMUP_DAYS: int = 120
 # 단위 proxy 수익률의 회전 비용. 메이커 체결률 약 98% 실측에 맞춰 메이커 수수료를 쓴다.
 LIVE_UNIT_PROXY_COST_BPS: float = ACCOUNT_MAKER_FEE_BPS
 
+# --- instrument lifecycle (spec 34) ---
+
+# Disclosed proxy for a missing real announcement; mirrors Binance's usual ~1-week notice for scheduled delistings.
+DELIST_ANNOUNCEMENT_LEAD: pd.Timedelta = pd.Timedelta(days=7)
+# Settlement fee charged on delivered notional; equals ExecutionSpec().taker_fee_bps and the live delisting_settlement_fee_bps default.
+DELIST_SETTLEMENT_FEE_BPS: float = 5.0
+# Mirrors live delisting_settlement_min_flat_bars.
+SETTLEMENT_EVIDENCE_MIN_FLAT_BARS: int = 3
+# Mirrors live delisting_settlement_price_rtol.
+SETTLEMENT_EVIDENCE_PRICE_RTOL: float = 1e-9
+# Binance index-average settlement window.
+SETTLEMENT_PROXY_TWAP_WINDOW: pd.Timedelta = pd.Timedelta(minutes=30)
+# At least half of the ten 3m bars must have traded for the TWAP to describe the final half hour.
+SETTLEMENT_PROXY_MIN_BARS: int = 5
+# Every lake settlement price lies inside this pre-last-trade liquid range (145/145 measured); outside it a price is treated as an evidence error.
+SETTLEMENT_PRICE_ENVELOPE_LOOKBACK: pd.Timedelta = pd.Timedelta(hours=24)
+# Trailing flat run length that marks a delisted (forward-filled) tail; mirrors the live min-flat-bars rule.
+SETTLEMENT_AUDIT_MIN_TRAILING_FLAT_BARS: int = 3
+
 # --- continuous process backtest -------------------------------------------------
 # 한 번의 연속 인과 경로에서 매월 재적합한다(분기 폴드 개별 재생 대체).
 PROCESS_REFIT_FREQUENCY: str = "MS"

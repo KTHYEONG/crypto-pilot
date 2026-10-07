@@ -240,3 +240,21 @@ def test_scenario_kelly_lcb_02_penalty_below_registered_train_edge() -> None:
     assert COMMITTEE_KELLY_WINDOW_DAYS == 42
     assert COMMITTEE_KELLY_LCB_Z == 0.0
     assert COMMITTEE_KELLY_TRAIN_DAILY_SHARPE == pytest.approx(0.1648)  # noqa: SIM300
+
+
+def test_settlement_fee_mirrors_taker_fee() -> None:
+    from src.live.settings import LiveSettings
+    from src.mhs.params import DELIST_SETTLEMENT_FEE_BPS
+    from src.mhs.types import ExecutionSpec
+
+    assert ExecutionSpec().taker_fee_bps == DELIST_SETTLEMENT_FEE_BPS
+    assert LiveSettings().delisting_settlement_fee_bps == DELIST_SETTLEMENT_FEE_BPS
+
+
+def test_evidence_params_mirror_live_settings() -> None:
+    from src.live.settings import LiveSettings
+    from src.mhs.params import SETTLEMENT_EVIDENCE_MIN_FLAT_BARS, SETTLEMENT_EVIDENCE_PRICE_RTOL
+
+    settings = LiveSettings()
+    assert settings.delisting_settlement_min_flat_bars == SETTLEMENT_EVIDENCE_MIN_FLAT_BARS
+    assert settings.delisting_settlement_price_rtol == SETTLEMENT_EVIDENCE_PRICE_RTOL

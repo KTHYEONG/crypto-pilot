@@ -373,6 +373,56 @@ def _verify_source_gaps(args: argparse.Namespace) -> None:
         _logger.info("verify_source_gaps status=WRITTEN records=%d", count)
 
 
+def _build_settlement_registry(args: argparse.Namespace) -> None:
+    from src.application.ops.settlement_registry import (
+        build_settlement_registry,
+        write_settlement_registry,
+    )
+    from src.common.errors import DataIntegrityError
+    from src.common.paths import FUTURES_DATA_DIR
+    from src.mhs.instrument_settlements import (
+        EMPTY_SETTLEMENT_REGISTRY,
+        default_instrument_settlement_registry_path,
+        load_instrument_settlement_registry,
+    )
+
+    committed_path = default_instrument_settlement_registry_path()
+    try:
+        existing = load_instrument_settlement_registry()
+    except DataIntegrityError:
+        if committed_path.exists():
+            raise
+        _logger.warning(
+            "[DATA] stage=build_settlement_registry status=NO_COMMITTED_REGISTRY bootstrapping from empty",
+        )
+        existing = EMPTY_SETTLEMENT_REGISTRY
+
+    horizon = pd.Timestamp(args.horizon)
+    symbols = list(args.symbol) if args.symbol else None
+    build = build_settlement_registry(
+        FUTURES_DATA_DIR / "ohlcv",
+        horizon=horizon,
+        existing=existing,
+        verified_at=pd.Timestamp.now(tz="UTC"),
+        symbols=symbols,
+    )
+    _logger.info(
+        "[DATA] stage=build_settlement_registry records=%d unresolved=%d changed=%d horizon=%s",
+        len(build.registry.settlements) + len(build.registry.truncations),
+        len(build.unresolved), len(build.changed), horizon.isoformat(),
+    )
+    for symbol, reason in build.unresolved:
+        _logger.warning("[DATA] stage=build_settlement_registry unresolved symbol=%s reason=%s", symbol, reason)
+    if args.write:
+        count = write_settlement_registry(build, default_instrument_settlement_registry_path())
+        _logger.info("[DATA] stage=build_settlement_registry status=WRITTEN records=%d", count)
+    elif args.output:
+        from pathlib import Path
+
+        count = write_settlement_registry(build, Path(args.output))
+        _logger.info("[DATA] stage=build_settlement_registry status=WRITTEN records=%d path=%s", count, args.output)
+
+
 def _sync_execution_coverage(args: argparse.Namespace) -> None:
     from src.market_data.services import collection as _collection
     from src.market_data.services.execution_coverage import (
@@ -581,6 +631,16 @@ def add_data_commands(data_parser: argparse.ArgumentParser) -> None:
     verify_gaps.add_argument("--symbol", action="append", default=None)
     verify_gaps.add_argument("--write", action="store_true", default=False)
     verify_gaps.set_defaults(handler=_verify_source_gaps)
+
+    build_reg = collect.add_parser(
+        "build-settlement-registry",
+        help="Derive candidate instrument settlement records from the lake",
+    )
+    build_reg.add_argument("--horizon", required=True)
+    build_reg.add_argument("--symbol", action="append", default=None)
+    build_reg.add_argument("--output", default=None)
+    build_reg.add_argument("--write", action="store_true", default=False)
+    build_reg.set_defaults(handler=_build_settlement_registry)
 
     sync_cov = collect.add_parser(
         "sync-execution-coverage",
