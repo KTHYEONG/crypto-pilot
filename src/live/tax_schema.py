@@ -172,7 +172,8 @@ def parse_tax_decimal(value: object, *, field: str) -> Decimal:
     if isinstance(value, int):
         return Decimal(value)
     if isinstance(value, str):
-        if not value or value.strip() != value:
+        # Decimal() accepts PEP 515 digit grouping ("1_000"); venue and ledger literals never carry separators.
+        if not value or value.strip() != value or "_" in value:
             raise DataIntegrityError(f"tax field {field!r} is not a decimal literal: {value!r}")
         try:
             parsed = Decimal(value)

@@ -402,8 +402,8 @@ def test_parse_tax_decimal_accepts_exact_forms(value: object, expected: Decimal)
 
 @pytest.mark.parametrize(
     "value",
-    [True, 0.1, None, "", " 1", "1,000", "abc", "NaN", "Infinity", "-Infinity", Decimal("NaN"), [1]],
-    ids=["bool", "float", "none", "empty", "padded", "grouped", "alpha", "nan", "inf", "ninf",
+    [True, 0.1, None, "", " 1", "1,000", "1_000", "abc", "NaN", "Infinity", "-Infinity", Decimal("NaN"), [1]],
+    ids=["bool", "float", "none", "empty", "padded", "grouped", "underscore_grouped", "alpha", "nan", "inf", "ninf",
          "decimal_nan", "list"],
 )
 def test_parse_tax_decimal_rejects_everything_else(value: object) -> None:
