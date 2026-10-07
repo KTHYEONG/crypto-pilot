@@ -123,9 +123,10 @@ python_files = ["test_*.py"]
 addopts = "-ra -q -m \"not slow\" --import-mode=importlib"
 pythonpath = ["."]
 markers = [
-    "slow: full-pipeline integration tests (growth engine, baseline replication, funding screening) that run real backtests over multi-year data. Excluded from the default run via `-m \"not slow\"`; run explicitly with `uv run pytest -m slow`.",
+    "slow: full-pipeline integration tests (growth engine, baseline replication, funding screening) that run real backtests over multi-year data. Excluded from the default run via `-m \"not slow\"`; run explicitly with `uv run pytest -m slow`. Periodic gate: uv run pytest tests/unit tests/integration -m slow -n 0 -p no:cacheprovider -rfEs",
     "e2e_heavy: full MHS diagnostic integration tests (minutes each; never also slow). Outside default testpaths; tools/verify.py defers and lists them (include with --run-heavy). Periodic gate: uv run pytest tests/integration -m e2e_heavy -n 8 --dist loadgroup",
     "mhs_parallel_parity: exempts an MHS integration test from the xdist fork-worker cap so it exercises real concurrent fork pools.",
+    "requires_market_lake: needs the real multi-year MHS lake at `src.common.paths.FUTURES_DATA_DIR / \"ohlcv\"` (`data/futures/ohlcv`); skipped with an explicit reason when `<lake>/1h` has no parquet; always combined with `slow`.",
 ]
 filterwarnings = [
     "ignore::RuntimeWarning:numpy.*",
