@@ -22,6 +22,7 @@ from src.mhs.params import FUNDING_CARRY_LOOKBACK_CANDIDATES_HOURS
 from src.mhs.types import BOOK_SPECS
 from src.quant.universe.pit_universe import symbol_partition
 
+from tests.fixtures.mhs_fold_market import COMPLETING_FOLD
 from tests.unit.mhs.test_evaluation_appresearch import (  # noqa: F401
     _FOLD,
     _START,
@@ -62,13 +63,13 @@ def test_fold_safe_slow_book_spec_admitted_vs_fallback() -> None:
     assert spec.min_symbols == default.min_symbols
 
 @pytest.mark.slow
-def test_fold_safe_horizon_flag_off_is_byte_identical(mhs_market, monkeypatch) -> None:
+def test_fold_safe_horizon_flag_off_is_byte_identical(mhs_completing_fold_market, monkeypatch) -> None:
     # SCENARIO_MHS_FOLD_SAFE_HORIZON_06_FLAG_OFF_IS_BYTE_IDENTICAL: with
     # fold_safe_horizon_selection=False (the default) neither the fold worker
     # nor the parent diagnostic touches fold_train_only_discovery_qualification
     # (call-count 0) and the fold report records the frozen 168h default -- a
     # no-op regression guard matching the project's flag-gated ADR pattern.
-    root, end = mhs_market
+    root, end = mhs_completing_fold_market
     symbols = [
         s for s in ("MHSAUSDT", "MHSBUSDT", "MHSCUSDT", "MHSDUSDT", "MHSEUSDT",
                     "MHSGUSDT", "MHSHUSDT", "MHSIUSDT", "MHSJUSDT", "MHSLUSDT")
@@ -92,7 +93,9 @@ def test_fold_safe_horizon_flag_off_is_byte_identical(mhs_market, monkeypatch) -
     import src.mhs.evaluation.folds as folds_mod
 
     monkeypatch.setattr(folds_mod, "fold_train_only_discovery_qualification", counting)
-    report = _run_anchored_fold(str(root), _FOLD, request, funding_by_symbol, 1.0, 0, None)
+    report = _run_anchored_fold(str(root), COMPLETING_FOLD, request, funding_by_symbol, 1.0, 0, None)
+    assert report.strict is not None
+    assert report.failures == ()
     assert calls["n"] == 0
     assert report.slow_horizon_hours == 168
     assert report.slow_horizon_source == "frozen_default"
@@ -116,7 +119,7 @@ def test_fold_safe_horizon_flag_off_is_byte_identical(mhs_market, monkeypatch) -
     assert captured["fold_slow_horizons"] == {}
 
 @pytest.mark.slow
-def test_fold_safe_horizon_records_source(mhs_market, monkeypatch) -> None:
+def test_fold_safe_horizon_records_source(mhs_completing_fold_market, monkeypatch) -> None:
     # SCENARIO_MHS_FOLD_SAFE_HORIZON_07_FOLD_REPORT_RECORDS_SOURCE: MhsFoldReport
     # constructed without the new fields defaults to (168, "frozen_default"),
     # _incomplete_fold_report keeps that default, and a fold run resolved with a
@@ -137,7 +140,7 @@ def test_fold_safe_horizon_records_source(mhs_market, monkeypatch) -> None:
     assert incomplete.slow_horizon_source == "frozen_default"
     assert incomplete.slow_horizon_hours == 168
 
-    root, end = mhs_market
+    root, end = mhs_completing_fold_market
     symbols = [
         s for s in ("MHSAUSDT", "MHSBUSDT", "MHSCUSDT", "MHSDUSDT", "MHSEUSDT",
                     "MHSGUSDT", "MHSHUSDT", "MHSIUSDT", "MHSJUSDT", "MHSLUSDT")
@@ -150,8 +153,9 @@ def test_fold_safe_horizon_records_source(mhs_market, monkeypatch) -> None:
         execution_universe_size=8,
     )
     report = _run_anchored_fold(
-        str(root), _FOLD, request, funding_by_symbol, 1.0, 0, None, slow_horizon_override=360,
+        str(root), COMPLETING_FOLD, request, funding_by_symbol, 1.0, 0, None, slow_horizon_override=360,
     )
+    assert report.strict is not None
     assert report.slow_horizon_hours == 360
     assert report.slow_horizon_source == "fold_train_only_discovery"
 

@@ -254,6 +254,7 @@ def _integration_targets(test_files: list[str]) -> list[str]:
 
 HEAVY_MARKER: Final[str] = "e2e_heavy"
 PERIODIC_HEAVY_GATE: Final[str] = "uv run pytest tests/integration -m e2e_heavy -n 8 --dist loadgroup"
+PERIODIC_SLOW_GATE: Final[str] = "uv run pytest tests/unit tests/integration -m slow -n 0 -p no:cacheprovider -rfEs"
 _HEAVY_TIMEOUT_SECONDS: Final[int] = 3600
 
 
@@ -346,6 +347,68 @@ def _deferral_lines(deferred: list[str]) -> tuple[list[str], list[JsonDiag]]:
             "error": f"deferred e2e_heavy: {nodeid}",
             "fix_hint": f"uv run python tools/verify.py --run-heavy --files {path_part}  (or the periodic gate)",
         })
+    return lines, diags
+
+
+def _slow_marked_files(targets: list[str]) -> list[str]:
+    """Target files whose module code references ``pytest.mark.slow``.
+
+    Static AST scan (no subprocess, no import). A file is reported when it contains an
+    ``Attribute`` chain ``pytest.mark.slow`` anywhere in code (decorators, ``pytestmark``
+    assignments, lists); string literals never match. The path part before ``::`` is used;
+    missing, unreadable or unparsable files are skipped (pytest reports them itself).
+
+    Returns:
+        Sorted unique path parts, as given.
+    """
+    found: set[str] = set()
+    for target in targets:
+        path = target.split("::", 1)[0]
+        try:
+            with open(path, encoding="utf-8") as f:
+                tree = ast.parse(f.read())
+        except (OSError, SyntaxError, UnicodeError):
+            continue
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Attribute)
+                and node.attr == "slow"
+                and isinstance(node.value, ast.Attribute)
+                and node.value.attr == "mark"
+                and isinstance(node.value.value, ast.Name)
+                and node.value.value.id == "pytest"
+            ):
+                found.add(path)
+                break
+    return sorted(found)
+
+
+def _slow_deferral_lines(files: list[str]) -> tuple[list[str], list[JsonDiag]]:
+    """Human lines and JSON diagnostics announcing slow tests the default run excludes.
+
+    Returns:
+        ``([], [])`` when ``files`` is empty; otherwise a header
+        ``"DEFERRED | <n> target file(s) carry slow tests not run; include with --run-slow or run the periodic slow gate: <PERIODIC_SLOW_GATE>"``
+        followed by one ``"DEFERRED | slow: <path>"`` per file, and one diagnostic per file
+        ``{"file": <path>, "line": 0, "error": "deferred slow: <path>",
+        "fix_hint": "uv run python tools/verify.py --run-slow --files <path>  (or the periodic slow gate)"}``.
+    """
+    if not files:
+        return [], []
+    header = (
+        f"DEFERRED | {len(files)} target file(s) carry slow tests not run; "
+        f"include with --run-slow or run the periodic slow gate: {PERIODIC_SLOW_GATE}"
+    )
+    lines = [header] + [f"DEFERRED | slow: {path}" for path in files]
+    diags = [
+        {
+            "file": path,
+            "line": 0,
+            "error": f"deferred slow: {path}",
+            "fix_hint": f"uv run python tools/verify.py --run-slow --files {path}  (or the periodic slow gate)",
+        }
+        for path in files
+    ]
     return lines, diags
 
 
@@ -615,6 +678,12 @@ def main() -> None:
             _exit_with_diags("pytest-collect", "FAIL | Heavy-tier collection failed",
                              [{"file": "", "line": 0, "error": str(exc), "fix_hint": "Fix collection errors or tier marks"}])
     deferral_lines, deferral_diags = _deferral_lines(deferred)
+    slow_files: list[str] = []
+    if not args.run_slow:
+        slow_files = _slow_marked_files(test_files)
+        slow_lines, slow_diags = _slow_deferral_lines(slow_files)
+        deferral_lines += slow_lines
+        deferral_diags += slow_diags
 
     # 5. Smart Pytest Execution (Resource Safety Guard)
     # 5. Smart Pytest Execution (Resource Safety Guard: Serial Execution Default)
@@ -689,18 +758,19 @@ def main() -> None:
                 "line": 0,
                 "error": f"pytest timed out after {pytest_timeout}s across {len(test_files)} target(s); last: {active_test}",
                 "fix_hint": "Use --files to scope checks, investigate slow tests, or pass --timeout with a larger value.",
-            }],
+            }, *deferral_diags],
         )
 
-    if pt_res.returncode == 5 and deferred:
+    if pt_res.returncode == 5 and (deferred or slow_files):
         unmapped_diags = [
             {"file": m, "line": 0, "error": f"unmapped: no test covers {m}", "fix_hint": "Add tests/unit coverage for this module"}
             for m in unmapped
         ]
-        deferred_suffix = f", {len(deferred)} deferred e2e_heavy"
+        deferred_suffix = f", {len(deferred)} deferred e2e_heavy" if deferred else ""
+        slow_suffix = f", {len(slow_files)} deferred slow file(s)" if slow_files else ""
         unmapped_suffix = f", {len(unmapped_diags)} unmapped" if unmapped_diags else ""
         elapsed = time.monotonic() - started
-        print(f"PASS | All checks passed (Scaffolding-Clean, Lint, Type, Tests 0 passed{unmapped_suffix}{deferred_suffix}) in {elapsed:.2f}s")
+        print(f"PASS | All checks passed (Scaffolding-Clean, Lint, Type, Tests 0 passed{unmapped_suffix}{deferred_suffix}{slow_suffix}) in {elapsed:.2f}s")
         print(_emit_json("PASS", "all", unmapped_diags + deferral_diags, None), file=sys.stderr)
         return
 
@@ -709,7 +779,7 @@ def main() -> None:
             _exit_with_diags(
                 "coverage",
                 f"FAIL | Diff Coverage: {len(cov_diags)} file(s) with untested new lines",
-                cov_diags,
+                cov_diags + deferral_diags,
             )
         unmapped_diags = [
             {"file": m, "line": 0, "error": f"unmapped: no test covers {m}", "fix_hint": "Add tests/unit coverage for this module"}
@@ -718,6 +788,7 @@ def main() -> None:
         cov_suffix = f", Diff-Coverage {cov_pct}%" if cov_pct is not None else ""
         unmapped_suffix = f", {len(unmapped_diags)} unmapped" if unmapped_diags else ""
         deferred_suffix = f", {len(deferred)} deferred e2e_heavy" if deferred else ""
+        deferred_suffix += f", {len(slow_files)} deferred slow file(s)" if slow_files else ""
         passed = re.search(r"\b(\d+) passed\b", pt_res.stdout)
         test_summary = f"Tests {passed[1]} passed" if passed else "Tests"
         elapsed = time.monotonic() - started
@@ -734,7 +805,7 @@ def main() -> None:
         _exit_with_diags(
             "pytest",
             f"FAIL | Pytest Failed: {cause_sliced}",
-            [{"file": "", "line": 0, "error": cause_sliced, "fix_hint": "Fix failing pytest assertions"}],
+            [{"file": "", "line": 0, "error": cause_sliced, "fix_hint": "Fix failing pytest assertions"}, *deferral_diags],
         )
 
 

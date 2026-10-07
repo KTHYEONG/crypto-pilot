@@ -11,6 +11,7 @@ import src.mhs.evaluation.concurrency as concurrency_mod
 import src.mhs.evaluation.diagnostics as diagnostics_mod
 from src.mhs.committee import purged_walk_forward as _committee_purged_walk_forward
 from src.mhs.diagnostic_run import run_mhs_horizon_diagnostic
+from src.mhs.panel import DATA_POLICY_LEGACY
 from src.mhs.params import COMMITTEE_OOS_START, MEASURED_EXECUTION_COST_TIERS_BPS
 
 from tests.unit.mhs.test_evaluation_appresearch import (  # noqa: F401
@@ -434,8 +435,8 @@ def test_committee_source_coverage_gates_admission(mhs_market_long, monkeypatch)
     # every member -- B3 is fail-closed-only and non-disruptive to the shipped
     # committee.
     real_load = diagnostics_mod._load_feature_panels
-    def _full_coverage_panels(root_arg, start_arg, end_arg, grid_1h, aligned_symbols, columns=None):
-        panels = real_load(root_arg, start_arg, end_arg, grid_1h, aligned_symbols, columns=columns)
+    def _full_coverage_panels(root_arg, start_arg, end_arg, grid_1h, aligned_symbols, columns=None, *, data_policy=DATA_POLICY_LEGACY):
+        panels = real_load(root_arg, start_arg, end_arg, grid_1h, aligned_symbols, columns=columns, data_policy=data_policy)
         quote_vol = panels["quote_vol"]
         panels["taker_buy_quote"] = quote_vol * 0.5
         return panels

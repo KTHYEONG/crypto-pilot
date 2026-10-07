@@ -13,6 +13,7 @@ from tests.integration.mhs._tiers import (
     HEAVY_DIAGNOSTIC_FIXTURES,
     fork_worker_cap,
     heavy_tier_violations,
+    market_lake_skip_reason,
 )
 
 
@@ -124,3 +125,22 @@ def test_heavy_fixture_set_excludes_light_oracles() -> None:
     assert "synthetic_market" not in HEAVY_DIAGNOSTIC_FIXTURES
     assert "fold_market" not in HEAVY_DIAGNOSTIC_FIXTURES
     assert "ohlcv_market" not in HEAVY_DIAGNOSTIC_FIXTURES
+
+
+def test_absent_lake_root_is_skipped_with_explicit_reason(tmp_path: Path) -> None:
+    lake = tmp_path / "lake"
+    reason = market_lake_skip_reason(lake)
+    assert reason is not None
+    assert reason.startswith("requires_market_lake:")
+    assert str(lake) in reason
+
+
+def test_empty_1h_directory_counts_as_absent(tmp_path: Path) -> None:
+    (tmp_path / "1h").mkdir()
+    assert market_lake_skip_reason(tmp_path) is not None
+
+
+def test_partial_lake_is_not_skipped(tmp_path: Path) -> None:
+    (tmp_path / "1h").mkdir()
+    (tmp_path / "1h" / "X.parquet").touch()
+    assert market_lake_skip_reason(tmp_path) is None

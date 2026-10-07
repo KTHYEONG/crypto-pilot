@@ -203,12 +203,19 @@ FOLD_WINDOW_FOLD = AnchoredPurgedFold(
 
 
 _SUBPROCESS_SCRIPT = """
-import json, sys
+import json, os, sys
 sys.path.insert(0, sys.argv[1])
 from pathlib import Path
+temp_root = Path(os.environ["PYTEST_DEBUG_TEMPROOT"]).resolve()
+from tests.fixtures.mhs_requests import research_baseline
 import pandas as pd
 import src.mhs.marks as marks
 import src.mhs.statistics as statistics
+import src.common.paths as paths
+import src.common.logging as app_logging
+if not (paths.BACKTESTS_DIR.resolve().is_relative_to(temp_root) and app_logging.LOG_DIR.resolve().is_relative_to(temp_root)):
+    sys.stderr.write(f"hermetic check failed: BACKTESTS_DIR={paths.BACKTESTS_DIR.resolve()} LOG_DIR={app_logging.LOG_DIR.resolve()} temp_root={temp_root}\\n")
+    sys.exit(3)
 from src.mhs.contracts import MhsDiagnosticRequest
 from src.mhs.diagnostic_run import run_mhs_horizon_diagnostic
 from src.mhs.report.persist import persist_mhs_horizon_diagnostic_report
