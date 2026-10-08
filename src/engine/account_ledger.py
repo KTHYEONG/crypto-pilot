@@ -139,7 +139,9 @@ def replay_account(
             raise DataIntegrityError(f"{name} index misaligned with unit_weights")
     if not (marks.high.index.equals(marks.close.index) and marks.low.index.equals(marks.close.index)):
         raise DataIntegrityError("mark panels carry misaligned indexes")
-    if not (list(marks.high.columns) == list(marks.close.columns) and list(marks.low.columns) == list(marks.close.columns)):
+    if not (
+        list(marks.high.columns) == list(marks.close.columns) and list(marks.low.columns) == list(marks.close.columns)
+    ):
         raise DataIntegrityError("mark panels carry misaligned columns")
     symbols = list(reference_columns)
     absent = [symbol for symbol in symbols if symbol not in marks.close.columns]
@@ -235,11 +237,20 @@ def replay_account(
             total = float(unit_cum[n - 1]) if n > 0 else 0.0
             total_sq = float(unit_cum_sq[n - 1]) if n > 0 else 0.0
             moments = bayesian_unit_moments(
-                n, total, total_sq,
-                prior_days=policy.prior_days, min_moment_days=policy.min_moment_days,
+                n,
+                total,
+                total_sq,
+                prior_days=policy.prior_days,
+                min_moment_days=policy.min_moment_days,
             )
         exposure = choose_exposure(
-            weight_values[day], equity, held, adv_values[day], sigma_values[day], ladders, policy,
+            weight_values[day],
+            equity,
+            held,
+            adv_values[day],
+            sigma_values[day],
+            ladders,
+            policy,
             moments,
         )
         target = exposure * equity * weight_values[day]
@@ -306,7 +317,7 @@ def replay_account(
             anchor_sent = np.abs(delta) * price
             total_anchor_sent += float(anchor_sent.sum())
             maker_anchor_sent += float(anchor_sent[maker_fill].sum())
-        # ADV·σ가 없는 종목은 충격을 추정할 근거가 없으므로 0으로 두고, NaN이 현금을 오염시키지 않게 한다.
+        # Zero impact when ADV or sigma is missing so NaN does not corrupt cash.
         valid_impact = np.isfinite(adv_values[day]) & (adv_values[day] > 0) & np.isfinite(sigma_values[day])
         safe_adv = np.where(valid_impact, adv_values[day], np.inf)
         safe_sigma = np.where(valid_impact, sigma_values[day], 0.0)

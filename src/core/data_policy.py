@@ -33,7 +33,7 @@ MHS_DATA_POLICY_DEFAULT: Final[Literal["zombie_mask_v1"]] = "zombie_mask_v1"
 # `src.core.source_gaps.blocked_mask` instead.
 
 
-# 심볼 전체 이력을 버리는 근거: 상폐 확정이거나 범위가 측정되지 않은 레거시 기록일 때만.
+# Exclusion applies only to confirmed delistings or unscoped legacy records.
 _SYMBOL_EXCLUDING_REASONS: Final[frozenset[str]] = frozenset({"DELISTED"})
 _SYMBOL_EXCLUDING_EXTENTS: Final[frozenset[SourceGapExtent]] = frozenset({"UNSCOPED"})
 

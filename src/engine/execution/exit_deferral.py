@@ -23,7 +23,7 @@ def classify_exit_block_cause(
     mark_valid: bool,
     funding_known: bool,
 ) -> ExitBlockCause | None:
-    """Cause of a blocked exit that qualifies for deferral, else None. VENUE_HALT when the bar lies in a registry halt; SYMBOL_NO_TRADE when the bar's quote volume is exactly 0.0 outside any halt. Both require a finite strictly positive mark and known funding: an exit that cannot be valued or financed is missing data, not a trading pause, and must stay fail-closed. NaN, negative or non-finite quote volume never qualifies."""
+    """Classify deferrable blocked-exit cause, or None if non-qualifying."""
     if not bool(mark_valid) or not bool(funding_known):
         return None
     qv = float(quote_volume)
@@ -47,7 +47,7 @@ def first_viable_retry_bar(
     grid_ns: np.ndarray,
     last_trade_ns: int,
 ) -> int:
-    """Index of the first bar in ``(after_pos, deadline_pos]`` that is not halted, has quote volume strictly greater than zero, known funding, a finite close and a label before ``last_trade_ns``; -1 when none. Reads only bars at or before ``deadline_pos`` (the order's own timeout), so the decision never consumes data past the deadline."""
+    """Index of the first viable unhalted trading bar in (after_pos, deadline_pos], or -1."""
     start = int(after_pos) + 1
     n = min(len(halted), len(quote_volume), len(funding_known), len(close), len(grid_ns))
     stop = min(int(deadline_pos), n - 1)
@@ -84,7 +84,7 @@ class ExitEpisodeClock:
         self._episodes.pop(int(gcol), None)
 
     def admit(self, gcol: int, inventory_units: float, decision_ns: int) -> bool:
-        """Whether a blocked exit may still be deferred. An episode is identified by ``(gcol, inventory_units)`` and starts at the first blocked decision; any change of the symbol's inventory ends it. Returns True while ``decision_ns - episode_start <= max_age_ns``; the age of a new episode is zero. Decisions must be admitted in non-decreasing time order."""
+        """Whether a blocked exit remains within the bounded episode lifetime."""
         now = int(decision_ns)
         if self._last_ns is not None and now < self._last_ns:
             raise DataIntegrityError("exit deferral decisions must be admitted in non-decreasing time order")

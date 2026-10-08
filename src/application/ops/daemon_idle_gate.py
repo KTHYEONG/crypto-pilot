@@ -15,14 +15,14 @@ from src.common.daemon_stages import BUSY_STAGES
 EXIT_PROCEED: int = 0
 EXIT_WAIT: int = 10
 
-# 신호 공개(23:00 UTC) 직전부터 막아 공개 직후 제출이 재시작으로 밀리지 않게 한다.
+# Block just before signal release (23:00 UTC) to prevent submissions from being delayed by restart.
 DECISION_WINDOW_LEAD_MINUTES: int = 15
-# strategy 신호 공개 시각(UTC). FLOW_MOM_TOP20.release_hour_utc 와 같아야 한다(의존성 없는 CI 모듈이라 복제).
+# Strategy signal release hour (UTC); matches FLOW_MOM_TOP20.release_hour_utc.
 DECISION_RELEASE_HOUR_UTC: int = 23
-# 신호 스테일 상한(시간). LiveSettings.max_signal_staleness_hours 와 같아야 한다.
+# Signal staleness upper bound in hours; matches LiveSettings.max_signal_staleness_hours.
 DECISION_SIGNAL_STALENESS_HOURS: float = 26.0
 
-# 최악 재시도 경로 02:00 + 실행 단계 66분을 덮는다.
+# Covers worst-case retry path (02:00 UTC) plus 66m execution phase.
 DEFAULT_MAX_WAIT_S: float = 3 * 3600.0
 DEFAULT_STALE_AFTER_S: float = 2700.0
 
@@ -102,7 +102,11 @@ def decide_deploy(
         status = heartbeat.get("status") if heartbeat is not None else None
         decision_raw = heartbeat.get("decision_time") if heartbeat is not None else None
         decision_ts = _parse_heartbeat_time(decision_raw)
-        if status == "COMPLETE" and decision_ts is not None and decision_ts.replace(hour=0, minute=0, second=0, microsecond=0) == window_day:
+        if (
+            status == "COMPLETE"
+            and decision_ts is not None
+            and decision_ts.replace(hour=0, minute=0, second=0, microsecond=0) == window_day
+        ):
             return GateDecision("proceed", "cycle_complete")
         status_label = str(status) if isinstance(status, str) else "unknown"
         return GateDecision("wait", f"decision_window:{status_label}")
@@ -127,7 +131,7 @@ def decide_deploy(
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Provide the dependency-free deployment gate entry point. Args: existing heartbeat and wait CLI arguments. Returns: 10 for wait, otherwise 0. Raises: existing argument and file-read errors."""
+    """Dependency-free deployment gate entry point waiting for daemon idle."""
     parser = argparse.ArgumentParser(description="Deploy gate: wait for daemon idle.")
     parser.add_argument("--heartbeat-file", required=True)
     parser.add_argument("--waited-s", type=float, required=True)
