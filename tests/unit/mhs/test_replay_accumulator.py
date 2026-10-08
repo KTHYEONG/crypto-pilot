@@ -170,6 +170,76 @@ class TestWindowedReplayEquivalence:
             assert gap.timestamp is not None
             assert gap.execution_bound == "OHLCV_STRICT_PROXY"
 
+    def test_mark_gap_over_held_inventory_books_no_funding(self) -> None:
+        wl = self._workload()
+        wl["funding"].loc[:, :] = 0.0
+        wl["funding"].iloc[100:105, 3] = 1.0e-5
+        windowed = replay_execution_windows(
+            _partition_windows(
+                wl["grid"], wl["weights"], wl["signals"], wl["highs"], wl["lows"],
+                wl["closes"], wl["marks"], wl["funding"], ExecutionSpec(), n_windows=2,
+            ),
+            1.0, "OHLCV_STRICT_PROXY", ExecutionSpec(),
+        )
+        assert not windowed.ledger.primary_valid
+        codes = {g.code for g in windowed.data_gaps}
+        assert codes >= {"MISSING_HELD_MARK", "MISSING_HELD_FUNDING"}
+        oracle = simulated_inventory_ledger(
+            windowed.simulated_fills, wl["marks"], wl["funding"],
+            1.0, "OHLCV_STRICT_PROXY", "OHLCV_CLOSE_FALLBACK",
+        )
+        disputed = wl["grid"][100:105]
+        mine = windowed.ledger.funding_charge.loc[disputed]
+        ref = oracle.funding_charge.loc[disputed]
+        assert list(mine.index) == list(ref.index)
+        np.testing.assert_array_equal(mine.to_numpy(), ref.to_numpy())
+        assert (mine == 0.0).all()
+        held = windowed.simulated_fills.loc[
+            (windowed.simulated_fills["symbol"] == "SYM003USDT")
+            & (windowed.simulated_fills["timestamp"] < disputed[0]), "quantity_delta",
+        ].sum()
+        assert abs(held) >= 1.0e-12
+
+    def test_unknown_funding_over_held_inventory_flags_funding_only(self) -> None:
+        import dataclasses
+
+        wl = self._workload()
+        disputed = wl["grid"][100:105]
+        patched = []
+        for w in _partition_windows(
+            wl["grid"], wl["weights"], wl["signals"], wl["highs"], wl["lows"],
+            wl["closes"], wl["closes"], wl["funding"], ExecutionSpec(), n_windows=2,
+        ):
+            known = pd.DataFrame(True, index=w.minute_grid, columns=list(w.symbols))
+            hit = known.index.intersection(disputed)
+            known.loc[hit, "SYM003USDT"] = False
+            patched.append(dataclasses.replace(w, funding_known=known))
+        windowed = replay_execution_windows(patched, 1.0, "OHLCV_STRICT_PROXY", ExecutionSpec())
+        assert not windowed.ledger.primary_valid
+        codes = {g.code for g in windowed.data_gaps}
+        assert "MISSING_HELD_FUNDING" in codes
+        assert "MISSING_HELD_MARK" not in codes
+
+    def test_oracle_and_windowed_agree_on_gap_codes(self) -> None:
+        wl = self._workload()
+        windowed = replay_execution_windows(
+            _partition_windows(
+                wl["grid"], wl["weights"], wl["signals"], wl["highs"], wl["lows"],
+                wl["closes"], wl["marks"], wl["funding"], ExecutionSpec(), n_windows=2,
+            ),
+            1.0, "OHLCV_STRICT_PROXY", ExecutionSpec(),
+        )
+        oracle = simulated_inventory_ledger(
+            windowed.simulated_fills, wl["marks"], wl["funding"],
+            1.0, "OHLCV_STRICT_PROXY", "OHLCV_CLOSE_FALLBACK",
+        )
+        assert {g.code for g in windowed.data_gaps} == {g.code for g in oracle.data_gaps}
+        single_panel = strategy_aware_execution_replay(
+            wl["weights"], wl["signals"], wl["highs"], wl["lows"], wl["closes"],
+            wl["marks"], wl["funding"], 1.0, "OHLCV_STRICT_PROXY", ExecutionSpec(),
+        )
+        assert {g.code for g in windowed.data_gaps} == {g.code for g in single_panel.data_gaps}
+
     def test_paired_fanout_matches_independent_bounds(self) -> None:
         """MHS-MEM-PAIR-01: a single window stream fanned out into the
         strict/stress pair equals the two legacy independent single-bound

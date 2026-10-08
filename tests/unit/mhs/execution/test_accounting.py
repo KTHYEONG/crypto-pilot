@@ -103,7 +103,9 @@ def _scalar_reference_settle(state, bar_ns, columns, marks, funding_rates, fundi
         gmarks[columns] = marks[b]
         grates[columns] = funding_rates[b]
         gknown[columns] = funding_known[b]
-        held_unknown = (np.abs(state.units) >= 1e-12) & ~gknown
+        held = np.abs(state.units) >= 1e-12
+        unpriceable = ~np.isfinite(gmarks) & (grates != 0.0)
+        held_unknown = held & (~gknown | unpriceable)
         if bool(held_unknown.any()):
             gap_rows.append((b, int(np.flatnonzero(held_unknown)[0])))
             charged = state.advance_to(

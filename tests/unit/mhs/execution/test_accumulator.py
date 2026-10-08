@@ -804,7 +804,9 @@ def _head_mirror_window(self, frame, p0: int) -> None:
         gmarks[gpos] = marks_values[b]
         grates[gpos] = funding_matrix[b]
         gknown[gpos] = funding_known[b]
-        held_unknown = (np.abs(state.units) >= QTY_EPS) & ~gknown
+        held = np.abs(state.units) >= QTY_EPS
+        unpriceable = ~np.isfinite(gmarks) & (grates != 0.0)
+        held_unknown = held & (~gknown | unpriceable)
         if bool(held_unknown.any()):
             self.ledger_valid = False
             self.invalid_reasons.add("MISSING_DATA")

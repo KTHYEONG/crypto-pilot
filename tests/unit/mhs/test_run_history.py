@@ -981,10 +981,15 @@ def test_admission_procedure_is_part_of_trial_identity() -> None:
 
 
 def test_lifecycle_procedure_is_part_of_trial_identity() -> None:
+    from src.mhs import params as _params
     from src.mhs.live_strategy import capture_params_snapshot
     from src.mhs.run_history import trial_identity_key
     snapshot = capture_params_snapshot()
-    assert snapshot["INSTRUMENT_LIFECYCLE_PROCEDURE"] == "pit_registry_settlement_halts_v2"
+    assert snapshot["INSTRUMENT_LIFECYCLE_PROCEDURE"] == _params.INSTRUMENT_LIFECYCLE_PROCEDURE
+    assert snapshot["INSTRUMENT_LIFECYCLE_PROCEDURE"] not in (
+        "pit_registry_settlement_halts_v2",
+        "pit_registry_settlement_halts_causal_exclusions_v3",
+    )
     base = {"flags": {}, "params_snapshot": snapshot}
     stripped = {"flags": {}, "params_snapshot": {k: v for k, v in snapshot.items() if k != "INSTRUMENT_LIFECYCLE_PROCEDURE"}}
     assert trial_identity_key(base) != trial_identity_key(stripped)

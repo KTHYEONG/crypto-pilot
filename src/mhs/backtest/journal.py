@@ -208,6 +208,8 @@ def _canonical(value: Any) -> Any:
         encoded: dict[str, Any] = {"__type__": type(value).__name__}
         for field in dataclasses.fields(value):
             encoded[field.name] = _canonical(getattr(value, field.name))
+        if isinstance(value, ExecutionSpec) and value.settlement_price_haircut_bps == 0.0:
+            encoded.pop("settlement_price_haircut_bps")
         return {key: encoded[key] for key in sorted(encoded)}
     raise DataIntegrityError(f"values of type {type(value).__name__} are not canonical JSON values")
 
@@ -379,29 +381,16 @@ def _decode_sizing(data: Any) -> ProcessRiskSizingSpec | None:
         raise DataIntegrityError(f"invalid ProcessRiskSizingSpec: {exc}") from exc
 
 
+_EXECUTION_SPEC_KEYS = frozenset(f.name for f in dataclasses.fields(ExecutionSpec))
+
+
 def _decode_execution_spec(data: Any) -> ExecutionSpec:
-    node = _require_typed_dict(
-        data,
-        "ExecutionSpec",
-        (
-            "decision_anchor",
-            "ladder_tranches",
-            "liquidity_cost_model",
-            "maker_fee_bps",
-            "min_notional_probe_usdt",
-            "name_drift_trim_interval_hours",
-            "name_drift_trim_max_weight",
-            "passive_timeout_minutes",
-            "peg_chase_band_bps",
-            "peg_chase_tranches",
-            "peg_passive_fraction",
-            "reference_equity_usdt",
-            "require_trade_through",
-            "spread_ewma_alpha",
-            "taker_fee_bps",
-            "taker_slippage_bps",
-        ),
-    )
+    if not isinstance(data, dict) or data.get("__type__") != "ExecutionSpec":
+        raise DataIntegrityError("invalid ExecutionSpec encoding")
+    keys = set(data) - {"__type__"}
+    if keys != _EXECUTION_SPEC_KEYS and keys != _EXECUTION_SPEC_KEYS - {"settlement_price_haircut_bps"}:
+        raise DataIntegrityError("invalid ExecutionSpec encoding")
+    node = data
     try:
         trim = node["name_drift_trim_max_weight"]
         return ExecutionSpec(
@@ -421,6 +410,7 @@ def _decode_execution_spec(data: Any) -> ExecutionSpec:
             reference_equity_usdt=_as_float(node["reference_equity_usdt"], "reference_equity_usdt"),
             name_drift_trim_max_weight=None if trim is None else _as_float(trim, "name_drift_trim_max_weight"),
             name_drift_trim_interval_hours=_as_int(node["name_drift_trim_interval_hours"], "name_drift_trim_interval_hours"),
+            settlement_price_haircut_bps=_as_float(node.get("settlement_price_haircut_bps", 0.0), "settlement_price_haircut_bps"),
         )
     except (DataIntegrityError, TypeError, ValueError) as exc:
         raise DataIntegrityError(f"invalid ExecutionSpec: {exc}") from exc

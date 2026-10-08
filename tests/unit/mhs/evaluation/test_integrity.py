@@ -62,10 +62,14 @@ def test_source_gap_excluded_symbols_after_ohlcv_recollection_sweep() -> None:
     }
     assert recovered.isdisjoint(integrity.SOURCE_GAP_EXCLUDED_SYMBOLS)
     assert {"CVXUSDT", "SLPUSDT"} <= integrity.SOURCE_GAP_EXCLUDED_SYMBOLS
+    # LUNAUSDT is explained by the settlement registry
+    # (source_gap_superseded_by_settlement), so it is replayed causally
+    # instead of whole-history excluded.
+    assert "LUNAUSDT" not in integrity.SOURCE_GAP_EXCLUDED_SYMBOLS
     assert set(integrity.SOURCE_GAP_EXCLUDED_SYMBOLS) == {
         "AERGOUSDT", "CTKUSDT", "CVCUSDT", "MAVIAUSDT", "LITUSDT", "PUMPUSDT",
         "CVXUSDT", "SLPUSDT", "BNXUSDT", "AIAUSDT", "ICPUSDT", "BNTUSDT",
-        "BTCSTUSDT", "BDXNUSDT", "LUNAUSDT", "MANAUSDT", "NEARUSDT",
+        "BTCSTUSDT", "BDXNUSDT", "MANAUSDT", "NEARUSDT",
     }
 
 
@@ -458,7 +462,11 @@ def test_source_gap_excluded_symbols_no_longer_blanket_excludes_resolved_end_of_
     }
     assert resolved.isdisjoint(integrity.SOURCE_GAP_EXCLUDED_SYMBOLS)
     assert {"AIAUSDT", "ICPUSDT", "BNTUSDT", "BTCSTUSDT", "BDXNUSDT"} <= integrity.SOURCE_GAP_EXCLUDED_SYMBOLS
-    assert len(integrity.SOURCE_GAP_EXCLUDED_SYMBOLS) == 17
+    # LUNAUSDT is explained by the settlement registry
+    # (source_gap_superseded_by_settlement), so it is replayed causally
+    # instead of whole-history excluded.
+    assert "LUNAUSDT" not in integrity.SOURCE_GAP_EXCLUDED_SYMBOLS
+    assert len(integrity.SOURCE_GAP_EXCLUDED_SYMBOLS) == 16
     assert {"LITUSDT", "PUMPUSDT", "BNXUSDT", "MAVIAUSDT"} <= integrity.SOURCE_GAP_EXCLUDED_SYMBOLS
 
 

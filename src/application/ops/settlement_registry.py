@@ -38,7 +38,7 @@ from src.mhs.settlement_evidence import (
     derive_settlement_price,
     measure_symbol_tail,
 )
-from src.mhs.venue_halts import VenueHaltRegistry
+from src.mhs.venue_halts import VenueHaltInterval, VenueHaltRegistry
 
 _logger = logging.getLogger(__name__)
 
@@ -313,6 +313,101 @@ def write_settlement_registry(build: SettlementRegistryBuild, path: Path) -> int
 _HALT_STEP: pd.Timedelta = pd.Timedelta(minutes=3)
 
 
+def _halt_zombie_floors(settlements: InstrumentSettlementRegistry) -> dict[str, int]:
+    """Earliest settlement last-trade per symbol; bars at or after it are delisted tails."""
+    floors: dict[str, int] = {}
+    for record in settlements.settlements:
+        prev = floors.get(record.symbol)
+        cur = int(record.last_trade_at.value)
+        if prev is None or cur < prev:
+            floors[record.symbol] = cur
+    return floors
+
+
+def _halt_symbol_bars(path: Path, horizon_ns: int, step_ns: int) -> tuple[np.ndarray, np.ndarray] | None:
+    """Load one symbol's validated sub-horizon 3m labels and quote volumes.
+
+    Returns None when the symbol has no bar before the horizon.
+
+    Raises:
+        DataIntegrityError: unreadable frame, off-grid timestamps, duplicate bars or invalid volumes.
+    """
+    try:
+        frame = pd.read_parquet(path, columns=["timestamp", "quote_vol"])
+    except Exception as exc:
+        raise DataIntegrityError(f"venue halt bars unreadable: {path.name}") from exc
+    stamps_ms = pd.to_numeric(frame["timestamp"], errors="coerce").to_numpy(dtype="float64")
+    finite = np.isfinite(stamps_ms)
+    if not finite.all() or bool((stamps_ms % (step_ns // 1_000_000) != 0).any()):
+        raise DataIntegrityError(f"venue halt timestamps invalid or off-grid: {path.name}")
+    labels_ns = stamps_ms.astype("int64") * 1_000_000
+    qv = pd.to_numeric(frame["quote_vol"], errors="coerce").to_numpy(dtype="float64")
+    keep = labels_ns < horizon_ns
+    labels_ns = labels_ns[keep]
+    qv = qv[keep]
+    if labels_ns.size == 0:
+        return None
+    order = np.argsort(labels_ns, kind="stable")
+    labels_ns = labels_ns[order]
+    qv = qv[order]
+    if bool((np.diff(labels_ns) == 0).any()):
+        raise DataIntegrityError(f"venue halt duplicate symbol bars: {path.name}")
+    if not np.isfinite(qv).all() or bool((qv < 0.0).any()):
+        raise DataIntegrityError(f"venue halt quote volume invalid: {path.name}")
+    return labels_ns, qv
+
+
+def _halt_interval(
+    grid: pd.DatetimeIndex,
+    run_start: int,
+    prev: int,
+    present: np.ndarray,
+    zero: np.ndarray,
+    share: np.ndarray,
+    stamped: pd.Timestamp,
+) -> VenueHaltInterval:
+    """Build one halt interval over contiguous halted labels [run_start, prev]."""
+    start = grid[run_start]
+    return VenueHaltInterval(
+        halt_id=start.strftime("%Y-%m-%dT%H:%MZ"), start=start, end=grid[prev] + _HALT_STEP,
+        present_symbols=int(present[run_start]),
+        zero_symbols=int(zero[run_start]),
+        evidence=(
+            f"exchange-wide halt: {prev - run_start + 1} bars,"
+            f" present={int(present[run_start])},"
+            f" zero={int(zero[run_start])},"
+            f" min_zero_share={float(share[run_start : prev + 1].min()):.4f}"
+        ),
+        verified_at=stamped,
+    )
+
+
+def _halt_assemble_intervals(
+    grid: pd.DatetimeIndex,
+    halted: np.ndarray,
+    present: np.ndarray,
+    zero: np.ndarray,
+    share: np.ndarray,
+    stamped: pd.Timestamp,
+) -> list[VenueHaltInterval]:
+    """Compress contiguous halted labels into venue-halt intervals."""
+    intervals: list[VenueHaltInterval] = []
+    idx = np.flatnonzero(halted)
+    if idx.size:
+        run_start = int(idx[0])
+        prev = int(idx[0])
+        for cursor in idx[1:].tolist():
+            cursor = int(cursor)
+            if cursor == prev + 1:
+                prev = cursor
+                continue
+            intervals.append(_halt_interval(grid, run_start, prev, present, zero, share, stamped))
+            run_start = cursor
+            prev = cursor
+        intervals.append(_halt_interval(grid, run_start, prev, present, zero, share, stamped))
+    return intervals
+
+
 def build_venue_halt_registry(
     ohlcv_root: Path, *, horizon: pd.Timestamp, settlements: InstrumentSettlementRegistry,
     verified_at: pd.Timestamp,
@@ -329,7 +424,7 @@ def build_venue_halt_registry(
         DataIntegrityError: unreadable archive; horizon naive/non-UTC.
     """
     from src.mhs.params import VENUE_HALT_MIN_PRESENT_SYMBOLS, VENUE_HALT_MIN_ZERO_FRACTION
-    from src.mhs.venue_halts import VenueHaltInterval, assemble_venue_halt_registry
+    from src.mhs.venue_halts import assemble_venue_halt_registry
 
     end = _require_utc_moment(horizon, "horizon")
     stamped = _require_utc_moment(verified_at, "verified_at")
@@ -344,12 +439,7 @@ def build_venue_halt_registry(
     if not archives:
         raise DataIntegrityError(f"venue halt build unreadable: {three_dir}")
 
-    zombie_floor: dict[str, int] = {}
-    for record in settlements.settlements:
-        prev = zombie_floor.get(record.symbol)
-        cur = int(record.last_trade_at.value)
-        if prev is None or cur < prev:
-            zombie_floor[record.symbol] = cur
+    zombie_floor = _halt_zombie_floors(settlements)
 
     horizon_ns = int(end.value)
     global_min: int | None = None
@@ -359,28 +449,10 @@ def build_venue_halt_registry(
     for count, path in enumerate(archives):
         if count % 100 == 0 and count:
             _logger.info("[DATA] stage=build_venue_halts scanned=%d", count)
-        try:
-            frame = pd.read_parquet(path, columns=["timestamp", "quote_vol"])
-        except Exception as exc:
-            raise DataIntegrityError(f"venue halt bars unreadable: {path.name}") from exc
-        stamps_ms = pd.to_numeric(frame["timestamp"], errors="coerce").to_numpy(dtype="float64")
-        finite = np.isfinite(stamps_ms)
-        if not finite.all() or bool((stamps_ms % (step_ns // 1_000_000) != 0).any()):
-            raise DataIntegrityError(f"venue halt timestamps invalid or off-grid: {path.name}")
-        labels_ns = stamps_ms.astype("int64") * 1_000_000
-        qv = pd.to_numeric(frame["quote_vol"], errors="coerce").to_numpy(dtype="float64")
-        keep = labels_ns < horizon_ns
-        labels_ns = labels_ns[keep]
-        qv = qv[keep]
-        if labels_ns.size == 0:
+        loaded = _halt_symbol_bars(path, horizon_ns, step_ns)
+        if loaded is None:
             continue
-        order = np.argsort(labels_ns, kind="stable")
-        labels_ns = labels_ns[order]
-        qv = qv[order]
-        if bool((np.diff(labels_ns) == 0).any()):
-            raise DataIntegrityError(f"venue halt duplicate symbol bars: {path.name}")
-        if not np.isfinite(qv).all() or bool((qv < 0.0).any()):
-            raise DataIntegrityError(f"venue halt quote volume invalid: {path.name}")
+        labels_ns, qv = loaded
         start_ns = int(labels_ns[0]) // step_ns * step_ns
         if present.size == 0:
             global_min = start_ns
@@ -415,52 +487,7 @@ def build_venue_halt_registry(
     halted = (present >= VENUE_HALT_MIN_PRESENT_SYMBOLS) & (
         zero >= VENUE_HALT_MIN_ZERO_FRACTION * present
     )
-    intervals: list[VenueHaltInterval] = []
-    idx = np.flatnonzero(halted)
-    if idx.size:
-        run_start = int(idx[0])
-        prev = int(idx[0])
-        for cursor in idx[1:].tolist():
-            cursor = int(cursor)
-            if cursor == prev + 1:
-                prev = cursor
-                continue
-            start = grid[run_start]
-            halt_id = start.strftime("%Y-%m-%dT%H:%MZ")
-            run_share = float(share[run_start : prev + 1].min())
-            intervals.append(
-                VenueHaltInterval(
-                    halt_id=halt_id, start=start, end=grid[prev] + _HALT_STEP,
-                    present_symbols=int(present[run_start]),
-                    zero_symbols=int(zero[run_start]),
-                    evidence=(
-                        f"exchange-wide halt: {prev - run_start + 1} bars,"
-                        f" present={int(present[run_start])},"
-                        f" zero={int(zero[run_start])},"
-                        f" min_zero_share={run_share:.4f}"
-                    ),
-                    verified_at=stamped,
-                )
-            )
-            run_start = cursor
-            prev = cursor
-        start = grid[run_start]
-        halt_id = start.strftime("%Y-%m-%dT%H:%MZ")
-        run_share = float(share[run_start : prev + 1].min())
-        intervals.append(
-            VenueHaltInterval(
-                halt_id=halt_id, start=start, end=grid[prev] + _HALT_STEP,
-                present_symbols=int(present[run_start]),
-                zero_symbols=int(zero[run_start]),
-                evidence=(
-                    f"exchange-wide halt: {prev - run_start + 1} bars,"
-                    f" present={int(present[run_start])},"
-                    f" zero={int(zero[run_start])},"
-                    f" min_zero_share={run_share:.4f}"
-                ),
-                verified_at=stamped,
-            )
-        )
+    intervals = _halt_assemble_intervals(grid, halted, present, zero, share, stamped)
     registry = assemble_venue_halt_registry(intervals)
     halted_bars = int(halted.sum())
     _logger.info(

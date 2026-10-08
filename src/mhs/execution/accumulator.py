@@ -14,6 +14,7 @@ from src.mhs.types import ExecutionSpec
 
 from . import _ExecutionBound, _MarkSource
 from . import contracts as _contracts
+from . import fill_terms as _fill_terms
 from . import microstructure as _microstructure
 from .contracts import (
     ExecutionDataGap,
@@ -1227,32 +1228,19 @@ class _BoundExecutionReplayAccumulator:
             )
         if reason == "passive_fill":
             self.fill_count += 1
-        if self.execution_bound == "OHLCV_IMMEDIATE_TAKER":
-            shortfall = side * (fill_price / decision_price - 1.0) * 1e4 + fee_bps
-            if self.spec.liquidity_cost_model == "corwin_schultz":
-                self._record_terms(
-                    decision_price, fill_price, side,
-                    self.spec.taker_fee_bps,
-                    fee_bps - self.spec.taker_fee_bps,
-                )
-            else:
-                # Flat model: the fixed slippage folds into the fee
-                # term and the spread term stays exactly zero.
-                self._record_terms(decision_price, fill_price, side, fee_bps, 0.0)
-        else:
-            shortfall = _microstructure.passive_fill_shortfall_bps(
-                decision_price, adverse, timeout_close, side, self.spec,
-                taker_cost_bps=self._taker_cost_bps(gcol),
-            )
-            # The residual after timing is the all-in fee component;
-            # deriving it keeps fee+spread+delay == shortfall exact
-            # even on degenerate exact-touch fills.
-            anchor = fill_price if reason == "passive_fill" else timeout_close
-            self._record_terms(
-                decision_price, anchor, side,
-                shortfall - side * (anchor / decision_price - 1.0) * 1e4,
-                0.0,
-            )
+        shortfall, term_price, fee_term, spread_term = _fill_terms.resolve_single_fill_terms(
+            execution_bound=self.execution_bound,
+            spec=self.spec,
+            decision_price=decision_price,
+            fill_price=fill_price,
+            timeout_close=timeout_close,
+            adverse=adverse,
+            side=side,
+            fee_bps=fee_bps,
+            taker_cost_bps=self._taker_cost_bps(gcol),
+            reason=reason,
+        )
+        self._record_terms(decision_price, term_price, side, fee_term, spread_term)
         self.shortfalls.append(shortfall)
         self.shortfall_notionals.append(abs(net_units) * fill_price)
         self._book_fill(
@@ -1748,9 +1736,7 @@ class _BoundExecutionReplayAccumulator:
                     curr_mark = float(marks_col[0])
                     curr_avail = int(self._w_mark_avail[0, j])
                     curr_ok = bool(
-                        np.isfinite(curr_mark)
-                        and curr_mark > 0.0
-                        and curr_avail <= int(grid_ns[0])
+                        np.isfinite(curr_mark) and curr_mark > 0.0 and curr_avail <= int(grid_ns[0])
                     )
                     prior_ok = bool(
                         np.isfinite(prior_mark)
@@ -1783,10 +1769,12 @@ class _BoundExecutionReplayAccumulator:
                 usable = finite & fknown_col
                 charged_col = np.where(usable, funding_col * before * marks_col, 0.0)
                 funding_arr += charged_col
-                if bool(((~fknown_col & held) & kept).any()):
+                unpriceable = ~finite & (funding_col != 0.0)
+                funding_gap = (held & (~fknown_col | unpriceable)) & kept
+                if bool(funding_gap.any()):
                     self.ledger_valid = False
                     self.invalid_reasons.add("MISSING_DATA")
-                    bad = np.flatnonzero((~fknown_col & held) & kept)
+                    bad = np.flatnonzero(funding_gap)
                     self._record_ledger_funding_gap(local_cols[j], grid[int(bad[0])])
                 notional_arr += units * valuation_col
                 notional_before_arr += before * valuation_col
