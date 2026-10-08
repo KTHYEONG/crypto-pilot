@@ -523,6 +523,64 @@ def test_malformed_encodings_are_rejected() -> None:
         _endpoint_schedule("5")
 
 
+def test_default_haircut_keeps_legacy_digest() -> None:
+    import hashlib
+    import json
+
+    procedure = _procedure()
+    encoded = procedure_to_json(procedure)
+    assert "settlement_price_haircut_bps" not in encoded["execution_spec"]
+    legacy_shape = procedure_to_json(_procedure(execution_spec=ExecutionSpec(settlement_price_haircut_bps=450.0)))
+    del legacy_shape["execution_spec"]["settlement_price_haircut_bps"]
+    assert encoded == legacy_shape
+    legacy = json.dumps(legacy_shape, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    assert process_procedure_digest(procedure) == hashlib.sha256(legacy.encode("utf-8")).hexdigest()
+
+
+def test_legacy_record_without_haircut_loads(tmp_path: Path) -> None:
+    from src.mhs.backtest.journal import plan_to_json
+
+    plan = _plan()
+    stored = plan_to_json(plan)
+    assert "settlement_price_haircut_bps" not in stored["procedure"]["execution_spec"]
+    loaded = plan_from_json(stored)
+    assert loaded.procedure.execution_spec.settlement_price_haircut_bps == 0.0
+    assert process_procedure_digest(loaded.procedure) == plan.procedure_digest
+    journal, registered = _registered(tmp_path)
+    stored = plan_to_json(registered)
+    stored["procedure"]["execution_spec"].pop("settlement_price_haircut_bps", None)
+    with sqlite3.connect(str(journal)) as conn:
+        conn.execute("UPDATE plans SET canonical=?", (json.dumps(stored),))
+    assert load_process_evaluation_plan(journal) == registered
+
+
+def test_non_default_haircut_round_trips_and_rekeys() -> None:
+    stressed = _procedure(execution_spec=ExecutionSpec(settlement_price_haircut_bps=450.0))
+    encoded = procedure_to_json(stressed)
+    assert encoded["execution_spec"]["settlement_price_haircut_bps"] == 450.0
+    assert procedure_from_json(encoded) == stressed
+    assert process_procedure_digest(stressed) != process_procedure_digest(_procedure())
+
+
+def test_haircut_malformed_encodings_are_rejected() -> None:
+    encoded = procedure_to_json(_procedure())
+    encoded["execution_spec"] = {**encoded["execution_spec"], "unknown_key": 1.0}
+    with pytest.raises(DataIntegrityError):
+        procedure_from_json(encoded)
+    encoded = procedure_to_json(_procedure())
+    encoded["execution_spec"] = {**encoded["execution_spec"], "settlement_price_haircut_bps": "450"}
+    with pytest.raises(DataIntegrityError):
+        procedure_from_json(encoded)
+
+
+@pytest.mark.parametrize("field", [f.name for f in dataclasses.fields(ExecutionSpec) if f.name != "settlement_price_haircut_bps"])
+def test_execution_spec_legacy_fields_remain_required(field: str) -> None:
+    encoded = procedure_to_json(_procedure())
+    del encoded["execution_spec"][field]
+    with pytest.raises(DataIntegrityError, match="invalid ExecutionSpec encoding"):
+        procedure_from_json(encoded)
+
+
 def test_invalid_constructions_are_rejected() -> None:
     with pytest.raises(DataIntegrityError):
         _procedure(schema_version=2)

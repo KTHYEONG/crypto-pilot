@@ -340,6 +340,8 @@ class CausalPortfolioState:
         principal plus fee), except that unknown funding over held inventory does not raise: the bar
         settles known funding only and is reported in ``gap_bar_offsets`` so the replay engine can
         record ``MISSING_HELD_FUNDING`` and invalidate instead of crashing or inventing a cost.
+        Held inventory over an unpriceable mark with a nonzero rate is reported the same way:
+        the charge prices at zero (nothing is booked) and the bar is a funding gap as well.
 
         Arithmetic is fixed so results never depend on numpy reduction internals or vector width:
         the per-bar charge is the left-to-right fold in ascending canonical column order of
@@ -393,7 +395,8 @@ class CausalPortfolioState:
             start_local = _backlog_start(self.units, cols, s_col, s_qty, backlog_count)
             f_qty = s_qty[backlog_count:]
             units_rows = _pre_fill_units(nb, nl, start_local, f_local, fill_bar, f_qty)
-            held_unknown = (np.abs(units_rows) >= QTY_EPS) & ~k
+            unpriceable = ~np.isfinite(m) & (r != 0.0)
+            held_unknown = (np.abs(units_rows) >= QTY_EPS) & (~k | unpriceable)
             gap_bar: npt.NDArray[np.bool_] = np.asarray(held_unknown.any(axis=1))
             eff_rates = np.where(gap_bar[:, None] & ~k, 0.0, r)
             priced = np.where(np.isfinite(m), m, 0.0)

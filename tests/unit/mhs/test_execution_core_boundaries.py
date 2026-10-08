@@ -151,9 +151,13 @@ def test_exception_roster_values() -> None:
         {
             "AERGOUSDT", "CTKUSDT", "CVCUSDT", "MAVIAUSDT", "LITUSDT", "PUMPUSDT",
             "CVXUSDT", "SLPUSDT", "BNXUSDT", "AIAUSDT", "ICPUSDT", "BNTUSDT",
-            "BTCSTUSDT", "BDXNUSDT", "LUNAUSDT", "MANAUSDT", "NEARUSDT",
+            "BTCSTUSDT", "BDXNUSDT", "MANAUSDT", "NEARUSDT",
         }
     )
+    # LUNAUSDT is explained by the settlement registry
+    # (source_gap_superseded_by_settlement), so it is replayed causally
+    # instead of whole-history excluded.
+    assert "LUNAUSDT" not in SOURCE_GAP_EXCLUDED_SYMBOLS
 
 
 def test_moved_defaults_match_legacy_values() -> None:
