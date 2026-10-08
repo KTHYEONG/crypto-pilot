@@ -595,14 +595,18 @@ def test_idle_settlement_not_triggered_before_24h() -> None:
     w = _window(grid, qv, marks, [grid[0], grid[20]], [0.5, 0.0])
     # When
     result = replay_execution_windows((w,), 1000.0, 'OHLCV_IMMEDIATE_TAKER', ExecutionSpec())
-    # Then: no settlement; the exit on a zero-volume bar is unfilled and inventory stays open and marked
+    # Then: no settlement; the exit on a zero-volume bar is disclosed and retried
+    # at the next decision inside the 24h episode bound, inventory stays open and marked
     assert 'delist_settlement' not in set(result.simulated_fills['reason'])
     assert result.termination_counts.get('DELIST_SETTLEMENT', 0) == 0
-    assert result.termination_counts['NO_VOLUME_UNFILLED'] >= 1
+    assert result.termination_counts['BLOCKED_EXIT_SYMBOL_NO_TRADE'] == 1
     assert [p.status for p in result.terminal_positions] == ['open_marked']
-    # A blocked exit keeps exposure on, so the ledger is invalid with the volume cause retained.
-    assert not result.ledger.primary_valid
-    assert any(g.code == 'KNOWN_ZERO_VOLUME' for g in result.ledger.data_gaps)
+    # A disclosed retry keeps exposure on without invalidating the ledger.
+    assert result.ledger.primary_valid
+    assert result.data_gaps == ()
+    assert len(result.exit_block_disclosures) == 1
+    assert result.exit_block_disclosures[0].cause == 'SYMBOL_NO_TRADE'
+    assert result.exit_block_disclosures[0].outcome == 'retry_next_decision'
 
 
 def test_idle_settlement_not_triggered_by_unknown_volume_hole() -> None:

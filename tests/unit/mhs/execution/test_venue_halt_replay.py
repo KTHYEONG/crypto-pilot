@@ -10,7 +10,7 @@ import pytest
 
 from src.common.errors import DataIntegrityError
 from src.mhs.execution import ExecutionReplayWindow, ExecutionSpec, replay_execution_windows
-from src.mhs.execution.contracts import InstrumentSettlementEvent, VenueHaltExitBlock
+from src.mhs.execution.contracts import InstrumentSettlementEvent, ExitBlockDisclosure
 from src.mhs.evaluation.windows import _load_window_from_ipc, _spill_window_to_ipc
 from src.mhs.venue_halts import VenueHaltInterval
 
@@ -109,11 +109,12 @@ def test_halted_exit_deferred_inside_timeout() -> None:
     w = _window(grid, decisions, weights, halt_bars=halt)
     result = replay_execution_windows((w,), 10000.0, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec())
     assert result.termination_counts.get("VENUE_HALT_DEFERRED_EXIT") == 1
-    assert len(result.venue_halt_exit_blocks) == 1
-    block = result.venue_halt_exit_blocks[0]
+    assert len(result.exit_block_disclosures) == 1
+    block = result.exit_block_disclosures[0]
     assert block.outcome == "deferred_fill"
     assert block.blocked_bar == grid[21]
     assert block.filled_bar == grid[24]
+    assert block.cause == "VENUE_HALT"
     assert block.halt_id == "2022-01-14T01:03Z"
     taker = result.simulated_fills[
         (result.simulated_fills["reason"] == "timeout_taker") & (result.simulated_fills["quantity_delta"] < 0)
@@ -134,9 +135,10 @@ def test_halt_through_deadline_retries_next_decision() -> None:
     result = replay_execution_windows((w,), 10000.0, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec())
     assert result.termination_counts.get("BLOCKED_EXIT_VENUE_HALT") == 1
     assert result.termination_counts.get("VENUE_HALT_DEFERRED_EXIT", 0) == 0
-    assert len(result.venue_halt_exit_blocks) == 1
-    block = result.venue_halt_exit_blocks[0]
+    assert len(result.exit_block_disclosures) == 1
+    block = result.exit_block_disclosures[0]
     assert block.outcome == "retry_next_decision"
+    assert block.cause == "VENUE_HALT"
     assert block.filled_bar is None
     assert result.ledger.primary_valid
     exits = result.simulated_fills[
@@ -154,16 +156,24 @@ def test_unknown_funding_during_halt_still_invalidates() -> None:
     result = replay_execution_windows((w,), 10000.0, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec())
     assert not result.ledger.primary_valid
     assert any(g.code == "BLOCKED_EXIT_UNKNOWN_FUNDING" for g in result.data_gaps)
-    assert result.venue_halt_exit_blocks == ()
+    assert result.exit_block_disclosures == ()
     assert result.termination_counts.get("VENUE_HALT_DEFERRED_EXIT", 0) == 0
 
 
-def test_zero_volume_outside_halt_still_invalidates_exits() -> None:
+def test_zero_volume_outside_halt_defers_as_symbol_no_trade() -> None:
     grid, decisions, weights = _exit_setup()
     w = _window(grid, decisions, weights, zero_bars={str(grid[21])})
     result = replay_execution_windows((w,), 10000.0, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec())
-    assert not result.ledger.primary_valid
-    assert any(g.code == "KNOWN_ZERO_VOLUME" for g in result.data_gaps)
+    assert result.ledger.primary_valid
+    assert result.data_gaps == ()
+    assert result.termination_counts.get("SYMBOL_NO_TRADE_DEFERRED_EXIT") == 1
+    assert len(result.exit_block_disclosures) == 1
+    block = result.exit_block_disclosures[0]
+    assert block.cause == "SYMBOL_NO_TRADE"
+    assert block.halt_id is None
+    assert block.outcome == "deferred_fill"
+    assert block.blocked_bar == grid[21]
+    assert block.filled_bar == grid[22]
 
 
 def test_entries_during_halt_unchanged() -> None:
@@ -172,7 +182,7 @@ def test_entries_during_halt_unchanged() -> None:
     w = _window(grid, [str(grid[0])], {"AUSDT": [0.5], "BUSDT": [0.0]}, halt_bars=halt)
     result = replay_execution_windows((w,), 10000.0, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec())
     assert result.termination_counts.get("NO_VOLUME_UNFILLED") == 1
-    assert result.venue_halt_exit_blocks == ()
+    assert result.exit_block_disclosures == ()
     assert result.simulated_fills.empty
 
 
@@ -185,7 +195,8 @@ def test_halt_blocks_even_positive_volume_and_defers_once(bound) -> None:
     volumes.loc[grid[21]:grid[23]] = 1000.0
     w = dataclasses.replace(w, quote_volumes=volumes)
     result = replay_execution_windows((w,), 10000.0, bound, ExecutionSpec(), retain_event_snapshots=True)
-    assert result.venue_halt_exit_blocks[0].filled_bar == grid[24]
+    assert result.exit_block_disclosures[0].filled_bar == grid[24]
+    assert result.exit_block_disclosures[0].cause == "VENUE_HALT"
     assert result.termination_counts["VENUE_HALT_DEFERRED_EXIT"] == 1
     exits = result.simulated_fills.loc[lambda f: f.quantity_delta < 0]
     assert len(exits) == 1
@@ -212,8 +223,9 @@ def test_deferral_respects_last_trade_cutoff() -> None:
     w = _window(grid, decisions, weights, halt_bars=halt, events=(event,))
     result = replay_execution_windows((w,), 10000.0, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec())
     assert result.termination_counts.get("VENUE_HALT_DEFERRED_EXIT", 0) == 0
-    assert len(result.venue_halt_exit_blocks) == 1
-    assert result.venue_halt_exit_blocks[0].outcome == "retry_next_decision"
+    assert len(result.exit_block_disclosures) == 1
+    assert result.exit_block_disclosures[0].outcome == "retry_next_decision"
+    assert result.exit_block_disclosures[0].cause == "VENUE_HALT"
 
 
 def test_laddered_halt_defers_remaining_quantity() -> None:
@@ -228,9 +240,10 @@ def test_laddered_halt_defers_remaining_quantity() -> None:
     )
     result = replay_execution_windows((w,), 10000.0, "OHLCV_LADDERED_PROXY", ExecutionSpec())
     assert result.termination_counts.get("VENUE_HALT_DEFERRED_EXIT") == 1
-    assert len(result.venue_halt_exit_blocks) == 1
-    assert result.venue_halt_exit_blocks[0].outcome == "deferred_fill"
-    assert result.venue_halt_exit_blocks[0].filled_bar == grid[24]
+    assert len(result.exit_block_disclosures) == 1
+    assert result.exit_block_disclosures[0].outcome == "deferred_fill"
+    assert result.exit_block_disclosures[0].cause == "VENUE_HALT"
+    assert result.exit_block_disclosures[0].filled_bar == grid[24]
     assert result.data_gaps == ()
 
 
@@ -245,10 +258,11 @@ def test_spill_round_trip_keeps_halts(tmp_path) -> None:
 
 
 def test_halt_disclosure_record_contract() -> None:
-    block = VenueHaltExitBlock(
+    block = ExitBlockDisclosure(
         symbol="AUSDT",
         decision_time=pd.Timestamp("2022-01-14 01:00", tz="UTC"),
         blocked_bar=pd.Timestamp("2022-01-14 01:03", tz="UTC"),
+        cause="VENUE_HALT",
         halt_id="2022-01-14T01:03Z",
         outcome="deferred_fill",
         filled_bar=pd.Timestamp("2022-01-14 01:12", tz="UTC"),
@@ -257,6 +271,17 @@ def test_halt_disclosure_record_contract() -> None:
     assert block.outcome == "deferred_fill"
     retried = dataclasses.replace(block, outcome="retry_next_decision", filled_bar=None)
     assert retried.filled_bar is None
+    frozen = ExitBlockDisclosure(
+        symbol="AUSDT",
+        decision_time=pd.Timestamp("2022-01-14 01:00", tz="UTC"),
+        blocked_bar=pd.Timestamp("2022-01-14 01:03", tz="UTC"),
+        cause="SYMBOL_NO_TRADE",
+        halt_id=None,
+        outcome="retry_next_decision",
+        filled_bar=None,
+        quantity=-5.0,
+    )
+    assert frozen.cause == "SYMBOL_NO_TRADE"
 
 
 def test_deferral_scan_skips_inviable_bars() -> None:
@@ -270,8 +295,9 @@ def test_deferral_scan_skips_inviable_bars() -> None:
     )
     result = replay_execution_windows((w,), 10000.0, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec())
     assert result.termination_counts.get("VENUE_HALT_DEFERRED_EXIT") == 1
-    assert len(result.venue_halt_exit_blocks) == 1
-    assert result.venue_halt_exit_blocks[0].filled_bar == grid[27]
+    assert len(result.exit_block_disclosures) == 1
+    assert result.exit_block_disclosures[0].cause == "VENUE_HALT"
+    assert result.exit_block_disclosures[0].filled_bar == grid[27]
     assert not any(g.code == "BLOCKED_EXIT_VENUE_HALT" for g in result.data_gaps)
 
 
@@ -280,6 +306,7 @@ def test_halt_disclosure_rejects_malformed_records() -> None:
         "symbol": "AUSDT",
         "decision_time": pd.Timestamp("2022-01-14 01:00", tz="UTC"),
         "blocked_bar": pd.Timestamp("2022-01-14 01:03", tz="UTC"),
+        "cause": "VENUE_HALT",
         "halt_id": "2022-01-14T01:03Z",
         "outcome": "deferred_fill",
         "filled_bar": pd.Timestamp("2022-01-14 01:12", tz="UTC"),
@@ -287,9 +314,16 @@ def test_halt_disclosure_rejects_malformed_records() -> None:
     }
     bad = [
         {**good, "symbol": ""},
+        {**good, "cause": "HALTED"},
+        {**good, "halt_id": ""},
+        {**good, "halt_id": None},
+        {**good, "cause": "SYMBOL_NO_TRADE", "halt_id": "2022-01-14T01:03Z"},
         {**good, "outcome": "filled"},
         {**good, "decision_time": "not-a-timestamp"},
         {**good, "blocked_bar": pd.NaT},
+        {**good, "decision_time": pd.Timestamp("2022-01-14 01:00")},
+        {**good, "blocked_bar": pd.Timestamp("2022-01-14 01:03", tz="Asia/Seoul")},
+        {**good, "filled_bar": pd.Timestamp("2022-01-14 01:12")},
         {**good, "filled_bar": "not-a-timestamp"},
         {**good, "outcome": "deferred_fill", "filled_bar": None},
         {**good, "outcome": "retry_next_decision"},
@@ -297,7 +331,7 @@ def test_halt_disclosure_rejects_malformed_records() -> None:
     ]
     for kwargs in bad:
         with pytest.raises(DataIntegrityError):
-            VenueHaltExitBlock(**kwargs)  # type: ignore[arg-type]
+            ExitBlockDisclosure(**kwargs)  # type: ignore[arg-type]
 
 
 def test_deferred_exit_under_corwin_schultz_costs() -> None:
@@ -309,7 +343,7 @@ def test_deferred_exit_under_corwin_schultz_costs() -> None:
     spec = _dc.replace(ExecutionSpec(), liquidity_cost_model="corwin_schultz")
     result = replay_execution_windows((w,), 10000.0, "OHLCV_IMMEDIATE_TAKER", spec)
     assert result.termination_counts.get("VENUE_HALT_DEFERRED_EXIT") == 1
-    assert result.venue_halt_exit_blocks[0].filled_bar == grid[24]
+    assert result.exit_block_disclosures[0].filled_bar == grid[24]
     assert result.data_gaps == ()
 
 
