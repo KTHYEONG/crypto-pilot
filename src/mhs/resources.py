@@ -19,7 +19,6 @@ from typing import Literal
 import psutil
 
 from src.common.errors import DataIntegrityError
-from src.mhs.contracts import MhsResourceMeasurement
 from src.mhs.tree_memory import observe_tree_memory
 from src.mhs.types import (
     RAM_BUDGET_FRACTION,
@@ -32,6 +31,27 @@ _logger = logging.getLogger("MhsHorizonDiagnostic")
 MHS_TREE_PSS_BUDGET_BYTES: int = 6 * 2**30
 MHS_REPLAY_BUDGET_BYTES: int = 4 * 2**30
 MHS_AVAILABLE_FLOOR_BYTES: int = 2 * 2**30
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class MhsResourceMeasurement:
+    """One ordered resource sample for a material diagnostic stage.
+
+    ``elapsed_ms`` is the wall time since the previous recorded stage; ``rss_bytes``
+    is the current process resident set size. Measurements are observational only
+    and must never alter control flow, replay data, or the GO gate.
+    """
+
+    stage: str
+    elapsed_ms: int
+    rss_bytes: int
+    grid_bars: int | None = None
+    n_symbols: int | None = None
+    fill_count: int | None = None
+    window_start: str | None = None
+    window_end: str | None = None
+    active_symbols: int | None = None
+    peak_rss_bytes: int | None = None
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
