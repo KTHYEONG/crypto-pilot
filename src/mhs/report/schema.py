@@ -16,7 +16,6 @@ if TYPE_CHECKING:
         MhsBookReport,
         MhsFoldReport,
         MhsResearchGoResult,
-        MhsResourceMeasurement,
     )
     from src.mhs.discovery import DiscoveryQualificationResult
     from src.mhs.evidence import (
@@ -24,7 +23,7 @@ if TYPE_CHECKING:
         DeploymentReadinessResult,
         DsrDecomposition,
     )
-    from src.mhs.resources import ProcessTreeMemoryStats
+    from src.mhs.resources import MhsResourceMeasurement, ProcessTreeMemoryStats
 
 
 @dataclass(frozen=True, slots=True)
