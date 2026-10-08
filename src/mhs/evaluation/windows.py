@@ -40,6 +40,8 @@ from src.mhs.execution import (
 )
 from src.mhs.execution.settlement import settlement_event_from_json as _settlement_event_from_json
 from src.mhs.execution.settlement import settlement_event_to_json as _settlement_event_to_json
+from src.mhs.execution.settlement import venue_halt_from_json as _venue_halt_from_json
+from src.mhs.execution.settlement import venue_halt_to_json as _venue_halt_to_json
 from src.mhs.execution.window_stream import MhsExecutionWindow as MhsExecutionWindow
 from src.mhs.execution.window_stream import _estimate_mhs_execution_allocation as _estimate_mhs_execution_allocation
 from src.mhs.execution.window_stream import _iter_mhs_execution_windows as _iter_mhs_execution_windows
@@ -164,6 +166,11 @@ def _spill_window_to_ipc(window: ExecutionReplayWindow, target_path: str) -> Non
                 _settlement_event_to_json(e)
                 for e in window.settlement_events
             ],
+            # spec 34: venue halts survive the IPC spill
+            "venue_halts": [
+                _venue_halt_to_json(h)
+                for h in window.venue_halts
+            ],
         }
         with zipfile.ZipFile(target_path, "w", compression=zipfile.ZIP_STORED) as zf:
             zf.writestr("meta.json", json.dumps(meta))
@@ -242,6 +249,10 @@ def _load_window_from_ipc(target_path: str) -> ExecutionReplayWindow:
             funding_coverage_gaps=coverage,
             settlement_events=tuple(
                 _settlement_event_from_json(p) for p in meta.get("settlement_events", [])
+            ),
+            # spec 34: venue halts survive the IPC spill
+            venue_halts=tuple(
+                _venue_halt_from_json(p) for p in meta.get("venue_halts", [])
             ),
         )
     except Exception as exc:

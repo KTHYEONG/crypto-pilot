@@ -888,3 +888,108 @@ def test_settlement_cli_rejects_non_utc_horizons(tmp_path, monkeypatch, horizon)
     args = _mhs_parser().parse_args(["data", "build-settlement-registry", "--horizon", horizon])
     with pytest.raises(DataIntegrityError, match="UTC"):
         args.handler(args)
+
+
+def _halt_cli_lake(root) -> None:
+    import pandas as pd
+
+    t0 = pd.Timestamp("2025-01-01T00:00:00Z")
+    stamps = [int((t0 + pd.Timedelta(minutes=3 * i)).value // 10**6) for i in range(10)]
+    (root / "ohlcv" / "3m").mkdir(parents=True, exist_ok=True)
+    for i in range(12):
+        pd.DataFrame({
+            "timestamp": stamps,
+            "open": [3.0] * 10, "high": [3.0] * 10, "low": [3.0] * 10,
+            "close": [3.0] * 10, "quote_vol": [10.0] * 3 + [0.0] * 4 + [10.0] * 3,
+        }).to_parquet(root / "ohlcv" / "3m" / f"LIVE{i:02d}USDT.parquet", index=False)
+
+
+def test_build_venue_halts_writes_output(tmp_path, monkeypatch, caplog) -> None:
+    from src.mhs.instrument_settlements import EMPTY_SETTLEMENT_REGISTRY
+    from src.mhs.venue_halts import parse_venue_halt_registry
+
+    _halt_cli_lake(tmp_path)
+    monkeypatch.setattr("src.common.paths.FUTURES_DATA_DIR", tmp_path)
+    monkeypatch.setattr(
+        "src.mhs.instrument_settlements.load_instrument_settlement_registry",
+        lambda path=None: EMPTY_SETTLEMENT_REGISTRY,
+    )
+    out = tmp_path / "halts.jsonl"
+    with caplog.at_level("INFO", logger="src.cli.commands.data"):
+        args = _mhs_parser().parse_args(
+            ["data", "build-venue-halts", "--horizon", "2025-01-02T00:00:00Z",
+             "--output", str(out)]
+        )
+        args.handler(args)
+    assert "stage=build_venue_halts" in caplog.text
+    registry = parse_venue_halt_registry(out.read_bytes(), source=str(out))
+    assert len(registry.halts) == 1
+    assert (registry.halts[0].present_symbols, registry.halts[0].zero_symbols) == (12, 12)
+
+
+def test_build_venue_halts_write_replaces_registry(tmp_path, monkeypatch) -> None:
+    from src.mhs.instrument_settlements import EMPTY_SETTLEMENT_REGISTRY
+    from src.mhs.venue_halts import parse_venue_halt_registry
+
+    _halt_cli_lake(tmp_path)
+    monkeypatch.setattr("src.common.paths.FUTURES_DATA_DIR", tmp_path)
+    monkeypatch.setattr(
+        "src.mhs.instrument_settlements.load_instrument_settlement_registry",
+        lambda path=None: EMPTY_SETTLEMENT_REGISTRY,
+    )
+    target = tmp_path / "committed.jsonl"
+    monkeypatch.setattr(
+        "src.mhs.venue_halts.default_venue_halt_registry_path", lambda: target,
+    )
+    args = _mhs_parser().parse_args(
+        ["data", "build-venue-halts", "--horizon", "2025-01-02T00:00:00Z", "--write"]
+    )
+    args.handler(args)
+    registry = parse_venue_halt_registry(target.read_bytes(), source=str(target))
+    assert len(registry.halts) == 1
+
+
+def test_build_venue_halts_bootstraps_without_committed(tmp_path, monkeypatch, caplog) -> None:
+    from src.common.errors import DataIntegrityError
+
+    _halt_cli_lake(tmp_path)
+    monkeypatch.setattr("src.common.paths.FUTURES_DATA_DIR", tmp_path)
+
+    def _missing(path=None):
+        raise DataIntegrityError("settlement registry unreadable: gone")
+
+    monkeypatch.setattr(
+        "src.mhs.instrument_settlements.load_instrument_settlement_registry", _missing,
+    )
+    monkeypatch.setattr(
+        "src.mhs.instrument_settlements.default_instrument_settlement_registry_path",
+        lambda: tmp_path / "absent.jsonl",
+    )
+    with caplog.at_level("INFO", logger="src.cli.commands.data"):
+        args = _mhs_parser().parse_args(
+            ["data", "build-venue-halts", "--horizon", "2025-01-02T00:00:00Z",
+             "--output", str(tmp_path / "halts.jsonl")]
+        )
+        args.handler(args)
+    assert "NO_COMMITTED_REGISTRY" in caplog.text
+    assert not (tmp_path / "absent.jsonl").exists()
+
+
+def test_build_venue_halts_refuses_corrupt_committed(tmp_path, monkeypatch) -> None:
+    import pytest
+
+    from src.common.errors import DataIntegrityError
+
+    _halt_cli_lake(tmp_path)
+    monkeypatch.setattr("src.common.paths.FUTURES_DATA_DIR", tmp_path)
+    corrupt = tmp_path / "corrupt.jsonl"
+    corrupt.write_bytes(b"{oops")
+    monkeypatch.setattr(
+        "src.mhs.instrument_settlements.default_instrument_settlement_registry_path",
+        lambda: corrupt,
+    )
+    args = _mhs_parser().parse_args(
+        ["data", "build-venue-halts", "--horizon", "2025-01-02T00:00:00Z"]
+    )
+    with pytest.raises(DataIntegrityError):
+        args.handler(args)

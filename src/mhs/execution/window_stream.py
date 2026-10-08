@@ -21,6 +21,7 @@ from src.mhs.resources import (
     plan_mhs_execution_bars,
 )
 from src.mhs.types import ExecutionSpec
+from src.mhs.venue_halts import VenueHaltRegistry, venue_halt_registry_for_root
 
 from .settlement import settled_before_piece, settlement_events_for_piece
 
@@ -50,6 +51,15 @@ def _resolve_settlement_registry(
     if settlement_registry is not None:
         return settlement_registry
     return settlement_registry_for_root(root)
+
+
+def _resolve_venue_halt_registry(
+    venue_halts: VenueHaltRegistry | None, root: str,
+) -> VenueHaltRegistry:
+    """Resolve the window-stream halt registry without branching at the call site."""
+    if venue_halts is not None:
+        return venue_halts
+    return venue_halt_registry_for_root(root)
 
 
 def _resolve_ns_vectorized(
@@ -202,6 +212,7 @@ def _materialize_execution_piece(
     window_end: pd.Timestamp,
     logical_partition: tuple[int, int],
     settlement_registry: InstrumentSettlementRegistry | None = None,
+    venue_halts: VenueHaltRegistry | None = None,
     replay_start: pd.Timestamp | None = None,
     replay_end: pd.Timestamp | None = None,
     initial_swap_bytes: int | None = None,
@@ -212,8 +223,10 @@ def _materialize_execution_piece(
         initial_swap_bytes: Observed run-entry process-tree swap baseline; existing swapped pages are not classified as growth.
     """
     from src.mhs.instrument_settlements import EMPTY_SETTLEMENT_REGISTRY as _EMPTY_REG
+    from src.mhs.venue_halts import EMPTY_VENUE_HALT_REGISTRY as _EMPTY_HALTS
 
     _reg = settlement_registry if settlement_registry is not None else _EMPTY_REG
+    _halts = venue_halts if venue_halts is not None else _EMPTY_HALTS
     _rs = replay_start if replay_start is not None else piece_grid[0]
     _re = replay_end if replay_end is not None else piece_grid[-1] + (piece_grid[1] - piece_grid[0] if len(piece_grid) > 1 else pd.Timedelta(minutes=3))
     drop = settled_before_piece(_reg, roster, piece_grid, piece_weights)
@@ -271,6 +284,7 @@ def _materialize_execution_piece(
         _reg, roster, piece_grid, quote_volumes,
         replay_start=_rs, replay_end=_re,
     )
+    halt_step = piece_grid[1] - piece_grid[0] if len(piece_grid) > 1 else pd.Timedelta(minutes=3)
     window = ExecutionReplayWindow(
         window_start=window_start,
         window_end=window_end,
@@ -291,6 +305,7 @@ def _materialize_execution_piece(
         funding_coverage_gaps=coverage_gaps,
         funding_knowledge_source=funding_alignment.knowledge_source,
         settlement_events=settlement_events,
+        venue_halts=_halts.overlapping(piece_grid[0], piece_grid[-1] + halt_step),
     )
     del symbol_frames
     del aligned
@@ -315,6 +330,7 @@ def _iter_mhs_execution_windows(
     execution_bound_count: int = 2,
     initial_swap_bytes: int | None = None,
     settlement_registry: InstrumentSettlementRegistry | None = None,
+    venue_halts: VenueHaltRegistry | None = None,
 ) -> Iterator[MhsExecutionWindow]:
     """Stream chronologically completed three-minute trade bars and funding knowledge for an exact target path. The OHLCV mode leaves `ExecutionReplayWindow.marks` absent so the shared accounting engine values positions from 3m closes; bar completion remains the earliest publication time. Rosters always cover carried inventory — live requirements when supplied, otherwise every column targeted so far. Every window carries the evidenced settlement events of its roster so all replay paths settle delisted inventory identically; symbols delivered before the piece with exact-zero targets leave the roster.
 
@@ -403,6 +419,7 @@ def _iter_mhs_execution_windows(
     materialize = functools.partial(
         _materialize_execution_piece,
         settlement_registry=_resolve_settlement_registry(settlement_registry, root),
+        venue_halts=_resolve_venue_halt_registry(venue_halts, root),
         replay_start=start,
         replay_end=end,
     )

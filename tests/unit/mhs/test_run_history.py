@@ -984,7 +984,56 @@ def test_lifecycle_procedure_is_part_of_trial_identity() -> None:
     from src.mhs.live_strategy import capture_params_snapshot
     from src.mhs.run_history import trial_identity_key
     snapshot = capture_params_snapshot()
-    assert snapshot["INSTRUMENT_LIFECYCLE_PROCEDURE"] == "pit_registry_settlement_v1"
+    assert snapshot["INSTRUMENT_LIFECYCLE_PROCEDURE"] == "pit_registry_settlement_halts_v2"
     base = {"flags": {}, "params_snapshot": snapshot}
     stripped = {"flags": {}, "params_snapshot": {k: v for k, v in snapshot.items() if k != "INSTRUMENT_LIFECYCLE_PROCEDURE"}}
     assert trial_identity_key(base) != trial_identity_key(stripped)
+
+
+def test_halt_registry_digest_rekeys_trials(monkeypatch) -> None:
+    import pandas as pd
+
+    import src.mhs.venue_halts as venue_halts
+    from src.mhs.live_strategy import capture_params_snapshot
+    from src.mhs.run_history import trial_identity_key
+    from src.mhs.venue_halts import VenueHaltInterval, assemble_venue_halt_registry
+
+    base_snapshot = capture_params_snapshot()
+    assert "VENUE_HALT_REGISTRY_DIGEST" in base_snapshot
+    halt = VenueHaltInterval(
+        halt_id="2022-05-01T22:27Z",
+        start=pd.Timestamp("2022-05-01T22:27Z"),
+        end=pd.Timestamp("2022-05-01T22:36:00Z"),
+        present_symbols=12,
+        zero_symbols=12,
+        evidence="test halt",
+        verified_at=pd.Timestamp("2026-07-01T00:00:00Z"),
+    )
+    changed = VenueHaltInterval(
+        halt_id="2022-05-01T22:27Z",
+        start=pd.Timestamp("2022-05-01T22:27Z"),
+        end=pd.Timestamp("2022-05-01T22:39:00Z"),
+        present_symbols=12,
+        zero_symbols=12,
+        evidence="test halt",
+        verified_at=pd.Timestamp("2026-07-01T00:00:00Z"),
+    )
+    monkeypatch.setattr(
+        venue_halts, "load_venue_halt_registry",
+        lambda path=None: assemble_venue_halt_registry([halt]),
+    )
+    venue_halts.clear_venue_halt_registry_cache()
+    one = capture_params_snapshot()
+    monkeypatch.setattr(
+        venue_halts, "load_venue_halt_registry",
+        lambda path=None: assemble_venue_halt_registry([changed]),
+    )
+    venue_halts.clear_venue_halt_registry_cache()
+    two = capture_params_snapshot()
+    assert one["VENUE_HALT_REGISTRY_DIGEST"] != two["VENUE_HALT_REGISTRY_DIGEST"]
+    assert trial_identity_key({"flags": {}, "params_snapshot": one}) != trial_identity_key(
+        {"flags": {}, "params_snapshot": two}
+    )
+    monkeypatch.undo()
+    venue_halts.clear_venue_halt_registry_cache()
+    assert capture_params_snapshot()["VENUE_HALT_REGISTRY_DIGEST"] == base_snapshot["VENUE_HALT_REGISTRY_DIGEST"]

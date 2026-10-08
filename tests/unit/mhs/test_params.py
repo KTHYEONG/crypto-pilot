@@ -258,3 +258,13 @@ def test_evidence_params_mirror_live_settings() -> None:
     settings = LiveSettings()
     assert settings.delisting_settlement_min_flat_bars == SETTLEMENT_EVIDENCE_MIN_FLAT_BARS
     assert settings.delisting_settlement_price_rtol == SETTLEMENT_EVIDENCE_PRICE_RTOL
+
+
+def test_forced_exit_lead_mirrors_live() -> None:
+    import pandas as pd
+
+    from src.live.settings import LiveSettings
+    from src.mhs.params import DELIST_FORCED_EXIT_LEAD
+
+    live_horizon = pd.Timedelta(days=1) + pd.Timedelta(hours=LiveSettings().delisting_block_lead_hours)
+    assert DELIST_FORCED_EXIT_LEAD == live_horizon  # noqa: SIM300

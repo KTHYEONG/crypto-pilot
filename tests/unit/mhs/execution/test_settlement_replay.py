@@ -21,6 +21,7 @@ def _event(
     price: float = 2.0,
     source: str = "venue",
     fee: float = 5.0,
+    announced: str | None = None,
 ) -> InstrumentSettlementEvent:
     dv = pd.Timestamp(delivery, tz="UTC")
     lt = pd.Timestamp(last_trade, tz="UTC")
@@ -32,7 +33,7 @@ def _event(
         settlement_price=price,
         fee_bps=fee,
         source_digest="sha256:test",
-        announced_at=pd.Timestamp("2022-01-07 02:00", tz="UTC"),
+        announced_at=pd.Timestamp(announced, tz="UTC") if announced is not None else lt,
         last_trade_at=lt,
         price_source=source,  # type: ignore[arg-type]
     )
@@ -404,3 +405,118 @@ def test_conflicting_overlap_event_fails_closed() -> None:
     window = _window(grid, [str(grid[0])], {"AUSDT": [0.5]}, events=(event, dataclasses.replace(event, settlement_price=3.0)))
     with pytest.raises(DataIntegrityError, match="conflicting settlement"):
         replay_execution_windows((window,), 10000.0, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec())
+
+
+def _far_event(announced: str, base: pd.Timestamp) -> InstrumentSettlementEvent:
+    far = base + pd.Timedelta(days=100)
+    return _event(
+        delivery=str(far), last_trade=str(far), announced=announced,
+    )
+
+
+def test_post_announcement_reentry_blocked_in_replay() -> None:
+    grid = _grid(periods=60)
+    ev = _far_event(str(grid[15]), grid[0])
+    w = _window(
+        grid, [str(grid[0]), str(grid[10]), str(grid[20])],
+        {"AUSDT": [0.5, 0.0, 0.5], "BUSDT": [0.0, 0.0, 0.0]},
+        events=(ev,), closes={"AUSDT": 100.0, "BUSDT": 100.0},
+    )
+    result = replay_execution_windows((w,), 10000.0, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec())
+    assert result.termination_counts.get("DELISTING_ENTRY_BLOCKED", 0) >= 1
+    exit_ts = result.simulated_fills[
+        (result.simulated_fills["symbol"] == "AUSDT")
+        & (result.simulated_fills["quantity_delta"] < 0)
+    ].iloc[0]["timestamp"]
+    later_entries = result.simulated_fills[
+        (result.simulated_fills["symbol"] == "AUSDT")
+        & (result.simulated_fills["quantity_delta"] > 0)
+        & (result.simulated_fills["timestamp"] > exit_ts)
+    ]
+    assert later_entries.empty
+
+
+def test_forced_exit_before_delivery() -> None:
+    grid = _grid(periods=1600)
+    announced = str(grid[100])
+    delivery = grid[1550]
+    ev = _event(delivery=str(delivery), last_trade=str(delivery), announced=announced)
+    decisions = [str(grid[0]), str(grid[500]), str(grid[1000])]
+    w = _window(
+        grid, decisions,
+        {"AUSDT": [0.5, 0.5, 0.5], "BUSDT": [0.0, 0.0, 0.0]},
+        events=(ev,), closes={"AUSDT": 100.0, "BUSDT": 100.0},
+    )
+    result = replay_execution_windows((w,), 10000.0, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec())
+    assert result.termination_counts.get("DELISTING_FORCED_EXIT", 0) >= 1
+    exits = result.simulated_fills[
+        (result.simulated_fills["symbol"] == "AUSDT")
+        & (result.simulated_fills["quantity_delta"] < 0)
+        & (result.simulated_fills["reason"] != "delist_settlement")
+    ]
+    assert len(exits) == 1
+    assert pd.Timestamp(exits.iloc[0]["timestamp"]) < pd.Timestamp(str(delivery))
+    assert result.termination_counts.get("DELIST_SETTLEMENT", 0) in (None, 0)
+
+
+def test_nan_hold_overridden_by_forced_exit() -> None:
+    grid = _grid(periods=1600)
+    announced = str(grid[100])
+    delivery = grid[1550]
+    ev = _event(delivery=str(delivery), last_trade=str(delivery), announced=announced)
+    decisions = [str(grid[0]), str(grid[500])]
+    w = _window(
+        grid, decisions,
+        {"AUSDT": [0.5, float("nan")], "BUSDT": [0.0, 0.0]},
+        events=(ev,), closes={"AUSDT": 100.0, "BUSDT": 100.0},
+    )
+    result = replay_execution_windows((w,), 10000.0, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec())
+    assert result.termination_counts.get("DELISTING_FORCED_EXIT", 0) >= 1
+    exits = result.simulated_fills[
+        (result.simulated_fills["symbol"] == "AUSDT")
+        & (result.simulated_fills["quantity_delta"] < 0)
+    ]
+    assert len(exits) == 1
+
+
+def _i5_pair() -> tuple:
+    grid = _grid(periods=60)
+    delivery = grid[0] + pd.Timedelta(days=100)
+    decisions = [str(grid[0]), str(grid[20]), str(grid[45])]
+    weights = {"AUSDT": [0.5, 0.5, 0.8], "BUSDT": [0.0, 0.0, 0.0]}
+    closes = {"AUSDT": 100.0, "BUSDT": 100.0}
+    ev_a = _event(delivery=str(delivery), last_trade=str(delivery), announced=str(grid[30]))
+    ev_b = _event(delivery=str(delivery), last_trade=str(delivery), announced=str(grid[50]))
+    w_a = _window(grid, decisions, weights, events=(ev_a,), closes=closes)
+    w_b = _window(grid, decisions, weights, events=(ev_b,), closes=closes)
+    return grid, w_a, w_b
+
+
+def test_announcement_perturbation_after_T_invisible() -> None:
+    grid, w_a, w_b = _i5_pair()
+    bound: str = "OHLCV_IMMEDIATE_TAKER"
+    r_a = replay_execution_windows((w_a,), 10000.0, bound, ExecutionSpec(), retain_event_snapshots=True)  # type: ignore[arg-type]
+    r_b = replay_execution_windows((w_b,), 10000.0, bound, ExecutionSpec(), retain_event_snapshots=True)  # type: ignore[arg-type]
+    cutoff = grid[25]
+    early_a = r_a.simulated_fills[pd.to_datetime(r_a.simulated_fills["timestamp"], utc=True) <= cutoff]
+    early_b = r_b.simulated_fills[pd.to_datetime(r_b.simulated_fills["timestamp"], utc=True) <= cutoff]
+    pd.testing.assert_frame_equal(
+        early_a.reset_index(drop=True), early_b.reset_index(drop=True),
+    )
+    pd.testing.assert_series_equal(r_a.ledger.equity.loc[:cutoff], r_b.ledger.equity.loc[:cutoff])
+    pd.testing.assert_frame_equal(r_a.simulated_units.loc[:cutoff], r_b.simulated_units.loc[:cutoff])
+    pd.testing.assert_series_equal(r_a.ledger.fee_charge.loc[:cutoff], r_b.ledger.fee_charge.loc[:cutoff])
+    pd.testing.assert_series_equal(r_a.ledger.funding_charge.loc[:cutoff], r_b.ledger.funding_charge.loc[:cutoff])
+    assert [g for g in r_a.data_gaps if g.timestamp <= cutoff] == [g for g in r_b.data_gaps if g.timestamp <= cutoff]
+
+
+def test_announcement_difference_starts_at_first_informed_decision() -> None:
+    grid, w_a, w_b = _i5_pair()
+    bound: str = "OHLCV_IMMEDIATE_TAKER"
+    r_a = replay_execution_windows((w_a,), 10000.0, bound, ExecutionSpec())  # type: ignore[arg-type]
+    r_b = replay_execution_windows((w_b,), 10000.0, bound, ExecutionSpec())  # type: ignore[arg-type]
+    assert r_a.termination_counts.get("DELISTING_ENTRY_BLOCKED", 0) >= 1
+    assert r_b.termination_counts.get("DELISTING_ENTRY_BLOCKED", 0) in (None, 0)
+    assert len(r_a.simulated_fills) + 1 == len(r_b.simulated_fills)
+    first_new = r_b.simulated_fills[~r_b.simulated_fills["timestamp"].isin(r_a.simulated_fills["timestamp"])]
+    assert first_new["timestamp"].tolist() == [grid[47]]

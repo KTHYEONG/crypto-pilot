@@ -26,6 +26,7 @@ PARAMS_SNAPSHOT_KEYS: tuple[str, ...] = (
     "COMMITTEE_ADMISSION_PROCEDURE",
     "INSTRUMENT_LIFECYCLE_PROCEDURE",
     "INSTRUMENT_SETTLEMENT_REGISTRY_DIGEST",
+    "VENUE_HALT_REGISTRY_DIGEST",
 )
 
 
@@ -38,6 +39,11 @@ def capture_params_snapshot() -> dict[str, Any]:
             from src.mhs.instrument_settlements import load_instrument_settlement_registry
 
             snap[key] = load_instrument_settlement_registry().digest
+            continue
+        if key == "VENUE_HALT_REGISTRY_DIGEST":
+            from src.mhs.venue_halts import load_venue_halt_registry
+
+            snap[key] = load_venue_halt_registry().digest
             continue
         val = getattr(mhs_params, key)
         if key == "COMMITTEE_OOS_START":

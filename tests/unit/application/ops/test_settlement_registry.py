@@ -307,3 +307,228 @@ def test_subset_build_preserves_other_symbols_and_collection_declarations(tmp_pa
     build = _build(tmp_path, existing=existing, symbols=["ABRUPTUSDT"])
     assert build.registry.settlements == (flat,)
     assert build.registry.truncations == (truncation,)
+
+
+def _halt_lake(root, n_live: int, n_zombie: int = 0) -> None:
+    bars = _stamps(T0, 10)
+    vols = [10.0] * 3 + [0.0] * 4 + [10.0] * 3
+    for i in range(n_live):
+        _write_3m(root / "3m" / f"LIVE{i:02d}USDT.parquet", bars,
+                  [3.0] * 10, vols)
+    for i in range(n_zombie):
+        _write_3m(root / "3m" / f"ZOMB{i:02d}USDT.parquet", bars,
+                  [3.0] * 10, vols)
+
+
+def _zombie_registry(symbols: list[str]) -> object:
+    from src.mhs.instrument_settlements import InstrumentSettlementRecord
+
+    last_trade = T0 + STEP * 3
+    records = [
+        InstrumentSettlementRecord(
+            symbol=symbol,
+            event_id=f"{symbol}:{int(last_trade.value // 1_000_000)}",
+            announced_at=last_trade - pd.Timedelta(days=7),
+            announcement_source="proxy_lead",
+            announcement_evidence="",
+            last_trade_at=last_trade,
+            delivery_at=last_trade,
+            settlement_price=3.0,
+            price_source="curated",
+            price_evidence="test",
+            fee_bps=5.0,
+            evidence_digest="sha256:test",
+            verified_at=HORIZON,
+        )
+        for symbol in symbols
+    ]
+    return assemble_instrument_settlement_registry(records, [])
+
+
+def _build_halts(root, **kwargs):
+    from src.application.ops.settlement_registry import build_venue_halt_registry
+
+    params = {
+        "horizon": T0 + STEP * 10, "settlements": EMPTY_SETTLEMENT_REGISTRY,
+        "verified_at": HORIZON,
+    }
+    params.update(kwargs)
+    return build_venue_halt_registry(root, **params)
+
+
+def test_cross_section_detection(tmp_path) -> None:
+    _halt_lake(tmp_path, 12)
+    registry = _build_halts(tmp_path)
+    assert len(registry.halts) == 1
+    halt = registry.halts[0]
+    assert halt.start == T0 + STEP * 3
+    assert halt.end == T0 + STEP * 7
+    assert (halt.present_symbols, halt.zero_symbols) == (12, 12)
+
+
+def test_single_symbol_flat_tail_is_not_a_halt(tmp_path) -> None:
+    bars = _stamps(T0, 100)
+    _write_3m(tmp_path / "3m" / "FLATUSDT.parquet", bars,
+              [3.0] * 100, [10.0] * 3 + [0.0] * 97)
+    registry = _build_halts(tmp_path)
+    assert registry.halts == ()
+
+
+def test_zombie_tails_excluded(tmp_path) -> None:
+    zombies = [f"ZOMB{i:02d}USDT" for i in range(3)]
+    _halt_lake(tmp_path, 9, 3)
+    registry = _build_halts(tmp_path, settlements=_zombie_registry(zombies))
+    assert registry.halts == ()
+    _halt_lake(tmp_path, 10, 3)
+    registry = _build_halts(tmp_path, settlements=_zombie_registry(zombies))
+    assert len(registry.halts) == 1
+    assert (registry.halts[0].present_symbols, registry.halts[0].zero_symbols) == (10, 10)
+
+
+def test_halt_generator_writes_canonical_bytes(tmp_path) -> None:
+    from src.application.ops.settlement_registry import write_venue_halt_registry
+
+    _halt_lake(tmp_path, 12)
+    registry = _build_halts(tmp_path)
+    first = tmp_path / "first.jsonl"
+    second = tmp_path / "second.jsonl"
+    assert write_venue_halt_registry(registry, first) == 1
+    assert write_venue_halt_registry(registry, second) == 1
+    assert first.read_bytes() == second.read_bytes()
+
+
+def test_halt_grid_expands_for_earlier_archives(tmp_path) -> None:
+    _halt_lake(tmp_path, 12)
+    _write_3m(tmp_path / "3m" / "ZZEARLYUSDT.parquet", _stamps(T0 - STEP * 2, 2), [3.0] * 2, [10.0] * 2)
+    registry = _build_halts(tmp_path)
+    assert registry.halts[0].start == T0 + STEP * 3
+    assert registry.halts[0].present_symbols == 12
+
+
+@pytest.mark.parametrize(("stamps", "volumes"), [
+    ([int(T0.value // 1_000_000)] * 12, [0.0] * 12),
+    ([float("nan")], [0.0]),
+    ([int(T0.value // 1_000_000) + 1], [0.0]),
+    ([int(T0.value // 1_000_000)], [float("nan")]),
+    ([int(T0.value // 1_000_000)], [-1.0]),
+])
+def test_halt_census_rejects_invalid_symbol_bars(tmp_path, stamps, volumes) -> None:
+    _write_3m(tmp_path / "3m" / "BADUSDT.parquet", stamps, [3.0] * len(stamps), volumes)
+    with pytest.raises(DataIntegrityError):
+        _build_halts(tmp_path)
+
+
+def test_positive_volume_after_last_trade_never_counts_as_live(tmp_path) -> None:
+    _halt_lake(tmp_path, 10, 3)
+    zombies = [f"ZOMB{i:02d}USDT" for i in range(3)]
+    for symbol in zombies:
+        _write_3m(tmp_path / "3m" / f"{symbol}.parquet", _stamps(T0, 10), [3.0] * 10, [10.0] * 10)
+    registry = _build_halts(tmp_path, settlements=_zombie_registry(zombies))
+    assert len(registry.halts) == 1
+    assert registry.halts[0].present_symbols == 10
+
+
+def test_halt_generator_rejects_naive_horizon(tmp_path) -> None:
+    from src.application.ops.settlement_registry import build_venue_halt_registry
+
+    _halt_lake(tmp_path, 12)
+    with pytest.raises(DataIntegrityError):
+        build_venue_halt_registry(
+            tmp_path, horizon=pd.Timestamp("2025-01-02"),
+            settlements=EMPTY_SETTLEMENT_REGISTRY, verified_at=HORIZON,
+        )
+
+
+def test_halt_generator_rejects_unreadable_lake(tmp_path) -> None:
+    from src.application.ops.settlement_registry import build_venue_halt_registry
+
+    with pytest.raises(DataIntegrityError):
+        _build_halts(tmp_path / "absent")
+    empty = tmp_path / "empty"
+    (empty / "3m").mkdir(parents=True)
+    with pytest.raises(DataIntegrityError):
+        _build_halts(empty)
+    with pytest.raises(DataIntegrityError):
+        build_venue_halt_registry(
+            tmp_path / "file.parquet", horizon=T0 + STEP * 10,
+            settlements=EMPTY_SETTLEMENT_REGISTRY, verified_at=HORIZON,
+        )
+
+
+def test_halt_generator_rejects_unreadable_archive(tmp_path, monkeypatch) -> None:
+    from pathlib import Path
+
+    from src.application.ops.settlement_registry import build_venue_halt_registry
+
+    _halt_lake(tmp_path, 12)
+    corrupt = tmp_path / "3m" / "CORRUPTUSDT.parquet"
+    corrupt.write_bytes(b"not a parquet file")
+    with pytest.raises(DataIntegrityError, match="unreadable"):
+        _build_halts(tmp_path)
+    corrupt.unlink()
+    real_glob = Path.glob
+
+    def _boom(self, pattern):
+        if pattern == "*.parquet":
+            raise OSError("boom")
+        return real_glob(self, pattern)
+
+    monkeypatch.setattr(Path, "glob", _boom)
+    with pytest.raises(DataIntegrityError, match="unreadable"):
+        build_venue_halt_registry(
+            tmp_path, horizon=T0 + STEP * 10,
+            settlements=EMPTY_SETTLEMENT_REGISTRY, verified_at=HORIZON,
+        )
+
+
+def test_halt_generator_ignores_post_horizon_bars(tmp_path) -> None:
+    bars = _stamps(T0 + STEP * 10, 10)
+    _write_3m(tmp_path / "3m" / "LATEUSDT.parquet", bars,
+              [3.0] * 10, [0.0] * 10)
+    registry = _build_halts(tmp_path)
+    assert registry.halts == ()
+
+
+def test_halt_generator_heartbeat_over_many_archives(tmp_path, caplog) -> None:
+    import logging
+
+    for i in range(101):
+        _write_3m(tmp_path / "3m" / f"S{i:03d}USDT.parquet", _stamps(T0, 10),
+                  [3.0] * 10, [10.0] * 10)
+    with caplog.at_level(logging.INFO, logger="src.application.ops.settlement_registry"):
+        registry = _build_halts(tmp_path)
+    assert registry.halts == ()
+    assert "stage=build_venue_halts scanned=100" in caplog.text
+
+
+def test_halt_generator_groups_disjoint_runs(tmp_path) -> None:
+    bars = _stamps(T0, 20)
+    vols = [10.0] * 3 + [0.0] * 4 + [10.0] * 6 + [0.0] * 4 + [10.0] * 3
+    for i in range(12):
+        _write_3m(tmp_path / "3m" / f"LIVE{i:02d}USDT.parquet", bars,
+                  [3.0] * 20, vols)
+    registry = _build_halts(tmp_path, horizon=T0 + STEP * 20)
+    assert [h.halt_id for h in registry.halts] == [
+        (T0 + STEP * 3).strftime("%Y-%m-%dT%H:%MZ"),
+        (T0 + STEP * 13).strftime("%Y-%m-%dT%H:%MZ"),
+    ]
+
+
+def test_halt_writer_creates_parents_and_cleans_failed_replace(tmp_path, monkeypatch) -> None:
+    import os
+
+    from src.application.ops.settlement_registry import write_venue_halt_registry
+
+    _halt_lake(tmp_path, 12)
+    registry = _build_halts(tmp_path)
+    nested = tmp_path / "nested" / "dir" / "halts.jsonl"
+    assert write_venue_halt_registry(registry, nested) == 1
+    assert nested.exists()
+
+    def _boom(*args, **kwargs):
+        raise OSError("boom")
+
+    monkeypatch.setattr(os, "replace", _boom)
+    with pytest.raises(OSError, match="boom"):
+        write_venue_halt_registry(registry, tmp_path / "other.jsonl")
+    assert not (tmp_path / "other.jsonl").exists()
