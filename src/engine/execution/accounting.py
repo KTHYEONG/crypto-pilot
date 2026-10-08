@@ -22,7 +22,7 @@ from src.common.errors import DataIntegrityError
 
 from .contracts import SimulatedInventoryLedgerResult
 
-# 먼지 수량 임계, finalize의 기존 1e-12 및 net_units 임계와 동일
+# Dust quantity threshold matching finalize and net_units threshold.
 QTY_EPS: float = 1e-12
 
 
@@ -290,9 +290,7 @@ class CausalPortfolioState:
         self.last_marks = np.where(finite, marks, self.last_marks)
         held_unknown = (np.abs(self.units) >= QTY_EPS) & ~np.asarray(funding_known, dtype=bool)
         if bool(np.any(held_unknown)):
-            raise DataIntegrityError(
-                "unknown funding for a held position fails closed: cannot settle funding"
-            )
+            raise DataIntegrityError("unknown funding for a held position fails closed: cannot settle funding")
         priced = np.where(finite, marks, 0.0)
         rates = np.asarray(funding_rates, dtype="float64")
         units = np.asarray(self.units, dtype="float64")
@@ -448,6 +446,4 @@ def reconcile_causal_state(
     expected = float(ledger.equity.iloc[-1]) if len(ledger.equity) else float("nan")
     actual = state.equity()
     if not bool(np.isclose(actual, expected, atol=atol, rtol=rtol)):
-        raise DataIntegrityError(
-            f"causal accounting diverged from ledger (state={actual!r} ledger={expected!r})"
-        )
+        raise DataIntegrityError(f"causal accounting diverged from ledger (state={actual!r} ledger={expected!r})")

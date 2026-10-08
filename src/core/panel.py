@@ -20,9 +20,9 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from src.common.errors import DataIntegrityError
-from src.market_data.storage.ohlcv import is_temp_artifact
 from src.core.data_policy import MHS_DATA_POLICY_DEFAULT, MhsDataPolicy
 from src.core.params import PANEL_MIN_HISTORY_BARS
+from src.market_data.storage.ohlcv import is_temp_artifact
 from src.quant.universe.pit_universe import symbol_partition
 
 DATA_POLICY_LEGACY: str = "legacy"
@@ -64,7 +64,9 @@ class PanelQuarantine:
     def enforce_limit(self, universe_size: int) -> None:
         limit = min(QUARANTINE_MAX_SYMBOLS, math.ceil(QUARANTINE_MAX_FRACTION * universe_size))
         if len(self.records) > limit:
-            raise DataIntegrityError(f"signal quarantine {len(self.records)} symbols exceeds limit {limit} of universe {universe_size}")
+            raise DataIntegrityError(
+                f"signal quarantine {len(self.records)} symbols exceeds limit {limit} of universe {universe_size}"
+            )
 
 
 def build_uniform_grid(start: pd.Timestamp, end: pd.Timestamp, interval: str) -> pd.DatetimeIndex:
@@ -81,7 +83,8 @@ def build_uniform_grid(start: pd.Timestamp, end: pd.Timestamp, interval: str) ->
 
 
 def partition_symbols(
-    symbols: Sequence[str], partition: Literal["dev", "holdout", "all"],
+    symbols: Sequence[str],
+    partition: Literal["dev", "holdout", "all"],
 ) -> list[str]:
     """Order-preserving delegate to ``pit_universe.symbol_partition``.
 
@@ -98,12 +101,7 @@ def partition_symbols(
 def zombie_masked_timestamps(
     path: str, start_ms: int, end_ms: int, interval_ms: int, run_bars: int = ZOMBIE_FLAT_RUN_BARS
 ) -> np.ndarray:
-    """좀비 구간 마스크: run_bars 이상 연속된 flat(volume==0 and high==low) 바의 타임스탬프.
-
-    인과적이다: 각 바의 마스크 여부는 그 바 이전(포함) 바들로만 판단되며,
-    판정은 윈도우 시작 전 run_bars-1 구간을 함께 읽어 워밍업한다. 중복
-    타임스탬프는 keep-last 로 해소한다.
-    """
+    """Causal mask of timestamps with run_bars consecutive flat bars (volume == 0 and high == low)."""
     missing = {"volume", "high", "low"} - set(pq.read_schema(path).names)
     if missing:
         raise DataIntegrityError(f"zombie mask requires {sorted(missing)} in {path}")
@@ -176,7 +174,9 @@ def load_base_panel(
         raise ValueError(f"unknown data_policy '{data_policy}' (shared default {MHS_DATA_POLICY_DEFAULT})")
     data_policy = str(MhsDataPolicy(data_policy))
     grid = build_uniform_grid(start, end, interval)
-    paths = sorted(p for p in glob.glob(os.path.join(root, interval, "*.parquet")) if not is_temp_artifact(os.path.basename(p)))
+    paths = sorted(
+        p for p in glob.glob(os.path.join(root, interval, "*.parquet")) if not is_temp_artifact(os.path.basename(p))
+    )
     names = [os.path.basename(p).removesuffix(".parquet") for p in paths]
     keep = set(partition_symbols(names, partition))
 
@@ -215,7 +215,7 @@ def load_base_panel(
         if masking:
             masks[path] = zombie_masked_timestamps(path, start_ms, end_ms, interval_ms)
             window_ts = ts_ms[keep_rows]
-            # 좀비 꼬리(상장폐지 후 거래소가 계속 내주는 flat 봉)는 수집 누락이 아니라 생애 종료이므로 격리 대상이 아니다.
+            # Delisted flat tails indicate instrument lifecycle end rather than missing data.
             zombie_tail = bool(window_ts.size) and bool(np.isin(window_ts.max(), masks[path]))
             keep_rows &= ~np.isin(ts_ms, masks[path])
         else:
@@ -223,7 +223,13 @@ def load_base_panel(
         idx = idx[keep_rows]
         if len(idx.drop_duplicates(keep="last")) < survivor_min_bars:
             continue
-        if quarantine is not None and not causal_history and not zombie_tail and idx.max() < end and idx.max() >= end - DECISION_BAR_LOOKBACK:
+        if (
+            quarantine is not None
+            and not causal_history
+            and not zombie_tail
+            and idx.max() < end
+            and idx.max() >= end - DECISION_BAR_LOOKBACK
+        ):
             quarantine.add(sym, "decision_bar_missing")
             scan_quarantined += 1
             continue
@@ -235,10 +241,7 @@ def load_base_panel(
     if allocation_admission is not None:
         allocation_admission(len(grid) * len(survivors) * len(columns) * 8 * 2)
 
-    values = {
-        column: np.full((len(grid), len(survivors)), np.nan, dtype="float64")
-        for column in columns
-    }
+    values = {column: np.full((len(grid), len(survivors)), np.nan, dtype="float64") for column in columns}
     failed_columns: list[int] = []
     for column_index, (path, sym) in enumerate(survivors):
         try:
@@ -283,10 +286,7 @@ def load_base_panel(
 
     if not failed_columns:
         symbols = [sym for _, sym in survivors]
-        return {
-            column: pd.DataFrame(values[column], index=grid, columns=symbols, copy=False)
-            for column in columns
-        }
+        return {column: pd.DataFrame(values[column], index=grid, columns=symbols, copy=False) for column in columns}
     keep_mask = np.ones(len(survivors), dtype=bool)
     keep_mask[failed_columns] = False
     symbols = [sym for (_, sym), keep in zip(survivors, keep_mask, strict=True) if keep]
@@ -320,10 +320,7 @@ def slice_base_panel(
     survivors = [c for c in ref.columns if valid_counts[c] >= min_bars]
     if not survivors:
         raise ValueError("no symbol survived the panel filters")
-    return {
-        column: frame.loc[start:end, survivors].astype("float64")
-        for column, frame in base_panel.items()
-    }
+    return {column: frame.loc[start:end, survivors].astype("float64") for column, frame in base_panel.items()}
 
 
 def liquid_half_eligibility(
@@ -339,12 +336,8 @@ def liquid_half_eligibility(
     ``min_history_bars`` bars. Missing history is False, never zero-filled.
     """
     if lookback_bars < 1 or min_history_bars < 1 or min_history_bars > lookback_bars:
-        raise ValueError(
-            "lookback_bars and min_history_bars must satisfy 1 <= min_history_bars <= lookback_bars"
-        )
-    trailing_mean = quote_volume.rolling(
-        lookback_bars, min_periods=min_history_bars
-    ).mean()
+        raise ValueError("lookback_bars and min_history_bars must satisfy 1 <= min_history_bars <= lookback_bars")
+    trailing_mean = quote_volume.rolling(lookback_bars, min_periods=min_history_bars).mean()
     median = trailing_mean.median(axis=1)
     eligible = trailing_mean.ge(median, axis=0)
     return eligible.fillna(False)

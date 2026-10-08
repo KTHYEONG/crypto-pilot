@@ -101,7 +101,9 @@ class StrategyBacktestRequest:
         if self.base_spec.one_way_taker_bps() != 6.0 or self.stress_spec.one_way_taker_bps() != 18.0:
             raise DataIntegrityError("base cost must be 6 bps and stress cost 18 bps one-way")
         if self.execution_bound not in ("OHLCV_IMMEDIATE_TAKER", "OHLCV_STRICT_PROXY"):
-            raise DataIntegrityError(f"execution_bound must be a registered crossing model, got {self.execution_bound!r}")
+            raise DataIntegrityError(
+                f"execution_bound must be a registered crossing model, got {self.execution_bound!r}"
+            )
         if self.base_spec.decision_anchor != "submit_bar" or self.stress_spec.decision_anchor != "submit_bar":
             raise DataIntegrityError("base and stress specs must use decision_anchor='submit_bar'")
         if not isinstance(self.report_periods, tuple) or not self.report_periods:
@@ -144,9 +146,7 @@ class StrategyBacktestRun:
 
 
 class LakeCoverageError(DataIntegrityError):
-    """The local 3m lake lacks bars for an instrument the strategy would have traded. Dropping
-    it would select the universe on the researcher's data completeness, which live trading
-    does not have; the run fails until the lake is repaired."""
+    """Raised when the local 3m lake lacks bars for a selected instrument."""
 
 
 def _strategy_delisting_block(
@@ -192,13 +192,15 @@ def _unresolved_lake_gap_intervals(
     return [
         iv
         for iv in active_intervals(plane="ohlcv_3m")
-        if iv.extent in ("OPEN_EDGE", "UNSCOPED")
-        and not source_gap_superseded_by_settlement(iv, settlement_registry)
+        if iv.extent in ("OPEN_EDGE", "UNSCOPED") and not source_gap_superseded_by_settlement(iv, settlement_registry)
     ]
 
 
 def _holding_window(
-    decision_index: pd.DatetimeIndex, *, entry_hour: int, holding: pd.Timedelta,
+    decision_index: pd.DatetimeIndex,
+    *,
+    entry_hour: int,
+    holding: pd.Timedelta,
 ) -> tuple[pd.DatetimeIndex, pd.DatetimeIndex]:
     starts = decision_index + pd.Timedelta(days=1, hours=int(entry_hour))
     return starts, starts + holding
@@ -257,9 +259,7 @@ def assert_lake_coverage(
                 continue
             break
     if offending:
-        details = "; ".join(
-            f"{sym} (first_day={day.date().isoformat()})" for sym, day in sorted(offending.items())
-        )
+        details = "; ".join(f"{sym} (first_day={day.date().isoformat()})" for sym, day in sorted(offending.items()))
         raise LakeCoverageError(
             f"strategy universe crosses unrepaired 3m lake gaps for {len(offending)} symbol(s): "
             f"{details}; run `data collect` (3m) + `data verify-source-gaps` to repair the lake"
@@ -283,7 +283,9 @@ def strategy_interior_withdrawals(
     values = np.zeros((len(decision_index), len(census)), dtype=bool)
     holding = pd.Timedelta(days=1) + pd.Timedelta(minutes=int(base_spec.passive_timeout_minutes))
     starts, ends = _holding_window(
-        decision_index, entry_hour=int(strategy.entry_hour_utc), holding=holding,
+        decision_index,
+        entry_hour=int(strategy.entry_hour_utc),
+        holding=holding,
     )
     for iv in active_intervals(plane="ohlcv_3m"):
         if iv.extent != "INTERIOR":
@@ -338,8 +340,11 @@ def strategy_blocked_decisions(
         return frame
     column_of = {sym: pos for pos, sym in enumerate(census)}
     values = _strategy_delisting_block(
-        decision_index, census, column_of,
-        snapshot_hour=snapshot_hour, settlement_registry=settlement_registry,
+        decision_index,
+        census,
+        column_of,
+        snapshot_hour=snapshot_hour,
+        settlement_registry=settlement_registry,
     )
     intervals = _withdrawable_gap_intervals(settlement_registry)
     if intervals:
@@ -366,7 +371,7 @@ def _strategy_execution_available_end(path: Path) -> pd.Timestamp | str:
         return "MISSING"
     try:
         frame = pd.read_parquet(path, columns=["timestamp"])
-    except Exception as exc:  # noqa: BLE001 - 판독 불가 사유를 진단 메시지로 승격한다.
+    except Exception as exc:  # noqa: BLE001 - elevate unreadable cause to diagnostic
         return f"UNREADABLE({type(exc).__name__})"
     stamps = pd.to_numeric(frame["timestamp"], errors="coerce").dropna() if not frame.empty else frame
     if not len(stamps):
@@ -413,7 +418,7 @@ def assert_strategy_execution_coverage(
         if not bool(granted.any()):
             continue
         last_true = pd.Timestamp(roster.index[int(np.flatnonzero(granted)[-1])])
-        # 결정일 D의 진입은 D+1 entry_hour, 청산은 다음 진입(D+2)이며 정산 여유까지 가격이 필요하다.
+        # Entry at D+1 entry_hour, exit at D+2; requires prices through settlement buffer.
         required = last_true + pd.Timedelta(days=2, hours=int(entry_hour_utc)) + settlement
         if required > execution_end:
             required = execution_end
@@ -421,21 +426,21 @@ def assert_strategy_execution_coverage(
         if isinstance(available, str):
             deficient.append(f"{symbol} (required={required.isoformat()}, available={available})")
         elif required - available > pd.Timedelta(minutes=3):
-            deficient.append(
-                f"{symbol} (required={required.isoformat()}, available={available.isoformat()})"
-            )
+            deficient.append(f"{symbol} (required={required.isoformat()}, available={available.isoformat()})")
     if deficient:
         raise DataIntegrityError(
-            f"strategy execution coverage incomplete for {len(deficient)} symbol(s): "
-            + "; ".join(deficient)
+            f"strategy execution coverage incomplete for {len(deficient)} symbol(s): " + "; ".join(deficient)
         )
 
 
 def _admit_source_stage(budget: MhsMemoryBudget, initial_swap_bytes: int | None) -> None:
     """Admit the source panel stage before any wide allocation."""
     assert_mhs_stage_allocation(
-        stage="strategy_source_panel", estimated_bytes=0,
-        budget=budget, replay=False, initial_swap_bytes=initial_swap_bytes,
+        stage="strategy_source_panel",
+        estimated_bytes=0,
+        budget=budget,
+        replay=False,
+        initial_swap_bytes=initial_swap_bytes,
     )
 
 
@@ -443,26 +448,44 @@ def _load_strategy_source(
     request: StrategyBacktestRequest,
     budget: MhsMemoryBudget,
     initial_swap_bytes: int | None,
-) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, pd.DataFrame], pd.DataFrame, tuple[str, ...], dict[str, pd.Series], dict[str, str], str]:
+) -> tuple[
+    pd.DataFrame,
+    pd.DataFrame,
+    dict[str, pd.DataFrame],
+    pd.DataFrame,
+    tuple[str, ...],
+    dict[str, pd.Series],
+    dict[str, str],
+    str,
+]:
     """Read the complete historical 1h census and derive daily and funding planes."""
     root = str(request.data_root) if request.data_root is not None else str(FUTURES_DATA_DIR / "ohlcv")
 
     def _admit_panel(estimated_bytes: int) -> None:
         assert_mhs_stage_allocation(
-            stage="strategy_source_panel", estimated_bytes=int(estimated_bytes),
-            budget=budget, replay=False, initial_swap_bytes=initial_swap_bytes,
+            stage="strategy_source_panel",
+            estimated_bytes=int(estimated_bytes),
+            budget=budget,
+            replay=False,
+            initial_swap_bytes=initial_swap_bytes,
         )
 
     panel = load_base_panel(
-        root, "1h", ("close", "quote_vol", "taker_buy_quote"),
-        request.source_start, request.evaluation_end, partition="all",
-        selection_mode="causal_history", allocation_admission=_admit_panel,
+        root,
+        "1h",
+        ("close", "quote_vol", "taker_buy_quote"),
+        request.source_start,
+        request.evaluation_end,
+        partition="all",
+        selection_mode="causal_history",
+        allocation_admission=_admit_panel,
     )
     close_1h = panel["close"]
     quote_1h = panel["quote_vol"]
     census = tuple(close_1h.columns)
     assert_settlement_registry_complete(
-        Path(root), census,
+        Path(root),
+        census,
         audit_end=request.evaluation_end,
         registry=settlement_registry_for_root(root),
     )
@@ -472,11 +495,21 @@ def _load_strategy_source(
     completed = (grid_1h + pd.Timedelta(hours=1)).to_numpy(dtype="datetime64[ns]")
     hourly_available_at = pd.DataFrame(
         np.tile(completed[:, None], (1, len(census))),
-        index=grid_1h, columns=list(census),
+        index=grid_1h,
+        columns=list(census),
     ).apply(lambda col: pd.to_datetime(col).dt.tz_localize("UTC"))
     funding_by_symbol, funding_failures = _load_funding_series(list(census))
     hourly_panels = {key: panel[key] for key in ("close", "quote_vol", "taker_buy_quote")}
-    return daily_close, daily_quote_volume, hourly_panels, hourly_available_at, census, funding_by_symbol, funding_failures, root
+    return (
+        daily_close,
+        daily_quote_volume,
+        hourly_panels,
+        hourly_available_at,
+        census,
+        funding_by_symbol,
+        funding_failures,
+        root,
+    )
 
 
 def _strategy_execution_fence(candidate: StrategyTargets) -> pd.Timestamp:
@@ -497,16 +530,25 @@ def _strategy_window_stream(
     live_accumulators: _LiveAccumulatorSets,
 ) -> Iterator[ExecutionReplayWindow]:
     """Yield one materialized 3m window at a time with carried holdings retained."""
+
     def _required() -> frozenset[str]:
         if not live_accumulators:
             return frozenset()
         return live_required_symbols(live_accumulators[-1])
 
     yield from _iter_mhs_execution_windows(
-        candidate.target_weights, candidate.signal_available_at, root, "3m",
-        stream_start, stream_end, funding_by_symbol, base_spec,
-        funding_failures=funding_failures, required_symbols=_required,
-        budget_bytes=budget.replay_tree_pss_bytes, reserve_bytes=budget.min_available_bytes,
+        candidate.target_weights,
+        candidate.signal_available_at,
+        root,
+        "3m",
+        stream_start,
+        stream_end,
+        funding_by_symbol,
+        base_spec,
+        funding_failures=funding_failures,
+        required_symbols=_required,
+        budget_bytes=budget.replay_tree_pss_bytes,
+        reserve_bytes=budget.min_available_bytes,
     )
 
 
@@ -520,34 +562,56 @@ def build_request_targets(
     budget = resolve_mhs_memory_budget(request.memory_budget)
     initial_swap_bytes = _current_tree_swap_bytes()
     _admit_source_stage(budget, initial_swap_bytes)
-    daily_close, daily_quote_volume, hourly_panels, hourly_available_at, census, funding_by_symbol, funding_failures, root = _load_strategy_source(
-        request, budget, initial_swap_bytes
-    )
+    (
+        daily_close,
+        daily_quote_volume,
+        hourly_panels,
+        hourly_available_at,
+        census,
+        funding_by_symbol,
+        funding_failures,
+        root,
+    ) = _load_strategy_source(request, budget, initial_swap_bytes)
     blocked_decisions = strategy_blocked_decisions(
-        pd.DatetimeIndex(daily_close.index), census, strategy=request.strategy, base_spec=request.base_spec,
+        pd.DatetimeIndex(daily_close.index),
+        census,
+        strategy=request.strategy,
+        base_spec=request.base_spec,
         settlement_registry=settlement_registry_for_root(root),
     )
     roster = build_pit_roster(
-        daily_close, daily_quote_volume, census,
-        breadth=request.strategy.breadth, blocked_decisions=blocked_decisions,
+        daily_close,
+        daily_quote_volume,
+        census,
+        breadth=request.strategy.breadth,
+        blocked_decisions=blocked_decisions,
     )
     registry = settlement_registry_for_root(root)
     delisting_values = _strategy_delisting_block(
-        pd.DatetimeIndex(daily_close.index), list(census),
+        pd.DatetimeIndex(daily_close.index),
+        list(census),
         {sym: pos for pos, sym in enumerate(census)},
         snapshot_hour=int(request.strategy.snapshot_hour_utc),
         settlement_registry=registry,
     )
-    delisting_frame = pd.DataFrame(delisting_values, index=pd.DatetimeIndex(daily_close.index), columns=list(census), dtype=bool)
+    delisting_frame = pd.DataFrame(
+        delisting_values, index=pd.DatetimeIndex(daily_close.index), columns=list(census), dtype=bool
+    )
     roster_no_gap = build_pit_roster(
-        daily_close, daily_quote_volume, census,
-        breadth=request.strategy.breadth, blocked_decisions=delisting_frame,
+        daily_close,
+        daily_quote_volume,
+        census,
+        breadth=request.strategy.breadth,
+        blocked_decisions=delisting_frame,
     )
     assert_lake_coverage(
-        pd.DatetimeIndex(daily_close.index), roster_no_gap,
-        strategy=request.strategy, base_spec=request.base_spec,
+        pd.DatetimeIndex(daily_close.index),
+        roster_no_gap,
+        strategy=request.strategy,
+        base_spec=request.base_spec,
         settlement_registry=registry,
-        evaluation_start=request.evaluation_start, evaluation_end=request.evaluation_end,
+        evaluation_start=request.evaluation_start,
+        evaluation_end=request.evaluation_end,
     )
     ever_selected = [sym for sym in census if bool(roster[sym].any())]
     assert_strategy_execution_coverage(
@@ -581,8 +645,13 @@ def build_request_targets(
         strategy=request.strategy,
     )
     context = StrategySourceContext(
-        census=census, funding_by_symbol=funding_by_symbol, funding_failures=funding_failures,
-        root=root, budget=budget, daily_close=daily_close, daily_quote_volume=daily_quote_volume,
+        census=census,
+        funding_by_symbol=funding_by_symbol,
+        funding_failures=funding_failures,
+        root=root,
+        budget=budget,
+        daily_close=daily_close,
+        daily_quote_volume=daily_quote_volume,
     )
     return candidate, context
 
@@ -612,11 +681,15 @@ def run_strategy_backtest(request: StrategyBacktestRequest) -> StrategyBacktestR
     census = context.census
     settlement_registry = settlement_registry_for_root(root)
     blocked_decisions = strategy_blocked_decisions(
-        pd.DatetimeIndex(context.daily_close.index), census, strategy=request.strategy, base_spec=request.base_spec,
+        pd.DatetimeIndex(context.daily_close.index),
+        census,
+        strategy=request.strategy,
+        base_spec=request.base_spec,
         settlement_registry=settlement_registry,
     )
     delisting_only = _strategy_delisting_block(
-        pd.DatetimeIndex(context.daily_close.index), list(census),
+        pd.DatetimeIndex(context.daily_close.index),
+        list(census),
         {sym: pos for pos, sym in enumerate(census)},
         snapshot_hour=int(request.strategy.snapshot_hour_utc),
         settlement_registry=settlement_registry,
@@ -627,15 +700,26 @@ def run_strategy_backtest(request: StrategyBacktestRequest) -> StrategyBacktestR
 
     def _window_stream() -> Iterator[ExecutionReplayWindow]:
         yield from _strategy_window_stream(
-            candidate, candidate.signal_available_at[0], execution_end, root,
-            funding_by_symbol, funding_failures, request.base_spec, budget, live_accumulators,
+            candidate,
+            candidate.signal_available_at[0],
+            execution_end,
+            root,
+            funding_by_symbol,
+            funding_failures,
+            request.base_spec,
+            budget,
+            live_accumulators,
         )
 
     window_stream = _window_stream()
     evidence = evaluate_strategy_backtest(
-        candidate, window_stream, initial_equity=request.initial_equity,
-        base_spec=request.base_spec, stress_spec=request.stress_spec,
-        report_periods=request.report_periods, live_accumulators=live_accumulators,
+        candidate,
+        window_stream,
+        initial_equity=request.initial_equity,
+        base_spec=request.base_spec,
+        stress_spec=request.stress_spec,
+        report_periods=request.report_periods,
+        live_accumulators=live_accumulators,
         execution_bound=request.execution_bound,
     )
     for period in request.report_periods:
@@ -643,12 +727,18 @@ def run_strategy_backtest(request: StrategyBacktestRequest) -> StrategyBacktestR
         if float(row["base_coverage"]) != 1.0 or float(row["stress_coverage"]) != 1.0:
             raise DataIntegrityError(f"report period {period.label!r} is not fully covered by daily evidence")
     _, interior_frame = strategy_interior_withdrawals(
-        pd.DatetimeIndex(context.daily_close.index), census, strategy=request.strategy,
-        base_spec=request.base_spec, settlement_registry=settlement_registry,
+        pd.DatetimeIndex(context.daily_close.index),
+        census,
+        strategy=request.strategy,
+        base_spec=request.base_spec,
+        settlement_registry=settlement_registry,
     )
     decision_index = pd.DatetimeIndex(context.daily_close.index)
     no_gap_roster = build_pit_roster(
-        context.daily_close, context.daily_quote_volume, census, breadth=request.strategy.breadth,
+        context.daily_close,
+        context.daily_quote_volume,
+        census,
+        breadth=request.strategy.breadth,
         blocked_decisions=pd.DataFrame(delisting_only, index=decision_index, columns=list(census)),
     )
     entries = decision_index + pd.Timedelta(days=1, hours=int(request.strategy.entry_hour_utc))
@@ -656,12 +746,15 @@ def run_strategy_backtest(request: StrategyBacktestRequest) -> StrategyBacktestR
     affected = (interior_frame & no_gap_roster).loc[scored].sum()
     interior_counts = {str(sym): int(days) for sym, days in affected.items() if days > 0}
     withdrawals: tuple[Mapping[str, object], ...] = tuple(
-        {"symbol": sym, "extent": "INTERIOR", "days": int(days)}
-        for sym, days in sorted(interior_counts.items())
+        {"symbol": sym, "extent": "INTERIOR", "days": int(days)} for sym, days in sorted(interior_counts.items())
     )
     return StrategyBacktestRun(
-        request=request, candidate=candidate, evidence=evidence,
-        execution_start=execution_start, execution_end=execution_end, source_symbols=census,
+        request=request,
+        candidate=candidate,
+        evidence=evidence,
+        execution_start=execution_start,
+        execution_end=execution_end,
+        source_symbols=census,
         source_gap_excluded_symbols=tuple(sorted(sym for sym in census if bool(blocked_decisions[sym].any()))),
         source_gap_blocked_decisions=int(blocked_decisions.to_numpy(dtype=bool).sum()),
         delisting_blocked_decisions=int(delisting_only.sum()),
