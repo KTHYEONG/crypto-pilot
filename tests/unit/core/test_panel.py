@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from src.mhs.contracts import MhsDiagnosticRequest
+from src.lab.mhs.contracts import MhsDiagnosticRequest
 import os
 from pathlib import Path
 
@@ -316,7 +316,7 @@ def test_load_panel_stage_uses_pit_min_history_bars(monkeypatch) -> None:
     import types
     import pandas as pd
     import pytest
-    import src.mhs.pipeline.stages.panel as stage
+    import src.lab.mhs.pipeline.stages.panel as stage
     from src.core.params import PANEL_MIN_HISTORY_BARS
 
     captured: dict[str, object] = {}
@@ -338,7 +338,7 @@ def test_load_panel_stage_uses_pit_min_history_bars(monkeypatch) -> None:
 
 def test_load_feature_panels_uses_pit_min_history_bars(monkeypatch) -> None:
     import pandas as pd
-    import src.mhs.evaluation.diagnostics as diagnostics
+    import src.lab.mhs.evaluation.diagnostics as diagnostics
     from src.core.params import PANEL_MIN_HISTORY_BARS
 
     grid = pd.date_range("2024-01-01", periods=3, freq="1h", tz="UTC")

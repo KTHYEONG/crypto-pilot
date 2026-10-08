@@ -122,7 +122,7 @@ def test_live_chain_does_not_import_research_history() -> None:
             sys.executable,
             "-c",
             "import sys, src.live.portfolio_state, src.live.execution_quality;"
-            " print('src.mhs.run_history' in sys.modules)",
+            " print('src.lab.mhs.run_history' in sys.modules)",
         ],
         capture_output=True,
         text=True,

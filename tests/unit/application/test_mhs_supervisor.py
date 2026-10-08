@@ -11,7 +11,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-import src.application.mhs_supervisor as sup
+import src.lab.mhs.app.supervisor as sup
 
 
 def _stamps():
@@ -315,7 +315,7 @@ def test_code_identity_null_when_worker_unreadable(tmp_path, monkeypatch) -> Non
     real_read_bytes = Path.read_bytes
 
     def _read_boom(self, *args, **kwargs):
-        if self.name == "mhs_worker.py":
+        if self.name == "worker.py":
             raise OSError("injected provenance boom")
         return real_read_bytes(self, *args, **kwargs)
 
@@ -646,7 +646,7 @@ def test_cleanup_failure_keeps_computation_outcome(tmp_path, monkeypatch, caplog
     _install_fake(monkeypatch, 0, 0.0, _on_start)
     monkeypatch.setattr(sup, "apply_retention", _boom)
     _ensure_evidence(db)
-    with caplog.at_level("WARNING", logger="src.application.mhs_supervisor"):
+    with caplog.at_level("WARNING", logger="src.lab.mhs.app.supervisor"):
         run = sup.run_mhs_process_backtest(
             start=start, end=end, data_root=None, result_output=result, poll_seconds=0.05,
             registry_path=db, run_id=run_id,
@@ -679,7 +679,7 @@ def test_unsatisfied_budget_reported_explicitly(tmp_path, monkeypatch, caplog) -
         ),
     )
     _ensure_evidence(db)
-    with caplog.at_level("WARNING", logger="src.application.mhs_supervisor"):
+    with caplog.at_level("WARNING", logger="src.lab.mhs.app.supervisor"):
         run = sup.run_mhs_process_backtest(
             start=start, end=end, data_root=None, result_output=result, poll_seconds=0.05,
             registry_path=db, run_id=run_id,
@@ -710,7 +710,7 @@ def test_plan_failure_recorded_separately(tmp_path, monkeypatch, caplog) -> None
 
     _install_fake(monkeypatch, 0, 0.0, _on_start)
     monkeypatch.setattr(sup, "plan_retention", _boom)
-    with caplog.at_level("WARNING", logger="src.application.mhs_supervisor"):
+    with caplog.at_level("WARNING", logger="src.lab.mhs.app.supervisor"):
         run = sup.run_mhs_process_backtest(
             start=start, end=end, data_root=None, result_output=result, poll_seconds=0.05,
             registry_path=db, run_id=run_id,
@@ -947,7 +947,7 @@ def test_supervised_launch_shares_source_identity(tmp_path, monkeypatch) -> None
     assert run.status == "failed"
     assert "--procedure-code-digest" in seen["command"]
     assert seen["command"][seen["command"].index("--procedure-code-digest") + 1] == digest
-    assert seen["command"][1:3] == ["-m", "src.application.mhs_worker"]
+    assert seen["command"][1:3] == ["-m", "src.lab.mhs.app.worker"]
     assert not any(str(part).startswith("src.cli") for part in seen["command"])
     assert not any(str(part).startswith("tools") for part in seen["command"])
     conn = _sqlite3.connect(str(db))
@@ -1394,7 +1394,7 @@ def test_default_data_identity_unchanged(tmp_path, monkeypatch) -> None:
 
 
 def test_override_identity_covers_funding_and_ohlcv(tmp_path, monkeypatch) -> None:
-    import src.application.mhs_supervisor as supervisor_mod
+    import src.lab.mhs.app.supervisor as supervisor_mod
     import src.core.data_provenance as provenance
 
     lake = tmp_path / "futures"

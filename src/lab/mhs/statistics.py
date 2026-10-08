@@ -1,0 +1,486 @@
+"""MHS statistical evidence: Sharpe/IC/bootstrap/autocorrelation diagnostics.
+
+Pure computation helpers used by the orchestrator's diagnostic and evidence
+paths. No alpha, cost, or inventory arithmetic is introduced here; this module
+composes the fixed ``src.lab.mhs`` primitives (deflated_sharpe_ratio,
+autocorrelation_adjusted_sharpe, rank_weight_book, phase_tranche_book).
+"""
+
+from __future__ import annotations
+
+import logging
+from collections.abc import Sequence
+
+import numpy as np
+import pandas as pd
+
+from src.common.errors import DataIntegrityError
+from src.core.bootstrap import (
+    iter_stationary_bootstrap_index_chunks,
+    stationary_bootstrap_max_blocks,
+    stationary_bootstrap_scalar_indices,
+)
+from src.core.types import BookSpec
+from src.engine.execution import SimulatedInventoryLedgerResult
+from src.lab.mhs.contracts import MhsBookReport, MhsFoldReport
+from src.lab.mhs.evidence import (
+    TRIAL_SHARPE_DEDUP_DECIMALS,
+    DsrDecomposition,
+    autocorrelation_adjusted_sharpe,
+    deflated_sharpe_decomposition,
+    deflated_sharpe_ratio,
+    distinct_trial_sr_variance,
+    effective_observation_count,
+)
+from src.lab.mhs.params import PERIODS_PER_YEAR_1H as _PERIODS_PER_YEAR_1H
+from src.strategy.books import phase_tranche_book, rank_weight_book
+
+_logger = logging.getLogger(__name__)
+
+_BOOTSTRAP_SEED = 20260807
+_BOOTSTRAP_REPLICATES = 2000
+_BOOTSTRAP_MEAN_BLOCK = 168
+_BOOTSTRAP_CI_CHUNK_REPLICATES: int = 128
+
+# Lag-window sensitivity disclosure: one holding horizon = 168h. Report-only
+# alternative reading of the effective sample size (the registered max_lag
+# stays 24 and is unchanged).
+_HOLDING_HORIZON_MAX_LAG: int = 168
+
+def _xs_rank_ic(
+    signal: pd.DataFrame, opens: pd.DataFrame, forward_bars: int,
+) -> dict[str, float]:
+    """Cross-sectional rank IC of ``signal`` on a tradable forward window.
+
+    The forward return is built internally as
+    ``opens.pct_change(forward_bars).shift(-(forward_bars + 1))`` so the
+    measured window starts at ``open_{t+1}`` and avoids overlapping lookbacks.
+    """
+    if forward_bars < 1:
+        raise ValueError(f"forward_bars must be >= 1, got {forward_bars}")
+    fwd = opens.pct_change(forward_bars).shift(-(forward_bars + 1))
+    common_index = signal.index.intersection(fwd.index)
+    common_columns = signal.columns.intersection(fwd.columns)
+    if common_index.empty or common_columns.empty:
+        return {}
+    signal_common = signal.loc[common_index, common_columns]
+    fwd_common = fwd.loc[common_index, common_columns]
+    valid = signal_common.notna() & fwd_common.notna()
+    signal_rank = signal_common.where(valid).rank(axis=1)
+    fwd_rank = fwd_common.where(valid).rank(axis=1)
+    signal_centered = signal_rank.sub(signal_rank.mean(axis=1), axis=0)
+    fwd_centered = fwd_rank.sub(fwd_rank.mean(axis=1), axis=0)
+    denominator = np.sqrt(
+        signal_centered.pow(2).sum(axis=1) * fwd_centered.pow(2).sum(axis=1),
+    )
+    correlations = (
+        (signal_centered * fwd_centered).sum(axis=1) / denominator
+    ).where(valid.sum(axis=1).ge(5) & denominator.gt(0.0)).dropna()
+    if correlations.empty:
+        return {}
+    series = correlations.astype("float64")
+    n_dates = len(series)
+    mean_ic = float(series.mean())
+    sd = float(series.std(ddof=1)) if n_dates > 1 else 0.0
+    t_stat = mean_ic / (sd / np.sqrt(n_dates)) if sd > 0 else float("nan")
+    return {
+        "n_dates": n_dates, "mean_ic": mean_ic, "t_stat": t_stat,
+        "forward_bars": forward_bars,
+    }
+def _annualized_1h_sharpe(net: pd.Series) -> float | None:
+    """Annualized Sharpe of an hourly net-return series, or None when undefinable.
+
+    A missing/empty series, a zero standard deviation, or a non-finite result
+    return ``None`` explicitly -- never NaN silently coerced to 0.0 (the
+    trend-sleeve diagnostic contract requires every reported value to be finite
+    or an explicit None).
+    """
+    net = net.dropna()
+    if len(net) < 2:
+        return None
+    sd = float(net.std(ddof=1))
+    if sd <= 0:
+        return None
+    value = float(net.mean() / sd * np.sqrt(_PERIODS_PER_YEAR_1H))
+    return value if np.isfinite(value) else None
+def _finite_or_none(value: float) -> float | None:
+    """Coerce a metric to an explicit None when it is not finite (JSON-safe)."""
+    return None if not np.isfinite(value) else float(value)
+def _date_clustered_ols(
+    opens: pd.DataFrame, past: pd.DataFrame, forward_bars: int,
+) -> dict[str, float]:
+    """Pooled panel regression of a tradable forward return on ``past``.
+
+    Same causality fix as ``_xs_rank_ic`` (RC-3): the dependent variable is
+    built internally from ``opens`` with the ``shift(-(forward_bars + 1))``
+    convention, so the regression never regresses a return window that lies
+    inside its own predictor's lookback. Standard errors are date-clustered.
+    """
+    if forward_bars < 1:
+        raise ValueError(f"forward_bars must be >= 1, got {forward_bars}")
+    fwd = opens.pct_change(forward_bars).shift(-(forward_bars + 1))
+    common_index = past.index.intersection(fwd.index)
+    common_columns = past.columns.intersection(fwd.columns)
+    if common_index.empty or common_columns.empty:
+        return {
+            "n": 0, "n_dates": 0, "past_beta": float("nan"),
+            "past_t": float("nan"), "forward_bars": forward_bars,
+        }
+    x = past.loc[common_index, common_columns].to_numpy(dtype="float64", copy=False)
+    y = fwd.loc[common_index, common_columns].to_numpy(dtype="float64", copy=False)
+    valid = np.isfinite(x) & np.isfinite(y)
+    n = int(valid.sum())
+    if n < 10:
+        return {
+            "n": n, "n_dates": 0, "past_beta": float("nan"),
+            "past_t": float("nan"), "forward_bars": forward_bars,
+        }
+    x_valid = np.where(valid, x, 0.0)
+    y_valid = np.where(valid, y, 0.0)
+    sum_x = float(x_valid.sum())
+    sum_y = float(y_valid.sum())
+    xtx = np.array([[n, sum_x], [sum_x, float(np.square(x_valid).sum())]])
+    xty = np.array([sum_y, float((x_valid * y_valid).sum())])
+    inv_xtx = np.linalg.inv(xtx)
+    beta = inv_xtx @ xty
+    residual = np.where(valid, y - beta[0] - beta[1] * x, 0.0)
+    daily_scores = pd.DataFrame(
+        {"intercept": residual.sum(axis=1), "slope": (x_valid * residual).sum(axis=1)},
+        index=common_index,
+    ).resample("1D").sum()
+    scores = daily_scores.to_numpy(dtype="float64", copy=False)
+    meat = scores.T @ scores
+    cov = inv_xtx @ meat @ inv_xtx
+    se = np.sqrt(np.diag(cov))
+    t_beta = beta[1] / se[1] if se[1] > 0 else float("nan")
+    return {
+        "n": n, "n_dates": len(daily_scores), "past_beta": float(beta[1]),
+        "past_t": float(t_beta), "forward_bars": forward_bars,
+    }
+def _bootstrap_ci(net: pd.Series, n_replicates: int, mean_block: int, seed: int) -> tuple[float, float]:
+    """Percentile (2.5, 97.5) CI of the mean net return under a stationary block bootstrap.
+
+    Seeded and bit-reproducible: the draw protocol is the shared
+    ``src.core.bootstrap`` kernel with a fixed 128-replicate chunk, which is part of
+    the seeded stream and must not change. ``mean_block <= 0`` uses the scalar
+    full-length-block law for every replicate.
+
+    Returns:
+        ``(nan, nan)`` for an empty series, ``(x, x)`` for a single observation,
+        otherwise the lower/upper percentile of the replicate means.
+    """
+    rng = np.random.default_rng(seed)
+    arr = net.to_numpy(dtype="float64")
+    n = len(arr)
+    if n == 0:
+        return float("nan"), float("nan")
+    if n == 1:
+        m = float(arr[0])
+        return m, m
+    p_block = 1.0 / mean_block if mean_block > 0 else 0.0
+    if p_block <= 0.0:
+        means = np.empty(n_replicates, dtype=np.float64)
+        for r in range(n_replicates):
+            means[r] = arr[stationary_bootstrap_scalar_indices(rng, n, 0.0)].mean()
+        return float(np.percentile(means, 2.5)), float(np.percentile(means, 97.5))
+
+    max_blocks = stationary_bootstrap_max_blocks(n, mean_block)
+    means = np.empty(n_replicates, dtype=np.float64)
+    for chunk in iter_stationary_bootstrap_index_chunks(
+        rng, source_len=n, path_len=n, n_replicates=n_replicates, mean_block=mean_block,
+        chunk_size=_BOOTSTRAP_CI_CHUNK_REPLICATES, max_blocks=max_blocks,
+    ):
+        rows = chunk.indices.shape[0]
+        means[chunk.row_start : chunk.row_start + rows] = arr[chunk.indices].mean(axis=1)
+
+    return float(np.percentile(means, 2.5)), float(np.percentile(means, 97.5))
+def _placebo_sharpe_percentile(
+    signal: pd.DataFrame,
+    eligible: pd.DataFrame,
+    opens: pd.DataFrame,
+    bar_funding: pd.DataFrame,
+    grid_1h: pd.DatetimeIndex,
+    spec: BookSpec,
+    observed_sharpe: float,
+    n_placebos: int,
+    seed: int,
+) -> float | None:
+    rng = np.random.default_rng(seed)
+    ranks: list[float] = []
+    cols = list(signal.columns)
+    n_cols = len(cols)
+    sig_step = signal.reindex(grid_1h)
+    el_step = eligible.reindex(grid_1h)
+    # The fixed ledger raises ``DataIntegrityError`` unless weights, opens, and
+    # funding share an identical index and column set; preserve that contract
+    # instead of silently aligning via ``reindex``.
+    if not opens.index.equals(grid_1h) or not bar_funding.index.equals(grid_1h):
+        raise DataIntegrityError("opens and bar_funding must share the placebo grid index")
+    opens_arr = opens[cols].to_numpy(dtype="float64")
+    funding_arr = bar_funding[cols].to_numpy(dtype="float64")
+
+    # The placebo shuffle relabels the signal/eligible columns without moving
+    # their values, so ``rank_weight_book`` on any shuffled copy returns the
+    # identical weight matrix; only the price/funding columns are genuinely
+    # permuted relative to those weights.  The whole weight pipeline is
+    # therefore computed once as a 2D float64 matrix instead of re-materializing
+    # pandas DataFrames inside the 500-step loop (spec §3, Optimization 1).
+    weights = rank_weight_book(sig_step, el_step, spec.band.sign, spec.min_symbols)
+    weights = phase_tranche_book(weights, spec.tranche_count())
+    w_arr = weights.reindex(grid_1h).ffill().fillna(0.0).to_numpy(dtype="float64")
+
+    n_rows = opens_arr.shape[0]
+    lag = 1 + 1  # ``mhs_ledger_pnl`` uses ``execution_delay_bars=1``.
+    lagged = np.zeros_like(w_arr)
+    if lag < n_rows:
+        lagged[lag:] = w_arr[: n_rows - lag]
+
+    o2o = np.zeros_like(opens_arr)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        o2o[1:] = opens_arr[1:] / opens_arr[:-1] - 1.0
+
+    prev_lagged = np.zeros_like(lagged)
+    prev_lagged[1:] = lagged[:-1]
+    turnover = np.abs(lagged - prev_lagged).sum(axis=1)
+    half = 8.0 / 2.0 * 1e-4
+    cost_rate = half + half
+    nonfinite = ~np.isfinite(o2o) | ~np.isfinite(funding_arr)
+    safe_o2o = np.where(np.isfinite(o2o), o2o, 0.0)
+    safe_funding = np.where(np.isfinite(funding_arr), funding_arr, 0.0)
+    active = lagged != 0.0
+
+    for _p in range(n_placebos):
+        perm = rng.permutation(n_cols)
+        # A shuffled placebo can pair a non-zero weight with a symbol outside
+        # its lifecycle; such a placebo is invalid, not evidence that the
+        # production ledger should relax its active-cell guard.
+        if (active & nonfinite[:, perm]).any():
+            continue
+        book_return = (lagged * safe_o2o[:, perm]).sum(axis=1)
+        funding_charge = (lagged * safe_funding[:, perm]).sum(axis=1)
+        net_returns = book_return - turnover * cost_rate - funding_charge
+        if np.any(net_returns <= -1.0):
+            continue
+        equity = 10000.0 * np.cumprod(1.0 + net_returns)
+        net = equity[1:] / equity[:-1] - 1.0
+        if len(net) <= 1:
+            continue
+        sd = float(np.std(net, ddof=1))
+        if sd > 0:
+            ranks.append(float(np.mean(net) / sd * np.sqrt(_PERIODS_PER_YEAR_1H)))
+    if not ranks:
+        return None
+    return float(np.mean([1.0 if observed_sharpe >= r else 0.0 for r in ranks]))
+
+def _log_autocorr_diagnostic(tag: str, returns: pd.Series, adjusted_sharpe: float) -> None:
+    """Debug-only Lo(2002) decomposition: separates the denominator penalty
+    (serial-correlation artifact) from raw-return decay, per fold/regime tag.
+    """
+    mean = float(returns.mean())
+    std = float(returns.std(ddof=1))
+    sample_sharpe = mean / std * float(np.sqrt(365)) if std > 0 else float("nan")
+    denom = (
+        sample_sharpe / adjusted_sharpe
+        if np.isfinite(adjusted_sharpe) and adjusted_sharpe != 0.0
+        else float("nan")
+    )
+    n = len(returns)
+    rho1 = float(returns.autocorr(1)) if n > 2 else float("nan")
+    rho3 = float(returns.autocorr(3)) if n > 4 else float("nan")
+    rho7 = float(returns.autocorr(7)) if n > 8 else float("nan")
+    _logger.debug(
+        "[EVAL] tag=%s n=%d mean=%.5f std=%.5f sample_sharpe=%.3f adjusted_sharpe=%.3f "
+        "lo_denom=%.3f rho1=%.3f rho3=%.3f rho7=%.3f",
+        tag, n, mean, std, sample_sharpe, adjusted_sharpe, denom, rho1, rho3, rho7,
+    )
+def _daily_autocorr_sharpe(
+    ledger: SimulatedInventoryLedgerResult, *, debug_tag: str | None = None,
+) -> float:
+    if ledger.equity.empty:
+        return float("nan")
+    daily = ledger.equity.resample("1D").last().dropna()
+    if len(daily) < 9:
+        return float("nan")
+    returns = daily.pct_change().dropna()
+    adjusted = autocorrelation_adjusted_sharpe(returns, 365, 7)
+    if debug_tag is not None and _logger.isEnabledFor(logging.DEBUG):
+        _log_autocorr_diagnostic(debug_tag, returns, adjusted)
+    return adjusted
+def _hourly_ledger_series(
+    equity: pd.Series, fill_turnover: pd.Series,
+) -> tuple[pd.Series, pd.Series, pd.Series]:
+    """Resample a native execution-timeframe ledger to the annualization grid.
+
+    The ``_PERIODS_PER_YEAR_1H`` annualization constant describes hourly bars,
+    but the replay ledgers run on ``request.execution_timeframe`` (3m default),
+    so every headline metric derived from them must first be resampled to 1h
+    (the ``equity_1h`` pattern already present in ``_run_post_diag_deploy``).
+    Turnover is a per-bar traded-notional fraction, so hourly aggregation is a
+    sum (not a last-value sample, unlike equity). An already-hourly input passes
+    through unchanged.
+    """
+    equity_1h = equity.resample("1h").last().dropna()
+    net_returns_1h = equity_1h.pct_change().dropna()
+    turnover_1h = (
+        fill_turnover.resample("1h").sum()
+        .reindex(net_returns_1h.index)
+        .fillna(0.0)
+    )
+    return equity_1h, net_returns_1h, turnover_1h
+def _naive_sharpe(ledger: SimulatedInventoryLedgerResult) -> float:
+    net = ledger.equity.resample("1h").last().dropna().pct_change().dropna()
+    if len(net) < 2:
+        return float("nan")
+    sd = float(net.std(ddof=1))
+    if sd <= 0:
+        return float("inf") if float(net.mean()) > 0 else float("-inf")
+    return float(net.mean() / sd * np.sqrt(_PERIODS_PER_YEAR_1H))
+def _mean_ann(series: pd.Series, periods_per_year: float) -> float:
+    return float(series.mean()) * periods_per_year if len(series) else float("nan")
+def _geometric_cagr(equity: pd.Series) -> float:
+    if equity.empty or float(equity.iloc[0]) <= 0 or float(equity.iloc[-1]) <= 0:
+        return float("nan")
+    n = len(equity)
+    return float((equity.iloc[-1] / equity.iloc[0]) ** (_PERIODS_PER_YEAR_1H / n) - 1.0)
+
+def _mdd(equity: pd.Series) -> float:
+    if equity.empty:
+        return float("nan")
+    running_max = equity.cummax()
+    return float((equity / running_max - 1.0).min())
+def _causal_lag1_autocorr(x: np.ndarray) -> float:
+    """Lag-1 Pearson autocorrelation of a rolling window (raw ndarray, for use
+    inside ``Series.rolling(...).apply(..., raw=True)``).
+    """
+    if len(x) < 3:
+        return float("nan")
+    x0, x1 = x[:-1], x[1:]
+    if np.std(x0) == 0.0 or np.std(x1) == 0.0:
+        return float("nan")
+    return float(np.corrcoef(x0, x1)[0, 1])
+
+def _per_observation_sharpe(returns: pd.Series) -> float:
+    """Per-observation (non-annualized) sample Sharpe of a return series.
+
+    ``mean / std`` with no ``sqrt(periods_per_year)`` scaling, matching the
+    per-observation input contract of ``probabilistic_sharpe_ratio``/
+    ``deflated_sharpe_ratio``. Degenerate zero-variance returns NaN so a
+    non-finite observed Sharpe never reaches the deflation statistic.
+    """
+    returns = returns.dropna()
+    if len(returns) < 2:
+        return float("nan")
+    sd = float(returns.std(ddof=1))
+    if sd <= 0.0:
+        return float("nan")
+    return float(returns.mean() / sd)
+def _deflated_sharpe_evidence(
+    blend_report: MhsBookReport | None,
+    folds: tuple[MhsFoldReport, ...],
+    n_trials: int,
+    trial_sharpes: Sequence[float],
+) -> tuple[float | None, DsrDecomposition | None, float | None]:
+    """Per-observation deflated Sharpe of the blend primary against the
+    distinct per-observation trial outcomes recorded for this exact window.
+
+    ``trial_sharpes`` carries ANNUALIZED run-history Sharpes; each is divided
+    by ``sqrt(PERIODS_PER_YEAR_1H)`` so the pooled variance lives in
+    per-observation units like ``observed_sr``. The sample count is the
+    autocorrelation-corrected ``effective_observation_count`` of the hourly
+    returns -- serially dependent observations overstate ``sqrt(n)`` and would
+    inflate the DSR. Fewer than the registered minimum of distinct pooled
+    outcomes raises inside ``distinct_trial_sr_variance`` and fails closed:
+    the gated statistic is ``(None, None)``, while the fold-based DSR is still
+    returned as a purely observational proxy (it must never re-enter the gate
+    on any code path).
+    """
+    if blend_report is None or blend_report.primary is None or not folds:
+        return None, None, None
+    _equity_1h, net_returns_1h, _turnover = _hourly_ledger_series(
+        blend_report.primary.ledger.equity,
+        blend_report.primary.ledger.fill_turnover,
+    )
+    observed_sr = _per_observation_sharpe(net_returns_1h)
+    if not np.isfinite(observed_sr):
+        return None, None, None
+    fold_trial_sharpes: list[float] = []
+    for fold in folds:
+        if fold.strict is None or fold.failures:
+            continue
+        _fold_equity, fold_net, _fold_turnover = _hourly_ledger_series(
+            fold.strict.ledger.equity, fold.strict.ledger.fill_turnover,
+        )
+        fold_trial_sharpes.append(_per_observation_sharpe(fold_net))
+    if not fold_trial_sharpes:
+        return None, None, None
+    fold_variance = (
+        float(np.var(fold_trial_sharpes, ddof=1))
+        if len(fold_trial_sharpes) >= 2
+        else 0.0
+    )
+    returns = net_returns_1h.dropna()
+    if len(returns) < 2:
+        return None, None, None
+    try:
+        n_obs_effective = effective_observation_count(returns)
+    except ValueError:
+        # Too few observations for the autocorrelation window: unresolvable.
+        return None, None, None
+    if n_obs_effective < 2:
+        return None, None, None
+    skew = float(returns.skew())
+    kurtosis = float(returns.kurt()) + 3.0
+
+    # Observational fold proxy (report-only): today's fold-dispersion reading.
+    fold_proxy_value = deflated_sharpe_ratio(
+        observed_sr, fold_variance, n_trials, n_obs_effective, skew, kurtosis,
+    )
+    fold_proxy: float | None = (
+        fold_proxy_value if np.isfinite(fold_proxy_value) else None
+    )
+
+    # Gated statistic: distinct distinct-outcome trial pool only, fail-closed.
+    annualization_scale = float(np.sqrt(float(_PERIODS_PER_YEAR_1H)))
+    per_observation_trials = [
+        float(value) / annualization_scale
+        for value in trial_sharpes
+        if np.isfinite(float(value))
+    ]
+    try:
+        trial_variance = distinct_trial_sr_variance(
+            per_observation_trials, observed_sr
+        )
+    except ValueError:
+        return None, None, fold_proxy
+    distinct_outcomes = len({
+        round(float(value), TRIAL_SHARPE_DEDUP_DECIMALS)
+        for value in (observed_sr, *per_observation_trials)
+    })
+    result = deflated_sharpe_ratio(
+        observed_sr, trial_variance, n_trials, n_obs_effective, skew, kurtosis,
+    )
+    # Fail closed: a degenerate skew/kurtosis can push the statistic to NaN,
+    # which must never leak into the report payload as a real deflated value.
+    if not np.isfinite(result):
+        return None, None, fold_proxy
+    try:
+        n_obs_holding_horizon = effective_observation_count(
+            returns, _HOLDING_HORIZON_MAX_LAG
+        )
+    except ValueError:
+        # Series shorter than one holding horizon: sensitivity stays unset.
+        n_obs_holding_horizon = 0
+    decomposition = deflated_sharpe_decomposition(
+        observed_sr,
+        trial_variance,
+        n_trials,
+        len(returns),
+        n_obs_effective,
+        skew,
+        kurtosis,
+        tuple(fold_trial_sharpes),
+        trial_sr_source="distinct_trial_outcomes",
+        distinct_trial_outcomes=distinct_outcomes,
+        n_obs_effective_holding_horizon=n_obs_holding_horizon,
+    )
+    return result, decomposition, fold_proxy

@@ -180,7 +180,7 @@ def test_SCENARIO_LIVE_EXECUTION_QUALITY_SUMMARY_INSUFFICIENT_EVIDENCE(tmp_path:
 
 
 def test_SCENARIO_LIVE_DEPLOYMENT_READINESS_GATES_UNCHANGED(tmp_path: Path) -> None:
-    from src.mhs.evidence import compute_deployment_readiness
+    from src.lab.mhs.evidence import compute_deployment_readiness
 
     # Create sufficient evidence dir but gates should remain False
     history_dir = tmp_path / "hist_gate"
@@ -221,7 +221,7 @@ def test_execution_quality_shard_bounds_reference_live_records() -> None:
     from src.live.records import LIVE_RECORD_MAX_SHARDS, LIVE_RECORD_SHARD_MAX_BYTES
 
     source = Path(eq_mod.__file__).read_text(encoding="utf-8")
-    assert "src.mhs.run_history" not in source
+    assert "src.lab.mhs.run_history" not in source
     assert eq_mod.EXECUTION_QUALITY_SHARD_MAX_BYTES == LIVE_RECORD_SHARD_MAX_BYTES == 262144
     assert eq_mod.EXECUTION_QUALITY_MAX_SHARDS == LIVE_RECORD_MAX_SHARDS == 12
 

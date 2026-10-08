@@ -16,7 +16,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-import src.application.mhs_supervisor as sup
+import src.lab.mhs.app.supervisor as sup
 
 
 def _stamps():
@@ -454,7 +454,7 @@ def test_heartbeat_cadence_bounded_by_interval(tmp_path, monkeypatch, caplog) ->
     _install_scripted(monkeypatch, _ScriptedProc())
     monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: _DelayedProc(_on_start))
     monkeypatch.setattr(sup, "HEARTBEAT_SECONDS", 0.1)
-    with caplog.at_level(logging.INFO, logger="src.application.mhs_supervisor"):
+    with caplog.at_level(logging.INFO, logger="src.lab.mhs.app.supervisor"):
         run = sup.run_mhs_process_backtest(
             start=start, end=end, data_root=None, result_output=result,
             poll_seconds=0.02, registry_path=_registry(tmp_path),

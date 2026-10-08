@@ -31,7 +31,7 @@ def test_discovery_end_is_frozen_inclusive_boundary() -> None:
 
 
 def test_committee_stage_binds_policy_window_objects() -> None:
-    import src.mhs.pipeline.stages.committee as committee
+    import src.lab.mhs.pipeline.stages.committee as committee
 
     assert committee.DISCOVERY_END is DISCOVERY_END
     assert committee.HOLDOUT_CUTOFF is HOLDOUT_CUTOFF

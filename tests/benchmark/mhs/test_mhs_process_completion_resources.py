@@ -33,7 +33,7 @@ def test_fresh_process_bounded_stress(tmp_path) -> None:
     from src.engine.execution.batch import replay_execution_window_batch
     from src.core.resources import _StageRecorder
     from src.core.types import ExecutionSpec
-    from tests.unit.mhs.test_process_backtest import (
+    from tests.lab.mhs.test_process_backtest import (
         _inventory_test_path,
         _inventory_test_targets,
         _inventory_test_windows,
@@ -60,7 +60,7 @@ def test_registered_complete_acceptance(tmp_path) -> None:
     """Full supervised evaluation satisfies budgets with actual outcomes reported."""
     if os.environ.get(FULL_ACCEPTANCE_ENV) != "1":
         pytest.skip("full-data acceptance requires MHS_FULL_COMPLETION_ACCEPTANCE=1")
-    from src.application.mhs_supervisor import run_mhs_process_backtest
+    from src.lab.mhs.app.supervisor import run_mhs_process_backtest
 
     primary, failure, run_out, _ = _fresh_paths(tmp_path, "acceptance")
     run = run_mhs_process_backtest(
@@ -89,7 +89,7 @@ def test_registered_complete_acceptance(tmp_path) -> None:
 @pytest.mark.slow
 def test_honest_comparison_reports_canonical_targets(tmp_path) -> None:
     """Canonical-target comparison never advertises failed-prefix performance."""
-    from tests.unit.mhs.test_process_backtest import (
+    from tests.lab.mhs.test_process_backtest import (
         _inventory_test_path,
         _inventory_test_targets,
     )

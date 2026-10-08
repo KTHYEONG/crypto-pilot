@@ -21,63 +21,6 @@ def _run_provision_env(args: argparse.Namespace) -> None:
     logger.info("[SYS] ops provision-env installed keys=%d host=%s", key_count, args.host)
 
 
-def _run_backtests_migrate(args: argparse.Namespace) -> None:
-    from src.backtests.migration import migrate_legacy_backtests
-
-    registry_path = Path(args.registry_path)
-    histories = tuple(Path(item) for item in args.history_directory)
-    runs = tuple(Path(item) for item in args.run_directory)
-    report = migrate_legacy_backtests(
-        registry_path=registry_path,
-        history_directories=histories,
-        run_directories=runs,
-        dry_run=not args.apply,
-    )
-    logger.info(
-        "[SYS] ops backtests-migrate imported=%s skipped=%s protected=%s rejected=%s",
-        report["imported"],
-        report["skipped"],
-        report["protected"],
-        report["rejected"],
-    )
-
-
-def _run_backtests_verify_history_migration(args: argparse.Namespace) -> None:
-    from src.backtests.migration import verify_legacy_history_migration
-    from src.common.errors import DataIntegrityError
-
-    try:
-        report = verify_legacy_history_migration(
-            registry_path=Path(args.registry_path), source=Path(args.history_directory)
-        )
-    except DataIntegrityError as exc:
-        logger.error("[SYS] ops backtests-verify-history-migration failed error=%s", exc)
-        raise SystemExit(1) from exc
-    logger.info(
-        "[SYS] ops backtests-verify-history-migration verified source=%s records=%s trials=%s",
-        report["source"],
-        report["source_records"],
-        report["distinct_trial_identities"],
-    )
-
-
-def _run_procedure_registry_migrate(args: argparse.Namespace) -> None:
-    from src.common.errors import DataIntegrityError
-    from src.mhs.preregistration import migrate_legacy_procedure_registry
-
-    try:
-        moved = migrate_legacy_procedure_registry(
-            legacy_path=Path(args.legacy_path), target_path=Path(args.target_path)
-        )
-    except DataIntegrityError as exc:
-        logger.error("[DATA] ops procedure-registry-migrate failed error=%s", exc)
-        raise SystemExit(1) from exc
-    logger.info(
-        "[DATA] ops procedure-registry-migrate moved=%s legacy=%s target=%s",
-        moved, args.legacy_path, args.target_path,
-    )
-
-
 def _run_daemon_idle_gate(args: argparse.Namespace) -> None:
     from src.application.ops.daemon_idle_gate import main as gate_main
 
@@ -124,25 +67,6 @@ def _run_artifact_seal(args: argparse.Namespace) -> None:
 def add_ops_commands(parser: argparse.ArgumentParser) -> None:
     """Register the ``provision-env`` subcommand on the ``ops`` group parser."""
     subparsers = parser.add_subparsers(dest="ops_command", required=True)
-    migrate = subparsers.add_parser("backtests-migrate", help="Import explicitly selected legacy backtest evidence")
-    migrate.add_argument("--registry-path", type=str, required=True, help="Target registry SQLite path")
-    migrate.add_argument("--history-directory", type=str, action="append", default=[], help="Explicit legacy history directory")
-    migrate.add_argument("--run-directory", type=str, action="append", default=[], help="Explicit legacy run directory")
-    migrate.add_argument("--apply", action="store_true", default=False, help="Write the registry instead of previewing")
-    migrate.set_defaults(handler=_run_backtests_migrate)
-    verify = subparsers.add_parser(
-        "backtests-verify-history-migration", help="Verify a legacy history source is durably represented by the registry"
-    )
-    verify.add_argument("--registry-path", type=str, required=True, help="Target registry SQLite path")
-    verify.add_argument("--history-directory", type=str, required=True, help="Explicit legacy history directory")
-    verify.set_defaults(handler=_run_backtests_verify_history_migration)
-    proc = subparsers.add_parser(
-        "procedure-registry-migrate",
-        help="Move the legacy docs-tree procedure registry to the backtests root exactly once",
-    )
-    proc.add_argument("--legacy-path", type=str, required=True, help="Legacy procedure registry JSONL")
-    proc.add_argument("--target-path", type=str, required=True, help="Target procedure registry JSONL")
-    proc.set_defaults(handler=_run_procedure_registry_migrate)
     provision = subparsers.add_parser("provision-env", help="Provision VPS runtime secrets from the workstation SSOT")
     provision.add_argument("--host", type=str, default="or-vps", help="SSH host for the VPS runtime")
     provision.add_argument(

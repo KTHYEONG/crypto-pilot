@@ -12,12 +12,9 @@ from types import MappingProxyType
 from typing import Final
 from collections.abc import Mapping
 
-from src.mhs.contracts import MhsDiagnosticRequest
-from src.core.params import (
-    COMMITTEE_MEMBER_SET_INERT,
-    COMMITTEE_TARGET_GROSS,
-    GROWTH_ENVELOPE_DEFAULT,
-)
+from src.lab.mhs.contracts import MhsDiagnosticRequest
+from src.core.params import (COMMITTEE_TARGET_GROSS, GROWTH_ENVELOPE_DEFAULT)
+from src.lab.mhs.params import COMMITTEE_MEMBER_SET_INERT
 
 RESEARCH_BASELINE: Final[Mapping[str, object]] = MappingProxyType({
     "execution_universe_size": 30,

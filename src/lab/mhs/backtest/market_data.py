@@ -1,0 +1,350 @@
+"""Causal process market preparation without retained expired buffers."""
+
+from __future__ import annotations
+
+import logging
+from collections.abc import Mapping
+
+import numpy as np
+import pandas as pd
+
+from src.common.errors import DataIntegrityError
+from src.common.paths import FUTURES_DATA_DIR
+from src.core.data_policy import MHS_DATA_POLICY_DEFAULT
+from src.core.marks import _load_funding_series, _pit_execution_mask
+from src.core.panel import liquid_half_eligibility, load_base_panel
+from src.core.params import (
+    PANEL_MIN_HISTORY_BARS,
+    UNIVERSE_ELIGIBILITY_LOOKBACK_BARS,
+    UNIVERSE_ELIGIBILITY_MIN_HISTORY_BARS,
+)
+from src.core.resources import (
+    MhsMemoryBudget,
+    _current_tree_swap_bytes,
+    assert_mhs_stage_allocation,
+    resolve_mhs_memory_budget,
+)
+from src.engine.execution.contracts import align_funding_with_knowledge, bar_funding_panel
+from src.lab.mhs.backtest.availability import (
+    ObservationAvailability,
+    observed_history_mask,
+    select_available_observations,
+)
+from src.lab.mhs.backtest.contracts import ProcessMarketData
+from src.lab.mhs.funding import funding_carry_signal
+from src.lab.mhs.params import (
+    CAUSAL_BETA_LOOKBACK_BARS,
+    CAUSAL_BETA_MIN_PERIODS,
+    CLI_EXECUTION_UNIVERSE_SIZE_DEFAULT,
+    PROCESS_FEATURE_CANDIDATES,
+    PROCESS_FUNDING_CARRY_CANDIDATES_HOURS,
+    PROCESS_MIN_SYMBOLS,
+)
+from src.lab.mhs.process_features import PROCESS_FEATURE_COLUMN_BLOCK_SIZE, build_process_feature_grid
+from src.lab.mhs.regime import beta_neutralize_weights, causal_market_beta
+from src.market_data.services.mhs_execution import apply_dynamic_gap_exclusion
+from src.strategy.books import rank_weight_book
+from src.strategy.features import FEATURE_REGISTRY
+
+_logger = logging.getLogger(__name__)
+
+def build_candidate_member_books(
+    panels: Mapping[str, pd.DataFrame],
+    bar_funding_1h: pd.DataFrame,
+    eligible_1h: pd.DataFrame,
+    execution_mask_1h: pd.DataFrame,
+    decision_grid: pd.DatetimeIndex,
+    funding_known_1h: pd.DataFrame | None = None,
+) -> dict[str, pd.DataFrame]:
+    """Build unchanged beta-neutral process books only at decision labels.
+
+    Coverage over the complete evaluation period must not select early members;
+    candidates retain the original declared order and fail-closed projection.
+    Features are validated before ranking so a missing eligible feature never
+    counts toward the minimum population; settled funding is trailing
+    historical evidence only and unknown funding never enters carry signals.
+
+    Args:
+        panels: Canonically aligned hourly source planes.
+        bar_funding_1h: Existing causally aligned hourly funding rates.
+        eligible_1h: Existing liquid-universe eligibility for market beta.
+        execution_mask_1h: Existing causal execution eligibility.
+        decision_grid: UTC process decision labels.
+        funding_known_1h: Optional per-bar funding knowledge; carry signals
+            require a fully settled trailing window wherever it is supplied.
+    Returns:
+        All declared candidate books in original order, with original decision
+        weights, float64 precision and canonical symbol labels.
+    Raises:
+        ValueError: Existing alignment or feature contracts are invalid.
+        DataIntegrityError: Existing input integrity checks fail.
+    """
+    registry = {spec.name: spec for spec in FEATURE_REGISTRY}
+    beta_1h = causal_market_beta(
+        np.log(panels["close"]), eligible_1h, CAUSAL_BETA_LOOKBACK_BARS, CAUSAL_BETA_MIN_PERIODS
+    )
+    beta_grid = beta_1h.reindex(decision_grid)
+    del beta_1h
+    mask_grid = execution_mask_1h.reindex(decision_grid).fillna(False)
+    out: dict[str, pd.DataFrame] = {}
+    for name in PROCESS_FEATURE_CANDIDATES:
+        spec = registry[name]
+        _logger.info("[DATA] stage=candidate_progress candidate=%s", name)
+        feature_grid = build_process_feature_grid(spec, panels, decision_grid)
+        finite_grid = pd.DataFrame(
+            np.isfinite(feature_grid.to_numpy(dtype="float64")),
+            index=feature_grid.index,
+            columns=list(feature_grid.columns),
+        )
+        validated = mask_grid & finite_grid
+        grid_book = rank_weight_book(feature_grid, validated, 1, PROCESS_MIN_SYMBOLS)
+        del feature_grid, finite_grid
+        out[name] = beta_neutralize_weights(grid_book, beta_grid, validated, PROCESS_MIN_SYMBOLS)
+        del grid_book, validated
+    for lookback in PROCESS_FUNDING_CARRY_CANDIDATES_HOURS:
+        key = f"funding_carry_{lookback}h"
+        _logger.info("[DATA] stage=candidate_progress candidate=%s", key)
+        carry_parts = [
+            funding_carry_signal(
+                bar_funding_1h.iloc[:, left : left + PROCESS_FEATURE_COLUMN_BLOCK_SIZE], lookback
+            ).reindex(decision_grid)
+            for left in range(0, bar_funding_1h.shape[1], PROCESS_FEATURE_COLUMN_BLOCK_SIZE)
+        ]
+        signal_grid = pd.concat(carry_parts, axis=1).reindex(columns=list(bar_funding_1h.columns))
+        del carry_parts
+        finite_signal = pd.DataFrame(
+            np.isfinite(signal_grid.to_numpy(dtype="float64")),
+            index=signal_grid.index,
+            columns=list(signal_grid.columns),
+        )
+        if funding_known_1h is None:
+            validated_carry = mask_grid & finite_signal
+        else:
+            settled_hourly = (
+                funding_known_1h.reindex(columns=list(bar_funding_1h.columns))
+                .astype("float64")
+                .rolling(lookback, min_periods=lookback)
+                .sum()
+                == float(lookback)
+            )
+            settled_grid = settled_hourly.reindex(decision_grid).fillna(False)
+            settled_grid = settled_grid.reindex(columns=list(signal_grid.columns))
+            validated_carry = mask_grid & finite_signal & settled_grid
+            del settled_hourly, settled_grid
+        grid_book = rank_weight_book(signal_grid, validated_carry, -1, PROCESS_MIN_SYMBOLS)
+        del signal_grid, finite_signal
+        out[key] = beta_neutralize_weights(grid_book, beta_grid, validated_carry, PROCESS_MIN_SYMBOLS)
+        del grid_book, validated_carry
+    return out
+
+
+def _process_memory_budget(budget: MhsMemoryBudget | None) -> MhsMemoryBudget:
+    return resolve_mhs_memory_budget(budget)
+
+
+def _admit_process_stage(
+    *, stage: str, estimated_bytes: int, budget: MhsMemoryBudget,
+    replay: bool, initial_swap_bytes: int | None,
+) -> None:
+    assert_mhs_stage_allocation(
+        stage=stage, estimated_bytes=int(estimated_bytes),
+        budget=budget, replay=replay, initial_swap_bytes=initial_swap_bytes,
+    )
+
+
+def _estimate_panel_bytes(n_bars: int, n_symbols: int, n_planes: int = 6) -> int:
+    return max(int(n_bars) * max(int(n_symbols), 0) * max(int(n_planes), 0) * 8 * 2, 0)
+
+
+def load_process_market_data(
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+    *,
+    data_root: str | None = None,
+    memory_budget: MhsMemoryBudget | None = None,
+) -> ProcessMarketData:
+    """Build the causal hourly process panel from completed Binance trade OHLCV and observed funding. A symbol's signal eligibility uses only information published by the signal time; later source coverage, mark-price availability and terminal survival never choose earlier members. Three-minute execution completeness belongs to the replay and cannot be inferred from one-hour coverage.
+
+    Args:
+        start: Timezone-aware source start.
+        end: Timezone-aware source end within the registered ceiling.
+        data_root: Existing OHLCV override, not a funding or mark override.
+        memory_budget: Explicit stage limits or the validated defaults.
+    Returns:
+        Original hourly execution inputs and unchanged decision-grid books.
+    Raises:
+        RuntimeError: No development symbol has aligned funding.
+        DataIntegrityError: Source provenance or resource admission fails.
+    """
+    budget = _process_memory_budget(memory_budget)
+    initial_swap_bytes = _current_tree_swap_bytes()
+    _admit_process_stage(
+        stage="process_prepare_panel", estimated_bytes=0,
+        budget=budget, replay=False, initial_swap_bytes=initial_swap_bytes,
+    )
+    root = data_root or str(FUTURES_DATA_DIR / "ohlcv")
+
+    def admit_panel(estimated_bytes: int) -> None:
+        _admit_process_stage(
+            stage="process_prepare_panel", estimated_bytes=estimated_bytes,
+            budget=budget, replay=False, initial_swap_bytes=initial_swap_bytes,
+        )
+
+    panel = load_base_panel(
+        root, "1h",
+        ("close", "open", "high", "low", "quote_vol", "taker_buy_quote"),
+        start, end, partition="dev", min_bars=PANEL_MIN_HISTORY_BARS,
+        data_policy=MHS_DATA_POLICY_DEFAULT,
+        allocation_admission=admit_panel,
+        selection_mode="causal_history",
+    )
+    close, opens, quote_vol = panel["close"], panel["open"], panel["quote_vol"]
+    grid_1h = close.index
+    _logger.info("[DATA] stage=base_1h_panel bars=%d symbols=%d", len(grid_1h), len(close.columns))
+    funding_by_symbol, _dropped = _load_funding_series(list(close.columns))
+    roster = list(close.columns)
+    funded = [s for s in roster if s in funding_by_symbol]
+    if not funded:
+        raise RuntimeError("no dev symbol has funding coverage; the MHS ledger requires funding")
+    bar_period = grid_1h[1] - grid_1h[0]
+    completed_1h = grid_1h + bar_period
+    completed_ns = np.asarray(completed_1h.as_unit("ns").asi8, dtype="int64")
+    available_1h = pd.DataFrame(
+        np.tile(completed_ns[:, None], (1, len(roster))).astype("datetime64[ns]"),
+        index=grid_1h,
+        columns=list(roster),
+    )
+    observation_availability = ObservationAvailability(
+        event_time=grid_1h,
+        completed_at=completed_1h,
+        available_at=available_1h,
+        provenance="archive_completion_proxy",
+    )
+    hourly_information_cutoffs = completed_1h
+    published_close = select_available_observations(close, observation_availability, hourly_information_cutoffs)
+    published_close.index = grid_1h
+    history_mask = observed_history_mask(published_close, min_history_bars=PANEL_MIN_HISTORY_BARS)
+    funding_window = {
+        s: funding_by_symbol[s].loc[
+            (funding_by_symbol[s].index >= grid_1h[0])
+            & (funding_by_symbol[s].index < grid_1h[-1] + bar_period)
+        ]
+        for s in funded
+    }
+    bar_funding_raw = bar_funding_panel(funding_window, grid_1h)
+    aligned = list(bar_funding_raw.columns)
+    if not aligned:
+        raise RuntimeError("no dev symbol has causally aligned funding coverage")
+    bar_funding = bar_funding_raw.reindex(columns=list(roster)).replace(
+        [np.inf, -np.inf], np.nan
+    ).ffill().fillna(0.0)
+    funding_known_1h = align_funding_with_knowledge(
+        funding_by_symbol, grid_1h, symbols=list(roster)
+    ).known
+    unknown_symbols = [s for s in roster if bool((~funding_known_1h[s]).any())]
+    input_limitations = (
+        "archive_completion_proxy:publication_times_unmeasured",
+        f"funding_unknown:{','.join(unknown_symbols) if unknown_symbols else 'none'}",
+    )
+    _logger.info("[DATA] stage=funding_alignment bars=%d symbols=%d", len(grid_1h), len(aligned))
+    eligible = liquid_half_eligibility(
+        quote_vol,
+        lookback_bars=UNIVERSE_ELIGIBILITY_LOOKBACK_BARS,
+        min_history_bars=UNIVERSE_ELIGIBILITY_MIN_HISTORY_BARS,
+    )
+    eligible = eligible & history_mask & funding_known_1h
+    mask = _pit_execution_mask(quote_vol, eligible, CLI_EXECUTION_UNIVERSE_SIZE_DEFAULT)
+    decision_grid = pd.date_range(start, end, freq="24h", tz="UTC")
+    _admit_process_stage(
+        stage="process_funding_prefix", estimated_bytes=_estimate_panel_bytes(len(grid_1h), len(aligned), 2),
+        budget=budget, replay=False, initial_swap_bytes=initial_swap_bytes,
+    )
+    log_close_step = np.log(published_close).reindex(decision_grid)
+    # (t, t+24h] 구간 합을 누적합 차분으로 계산한다(결정일마다 전체 스캔 금지).
+    day = pd.Timedelta(hours=24)
+    prefix = np.vstack([np.zeros((1, len(roster))), np.cumsum(bar_funding.to_numpy(dtype="float64"), axis=0)])
+    left = np.searchsorted(bar_funding.index.to_numpy(), decision_grid.to_numpy(), side="right")
+    right = np.searchsorted(bar_funding.index.to_numpy(), (decision_grid + day).to_numpy(), side="right")
+    funding_step = pd.DataFrame(prefix[right] - prefix[left], index=decision_grid, columns=list(roster))
+    _logger.info("[DATA] stage=decision_grid days=%d symbols=%d", len(decision_grid), len(aligned))
+    panels: dict[str, pd.DataFrame] = {k: panel[k][list(roster)] for k in ("close", "open", "high", "low", "quote_vol", "taker_buy_quote")}
+    del panel, close, quote_vol, prefix, funding_by_symbol, funding_window, published_close
+    signal_mask, excluded_1h = apply_dynamic_gap_exclusion(mask, "1h", root=root)
+    causal_mask, excluded_3m = apply_dynamic_gap_exclusion(signal_mask, "3m", root=root)
+    _logger.info(
+        "[DATA] stage=causal_gap_exclusion reason=source_observations_available_by_decision "
+        "excluded_1h_symbols=%d excluded_3m_symbols=%d",
+        len(excluded_1h),
+        len(excluded_3m),
+    )
+    n_candidates = len(PROCESS_FEATURE_CANDIDATES) + len(PROCESS_FUNDING_CARRY_CANDIDATES_HOURS)
+    _admit_process_stage(
+        stage="process_candidate_books", estimated_bytes=_estimate_panel_bytes(len(decision_grid), len(aligned), n_candidates),
+        budget=budget, replay=False, initial_swap_bytes=initial_swap_bytes,
+    )
+    member_books = build_candidate_member_books(
+        panels, bar_funding, eligible, signal_mask, decision_grid,
+        funding_known_1h=funding_known_1h,
+    )
+    del panels
+    _logger.info("[DATA] stage=member_books candidates=%d", len(member_books))
+    book_columns = list(next(iter(member_books.values())).columns)
+    _admit_process_stage(
+        stage="process_hourly_ledger", estimated_bytes=_estimate_panel_bytes(len(decision_grid), len(book_columns), 2),
+        budget=budget, replay=False, initial_swap_bytes=initial_swap_bytes,
+    )
+    execution_mask = causal_mask.reindex(decision_grid, fill_value=False)[book_columns]
+    return ProcessMarketData(
+        grid_1h=grid_1h,
+        decision_grid=decision_grid,
+        opens_1h=opens,
+        bar_funding_1h=bar_funding,
+        log_close_step=log_close_step,
+        funding_step=funding_step,
+        member_books=member_books,
+        execution_mask=execution_mask,
+        observation_availability=observation_availability,
+        funding_known_1h=funding_known_1h,
+        input_limitations=input_limitations,
+    )
+
+
+def validate_process_execution_availability(target_weights: pd.DataFrame, execution_mask: pd.DataFrame) -> None:
+    """Fail closed when a causal execution mask cannot gate a decision book.
+
+    Shared by availability application and by callers that need the alignment
+    guarantee without materializing the masked book.
+
+    Args:
+        target_weights: Decision book whose labels and symbol columns the mask must cover.
+        execution_mask: Causal execution eligibility.
+    Returns:
+        None when labels and columns match exactly and the mask is complete boolean.
+    Raises:
+        DataIntegrityError: Labels, symbols or mask values are inconsistent.
+    """
+    if not target_weights.index.equals(execution_mask.index):
+        raise DataIntegrityError("execution_mask must share target_weights decision labels exactly")
+    if list(target_weights.columns) != list(execution_mask.columns):
+        raise DataIntegrityError("execution_mask must share target_weights symbol columns exactly")
+    if bool((execution_mask.dtypes.apply(lambda dt: dt.kind != "b")).any()):
+        raise DataIntegrityError("execution_mask must be boolean")
+    if bool(execution_mask.isna().to_numpy().any()):
+        raise DataIntegrityError("execution_mask must not be missing")
+
+
+def apply_process_execution_availability(target_weights: pd.DataFrame, execution_mask: pd.DataFrame) -> pd.DataFrame:
+    """Prevent unavailable targets from being revived by smoothing or adoption.
+
+    Args:
+        target_weights: Smoothed and adopted canonical decision targets.
+        execution_mask: Exactly aligned causal execution eligibility.
+
+    Returns:
+        Targets with unavailable cells exactly zero and available cells unchanged.
+
+    Raises:
+        DataIntegrityError: Labels, symbols or mask values are inconsistent.
+    """
+    validate_process_execution_availability(target_weights, execution_mask)
+    return target_weights.where(execution_mask, other=0.0)

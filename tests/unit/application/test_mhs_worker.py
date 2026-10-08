@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-import src.application.mhs_worker as worker
+import src.lab.mhs.app.worker as worker
 
 _BUDGET = ["--total-tree-pss-bytes", "1", "--replay-tree-pss-bytes", "1", "--min-available-bytes", "1"]
 _WINDOW = ["--start", "2026-01-01T00:00:00Z", "--end", "2026-02-01T00:00:00Z"]

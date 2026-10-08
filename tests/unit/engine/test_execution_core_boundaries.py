@@ -12,17 +12,17 @@ import pytest
 from src.core.types import ExecutionSpec
 
 _REEXPORTS: tuple[tuple[str, str, str], ...] = (
-    ("src.mhs.evaluation.windows", "src.engine.execution.window_stream", "_iter_mhs_execution_windows"),
-    ("src.mhs.evaluation.windows", "src.engine.execution.window_stream", "_resolve_ns_vectorized"),
-    ("src.mhs.evaluation.windows", "src.engine.execution.window_stream", "_estimate_mhs_execution_allocation"),
-    ("src.mhs.evaluation.windows", "src.engine.execution.window_stream", "_minimum_mhs_execution_bars"),
-    ("src.mhs.evaluation.windows", "src.engine.execution.window_stream", "_materialize_execution_piece"),
-    ("src.mhs.evaluation.windows", "src.engine.execution.window_stream", "MhsExecutionWindow"),
-    ("src.mhs.evaluation.integrity", "src.engine.execution.integrity", "replay_ledger_certified"),
-    ("src.mhs.evaluation.integrity", "src.engine.execution.integrity", "ledger_terminal_only"),
-    ("src.mhs.evaluation.integrity", "src.engine.execution.integrity", "_funding_gap_terminal_symbols"),
-    ("src.mhs.evaluation.integrity", "src.core.data_policy", "SOURCE_GAP_EXCLUDED_SYMBOLS"),
-    ("src.mhs.evaluation.specs", "src.engine.execution.specs", "_stress_cost_execution_spec"),
+    ("src.lab.mhs.evaluation.windows", "src.engine.execution.window_stream", "_iter_mhs_execution_windows"),
+    ("src.lab.mhs.evaluation.windows", "src.engine.execution.window_stream", "_resolve_ns_vectorized"),
+    ("src.lab.mhs.evaluation.windows", "src.engine.execution.window_stream", "_estimate_mhs_execution_allocation"),
+    ("src.lab.mhs.evaluation.windows", "src.engine.execution.window_stream", "_minimum_mhs_execution_bars"),
+    ("src.lab.mhs.evaluation.windows", "src.engine.execution.window_stream", "_materialize_execution_piece"),
+    ("src.lab.mhs.evaluation.windows", "src.engine.execution.window_stream", "MhsExecutionWindow"),
+    ("src.lab.mhs.evaluation.integrity", "src.engine.execution.integrity", "replay_ledger_certified"),
+    ("src.lab.mhs.evaluation.integrity", "src.engine.execution.integrity", "ledger_terminal_only"),
+    ("src.lab.mhs.evaluation.integrity", "src.engine.execution.integrity", "_funding_gap_terminal_symbols"),
+    ("src.lab.mhs.evaluation.integrity", "src.core.data_policy", "SOURCE_GAP_EXCLUDED_SYMBOLS"),
+    ("src.lab.mhs.evaluation.specs", "src.engine.execution.specs", "_stress_cost_execution_spec"),
 )
 
 
@@ -30,7 +30,7 @@ _REEXPORTS: tuple[tuple[str, str, str], ...] = (
 def test_evaluation_facade_reexports_execution_owner_object(facade_module: str, owner_module: str, name: str) -> None:
     """The evaluation namespaces re-export the execution owners, not copies.
 
-    Callers and monkeypatch seams use ``src.mhs.evaluation.*``; identity
+    Callers and monkeypatch seams use ``src.lab.mhs.evaluation.*``; identity
     guarantees there is a single implementation, so behaviour is tested once on
     the owner and parity between "legacy" and "new" can never drift.
     """
@@ -163,9 +163,10 @@ def test_exception_roster_values() -> None:
 def test_moved_defaults_match_legacy_values() -> None:
     """Defaults parity: production CLI defaults keep values; research baseline stays fixed."""
     from src.core import params as _params
+    from src.lab.mhs import params as _lab_params
 
     assert _params.CLI_GROWTH_ENVELOPE_DEFAULT == "growth_extreme_budgeted"
-    assert _params.CLI_EXECUTION_UNIVERSE_SIZE_DEFAULT == 60
+    assert _lab_params.CLI_EXECUTION_UNIVERSE_SIZE_DEFAULT == 60
     assert research_baseline().execution_universe_size == 30
 
 
@@ -214,19 +215,19 @@ def test_ops_migrate_wiring_stays_available(tmp_path) -> None:
     """Ops wiring: backtests-migrate leaf previews without mutating sources."""
     import argparse
 
-    from src.cli.commands.ops import add_ops_commands
+    from src.cli.commands.lab import add_lab_commands
 
     history = tmp_path / "history"
     history.mkdir()
     (history / "active.jsonl").write_text('{"status": "COMPLETE"}\n', encoding="utf-8")
     parser = argparse.ArgumentParser()
-    add_ops_commands(parser)
+    add_lab_commands(parser)
     args = parser.parse_args(
         ["backtests-migrate", "--registry-path", str(tmp_path / "registry.sqlite3"), "--history-directory", str(history)]
     )
     args.handler(args)
     assert not (tmp_path / "registry.sqlite3").exists()
-    import src.mhs.pipeline.stages.assemble as _assemble
+    import src.lab.mhs.pipeline.stages.assemble as _assemble
 
     assert callable(_assemble.assemble_report)
 
@@ -361,7 +362,7 @@ def test_recovery_cannot_erase_unknown_economics() -> None:
 
 def test_core_imports_avoid_research_facade() -> None:
     """Core import boundary: top-level helper imports stay out of research modules."""
-    forbidden = ("src.mhs.evaluation", "src.mhs.pipeline.config", "src.mhs.report", "src.mhs.reporting")
+    forbidden = ("src.lab.mhs.evaluation", "src.lab.mhs.pipeline.config", "src.lab.mhs.report", "src.lab.mhs.reporting")
     for module in ("src/engine/execution/window_stream.py", "src/engine/execution/integrity.py", "src/engine/execution/specs.py"):
         tree = ast.parse((Path(__file__).resolve().parents[3] / module).read_text(encoding="utf-8"))
         top_imports = [

@@ -99,9 +99,9 @@ def test_importing_research_surface_writes_nothing(tmp_path: Path) -> None:
     backtests_dir = tmp_path / "bt"
     log_dir = tmp_path / "logs"
     probe = (
-        "import src.common.paths as p, src.common.logging as l, src.mhs.telemetry as t,"
-        " src.mhs.report.persist, src.mhs.preregistration,"
-        " src.mhs.pipeline.orchestrator, src.cli.main;"
+        "import src.common.paths as p, src.common.logging as l, src.lab.mhs.telemetry as t,"
+        " src.lab.mhs.report.persist, src.lab.mhs.preregistration,"
+        " src.lab.mhs.pipeline.orchestrator, src.cli.main;"
         " tel = t.StageTelemetry();"
         " print(str(p.BACKTESTS_DIR)); print(str(l.LOG_DIR))"
     )
@@ -207,10 +207,10 @@ def test_subprocess_child_without_destination_cannot_write(tmp_path: Path) -> No
         "import pandas as pd\n"
         "from pathlib import Path as _P\n"
         f"out=_P(r'{out}')\n"
-        "from src.mhs.run_history import append_run_history_record\n"
-        "from src.mhs.report.persist import persist_mhs_report\n"
-        "from src.mhs.preregistration import ProcedureRegistration, record_forward_evaluation, register_procedure\n"
-        "from src.mhs.contracts import MhsDiagnosticRequest\n"
+        "from src.lab.mhs.run_history import append_run_history_record\n"
+        "from src.lab.mhs.report.persist import persist_mhs_report\n"
+        "from src.lab.mhs.preregistration import ProcedureRegistration, record_forward_evaluation, register_procedure\n"
+        "from src.lab.mhs.contracts import MhsDiagnosticRequest\n"
         "now=pd.Timestamp('2026-09-17', tz='UTC')\n"
         "reg=ProcedureRegistration('d'*32, now, pd.Timestamp('2026-06-30 23:59:59+00:00', tz='UTC'), {})\n"
         "end=pd.Timestamp('2026-12-31', tz='UTC')\n"
@@ -249,7 +249,7 @@ def test_cli_default_resolves_operator_path() -> None:
 
     repo_root = Path(__file__).resolve().parents[2]
     probe = (
-        "import src.common.paths as p, src.common.logging as l, src.mhs.preregistration as pr;"
+        "import src.common.paths as p, src.common.logging as l, src.lab.mhs.preregistration as pr;"
         " print(str(p.BACKTESTS_DIR)); print(str(l.LOG_DIR)); print(str(pr.PROCEDURE_REGISTRY_PATH))"
     )
     env = {k: v for k, v in os.environ.items() if k not in ("CRYPTO_PILOT_BACKTESTS_DIR", "CRYPTO_PILOT_LOG_DIR")}

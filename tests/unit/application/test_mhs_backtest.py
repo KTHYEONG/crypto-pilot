@@ -9,16 +9,16 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from src.application.mhs_backtest import (
+from src.lab.mhs.app.process_backtest import (
     MhsBacktestRequest,
     execute_mhs_backtest,
     validate_mhs_backtest_request,
 )
 from src.core.params import PROCESS_EVALUATION_CEILING
-import src.mhs.backtest.contracts as bt_contracts
-import src.mhs.backtest.inventory as bt_inventory
-from src.mhs.backtest.contracts import ProcessInventoryBacktestError
-from tests.unit.mhs.test_process_backtest import (
+import src.lab.mhs.backtest.contracts as bt_contracts
+import src.lab.mhs.backtest.inventory as bt_inventory
+from src.lab.mhs.backtest.contracts import ProcessInventoryBacktestError
+from tests.lab.mhs.test_process_backtest import (
     _failure_report_fixture,
     _inventory_fake_result,
     _inventory_test_proxy,
@@ -71,7 +71,7 @@ def _completed_report():
 
 def test_validate_mhs_backtest_request_rejects_bad_boundaries(tmp_path, monkeypatch) -> None:
     """Request boundary: invalid dates or policy are rejected before evaluation and output writes."""
-    import src.application.mhs_backtest as svc
+    import src.lab.mhs.app.process_backtest as svc
 
     def _boom(*args, **kwargs):
         raise AssertionError("evaluation must not run")
@@ -99,7 +99,7 @@ def test_validate_mhs_backtest_request_rejects_bad_boundaries(tmp_path, monkeypa
 
 def test_require_fresh_destinations_rejects_resolved_duplicates_first(tmp_path) -> None:
     """Resolved aliases collide before freshness: the second label reports distinctness."""
-    from src.application.mhs_backtest import require_fresh_destinations
+    from src.lab.mhs.app.process_backtest import require_fresh_destinations
 
     target = tmp_path / "result.json"
     alias = tmp_path / "alias.parquet"
@@ -111,7 +111,7 @@ def test_require_fresh_destinations_rejects_resolved_duplicates_first(tmp_path) 
 
 def test_require_fresh_destinations_rejects_dangling_symlink(tmp_path) -> None:
     """A dangling symlink still occupies its destination and creates nothing."""
-    from src.application.mhs_backtest import require_fresh_destinations
+    from src.lab.mhs.app.process_backtest import require_fresh_destinations
 
     link = tmp_path / "dangle.json"
     os.symlink(tmp_path / "missing.json", link)
@@ -122,7 +122,7 @@ def test_require_fresh_destinations_rejects_dangling_symlink(tmp_path) -> None:
 
 def test_require_fresh_destinations_accepts_new_distinct_paths(tmp_path) -> None:
     """Two absent, distinct destinations validate without side effects."""
-    from src.application.mhs_backtest import require_fresh_destinations
+    from src.lab.mhs.app.process_backtest import require_fresh_destinations
 
     first = tmp_path / "a" / "result.json"
     second = tmp_path / "b" / "targets.parquet"
@@ -133,7 +133,7 @@ def test_require_fresh_destinations_accepts_new_distinct_paths(tmp_path) -> None
 
 def test_validate_mhs_backtest_request_rejects_occupied_destinations(tmp_path, monkeypatch) -> None:
     """Fresh distinct evidence: aliased, existing or symlinked destinations are rejected."""
-    import src.application.mhs_backtest as svc
+    import src.lab.mhs.app.process_backtest as svc
 
     def _boom(*args, **kwargs):
         raise AssertionError("evaluation must not run")
@@ -162,7 +162,7 @@ def test_validate_mhs_backtest_request_rejects_occupied_destinations(tmp_path, m
 
 def test_execute_mhs_backtest_persists_primary_inventory_evidence(tmp_path, monkeypatch) -> None:
     """Primary inventory evidence: the existing 3m schema is persisted with comparative proxy."""
-    import src.application.mhs_backtest as svc
+    import src.lab.mhs.app.process_backtest as svc
     from src.core.resources import MhsMemoryBudget, resolve_mhs_memory_budget
 
     report = _completed_report()
@@ -188,7 +188,7 @@ def test_execute_mhs_backtest_persists_primary_inventory_evidence(tmp_path, monk
 
 def test_execute_mhs_backtest_exports_exact_sized_targets(tmp_path, monkeypatch) -> None:
     """Exact targets: export uses exact sized base targets, not rebuilt or unit targets."""
-    import src.application.mhs_backtest as svc
+    import src.lab.mhs.app.process_backtest as svc
 
     report = _completed_report()
     monkeypatch.setattr(svc, "evaluate_process_inventory_backtest", lambda *a, **k: report)
@@ -213,7 +213,7 @@ def test_execute_mhs_backtest_exports_exact_sized_targets(tmp_path, monkeypatch)
 
 def test_execute_mhs_backtest_preserves_typed_failure(tmp_path, monkeypatch) -> None:
     """Domain failure preservation: dedicated failure evidence is persisted and the cause escapes intact."""
-    import src.application.mhs_backtest as svc
+    import src.lab.mhs.app.process_backtest as svc
 
     cause = ValueError("evaluator blew up")
     failure = bt_contracts.ProcessInventoryBacktestError(
@@ -237,7 +237,7 @@ def test_execute_mhs_backtest_preserves_typed_failure(tmp_path, monkeypatch) -> 
 
 def test_execute_mhs_backtest_reports_failure_persist_error(tmp_path, monkeypatch) -> None:
     """Persistence failure: a failure-report write error never replaces the original evaluation error."""
-    import src.application.mhs_backtest as svc
+    import src.lab.mhs.app.process_backtest as svc
 
     failure = bt_contracts.ProcessInventoryBacktestError(_failure_report_fixture())
 
@@ -258,7 +258,7 @@ def test_execute_mhs_backtest_reports_failure_persist_error(tmp_path, monkeypatc
 
 def test_execute_mhs_backtest_reports_target_export_error(tmp_path, monkeypatch) -> None:
     """Persistence failure: a target-export write error stays failed while keeping primary evidence."""
-    import src.application.mhs_backtest as svc
+    import src.lab.mhs.app.process_backtest as svc
 
     report = _completed_report()
     monkeypatch.setattr(svc, "evaluate_process_inventory_backtest", lambda *a, **k: report)
@@ -318,7 +318,7 @@ def test_validate_managed_context_requires_registered_run(tmp_path) -> None:
     """Managed context: partial ownership, bad identities and unknown runs fail validation."""
     import uuid
 
-    from src.application.mhs_backtest import validate_mhs_backtest_request
+    from src.lab.mhs.app.process_backtest import validate_mhs_backtest_request
 
     run_id = uuid.uuid4().hex
     db = _managed_registry(tmp_path, run_id)
@@ -368,7 +368,7 @@ def test_validate_managed_context_requires_registered_run(tmp_path) -> None:
 
 def test_worker_main_rejects_invalid_arguments(tmp_path) -> None:
     """Worker argument validation: bad timestamps or budgets exit without evaluating."""
-    from src.application import mhs_worker as worker
+    from src.lab.mhs.app import worker as worker
 
     with pytest.raises(SystemExit):
         worker.main(_worker_args(tmp_path, start="not-a-date"))
@@ -386,9 +386,9 @@ def test_worker_main_rejects_invalid_arguments(tmp_path) -> None:
 
 def test_worker_main_executes_service_request(tmp_path, monkeypatch) -> None:
     """Worker dispatch: one request is built and executed exactly once."""
-    import src.application.mhs_worker as wmod
-    from src.application import mhs_worker as worker
-    from src.application.mhs_backtest import MhsBacktestRequest
+    import src.lab.mhs.app.worker as wmod
+    from src.lab.mhs.app import worker as worker
+    from src.lab.mhs.app.process_backtest import MhsBacktestRequest
 
     seen: dict = {}
 
@@ -416,8 +416,8 @@ def test_worker_main_executes_service_request(tmp_path, monkeypatch) -> None:
 
 def test_worker_main_propagates_evaluation_failure(tmp_path, monkeypatch) -> None:
     """Worker failure: evaluation errors escape nonzero with diagnostics preserved."""
-    import src.application.mhs_worker as wmod
-    from src.application import mhs_worker as worker
+    import src.lab.mhs.app.worker as wmod
+    from src.lab.mhs.app import worker as worker
 
     failure = bt_contracts.ProcessInventoryBacktestError(_failure_report_fixture())
 
@@ -434,15 +434,15 @@ def test_worker_main_logs_start_and_persistence_completion(tmp_path, monkeypatch
     """Worker diagnostics reach standard logging without touching the CLI configuration."""
     import logging
 
-    import src.application.mhs_worker as wmod
-    from src.application import mhs_worker as worker
+    import src.lab.mhs.app.worker as wmod
+    from src.lab.mhs.app import worker as worker
 
     source = __import__("pathlib").Path(wmod.__file__).read_text(encoding="utf-8")
     assert "src.cli" not in source
     monkeypatch.setattr(wmod, "execute_mhs_backtest", lambda request: object())
-    with caplog.at_level(logging.INFO, logger="src.application.mhs_worker"):
+    with caplog.at_level(logging.INFO, logger="src.lab.mhs.app.worker"):
         assert worker.main(_worker_args(tmp_path)) == 0
-    messages = [r.getMessage() for r in caplog.records if r.name == "src.application.mhs_worker"]
+    messages = [r.getMessage() for r in caplog.records if r.name == "src.lab.mhs.app.worker"]
     assert any("status=start" in m and "2022-01-01" in m for m in messages)
     assert any("status=persistence_complete" in m and "result.json" in m for m in messages)
 
@@ -451,8 +451,8 @@ def test_worker_main_preserves_existing_root_handler(tmp_path, monkeypatch) -> N
     """Repeated in-process worker calls neither reset nor duplicate user-installed handlers."""
     import logging
 
-    import src.application.mhs_worker as wmod
-    from src.application import mhs_worker as worker
+    import src.lab.mhs.app.worker as wmod
+    from src.lab.mhs.app import worker as worker
 
     root = logging.getLogger()
     saved = list(root.handlers)
@@ -473,14 +473,14 @@ def test_worker_main_validation_failure_without_result(tmp_path, monkeypatch, ca
     """Invalid worker controls keep existing classification and fabricate no result."""
     import logging
 
-    import src.application.mhs_worker as wmod
-    from src.application import mhs_worker as worker
+    import src.lab.mhs.app.worker as wmod
+    from src.lab.mhs.app import worker as worker
 
     def _boom(request):
         raise AssertionError("evaluation must not run")
 
     monkeypatch.setattr(wmod, "execute_mhs_backtest", _boom)
-    with caplog.at_level(logging.INFO, logger="src.application.mhs_worker"):
+    with caplog.at_level(logging.INFO, logger="src.lab.mhs.app.worker"):
         with pytest.raises(SystemExit, match="invalid worker arguments"):
             worker.main(_worker_args(tmp_path, start="2022-01-01T00:00:00"))
         with pytest.raises(SystemExit, match="invalid worker arguments"):
@@ -489,7 +489,7 @@ def test_worker_main_validation_failure_without_result(tmp_path, monkeypatch, ca
                     tmp_path, total_tree_pss_bytes=1 * 2**30, replay_tree_pss_bytes=2 * 2**30,
                 )
             )
-    messages = [r.getMessage() for r in caplog.records if r.name == "src.application.mhs_worker"]
+    messages = [r.getMessage() for r in caplog.records if r.name == "src.lab.mhs.app.worker"]
     assert not any("status=persistence_complete" in m for m in messages)
 
 
@@ -497,8 +497,8 @@ def test_worker_main_failure_propagates_without_completion(tmp_path, monkeypatch
     """Typed inventory failure keeps dedicated persistence and emits no completion event."""
     import logging
 
-    import src.application.mhs_worker as wmod
-    from src.application import mhs_worker as worker
+    import src.lab.mhs.app.worker as wmod
+    from src.lab.mhs.app import worker as worker
 
     failure = bt_contracts.ProcessInventoryBacktestError(_failure_report_fixture())
 
@@ -506,12 +506,12 @@ def test_worker_main_failure_propagates_without_completion(tmp_path, monkeypatch
         raise failure
 
     monkeypatch.setattr(wmod, "execute_mhs_backtest", _boom)
-    with caplog.at_level(logging.INFO, logger="src.application.mhs_worker"), pytest.raises(
+    with caplog.at_level(logging.INFO, logger="src.lab.mhs.app.worker"), pytest.raises(
         bt_contracts.ProcessInventoryBacktestError
     ) as excinfo:
         worker.main(_worker_args(tmp_path))
     assert excinfo.value is failure
-    messages = [r.getMessage() for r in caplog.records if r.name == "src.application.mhs_worker"]
+    messages = [r.getMessage() for r in caplog.records if r.name == "src.lab.mhs.app.worker"]
     assert any("status=start" in m for m in messages)
     assert not any("status=persistence_complete" in m for m in messages)
 
@@ -520,13 +520,13 @@ def test_worker_main_completion_claims_no_certification(tmp_path, monkeypatch, c
     """Completion on a financially invalid report claims persistence only, never certification."""
     import logging
 
-    import src.application.mhs_worker as wmod
-    from src.application import mhs_worker as worker
+    import src.lab.mhs.app.worker as wmod
+    from src.lab.mhs.app import worker as worker
 
     monkeypatch.setattr(wmod, "execute_mhs_backtest", lambda request: object())
-    with caplog.at_level(logging.INFO, logger="src.application.mhs_worker"):
+    with caplog.at_level(logging.INFO, logger="src.lab.mhs.app.worker"):
         assert worker.main(_worker_args(tmp_path)) == 0
-    messages = [r.getMessage() for r in caplog.records if r.name == "src.application.mhs_worker"]
+    messages = [r.getMessage() for r in caplog.records if r.name == "src.lab.mhs.app.worker"]
     completion = [m for m in messages if "status=persistence_complete" in m]
     assert len(completion) == 1
     lowered = completion[0].lower()
@@ -540,8 +540,8 @@ def test_worker_main_forwards_managed_context(tmp_path, monkeypatch) -> None:
     """Worker managed context: internal publication arguments reach the service request."""
     import uuid
 
-    import src.application.mhs_worker as wmod
-    from src.application import mhs_worker as worker
+    import src.lab.mhs.app.worker as wmod
+    from src.lab.mhs.app import worker as worker
 
     seen: dict = {}
 
@@ -573,8 +573,8 @@ def test_worker_main_forwards_managed_context(tmp_path, monkeypatch) -> None:
 
 def test_worker_main_defaults_to_standalone_context(tmp_path, monkeypatch) -> None:
     """Worker standalone context: omitted publication arguments keep the standalone report contract."""
-    import src.application.mhs_worker as wmod
-    from src.application import mhs_worker as worker
+    import src.lab.mhs.app.worker as wmod
+    from src.lab.mhs.app import worker as worker
 
     seen: dict = {}
 
@@ -594,7 +594,7 @@ def test_execute_managed_request_requires_source_identity(tmp_path, monkeypatch)
     """Managed canonical run without a digest is rejected before evaluation."""
     import uuid
 
-    import src.application.mhs_backtest as svc
+    import src.lab.mhs.app.process_backtest as svc
 
     def _boom(*args, **kwargs):
         raise AssertionError("evaluation must not run")
@@ -614,9 +614,9 @@ def test_malformed_procedure_identity_rejected(tmp_path, monkeypatch) -> None:
     """Malformed digest is rejected by worker and service before any procedure."""
     import uuid
 
-    import src.application.mhs_backtest as svc
-    from src.application import mhs_worker as worker
-    import src.application.mhs_worker as wmod
+    import src.lab.mhs.app.process_backtest as svc
+    from src.lab.mhs.app import worker as worker
+    import src.lab.mhs.app.worker as wmod
 
     def _boom(*args, **kwargs):
         raise AssertionError("evaluation must not run")
@@ -649,8 +649,8 @@ def test_worker_forwards_supervisor_identity(tmp_path, monkeypatch) -> None:
     """Worker dispatch carries the supervisor digest unchanged into the request."""
     import uuid
 
-    import src.application.mhs_worker as wmod
-    from src.application import mhs_worker as worker
+    import src.lab.mhs.app.worker as wmod
+    from src.lab.mhs.app import worker as worker
 
     seen: dict = {}
     monkeypatch.setattr(wmod, "execute_mhs_backtest", lambda request: seen.update(request=request))
@@ -674,8 +674,8 @@ def test_execute_canonical_request_constructs_typed_procedure(tmp_path, monkeypa
     """Canonical service builds one typed baseline procedure with the nested pool."""
     import uuid
 
-    import src.application.mhs_backtest as svc
-    from src.mhs.backtest.journal import ProcessProcedureDefinition
+    import src.lab.mhs.app.process_backtest as svc
+    from src.lab.mhs.backtest.journal import ProcessProcedureDefinition
 
     report = _completed_report()
     seen: dict = {}
@@ -712,7 +712,7 @@ def test_execute_canonical_request_constructs_typed_procedure(tmp_path, monkeypa
 
 def test_execute_legacy_direct_call_without_typed_procedure(tmp_path, monkeypatch) -> None:
     """Unmanaged direct request stays legacy with no typed procedure."""
-    import src.application.mhs_backtest as svc
+    import src.lab.mhs.app.process_backtest as svc
 
     report = _completed_report()
     seen: dict = {}
@@ -731,9 +731,9 @@ def test_partial_typed_procedure_context_rejected(tmp_path, monkeypatch) -> None
     """Partial typed context is rejected in service and worker."""
     import uuid
 
-    import src.application.mhs_backtest as svc
-    from src.application import mhs_worker as worker
-    import src.application.mhs_worker as wmod
+    import src.lab.mhs.app.process_backtest as svc
+    from src.lab.mhs.app import worker as worker
+    import src.lab.mhs.app.worker as wmod
 
     def _boom(*args, **kwargs):
         raise AssertionError("evaluation must not run")

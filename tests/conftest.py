@@ -139,7 +139,7 @@ def _sanitize_host_environment() -> None:
 
 @pytest.fixture(autouse=True)
 def _isolate_telemetry_logger():
-    from src.mhs.telemetry import TELEMETRY_LOGGER_NAME
+    from src.lab.mhs.telemetry import TELEMETRY_LOGGER_NAME
 
     logger = logging.getLogger(TELEMETRY_LOGGER_NAME)
     snapshot_handlers = list(logger.handlers)

@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.mhs.committee import growth_budget_annual_vol
+from src.lab.mhs.committee import growth_budget_annual_vol
 from src.core.params import GROWTH_RISK_ENVELOPES
 from src.quant.risk.growth_sizing import (
     FrontierScanPoint,
