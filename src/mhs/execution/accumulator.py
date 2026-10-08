@@ -19,13 +19,14 @@ from . import microstructure as _microstructure
 from .contracts import (
     ExecutionDataGap,
     ExecutionReplayWindow,
+    ExitBlockDisclosure,
     FundingCoverageGap,
     InstrumentSettlementEvent,
     SimulatedInventoryLedgerResult,
     StrategyExecutionReplayResult,
     TerminalPositionEvidence,
-    VenueHaltExitBlock,
 )
+from .exit_deferral import ExitBlockCause, ExitEpisodeClock, classify_exit_block_cause, first_viable_retry_bar
 from .settlement import _INT64_MAX
 from .window_staging import WindowStaging
 
@@ -297,7 +298,9 @@ class _BoundExecutionReplayAccumulator:
         self._booked_settlement_events: list[InstrumentSettlementEvent] = []
         self._admitted_events: dict[str, InstrumentSettlementEvent] = {}
         self._admitted_by_symbol: dict[str, InstrumentSettlementEvent] = {}
-        self.venue_halt_exit_blocks: list[VenueHaltExitBlock] = []
+        self.exit_block_disclosures: list[ExitBlockDisclosure] = []
+        from src.mhs.params import EXIT_DEFERRAL_MAX_AGE
+        self._exit_clock = ExitEpisodeClock(int(EXIT_DEFERRAL_MAX_AGE.value))
         self._w_halted = np.zeros(0, dtype=bool)
         self._w_halt_id: list[str | None] = []
         self._last_trade_ns = np.full(self.n_cols, _INT64_MAX, dtype="int64")
@@ -588,6 +591,12 @@ class _BoundExecutionReplayAccumulator:
         falls outside ``(signal, availability]`` has no causal standing
         (INV-BAR-AVAILABILITY). Returns the blocking gap, else ``None``.
         """
+        if not (int(signal_ns) < int(submit_ns) <= int(avail_submit_ns)):
+            return ExecutionDataGap(
+                code="CAUSAL_TIMING_VIOLATION", symbol=sym,
+                timestamp=decision_ts, decision_time=decision_ts, signal_time=signal_ts,
+                execution_bound=self.execution_bound,
+            )
         qv = float(self._w_qv[fill_pos, col])
         if qv == 0.0 or bool(self._w_halted[fill_pos]):
             return ExecutionDataGap(
@@ -607,12 +616,6 @@ class _BoundExecutionReplayAccumulator:
                 timestamp=decision_ts, decision_time=decision_ts, signal_time=signal_ts,
                 execution_bound=self.execution_bound,
             )
-        if not (int(signal_ns) < int(submit_ns) <= int(avail_submit_ns)):
-            return ExecutionDataGap(
-                code="CAUSAL_TIMING_VIOLATION", symbol=sym,
-                timestamp=decision_ts, decision_time=decision_ts, signal_time=signal_ts,
-                execution_bound=self.execution_bound,
-            )
         return None
 
     def _block_fill(
@@ -623,39 +626,16 @@ class _BoundExecutionReplayAccumulator:
         decision_price: float | None = None, equity: float | None = None,
         weight: float | None = None,
     ) -> bool:
-        """Record a viability block, distinguishing a blocked entry from a blocked exit.
+        """Record a viability block; a deferrable exit is re-attempted inside its timeout.
 
-        A blocked entry leaves the book exactly as it was, so retrying at the next decision is
-        both correct and riskless. A blocked exit does not: the position the strategy decided to
-        shed stays on, and its valuation and financing risk continue to accrue while the engine
-        reports nothing. Treating both as the same benign retry understates realized risk and is
-        the reason an unexitable position only surfaces later, at an unrelated bar.
-
-        An exit blocked by an evidenced exchange-wide halt is not missing
-        data: valuation and financing stay observable, so it is re-attempted as a taker at the first
-        viable bar inside the order's own timeout and otherwise disclosed and retried at the next
-        decision.
-
-        Args:
-            gap: The viability gap that blocked this fill.
-            prior_units: Signed inventory held immediately before the blocked intent.
-            net_units: Signed quantity the blocked intent would have transacted.
-            frame: Staged window (required for the halt-deferral path).
-            col: Local column of the blocked symbol.
-            fill_pos: Grid position of the halted bar the fill would have used.
-            timeout_pos: Grid position of the order's timeout bar (inclusive deadline).
-            submit_pos: Grid position of the submit bar (recorded submit time).
-            side: Signed intent side.
-            decision_price: Intent anchor price (shortfall reference).
-            equity: Decision-time sizing equity (recorded pre-trade equity).
-            weight: Intent target weight (recorded only in the failure message).
-        Returns:
-            True, so the caller advances to the next symbol exactly as before.
+        Entries never defer. A blocked exit whose mark is valued and whose
+        funding is known is disclosed and retried rather than invalidated,
+        bounded by the episode age; anything else takes the legacy fail-closed path.
         """
         is_exit = abs(prior_units) >= QTY_EPS and abs(prior_units + net_units) < abs(prior_units)
         if (
             gap.code == "KNOWN_ZERO_VOLUME" and is_exit and col is not None
-            and fill_pos is not None and bool(self._w_halted[fill_pos])
+            and fill_pos is not None
             and not bool(self._w_fknown[fill_pos, col])
         ):
             gap = dataclasses.replace(gap, code="MISSING_ACTIVE_FUNDING")
@@ -663,16 +643,23 @@ class _BoundExecutionReplayAccumulator:
             gap.code == "KNOWN_ZERO_VOLUME" and is_exit
             and frame is not None and col is not None and fill_pos is not None
             and timeout_pos is not None and 0 <= int(fill_pos) < len(self._w_halted)
-            and bool(self._w_halted[int(fill_pos)])
-            and bool(frame.mark_valid[int(fill_pos), int(col)])
-            and bool(self._w_fknown[int(fill_pos), int(col)])
         ):
-            return self._block_fill_halted_exit(
-                gap, frame=frame, col=int(col), fill_pos=int(fill_pos),
-                timeout_pos=int(timeout_pos), submit_pos=submit_pos, side=side,
-                decision_price=decision_price, equity=equity, weight=weight,
-                net_units=float(net_units),
+            cause = classify_exit_block_cause(
+                halted=bool(self._w_halted[int(fill_pos)]),
+                quote_volume=float(self._w_qv[int(fill_pos), int(col)]),
+                mark_valid=bool(frame.mark_valid[int(fill_pos), int(col)]),
+                funding_known=bool(self._w_fknown[int(fill_pos), int(col)]),
             )
+            if cause is not None:
+                decision_ns = int(gap.decision_time.value) if gap.decision_time is not None else int(frame.grid_ns[int(fill_pos)])
+                if self._exit_clock.admit(int(frame.gpos[int(col)]), float(prior_units), decision_ns):
+                    return self._defer_blocked_exit(
+                        gap, cause, frame=frame, col=int(col), fill_pos=int(fill_pos),
+                        timeout_pos=int(timeout_pos), submit_pos=submit_pos, side=side,
+                        decision_price=decision_price, equity=equity, weight=weight,
+                        net_units=float(net_units),
+                    )
+                self.termination_counts["EXIT_BLOCK_BOUND_EXCEEDED"] = self.termination_counts.get("EXIT_BLOCK_BOUND_EXCEEDED", 0) + 1
         if gap.code == "KNOWN_ZERO_VOLUME" and not is_exit:
             # 알려진 0 거래량은 데이터 공백이 아니라 체결 불가(거래소 중단·상폐 꼬리) — 다음 결정에서 재시도(라이브와 동일).
             self.unfilled_count += 1
@@ -700,50 +687,34 @@ class _BoundExecutionReplayAccumulator:
             self.termination_counts["NO_VOLUME_UNFILLED"] = self.termination_counts.get("NO_VOLUME_UNFILLED", 0) + 1
         return True
 
-    def _block_fill_halted_exit(
-        self, gap: ExecutionDataGap, *, frame: _WindowFrame, col: int,
+    def _defer_blocked_exit(
+        self, gap: ExecutionDataGap, cause: ExitBlockCause, *, frame: _WindowFrame, col: int,
         fill_pos: int, timeout_pos: int, submit_pos: int | None, side: int | None,
         decision_price: float | None, equity: float | None, weight: float | None,
         net_units: float,
     ) -> bool:
-        """Re-attempt an exit blocked at a halted bar inside its own order timeout.
-
-        The first bar after the blocked bar and within the timeout that is not
-        halted, has positive quote volume, known funding, a finite close and a
-        label before the symbol's last trade fills once as a taker at its close.
-        Otherwise the exit is disclosed and retried at the next decision. Neither
-        outcome records a data gap or touches ``ledger_valid``.
-        """
+        """Book a blocked exit at the first viable bar or disclose a next-decision retry."""
         gcol = int(frame.gpos[col])
         sym = frame.local_cols[col]
-        halt_id = self._w_halt_id[fill_pos] if 0 <= fill_pos < len(self._w_halt_id) else None
         blocked_bar = frame.grid[fill_pos]
         decision_ts = gap.decision_time if gap.decision_time is not None else blocked_bar
-        last_trade_ns = int(self._last_trade_ns[gcol])
-        deadline = min(int(timeout_pos), int(frame.n_grid) - 1)
-        defer = -1
-        for b in range(int(fill_pos) + 1, deadline + 1):
-            if b < len(self._w_halted) and bool(self._w_halted[b]):
-                continue
-            qv = float(self._w_qv[b, col])
-            if not qv > 0.0:
-                continue
-            if not bool(self._w_fknown[b, col]):
-                continue
-            close = float(frame.closes_values[b, col])
-            if not np.isfinite(close):
-                continue
-            if int(frame.grid_ns[b]) >= last_trade_ns:
-                continue
-            defer = b
-            break
+        cause_str = cause.value
+        halted_cause = cause_str == ExitBlockCause.VENUE_HALT.value
+        halt_id = self._w_halt_id[fill_pos] if 0 <= fill_pos < len(self._w_halt_id) else None
+        defer = first_viable_retry_bar(
+            after_pos=int(fill_pos), deadline_pos=min(int(timeout_pos), int(frame.n_grid) - 1),
+            halted=self._w_halted, quote_volume=self._w_qv[:, col],
+            funding_known=self._w_fknown[:, col], close=frame.closes_values[:, col],
+            grid_ns=frame.grid_ns, last_trade_ns=int(self._last_trade_ns[gcol]),
+        )
         if defer < 0:
             self.unfilled_count += 1
-            self.termination_counts["BLOCKED_EXIT_VENUE_HALT"] = self.termination_counts.get("BLOCKED_EXIT_VENUE_HALT", 0) + 1
-            self.venue_halt_exit_blocks.append(
-                VenueHaltExitBlock(
+            retry_key = "BLOCKED_EXIT_VENUE_HALT" if halted_cause else "BLOCKED_EXIT_SYMBOL_NO_TRADE"
+            self.termination_counts[retry_key] = self.termination_counts.get(retry_key, 0) + 1
+            self.exit_block_disclosures.append(
+                ExitBlockDisclosure(
                     symbol=sym, decision_time=decision_ts, blocked_bar=blocked_bar,
-                    halt_id=str(halt_id) if halt_id is not None else "",
+                    cause=cause_str, halt_id=str(halt_id) if halted_cause and halt_id is not None else None,
                     outcome="retry_next_decision", filled_bar=None, quantity=float(net_units),
                 )
             )
@@ -764,7 +735,8 @@ class _BoundExecutionReplayAccumulator:
         self.shortfall_notionals.append(abs(float(net_units)) * fill_price)
         self.unfilled_count += 1
         self.fallback_count += 1
-        self.termination_counts["VENUE_HALT_DEFERRED_EXIT"] = self.termination_counts.get("VENUE_HALT_DEFERRED_EXIT", 0) + 1
+        filled_key = "VENUE_HALT_DEFERRED_EXIT" if halted_cause else "SYMBOL_NO_TRADE_DEFERRED_EXIT"
+        self.termination_counts[filled_key] = self.termination_counts.get(filled_key, 0) + 1
         self._book_fill(
             frame, gcol=gcol, symbol=sym, bar_pos=defer,
             submit_pos=int(submit_pos) if submit_pos is not None else int(fill_pos),
@@ -775,10 +747,10 @@ class _BoundExecutionReplayAccumulator:
             target_weight=float(weight) if weight is not None else 0.0,
             decision_price=anchor,
         )
-        self.venue_halt_exit_blocks.append(
-            VenueHaltExitBlock(
+        self.exit_block_disclosures.append(
+            ExitBlockDisclosure(
                 symbol=sym, decision_time=decision_ts, blocked_bar=blocked_bar,
-                halt_id=str(halt_id) if halt_id is not None else "",
+                cause=cause_str, halt_id=str(halt_id) if halted_cause and halt_id is not None else None,
                 outcome="deferred_fill", filled_bar=frame.grid[defer],
                 quantity=float(net_units),
             )
@@ -950,7 +922,10 @@ class _BoundExecutionReplayAccumulator:
         self.cash -= quantity * fill_price
         fee = fee_bps / 1e4 * abs(quantity) * fill_price
         self.cash -= fee
+        prior_units = float(self.units_arr[gcol])
         self.units_arr[gcol] += quantity
+        if self.units_arr[gcol] != prior_units:
+            self._exit_clock.inventory_changed(gcol)
         self.fill_bar_ns.append(int(frame.grid_ns[bar_pos]))
         self.fill_gcol.append(int(gcol))
         self._mirror_pending.append(
@@ -2250,5 +2225,5 @@ class _BoundExecutionReplayAccumulator:
             terminal_positions=terminal_positions,
             ledger_available_at=ledger_available_at,
             settlement_events=tuple(self._booked_settlement_events),
-            venue_halt_exit_blocks=tuple(self.venue_halt_exit_blocks),
+            exit_block_disclosures=tuple(self.exit_block_disclosures),
         )
