@@ -52,7 +52,7 @@ def test_log_dir_declared_once() -> None:
     import ast
     from pathlib import Path
 
-    import src.mhs.telemetry as telemetry_mod
+    import src.lab.mhs.telemetry as telemetry_mod
 
     assert not hasattr(telemetry_mod, "LOG_DIR")
 

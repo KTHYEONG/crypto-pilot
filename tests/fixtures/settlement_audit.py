@@ -41,13 +41,13 @@ def patch_settlement_registry_for_fixture(monkeypatch: pytest.MonkeyPatch, root:
     """Supply the fixture's explicit truncation registry at every audit entry point."""
     registry = fixture_truncation_registry(root)
     monkeypatch.setattr(
-        "src.mhs.pipeline.stages.panel.settlement_registry_for_root", lambda _root: registry,
+        "src.lab.mhs.pipeline.stages.panel.settlement_registry_for_root", lambda _root: registry,
     )
     monkeypatch.setattr(
         "src.engine.strategy_backtest.settlement_registry_for_root", lambda _root: registry,
     )
     monkeypatch.setattr(
-        "src.mhs.backtest.inventory.settlement_registry_for_root", lambda _root: registry,
+        "src.lab.mhs.backtest.inventory.settlement_registry_for_root", lambda _root: registry,
     )
 
 

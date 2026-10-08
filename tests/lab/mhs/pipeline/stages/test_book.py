@@ -1,0 +1,184 @@
+"""Wiring smoke test for src.lab.mhs.pipeline.stages.book.build_books.
+
+Verifies the S3 stage reaches ``signal_ema_span``/``book_weights``/
+``horizon_ensemble_execution_weights`` through the ``stage_services`` seam
+after the P4 refactor (previously private ``evaluation.`` attribute lookups).
+"""
+
+from __future__ import annotations
+from tests.fixtures.mhs_requests import research_baseline
+import src.lab.mhs.evaluation.books as books_mod
+import src.lab.mhs.evaluation.specs as specs_mod
+
+import dataclasses
+
+import pandas as pd
+import pytest
+
+import src.lab.mhs.pipeline.stages.book as book_stage
+from src.lab.mhs.pipeline.context import PipelineContext
+from src.lab.mhs.telemetry import StageTelemetry
+
+_GRID = pd.date_range("2021-01-01", periods=3, freq="1h", tz="UTC")
+_SYMS = ["AAAUSDT", "BBBUSDT"]
+
+
+class _FakeBand:
+    def __init__(self, sign: int) -> None:
+        self.sign = sign
+
+
+class _FakeSpec:
+    def __init__(self, sign: int, horizon_hours: int, step_hours: int) -> None:
+        self.band = _FakeBand(sign)
+        self.horizon_hours = horizon_hours
+        self.step_hours = step_hours
+        self.min_symbols = 1
+
+
+def _bare_context() -> PipelineContext:
+    frame = pd.DataFrame(1.0, index=_GRID, columns=_SYMS)
+    ctx = PipelineContext(
+        config=research_baseline(
+            fast_book_mode="single_horizon", execution_coverage_gate=False,
+            beta_neutralize=False,
+        ),
+        resolved_end=None,
+        start=_GRID[0],
+        end=_GRID[-1],
+        rss_budget_bytes=None,
+        rss_reserve_bytes=None,
+        root="",
+        grid_1h=_GRID,
+        close=frame,
+        opens=frame,
+        quote_vol=frame,
+        taker_buy_quote=None,
+        symbols=_SYMS,
+    )
+    ctx.log_close = frame
+    ctx.eligible = pd.DataFrame(True, index=_GRID, columns=_SYMS)
+    ctx.fast_grid = _GRID
+    ctx.slow_grid = _GRID
+    ctx.fast = _FakeSpec(sign=1, horizon_hours=48, step_hours=6)
+    ctx.slow = _FakeSpec(sign=1, horizon_hours=168, step_hours=24)
+    return ctx
+
+
+def _seamed_context(monkeypatch: pytest.MonkeyPatch, committee_capital: bool) -> PipelineContext:
+    import src.lab.mhs.evaluation.books as books_mod
+    import src.lab.mhs.evaluation.specs as specs_mod
+
+    def _fake_signal_ema_span(sign: int, horizon_hours: int, step_hours: int) -> int:
+        return 4
+
+    def _fake_book_weights(log_close, eligible, spec, grid, *, ema_span):
+        return pd.DataFrame(spec.horizon_hours / 1000.0, index=grid, columns=log_close.columns)
+
+    def _fake_horizon_ensemble_execution_weights(*_a: object, **_k: object) -> pd.DataFrame:
+        return pd.DataFrame(0.0, index=_GRID, columns=_SYMS)
+
+    monkeypatch.setattr(specs_mod, "_signal_ema_span", _fake_signal_ema_span, raising=False)
+    monkeypatch.setattr(books_mod, "_book_weights", _fake_book_weights, raising=False)
+    monkeypatch.setattr(
+        books_mod, "_horizon_ensemble_execution_weights", _fake_horizon_ensemble_execution_weights, raising=False
+    )
+    monkeypatch.setattr(
+        book_stage, "_pit_execution_mask",
+        lambda quote_vol, eligible, universe_size: pd.DataFrame(True, index=quote_vol.index, columns=quote_vol.columns), raising=False
+    )
+    monkeypatch.setattr(
+        book_stage, "inverse_realized_vol_tilt", lambda w, vol: w,
+    )
+    monkeypatch.setattr(book_stage, "realized_vol", lambda log_close, horizon: pd.DataFrame(0.1, index=log_close.index, columns=log_close.columns))
+    monkeypatch.setattr(
+        book_stage, "renormalize_within_mask", lambda w, mask, min_symbols: w,
+    )
+
+    ctx = _bare_context()
+    ctx.config = research_baseline(
+        fast_book_mode="single_horizon", execution_coverage_gate=False,
+        beta_neutralize=False, committee_capital=committee_capital,
+    )
+    book_stage.build_books(ctx, StageTelemetry(log_run=False))
+    return ctx
+
+
+def test_build_books_committee_path_skips_1h_fast_slow_views(monkeypatch: pytest.MonkeyPatch) -> None:
+    ctx = _seamed_context(monkeypatch, committee_capital=True)
+
+    assert ctx.w_fast_1h.empty
+    assert ctx.w_slow_1h.empty
+    assert not ctx.w_fast_execution.empty
+    assert not ctx.w_slow_execution.empty
+    assert not ctx.execution_mask.empty
+
+
+def test_build_books_non_committee_path_materializes_1h_views(monkeypatch: pytest.MonkeyPatch) -> None:
+    import pandas as pd
+
+    ctx = _seamed_context(monkeypatch, committee_capital=False)
+
+    pd.testing.assert_frame_equal(
+        ctx.w_fast_1h, ctx.w_fast.reindex(ctx.grid_1h).ffill().fillna(0.0), check_exact=True,
+    )
+    pd.testing.assert_frame_equal(
+        ctx.w_slow_1h, ctx.w_slow.reindex(ctx.grid_1h).ffill().fillna(0.0), check_exact=True,
+    )
+
+
+def test_build_books_reaches_seam_functions(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+
+    def _fake_signal_ema_span(sign: int, horizon_hours: int, step_hours: int) -> int:
+        calls.append("_signal_ema_span")
+        return 4
+
+    def _fake_book_weights(log_close, eligible, spec, grid, *, ema_span):
+        calls.append("_book_weights")
+        return pd.DataFrame(0.0, index=grid, columns=log_close.columns)
+
+    def _fake_horizon_ensemble_execution_weights(*_a: object, **_k: object) -> pd.DataFrame:
+        calls.append("_horizon_ensemble_execution_weights")
+        return pd.DataFrame(0.0, index=_GRID, columns=_SYMS)
+
+    monkeypatch.setattr(book_stage, "_signal_ema_span", _fake_signal_ema_span, raising=False)
+    monkeypatch.setattr(specs_mod, "_signal_ema_span", _fake_signal_ema_span, raising=False)
+    monkeypatch.setattr(book_stage, "_book_weights", _fake_book_weights, raising=False)
+    monkeypatch.setattr(books_mod, "_book_weights", _fake_book_weights, raising=False)
+    monkeypatch.setattr(
+        book_stage, "_horizon_ensemble_execution_weights", _fake_horizon_ensemble_execution_weights, raising=False
+    )
+    monkeypatch.setattr(books_mod, "_horizon_ensemble_execution_weights", _fake_horizon_ensemble_execution_weights, raising=False)
+    monkeypatch.setattr(
+        book_stage, "_pit_execution_mask",
+        lambda quote_vol, eligible, universe_size: pd.DataFrame(True, index=quote_vol.index, columns=quote_vol.columns), raising=False
+    )
+    monkeypatch.setattr(
+        book_stage, "inverse_realized_vol_tilt", lambda w, vol: w,
+    )
+    monkeypatch.setattr(book_stage, "realized_vol", lambda log_close, horizon: pd.DataFrame(0.1, index=log_close.index, columns=log_close.columns))
+    monkeypatch.setattr(
+        book_stage, "renormalize_within_mask", lambda w, mask, min_symbols: w,
+    )
+    monkeypatch.setattr(
+        book_stage,
+        "apply_dynamic_gap_exclusion",
+        lambda mask, *_args, **_kwargs: (mask, ("AAAUSDT",)),
+    )
+    monkeypatch.setattr(
+        book_stage,
+        "assert_relevant_execution_data_coverage",
+        lambda *_args, **_kwargs: None,
+    )
+
+    ctx = _bare_context()
+    ctx.config = dataclasses.replace(ctx.config, execution_coverage_gate=True)
+    book_stage.build_books(ctx, StageTelemetry(log_run=False))
+
+    assert calls == [
+        "_signal_ema_span", "_signal_ema_span", "_book_weights", "_book_weights",
+        "_horizon_ensemble_execution_weights",
+    ]
+    assert ctx.w_fast_execution is not None
+    assert ctx.w_slow_execution is not None

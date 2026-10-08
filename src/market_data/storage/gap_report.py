@@ -44,7 +44,7 @@ def detect_internal_gaps(
         interior = column[first_true : last_true + 1]
         # Vectorized run-length encoding of contiguous False runs between the
         # symbol's own first/last True (same diff-based approach as
-        # src/mhs/evaluation.py): a zero-padded diff marks each run start
+        # src/lab/mhs/evaluation.py): a zero-padded diff marks each run start
         # (+1) and end (-1).
         padded = np.concatenate(([0], (~interior).astype(np.int8), [0]))
         deltas = np.diff(padded)

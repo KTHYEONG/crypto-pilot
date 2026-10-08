@@ -7,12 +7,12 @@ import dataclasses
 
 import pytest
 
-from src.cli.commands.research.mhs import add_mhs_commands
+from src.cli.commands.lab import add_lab_commands
 from src.cli.dataclass_args import explicit_field_values
-from src.mhs.contracts import MhsDiagnosticRequest
-from src.mhs.pipeline.config import resolve_cli_request
+from src.lab.mhs.contracts import MhsDiagnosticRequest
+from src.lab.mhs.pipeline.config import resolve_cli_request
 
-BASE = ["research", "run", "portfolio", "mhs-horizon-diagnostic"]
+BASE = ["lab", "horizon-diagnostic"]
 
 FROZEN_FLAGS = frozenset(
     [
@@ -85,9 +85,10 @@ FROZEN_FLAGS = frozenset(
 
 
 def _mhs_parser() -> argparse.ArgumentParser:
-    sub = argparse.ArgumentParser().add_subparsers()
-    add_mhs_commands(sub)
-    return sub.choices["mhs-horizon-diagnostic"]
+    root = argparse.ArgumentParser()
+    add_lab_commands(root.add_subparsers().add_parser("lab"))
+    lab = root._subparsers._group_actions[0].choices["lab"]  # type: ignore[union-attr]
+    return lab._subparsers._group_actions[0].choices["horizon-diagnostic"]  # type: ignore[union-attr]
 
 
 def _flag_set(parser: argparse.ArgumentParser) -> set[str]:
@@ -102,7 +103,7 @@ def _flag_set(parser: argparse.ArgumentParser) -> set[str]:
 def _parse(extra: list[str]) -> argparse.Namespace:
     from src.cli.main import build_root_parser
 
-    return build_root_parser().parse_args([*BASE, *extra])
+    return build_root_parser([*BASE, *extra]).parse_args([*BASE, *extra])
 
 
 def test_exposed_option_set_frozen() -> None:
@@ -111,9 +112,9 @@ def test_exposed_option_set_frozen() -> None:
 
 
 def test_no_arg_parity() -> None:
-    from src.cli.main import build_root_parser
+    from src.cli.main import build_root_parser as _build
 
-    args = build_root_parser().parse_args(BASE)
+    args = _build(BASE).parse_args(BASE)
     explicit = explicit_field_values(MhsDiagnosticRequest, args)
     assert explicit == {}
     assert resolve_cli_request(explicit) == MhsDiagnosticRequest()
@@ -236,9 +237,10 @@ def test_generator_is_production_path() -> None:
 
     import src.cli.dataclass_args as da
 
-    text = pathlib.Path("src/cli/commands/research/mhs.py").read_text(encoding="utf-8")
-    assert "add_dataclass_arguments" in text
-    assert 'add_argument("--start"' not in text
+    text = pathlib.Path("src/cli/commands/lab.py").read_text(encoding="utf-8")
+    section = text.split("def _add_horizon_diagnostic_leaf")[1].split("\ndef ")[0]
+    assert "add_dataclass_arguments" in section
+    assert 'add_argument("--start"' not in section
     assert not hasattr(da, "build_parser_from_dataclass")
     assert not hasattr(da, "request_from_namespace")
 
@@ -246,7 +248,7 @@ def test_generator_is_production_path() -> None:
 def test_request_default_execution_is_3m() -> None:
     import dataclasses
 
-    from src.mhs.contracts import MhsDiagnosticRequest
+    from src.lab.mhs.contracts import MhsDiagnosticRequest
 
     request = MhsDiagnosticRequest()
     assert request.execution_timeframe == "3m"
@@ -258,7 +260,7 @@ def test_request_default_execution_is_3m() -> None:
 def test_request_rejects_legacy_execution_intervals() -> None:
     import pytest
 
-    from src.mhs.contracts import MhsDiagnosticRequest
+    from src.lab.mhs.contracts import MhsDiagnosticRequest
 
     for legacy in ("1m", "5m"):
         with pytest.raises(ValueError, match="execution_timeframe"):
@@ -268,7 +270,7 @@ def test_request_rejects_legacy_execution_intervals() -> None:
 def test_request_timeout_must_align_to_three_minutes() -> None:
     import pytest
 
-    from src.mhs.contracts import MhsDiagnosticRequest
+    from src.lab.mhs.contracts import MhsDiagnosticRequest
 
     MhsDiagnosticRequest(passive_timeout_minutes=30)
     with pytest.raises(ValueError, match="multiple of 3"):
@@ -278,7 +280,7 @@ def test_request_timeout_must_align_to_three_minutes() -> None:
 def test_request_default_3m_rejects_one_minute() -> None:
     import pytest
 
-    from src.mhs.contracts import MhsDiagnosticRequest
+    from src.lab.mhs.contracts import MhsDiagnosticRequest
     from tests.fixtures.mhs_requests import research_baseline
 
     request = research_baseline(committee_capital=True)
@@ -290,8 +292,8 @@ def test_request_default_3m_rejects_one_minute() -> None:
 def test_execution_grids_use_three_minute_steps() -> None:
     import pandas as pd
 
-    from src.mhs.contracts import MhsDiagnosticRequest
-    from src.mhs.evaluation.windows import _iter_mhs_execution_windows
+    from src.lab.mhs.contracts import MhsDiagnosticRequest
+    from src.lab.mhs.evaluation.windows import _iter_mhs_execution_windows
     from src.core.types import ExecutionSpec
 
     request = MhsDiagnosticRequest()

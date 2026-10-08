@@ -243,7 +243,7 @@ def test_marker_expression_defers_heavy_unless_included(
 
 
 def test_integration_target_detection() -> None:
-    assert _is_integration_target("tests/integration/mhs/test_x.py::T::t") is True
+    assert _is_integration_target("tests/lab/mhs/integration/test_x.py::T::t") is True
     assert _is_integration_target("/abs/repo/tests/integration/test_y.py") is True
     assert _is_integration_target("tests/unit/test_z.py") is False
 
@@ -262,19 +262,19 @@ def test_collected_heavy_ids_are_parsed_exactly(monkeypatch: pytest.MonkeyPatch)
     def _fake(cmd: list[str], timeout: int = 120, **kwargs: object) -> subprocess.CompletedProcess[str]:
         captured["cmd"] = cmd
         stdout = (
-            "tests/integration/mhs/test_h.py::Test::test_a[param id]\n"
-            "tests/integration/mhs/test_h.py::Test::test_b\n"
-            "tests/integration/mhs/test_h.py::Test::test_a[param id]\n"
+            "tests/lab/mhs/integration/test_h.py::Test::test_a[param id]\n"
+            "tests/lab/mhs/integration/test_h.py::Test::test_b\n"
+            "tests/lab/mhs/integration/test_h.py::Test::test_a[param id]\n"
             "\n"
             "2/40 tests collected (38 deselected) in 3.1s\n"
         )
         return subprocess.CompletedProcess(cmd, 0, stdout, "")
 
     monkeypatch.setattr("tools.verify.run_cmd", _fake)
-    ids = _collect_deferred_heavy(["tests/integration/mhs/test_h.py"])
+    ids = _collect_deferred_heavy(["tests/lab/mhs/integration/test_h.py"])
     assert ids == [
-        "tests/integration/mhs/test_h.py::Test::test_a[param id]",
-        "tests/integration/mhs/test_h.py::Test::test_b",
+        "tests/lab/mhs/integration/test_h.py::Test::test_a[param id]",
+        "tests/lab/mhs/integration/test_h.py::Test::test_b",
     ]
     cmd = captured["cmd"]
     assert isinstance(cmd, list)
@@ -289,7 +289,7 @@ def test_nothing_heavy_selected_is_not_an_error(monkeypatch: pytest.MonkeyPatch)
         return subprocess.CompletedProcess(cmd, 5, "", "")
 
     monkeypatch.setattr("tools.verify.run_cmd", _fake)
-    assert _collect_deferred_heavy(["tests/integration/mhs/test_h.py"]) == []
+    assert _collect_deferred_heavy(["tests/lab/mhs/integration/test_h.py"]) == []
 
 
 @pytest.mark.parametrize("exit_code", [2, 124])
@@ -299,7 +299,7 @@ def test_collection_failure_fails_closed(monkeypatch: pytest.MonkeyPatch, exit_c
 
     monkeypatch.setattr("tools.verify.run_cmd", _fake)
     with pytest.raises(RuntimeError, match="first output line"):
-        _collect_deferred_heavy(["tests/integration/mhs/test_h.py"])
+        _collect_deferred_heavy(["tests/lab/mhs/integration/test_h.py"])
 
 
 def test_real_collection_lists_only_the_heavy_node(tmp_path: Path) -> None:
@@ -363,12 +363,12 @@ def test_default_run_defers_and_lists_heavy_tests(
     import json as _json
 
     ids = [
-        "tests/integration/mhs/test_h.py::Test::test_one",
-        "tests/integration/mhs/test_h.py::Test::test_two",
+        "tests/lab/mhs/integration/test_h.py::Test::test_one",
+        "tests/lab/mhs/integration/test_h.py::Test::test_two",
     ]
     timeouts, calls = _run_main_with_fake(
         monkeypatch, tmp_path,
-        ["verify", "--files", "tests/integration/mhs/test_h.py", "--skip-lint", "--skip-mypy", "--no-cov"],
+        ["verify", "--files", "tests/lab/mhs/integration/test_h.py", "--skip-lint", "--skip-mypy", "--no-cov"],
         ids, 5,
     )
     import tools.verify as verify_mod
@@ -393,10 +393,10 @@ def test_default_run_defers_and_lists_heavy_tests(
 def test_failure_still_lists_deferred_tests(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], pytest_exit: int
 ) -> None:
-    ids = ["tests/integration/mhs/test_h.py::Test::test_one"]
+    ids = ["tests/lab/mhs/integration/test_h.py::Test::test_one"]
     _timeouts, _calls = _run_main_with_fake(
         monkeypatch, tmp_path,
-        ["verify", "--files", "tests/integration/mhs/test_h.py", "--skip-lint", "--skip-mypy", "--no-cov"],
+        ["verify", "--files", "tests/lab/mhs/integration/test_h.py", "--skip-lint", "--skip-mypy", "--no-cov"],
         ids, pytest_exit,
     )
     import tools.verify as verify_mod
@@ -416,7 +416,7 @@ def test_run_heavy_includes_tier_without_collection(
 
     timeouts, calls = _run_main_with_fake(
         monkeypatch, tmp_path,
-        ["verify", "--files", "tests/integration/mhs/test_h.py", "--skip-lint", "--skip-mypy", "--no-cov", "--run-heavy"],
+        ["verify", "--files", "tests/lab/mhs/integration/test_h.py", "--skip-lint", "--skip-mypy", "--no-cov", "--run-heavy"],
         [], 0,
     )
     verify_mod.main()
@@ -432,7 +432,7 @@ def test_run_heavy_respects_explicit_timeout(tmp_path: Path, monkeypatch: pytest
 
     timeouts, _ = _run_main_with_fake(
         monkeypatch, tmp_path,
-        ["verify", "--files", "tests/integration/mhs/test_h.py", "--skip-lint", "--skip-mypy", "--no-cov",
+        ["verify", "--files", "tests/lab/mhs/integration/test_h.py", "--skip-lint", "--skip-mypy", "--no-cov",
          "--run-heavy", "--timeout", "30"],
         [], 0,
     )
@@ -480,11 +480,11 @@ def test_deferral_lines_contract() -> None:
     lines, diags = _deferral_lines([])
     assert lines == []
     assert diags == []
-    nodeid = "tests/integration/mhs/test_h.py::Test::test_one"
+    nodeid = "tests/lab/mhs/integration/test_h.py::Test::test_one"
     lines, diags = _deferral_lines([nodeid])
     assert lines[0].startswith("DEFERRED | 1 e2e_heavy test(s) not run;")
     assert lines[1] == f"DEFERRED | {nodeid}"
-    assert diags[0]["file"] == "tests/integration/mhs/test_h.py"
+    assert diags[0]["file"] == "tests/lab/mhs/integration/test_h.py"
     assert diags[0]["error"] == f"deferred e2e_heavy: {nodeid}"
 
 
@@ -493,10 +493,10 @@ def test_coverage_failure_still_lists_deferred_tests(
 ) -> None:
     import tools.verify as verify_mod
 
-    nodeid = "tests/integration/mhs/test_h.py::test_heavy"
+    nodeid = "tests/lab/mhs/integration/test_h.py::test_heavy"
     _run_main_with_fake(
         monkeypatch, tmp_path,
-        ["verify", "--files", "src/example.py", "tests/integration/mhs/test_h.py",
+        ["verify", "--files", "src/example.py", "tests/lab/mhs/integration/test_h.py",
          "--skip-lint", "--skip-mypy"],
         [nodeid], 0,
     )
@@ -515,7 +515,7 @@ def test_exit_five_without_deferred_tests_remains_failure(
 
     _run_main_with_fake(
         monkeypatch, tmp_path,
-        ["verify", "--files", "tests/integration/mhs/test_h.py",
+        ["verify", "--files", "tests/lab/mhs/integration/test_h.py",
          "--skip-lint", "--skip-mypy", "--no-cov"],
         [], 5,
     )
@@ -553,11 +553,11 @@ def test_slow_marked_files_matches_code_forms_only(tmp_path: Path) -> None:
 
 def test_slow_deferral_lines_contract() -> None:
     assert _slow_deferral_lines([]) == ([], [])
-    lines, diags = _slow_deferral_lines(["tests/unit/mhs/test_x.py"])
+    lines, diags = _slow_deferral_lines(["tests/lab/mhs/test_x.py"])
     assert PERIODIC_SLOW_GATE in lines[0]
-    assert lines[1] == "DEFERRED | slow: tests/unit/mhs/test_x.py"
-    assert diags[0]["file"] == "tests/unit/mhs/test_x.py"
-    assert diags[0]["error"] == "deferred slow: tests/unit/mhs/test_x.py"
+    assert lines[1] == "DEFERRED | slow: tests/lab/mhs/test_x.py"
+    assert diags[0]["file"] == "tests/lab/mhs/test_x.py"
+    assert diags[0]["error"] == "deferred slow: tests/lab/mhs/test_x.py"
 
 
 def test_default_run_lists_slow_target_files(
@@ -644,7 +644,7 @@ def test_main_collection_error_stops_before_test_execution(
 
     _run_main_with_fake(
         monkeypatch, tmp_path,
-        ["verify", "--files", "tests/integration/mhs/test_h.py",
+        ["verify", "--files", "tests/lab/mhs/integration/test_h.py",
          "--skip-lint", "--skip-mypy", "--no-cov"],
         [], 0,
     )

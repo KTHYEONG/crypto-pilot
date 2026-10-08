@@ -11,7 +11,7 @@ import pytest
 from src.common.errors import DataIntegrityError
 from src.engine.execution import ExecutionReplayWindow, ExecutionSpec, replay_execution_windows
 from src.engine.execution.contracts import InstrumentSettlementEvent, ExitBlockDisclosure
-from src.mhs.evaluation.windows import _load_window_from_ipc, _spill_window_to_ipc
+from src.lab.mhs.evaluation.windows import _load_window_from_ipc, _spill_window_to_ipc
 from src.core.venue_halts import VenueHaltInterval
 
 COLS = ("AUSDT", "BUSDT")

@@ -1,6 +1,6 @@
 """Independent-ledger oracle contract: streamed accumulator ledger vs single-panel recomputation.
 
-The oracle in ``src.mhs/execution/ledger.py`` re-derives the six ledger series by a different
+The oracle in ``src.lab.mhs/execution/ledger.py`` re-derives the six ledger series by a different
 arithmetic path (per-symbol cumulative sums of fill deltas) than the causal window accumulator.
 Agreement at 1e-12 is therefore evidence about window splitting, carry, and booking -- it only
 holds when the oracle is told the two facts the accumulator records but a bare fill stream cannot

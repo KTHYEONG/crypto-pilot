@@ -1,4 +1,4 @@
-"""Fail-closed equivalent-run reuse invariants for `backtest mhs`."""
+"""Fail-closed equivalent-run reuse invariants for `lab process-backtest`."""
 
 from __future__ import annotations
 
@@ -11,8 +11,8 @@ from pathlib import Path
 
 import pytest
 
-import src.application.mhs_reuse as reuse
-import src.application.mhs_supervisor as sup
+import src.lab.mhs.app.reuse as reuse
+import src.lab.mhs.app.supervisor as sup
 from src.backtests.contracts import ArtifactReference, RunFinalization, RunRegistration
 from src.backtests.registry import finalize_run, initialize_registry, register_run
 from src.common.errors import DataIntegrityError
@@ -583,7 +583,7 @@ def test_rejections_emit_structured_data_warnings(tmp_path, caplog) -> None:
     registry = tmp_path / "registry.sqlite3"
     fingerprint = _fp()
     run_id, _ = _seed(tmp_path, registry, fingerprint, status="failed")
-    with caplog.at_level(logging.WARNING, logger="src.application.mhs_supervisor"):
+    with caplog.at_level(logging.WARNING, logger="src.lab.mhs.app.supervisor"):
         lookup = sup.find_reused_run(registry, fingerprint)
     assert lookup.reused is None
     matches = [record for record in caplog.records if record.getMessage().startswith("[DATA] reuse_rejected")]

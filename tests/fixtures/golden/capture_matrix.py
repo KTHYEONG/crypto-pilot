@@ -30,12 +30,12 @@ from pathlib import Path
 
 
 import src.core.marks as marks
-import src.mhs.pipeline.stages.fold as fold_stage
-from src.mhs import statistics as _statistics
-from src.mhs.diagnostic_run import run_mhs_horizon_diagnostic
+import src.lab.mhs.pipeline.stages.fold as fold_stage
+from src.lab.mhs import statistics as _statistics
+from src.lab.mhs.diagnostic_run import run_mhs_horizon_diagnostic
 from tests.fixtures.golden.compare import GOLDEN_MATRIX_NAMES, assert_report_digest_identical
 from tests.fixtures.golden.digest import build_report_digest, build_report_summary
-from tests.unit.mhs.test_evaluation_appresearch import (
+from tests.lab.mhs.test_evaluation_appresearch import (
     _START,
     _write_3m_cache,
     _write_mhs_market,

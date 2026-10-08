@@ -19,7 +19,7 @@ DELETED_PATHS = [
     "tools/devops/mhs_baseline_run.py",
     "tools/devops/daemon_idle_gate.py",
     "tools/devops/seal_artifact.py",
-    "src/mhs/process_backtest.py",
+    "src/lab/mhs/process_backtest.py",
 ]
 
 STALE_TOKENS = [
@@ -86,17 +86,17 @@ def test_no_source_tools_dependency() -> None:
 def test_canonical_benchmark_uses_supervisor() -> None:
     """Maintained benchmark uses the canonical 3m supervisor invocation."""
     text = _read_text(ROOT / "tests/benchmark/mhs/test_mhs_replay_resources.py")
-    assert "uv run python -m src.cli.main backtest mhs" in text
+    assert "uv run python -m src.cli.main lab process-backtest" in text
     assert "mhs_baseline_run" not in text
-    assert (ROOT / "src/application/mhs_supervisor.py").exists()
+    assert (ROOT / "src/lab/mhs/app/supervisor.py").exists()
 
 
 def test_used_dependencies_preserved() -> None:
     """Retained research and live CLIs keep their required dependencies."""
     pyproject = _read_text(ROOT / "pyproject.toml")
     assert "optuna" in pyproject
-    from src.mhs.contracts import MhsDiagnosticRequest
-    from src.mhs.report.persist import persist_mhs_horizon_diagnostic_report
+    from src.lab.mhs.contracts import MhsDiagnosticRequest
+    from src.lab.mhs.report.persist import persist_mhs_horizon_diagnostic_report
 
     assert MhsDiagnosticRequest is not None
     assert callable(persist_mhs_horizon_diagnostic_report)
@@ -106,12 +106,12 @@ def test_no_eager_facade_on_package_import() -> None:
     """Importing the evaluation package performs no orchestration."""
     import ast
 
-    tree = ast.parse(_read_text(ROOT / "src/mhs/evaluation/__init__.py"))
+    tree = ast.parse(_read_text(ROOT / "src/lab/mhs/evaluation/__init__.py"))
     assert len(tree.body) == 1
     assert isinstance(tree.body[0], ast.Expr)
     assert isinstance(tree.body[0].value, ast.Constant)
     proc = subprocess.run(
-        [sys.executable, "-c", "import src.mhs.evaluation, sys; print(sorted(m for m in sys.modules if m.startswith('src.mhs.report') or m.startswith('src.mhs.pipeline')))"],
+        [sys.executable, "-c", "import src.lab.mhs.evaluation, sys; print(sorted(m for m in sys.modules if m.startswith('src.lab.mhs.report') or m.startswith('src.lab.mhs.pipeline')))"],
         cwd=str(ROOT),
         capture_output=True,
         text=True,
@@ -122,14 +122,14 @@ def test_no_eager_facade_on_package_import() -> None:
 
 def test_maintained_research_and_deployment_smoke() -> None:
     """Supported research CLI and deployment wiring stay importable."""
-    from src.cli.commands.research.mhs import _run_mhs_horizon_diagnostic, add_mhs_commands
-    from src.mhs.contracts import MhsDiagnosticRequest, MhsOutputTier
+    from src.cli.commands.lab import _run_horizon_diagnostic, add_lab_commands
+    from src.lab.mhs.contracts import MhsDiagnosticRequest, MhsOutputTier
     from src.engine.execution.window_stream import MhsExecutionWindow
-    from src.mhs.pipeline.orchestrator import run_mhs_diagnostic
+    from src.lab.mhs.pipeline.orchestrator import run_mhs_diagnostic
 
     assert callable(run_mhs_diagnostic)
-    assert callable(_run_mhs_horizon_diagnostic)
-    assert callable(add_mhs_commands)
+    assert callable(_run_horizon_diagnostic)
+    assert callable(add_lab_commands)
     assert MhsDiagnosticRequest is not None
     assert MhsOutputTier is not None
     assert MhsExecutionWindow is not None
@@ -140,25 +140,25 @@ def test_maintained_research_and_deployment_smoke() -> None:
 def test_direct_owner_patch_points() -> None:
     """Facade lookups resolve to concrete owners with no vacuous pass."""
     for rel in [
-        "src/mhs/pipeline/stages/panel.py",
-        "src/mhs/pipeline/stages/book.py",
-        "src/mhs/pipeline/stages/committee.py",
-        "src/mhs/pipeline/stages/selection.py",
-        "src/mhs/pipeline/stages/fold.py",
-        "src/mhs/pipeline/stages/replay.py",
-        "src/mhs/pipeline/stages/assemble.py",
-        "src/mhs/pipeline/orchestrator.py",
-        "src/mhs/evaluation/fold_weights.py",
-        "src/mhs/evaluation/books.py",
-        "src/mhs/evaluation/diagnostics.py",
-        "src/mhs/evaluation/committee.py",
-        "src/mhs/evaluation/windows.py",
+        "src/lab/mhs/pipeline/stages/panel.py",
+        "src/lab/mhs/pipeline/stages/book.py",
+        "src/lab/mhs/pipeline/stages/committee.py",
+        "src/lab/mhs/pipeline/stages/selection.py",
+        "src/lab/mhs/pipeline/stages/fold.py",
+        "src/lab/mhs/pipeline/stages/replay.py",
+        "src/lab/mhs/pipeline/stages/assemble.py",
+        "src/lab/mhs/pipeline/orchestrator.py",
+        "src/lab/mhs/evaluation/fold_weights.py",
+        "src/lab/mhs/evaluation/books.py",
+        "src/lab/mhs/evaluation/diagnostics.py",
+        "src/lab/mhs/evaluation/committee.py",
+        "src/lab/mhs/evaluation/windows.py",
     ]:
         text = _read_text(ROOT / rel)
-        assert "from src.mhs.evaluation import" not in text, rel
-        assert "import src.mhs.evaluation as ev" not in text, rel
+        assert "from src.lab.mhs.evaluation import" not in text, rel
+        assert "import src.lab.mhs.evaluation as ev" not in text, rel
     from src.strategy.books import inverse_realized_vol_tilt, renormalize_within_mask
-    from src.mhs.regime import crash_regime_tilt_weights
+    from src.lab.mhs.regime import crash_regime_tilt_weights
 
     assert callable(inverse_realized_vol_tilt)
     assert callable(renormalize_within_mask)
@@ -186,8 +186,8 @@ def test_full_three_minute_equivalence_scope() -> None:
     """Canonical run keeps 3m grid with supervisor wall and memory scope."""
     import dataclasses
 
-    import src.application.mhs_supervisor as sup_mod
-    from src.mhs.contracts import MhsDiagnosticRequest
+    import src.lab.mhs.app.supervisor as sup_mod
+    from src.lab.mhs.contracts import MhsDiagnosticRequest
 
     fields = {f.name: f.default for f in dataclasses.fields(MhsDiagnosticRequest)}
     assert fields.get("execution_timeframe") == "3m"
@@ -199,7 +199,7 @@ def test_direct_owner_blend_grid_selection() -> None:
     """Direct blend grid selection follows the capital contract."""
     import pandas as pd
 
-    from src.mhs.evaluation.books import _active_blend_book_and_grid
+    from src.lab.mhs.evaluation.books import _active_blend_book_and_grid
     from src.core.types import BOOK_SPECS
 
     fast = BOOK_SPECS["fast_reversal"]
@@ -216,7 +216,7 @@ def test_direct_owner_committee_book_call() -> None:
     import pandas as pd
     import pytest
 
-    from src.mhs.evaluation.committee import _committee_execution_book
+    from src.lab.mhs.evaluation.committee import _committee_execution_book
 
     idx = pd.date_range("2021-01-01", periods=4, freq="6h", tz="UTC")
     cols = ["AAAUSDT", "BBBUSDT"]
@@ -235,7 +235,7 @@ def test_direct_owner_fold_tilt_and_renormalize() -> None:
 
     from src.strategy.books import inverse_realized_vol_tilt, renormalize_within_mask
     from src.strategy.horizons import realized_vol
-    from src.mhs.regime import crash_regime_tilt_weights
+    from src.lab.mhs.regime import crash_regime_tilt_weights
 
     idx = pd.date_range("2021-01-01", periods=30, freq="6h", tz="UTC")
     cols = ["AAAUSDT", "BBBUSDT", "BTCUSDT"]
@@ -259,7 +259,7 @@ def test_direct_owner_window_batch_call(monkeypatch: object) -> None:
     import pandas as pd
     import pytest
 
-    import src.mhs.evaluation.windows as windows
+    import src.lab.mhs.evaluation.windows as windows
     from src.core.types import BOOK_SPECS
 
     grid = pd.date_range("2021-01-01", periods=4, freq="1h", tz="UTC")
@@ -308,9 +308,9 @@ def test_direct_owner_fold_target_weights() -> None:
     import numpy as np
     import pandas as pd
 
-    from src.mhs import research_go as _research_go
-    from src.mhs.evaluation.fold_weights import _build_fold_target_weights
-    from src.mhs.evidence import AnchoredPurgedFold
+    from src.lab.mhs import research_go as _research_go
+    from src.lab.mhs.evaluation.fold_weights import _build_fold_target_weights
+    from src.lab.mhs.evidence import AnchoredPurgedFold
     from src.strategy.features import FeatureAdmission
 
     n = 2000

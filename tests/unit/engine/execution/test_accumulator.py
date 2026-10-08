@@ -572,7 +572,7 @@ def test_non_positive_pre_trade_equity_fails_closed() -> None:
     import pytest
 
     from src.common.errors import DataIntegrityError
-    from src.mhs.evaluation.integrity import _classify_execution_failure
+    from src.lab.mhs.evaluation.integrity import _classify_execution_failure
 
     for bad_equity in (0.0, float("nan")):
         acc, kwargs, snapshot = _mid_replay_book_setup()
@@ -589,7 +589,7 @@ def test_non_finite_fill_sizing_fails_closed_without_mutation() -> None:
     import pytest
 
     from src.common.errors import DataIntegrityError
-    from src.mhs.evaluation.integrity import _classify_execution_failure
+    from src.lab.mhs.evaluation.integrity import _classify_execution_failure
 
     for bad_qty, bad_price in ((float("inf"), 100.0), (0.5, float("nan"))):
         acc, kwargs, snapshot = _mid_replay_book_setup()

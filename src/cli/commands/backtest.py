@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast
 
@@ -13,8 +12,7 @@ import pandas as pd
 
 from src.application.strategy_account import strategy_execution_specs
 from src.backtests.catalog import append_backtest_index
-from src.backtests.contracts import RetentionPolicy
-from src.common.paths import BACKTESTS_DIR, STRATEGY_BACKTESTS_DIR, VENUE_RULES_DIR
+from src.common.paths import STRATEGY_BACKTESTS_DIR, VENUE_RULES_DIR
 from src.core.params import (
     ACCOUNT_DEFAULT_CAPITAL_USDT,
     ACCOUNT_IMPACT_Y,
@@ -57,92 +55,16 @@ def _resolve_budget(args: argparse.Namespace) -> MhsMemoryBudget:
         raise SystemExit(f"invalid resource budget: {exc}") from exc
 
 
-def _resolve_destinations(args: argparse.Namespace) -> tuple[Path, Path | None]:
-    """Resolve the sole result document and optional exact-target export for one MHS run.
-
-    Args:
-        args: Parsed canonical MHS backtest arguments.
-    Returns:
-        A fresh `result.json` destination and an optional target parquet destination.
-    Raises:
-        SystemExit: An explicit destination is invalid or already occupied.
-    """
-    import os
-
-    targets_output = Path(args.targets_output) if args.targets_output is not None else None
-    if targets_output is not None:
-        if targets_output.suffix != ".parquet":
-            raise SystemExit(f"targets-output must be a parquet path, got {args.targets_output!r}")
-        if os.path.lexists(targets_output):
-            raise SystemExit(f"targets-output must be fresh: {targets_output} already exists")
-    if args.output is None:
-        run_root = BACKTESTS_DIR / "runs"
-        run_root.mkdir(parents=True, exist_ok=True)
-        run_dir = run_root / uuid.uuid4().hex
-        run_dir.mkdir(parents=True, exist_ok=True)
-        return run_dir / "result.json", targets_output
-    output = Path(args.output)
-    if output.suffix != ".json":
-        raise SystemExit(f"output must be a JSON path, got {args.output!r}")
-    if os.path.lexists(output):
-        raise SystemExit(f"output must be fresh: {output} already exists")
-    return output, targets_output
-
-
 def add_backtest_commands(backtest_parser: argparse.ArgumentParser) -> None:
-    """Register the default MHS inventory evaluation command.
+    """Register the deployable strategy backtest leaves.
 
     Args:
         backtest_parser: Root-owned parser for the backtest command group.
     Returns:
-        None; registers the mhs leaf and its supervised handler.
+        None; registers the strategy, exposure and account leaves. The
+        exploratory process backtest lives under ``lab process-backtest``.
     """
     sub = backtest_parser.add_subparsers(dest="command", required=True)
-    mhs = sub.add_parser(
-        "mhs",
-        help="Supervised 3m inventory evaluation of the continuous MHS process.",
-        description="Canonical three-minute inventory evidence with comparative hourly proxy state.",
-    )
-    mhs.add_argument("--start", default=None, help="UTC source start; date-only values are UTC.")
-    mhs.add_argument("--end", default=None, help="UTC registered evaluation end.")
-    mhs.add_argument("--data-root", default=None, help="Existing OHLCV root override.")
-    mhs.add_argument(
-        "--output", default=None,
-        help="Fresh complete result envelope JSON destination; omitted creates a unique run directory.",
-    )
-    mhs.add_argument("--targets-output", default=None, help="Optional fresh exact-target parquet destination.")
-    mhs.add_argument(
-        "--rebalance-tracking-error-threshold", type=float, default=None,
-        help="Existing optional process adoption control; omitted preserves baseline.",
-    )
-    mhs.add_argument("--timeout-seconds", type=float, default=None, help="Optional positive finite wall timeout.")
-    mhs.add_argument(
-        "--poll-seconds", type=float, default=0.25, help="Positive finite resource observation interval.",
-    )
-    mhs.add_argument("--total-tree-pss-bytes", type=int, default=None, help="Total process-tree PSS ceiling in bytes.")
-    mhs.add_argument("--replay-tree-pss-bytes", type=int, default=None, help="Replay process-tree PSS ceiling in bytes.")
-    mhs.add_argument("--min-available-bytes", type=int, default=None, help="Minimum effective physical headroom in bytes.")
-    mhs.add_argument(
-        "--execution-timeframe", choices=["3m"], default="3m",
-        help="Execution replay resolution; fixed to 3m and never changes strategy cadence.",
-    )
-    mhs.add_argument(
-        "--max-detail-bytes", type=int, default=None,
-        help="Optional destructive detail budget in bytes; omitted keeps every managed bundle.",
-    )
-    mhs.add_argument(
-        "--max-detail-runs", type=int, default=None,
-        help="Optional destructive detail budget in finalized runs; omitted keeps every managed bundle.",
-    )
-    mhs.add_argument(
-        "--registry-path", default=None,
-        help="Local execution registry; omitted uses the canonical backtests registry.",
-    )
-    mhs.add_argument(
-        "--force", action="store_true", default=False,
-        help="Execute an equivalent request again instead of reusing the finalized match.",
-    )
-    mhs.set_defaults(handler=run_mhs_backtest)
     strategy = sub.add_parser(
         "strategy",
         help="Deployed strategy Top-20/variant 3m inventory evaluation.",
@@ -202,117 +124,6 @@ def add_backtest_commands(backtest_parser: argparse.ArgumentParser) -> None:
     account.add_argument("--replay-tree-pss-bytes", type=int, default=None, help="Replay process-tree PSS ceiling in bytes.")
     account.add_argument("--min-available-bytes", type=int, default=None, help="Minimum effective physical headroom in bytes.")
     account.set_defaults(handler=run_account_replay_command)
-
-
-def _resolve_retention_policy(args: argparse.Namespace) -> RetentionPolicy | None:
-    """Build explicit destructive detail budgets, failing before any workload launch."""
-    from src.core.params import DEFAULT_DETAIL_RETENTION_MAX_BYTES, DEFAULT_DETAIL_RETENTION_MAX_RUNS
-
-    max_bytes = getattr(args, "max_detail_bytes", None)
-    max_runs = getattr(args, "max_detail_runs", None)
-    if max_bytes is None:
-        max_bytes = DEFAULT_DETAIL_RETENTION_MAX_BYTES
-    if max_runs is None:
-        max_runs = DEFAULT_DETAIL_RETENTION_MAX_RUNS
-    if max_bytes is None and max_runs is None:
-        return None
-    try:
-        return RetentionPolicy(max_detail_bytes=max_bytes, max_detail_runs=max_runs)
-    except ValueError as exc:
-        raise SystemExit(f"invalid detail retention budget: {exc}") from exc
-
-
-def _resolve_fingerprint(args: argparse.Namespace, start: pd.Timestamp, end: pd.Timestamp, budget: MhsMemoryBudget) -> str:
-    """Compute the immutable reuse fingerprint for one canonical request."""
-    from src.application.mhs_supervisor import request_fingerprint
-
-    return request_fingerprint(
-        start=start, end=end, data_root=getattr(args, "data_root", None),
-        tracking_error_threshold=getattr(args, "rebalance_tracking_error_threshold", None),
-        memory_budget=budget,
-        execution_timeframe=getattr(args, "execution_timeframe", "3m"),
-    )
-
-
-def run_mhs_backtest(args: argparse.Namespace) -> None:
-    """Run the canonical three-minute process evaluation, or reuse a verified equivalent run.
-
-    Reuse is offered only for the default run-directory layout. An explicit
-    destination is a demand for files at that path, and a reused run cannot
-    satisfy it. A fingerprint match is reused only after the registry
-    certifies that the run completed validly and its recorded artifacts still
-    verify on disk. Any refused match falls through to a fresh supervised run,
-    so stale or failed history can never end the command successfully.
-
-    Args:
-        args: Parsed dates, evidence paths, policy and resource controls.
-    Returns:
-        None after a verified reuse or a completed fresh run. On success,
-        stdout carries exactly the result envelope path.
-    Raises:
-        SystemExit: Arguments are invalid, the registry fails integrity
-            checks, or the observed fresh execution is non-success.
-        OSError: Launch or outcome persistence fails.
-    """
-    from src.application.mhs_supervisor import find_reused_run, run_mhs_process_backtest
-    from src.common.errors import DataIntegrityError
-
-    if getattr(args, "execution_timeframe", "3m") != "3m":
-        raise SystemExit(f"execution-timeframe must be 3m, got {getattr(args, 'execution_timeframe', None)!r}")
-    start = _utc_timestamp(getattr(args, "start", None), "start", DISCOVERY_START)
-    end = _utc_timestamp(getattr(args, "end", None), "end", PROCESS_EVALUATION_CEILING)
-    budget = _resolve_budget(args)
-    registry_path = Path(args.registry_path) if getattr(args, "registry_path", None) else BACKTESTS_DIR / "registry.sqlite3"
-    retention_policy = _resolve_retention_policy(args)
-    fingerprint = _resolve_fingerprint(args, start, end, budget)
-    explicit_destination = args.output is not None or args.targets_output is not None
-    if not getattr(args, "force", False) and explicit_destination:
-        _logger.info("[DATA] backtest mhs reuse_skipped reason=explicit_destination")
-    elif not getattr(args, "force", False):
-        try:
-            lookup = find_reused_run(registry_path, fingerprint)
-        except DataIntegrityError as exc:
-            _logger.error("[DATA] backtest mhs reuse_lookup_failed registry=%s", registry_path, exc_info=True)
-            raise SystemExit(f"registry integrity failure: {exc}") from exc
-        if lookup.reused is not None:
-            reused = lookup.reused
-            _logger.info(
-                "[DATA] backtest mhs reuse run_id=%s result_path=%s targets_path=%s finalized_at=%s evidence_retained=%s",
-                reused.run_id, reused.result_path, reused.targets_path, reused.finalized_at, reused.evidence_retained,
-            )
-            print(str(reused.result_path))  # noqa: T201 -- prints only the reused result path
-            return
-    result_output, targets_output = _resolve_destinations(args)
-    run_id = result_output.parent.name if getattr(args, "output", None) is None else uuid.uuid4().hex
-    _logger.info(
-        "[EVAL] backtest mhs result_output=%s targets_output=%s",
-        result_output, targets_output,
-    )
-    try:
-        run = run_mhs_process_backtest(
-            start=start, end=end, data_root=args.data_root, result_output=result_output,
-            targets_output=targets_output,
-            tracking_error_threshold=args.rebalance_tracking_error_threshold,
-            timeout_seconds=args.timeout_seconds, poll_seconds=args.poll_seconds,
-            memory_budget=budget,
-            registry_path=registry_path,
-            run_id=run_id,
-            retention_policy=retention_policy,
-        )
-    except ValueError as exc:
-        raise SystemExit(f"invalid backtest controls: {exc}") from exc
-    if run.status != "completed":
-        raise SystemExit(1)
-    if result_output.is_file():
-        payload = json.loads(result_output.read_text(encoding="utf-8"))
-        base = payload.get("financial", {}).get("base", {})
-        append_backtest_index(
-            index_path=BACKTESTS_DIR / "index.jsonl",
-            kind="mhs", run_dir=result_output.parent, created_at=pd.Timestamp.now(tz="UTC"),
-            evaluation_start=start, evaluation_end=end, strategy_id="process_inventory_3m",
-            base_cagr=base.get("cagr"), base_max_drawdown=base.get("max_drawdown"),
-        )
-    print(str(result_output))  # noqa: T201 -- prints only the finalized result path
 
 
 def _strategy_policy(breadth: int, variant: str = "primary") -> StrategySpec:
@@ -461,7 +272,7 @@ def _prune_strategy_runs(keep: int) -> None:
 def run_strategy_backtest_command(args: argparse.Namespace) -> None:
     """Run a strategy Top-20/variant 3m inventory evaluation.
 
-    This command is a distinct strategy identity from ``backtest mhs``.  It
+    This command is a distinct strategy identity from ``lab process-backtest``.  It
     accepts declared breadth and dates, builds no live artifact, and persists
     only completed strategy evidence.
 

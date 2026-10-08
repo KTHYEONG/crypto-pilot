@@ -12,7 +12,7 @@ from typing import Any, cast
 
 import pytest
 
-from src.backtests.migration import (
+from src.lab.mhs.app.backtests_migration import (
     _derive_run_id,
     _is_hex32,
     _map_run_status,
@@ -135,7 +135,7 @@ def test_migrate_preserves_ledger_only_trials(tmp_path: Path) -> None:
     """Ledger-only keys survive with first-seen provenance."""
     import json as _json
 
-    from src.mhs.run_history import trial_identity_key
+    from src.lab.mhs.run_history import trial_identity_key
 
     history = tmp_path / "history"
     record = _trial_record("r1", {"u": 1})
@@ -342,9 +342,9 @@ def test_migrate_helper_branches_and_ops_wiring(tmp_path: Path) -> None:
     )
     assert odd_report["imported"] == 1
     parser = argparse.ArgumentParser()
-    from src.cli.commands.ops import add_ops_commands
+    from src.cli.commands.lab import add_lab_commands
 
-    add_ops_commands(parser)
+    add_lab_commands(parser)
     args = parser.parse_args(
         ["backtests-migrate", "--registry-path", str(registry), "--history-directory", str(preview_history), "--apply"]
     )
@@ -363,7 +363,7 @@ def _write_sharded_history(source: Path, shards: list[list[dict[str, Any]]], led
 
 def test_verify_imported_history_matches_counts_and_provenance(tmp_path: Path) -> None:
     """Imported history verifies exactly with matching counts and earliest timestamps."""
-    from src.mhs.run_history import trial_identity_key
+    from src.lab.mhs.run_history import trial_identity_key
 
     first = _trial_record("r1", {"u": 1})
     first["run_at"] = "2026-01-01T00:00:00+00:00"
@@ -450,9 +450,9 @@ def test_verify_ignores_run_bundles_and_cli_wiring(tmp_path: Path) -> None:
     assert _counts(registry)["runs"] == 0
     assert _counts(registry)["migrations"] == 1
     parser = argparse.ArgumentParser()
-    from src.cli.commands.ops import add_ops_commands
+    from src.cli.commands.lab import add_lab_commands
 
-    add_ops_commands(parser)
+    add_lab_commands(parser)
     args = parser.parse_args(
         ["backtests-verify-history-migration", "--registry-path", str(registry), "--history-directory", str(source)]
     )
@@ -469,7 +469,7 @@ def test_verify_duplicate_trials_keep_earliest_identity(tmp_path: Path) -> None:
     """Duplicate trials remain monotone with one identity and earliest provenance."""
     import json as _json
 
-    from src.mhs.run_history import trial_identity_key
+    from src.lab.mhs.run_history import trial_identity_key
 
     record = _trial_record("r1", {"u": 1})
     record["run_at"] = "2026-01-01T00:00:00+00:00"
