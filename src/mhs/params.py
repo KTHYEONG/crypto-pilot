@@ -493,11 +493,13 @@ SETTLEMENT_AUDIT_MIN_TRAILING_FLAT_BARS: int = 3
 
 # --- spec 34: instrument lifecycle settlement (part 2 engine) ---
 SETTLEMENT_PRICE_STRESS_HAIRCUT_BPS: float = 450.0
-INSTRUMENT_LIFECYCLE_PROCEDURE: str = "pit_registry_settlement_halts_causal_exclusions"
+INSTRUMENT_LIFECYCLE_PROCEDURE: str = "pit_registry_settlement_halts_causal_exclusions_exit_deferral"
 DELIST_ROSTER_BLOCK_LEAD: pd.Timedelta = pd.Timedelta(hours=48)
 DELIST_FORCED_EXIT_LEAD: pd.Timedelta = pd.Timedelta(hours=72)
 VENUE_HALT_MIN_ZERO_FRACTION: float = 0.9
 VENUE_HALT_MIN_PRESENT_SYMBOLS: int = 10
+# Measured gap between the longest temporary freeze (96 min) and the shortest dead market (39 days).
+EXIT_DEFERRAL_MAX_AGE: pd.Timedelta = pd.Timedelta(hours=24)
 
 # --- continuous process backtest -------------------------------------------------
 # 한 번의 연속 인과 경로에서 매월 재적합한다(분기 폴드 개별 재생 대체).

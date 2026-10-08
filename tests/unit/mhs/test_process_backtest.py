@@ -1074,7 +1074,7 @@ def test_execution_availability_rejects_misaligned_mask() -> None:
 
 
 def test_zeroed_target_with_unfillable_exit_holds_inventory_as_open_marked() -> None:
-    """A masked exit that cannot fill keeps units held as priced open inventory."""
+    """A masked exit that cannot fill keeps units held as priced open inventory with a disclosed retry."""
     from src.mhs.execution import ExecutionReplayWindow, ExecutionSpec, replay_execution_windows
 
     data = _synthetic_data(n_days=60)
@@ -1091,7 +1091,11 @@ def test_zeroed_target_with_unfillable_exit_holds_inventory_as_open_marked() -> 
     result = replay_execution_windows((window,), 1000.0, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec())
     assert abs(float(result.ledger.equity.iloc[-1] - result.ledger.equity.iloc[0])) >= 0.0
     assert "delist_settlement" not in set(result.simulated_fills["reason"])
-    assert not result.ledger.primary_valid
+    assert result.ledger.primary_valid
+    assert result.data_gaps == ()
+    assert len(result.exit_block_disclosures) == 1
+    assert result.exit_block_disclosures[0].cause == "SYMBOL_NO_TRADE"
+    assert result.exit_block_disclosures[0].outcome == "retry_next_decision"
     assert [p.status for p in result.terminal_positions] == ["open_marked"]
     assert abs(float(result.terminal_positions[0].quantity)) > 0.0
 

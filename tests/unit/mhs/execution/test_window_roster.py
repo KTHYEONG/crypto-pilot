@@ -141,7 +141,7 @@ def test_nan_hold_keeps_symbol_in_gap_pieces(tmp_path, monkeypatch) -> None:
 
 
 def test_blocked_exit_stays_covered(tmp_path, monkeypatch) -> None:
-    """S2: A exit blocked by zero volume stays covered; genuine gap fails the ledger."""
+    """S2: A exit blocked by zero volume stays covered; a disclosed retry keeps the ledger valid."""
     _patch_budget(monkeypatch, 40)
     targets, signals, dec = _s2_targets()
     end = START + pd.Timedelta(days=1)
@@ -149,8 +149,13 @@ def test_blocked_exit_stays_covered(tmp_path, monkeypatch) -> None:
     windows, result = _drive(targets, signals, end, tmp_path, mode="fallback", budget=1)
     first = next(i for i, w in enumerate(windows) if "AUSDT" in w.symbols)
     assert all("AUSDT" in w.symbols for w in windows[first:])
-    assert not result.ledger.primary_valid
-    assert "KNOWN_ZERO_VOLUME" in {g.code for g in result.data_gaps}
+    assert result.ledger.primary_valid
+    assert result.data_gaps == ()
+    assert result.termination_counts.get("BLOCKED_EXIT_SYMBOL_NO_TRADE") == 1
+    assert len(result.exit_block_disclosures) == 1
+    block = result.exit_block_disclosures[0]
+    assert block.cause == "SYMBOL_NO_TRADE"
+    assert block.outcome == "retry_next_decision"
 
 
 def test_tail_pieces_carry_held_symbol(tmp_path, monkeypatch) -> None:

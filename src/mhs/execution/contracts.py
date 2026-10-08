@@ -372,14 +372,15 @@ class ExecutionDataGap:
 
 
 @dataclass(frozen=True, slots=True)
-class VenueHaltExitBlock:
-    """Disclosure of one exit blocked by an evidenced venue halt (never a data gap).
+class ExitBlockDisclosure:
+    """Disclosure of one exit blocked by a venue pause (never a data gap). The position stays on, so the block is reported rather than hidden: valuation and financing remain observable, and the exit is re-attempted inside its own timeout or at the next decision.
 
     Attributes:
         symbol: Blocked symbol.
         decision_time: Decision label of the intent.
-        blocked_bar: Halted bar the fill would have used.
-        halt_id: Registry identity of the halt.
+        blocked_bar: Bar the fill would have used.
+        cause: ``VENUE_HALT`` (registry halt) or ``SYMBOL_NO_TRADE`` (zero-volume bar outside any halt).
+        halt_id: Registry identity of the halt (required for ``VENUE_HALT``, None for ``SYMBOL_NO_TRADE``).
         outcome: ``deferred_fill`` (filled at ``filled_bar`` inside the order timeout) or
             ``retry_next_decision``.
         filled_bar: Deferred fill bar, None when retried.
@@ -389,30 +390,38 @@ class VenueHaltExitBlock:
     symbol: str
     decision_time: pd.Timestamp
     blocked_bar: pd.Timestamp
-    halt_id: str
+    cause: str
+    halt_id: str | None
     outcome: str
     filled_bar: pd.Timestamp | None
     quantity: float
 
     def __post_init__(self) -> None:
         if not isinstance(self.symbol, str) or not self.symbol:
-            raise DataIntegrityError("halt block symbol must be a nonempty string")
+            raise DataIntegrityError("exit block symbol must be a nonempty string")
+        if self.cause not in ("VENUE_HALT", "SYMBOL_NO_TRADE"):
+            raise DataIntegrityError(f"unknown exit block cause {self.cause!r}")
+        if self.cause == "VENUE_HALT":
+            if not isinstance(self.halt_id, str) or not self.halt_id:
+                raise DataIntegrityError("exit block VENUE_HALT requires a nonempty halt_id")
+        elif self.halt_id is not None:
+            raise DataIntegrityError("exit block SYMBOL_NO_TRADE requires halt_id None")
         if self.outcome not in ("deferred_fill", "retry_next_decision"):
-            raise DataIntegrityError(f"unknown halt block outcome {self.outcome!r}")
-        for name in ("decision_time", "blocked_bar"):
+            raise DataIntegrityError(f"unknown exit block outcome {self.outcome!r}")
+        for name in ("decision_time", "blocked_bar", "filled_bar"):
             value = getattr(self, name)
+            if name == "filled_bar" and value is None:
+                continue
             if not isinstance(value, pd.Timestamp) or pd.isna(value):
-                raise DataIntegrityError(f"halt block {name} must be a valid timestamp")
-        if self.filled_bar is not None and (
-            not isinstance(self.filled_bar, pd.Timestamp) or pd.isna(self.filled_bar)
-        ):
-            raise DataIntegrityError("halt block filled_bar must be a valid timestamp or None")
+                raise DataIntegrityError(f"exit block {name} must be a valid timestamp")
+            if value.tzinfo is None or value.utcoffset() != _datetime.timedelta(0):
+                raise DataIntegrityError(f"exit block {name} must be timezone-aware UTC")
         if self.outcome == "deferred_fill" and self.filled_bar is None:
-            raise DataIntegrityError("halt block deferred_fill requires filled_bar")
+            raise DataIntegrityError("exit block deferred_fill requires filled_bar")
         if self.outcome == "retry_next_decision" and self.filled_bar is not None:
-            raise DataIntegrityError("halt block retry_next_decision requires filled_bar None")
+            raise DataIntegrityError("exit block retry_next_decision requires filled_bar None")
         if not np.isfinite(float(self.quantity)):
-            raise DataIntegrityError("halt block quantity must be finite")
+            raise DataIntegrityError("exit block quantity must be finite")
 
 
 @dataclass(frozen=True, slots=True)
@@ -615,7 +624,7 @@ class StrategyExecutionReplayResult:
     terminal_positions: tuple[TerminalPositionEvidence, ...] = ()
     ledger_available_at: pd.DatetimeIndex | None = None
     settlement_events: tuple[InstrumentSettlementEvent, ...] = ()
-    venue_halt_exit_blocks: tuple[VenueHaltExitBlock, ...] = ()
+    exit_block_disclosures: tuple[ExitBlockDisclosure, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
