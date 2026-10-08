@@ -371,7 +371,8 @@ def test_proxy_ignores_zero_weight_nans_and_empty_books() -> None:
 
 
 def test_assemble_account_inputs_shares_causal_adv_sigma(tmp_path: Path) -> None:
-    from src.mhs.account_sources import assemble_account_inputs, causal_adv_sigma
+    from src.mhs.account_liquidity import causal_adv_sigma
+    from src.mhs.account_sources import assemble_account_inputs
     from src.mhs.frozen_research_candidate import FrozenMhsCandidate
     from src.mhs.frozen_research_run import FrozenSourceContext
     from src.mhs.resources import resolve_mhs_memory_budget

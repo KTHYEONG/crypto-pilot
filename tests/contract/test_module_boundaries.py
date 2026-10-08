@@ -389,7 +389,8 @@ def test_source_module_size_budget() -> None:
         "src/live/executor.py": 1980,
         "src/live/tax_ledger.py": 1209,
         "src/live/rest.py": 815,
-        "src/mhs/resources.py": 917,
+        # spec 38 part 1: MhsResourceMeasurement canonical home (moved from contracts).
+        "src/mhs/resources.py": 937,
         "src/mhs/evidence.py": 1267,
         "src/mhs/deploy_gate.py": 723,
         "src/mhs/scaling.py": 892,
@@ -412,7 +413,7 @@ def test_source_module_size_budget() -> None:
         # spec 34 part 3: build-venue-halts operator command next to build-settlement-registry.
         "src/cli/commands/data.py": 708,
         # Declare-once request schema: each MHS option is exactly one field plus CLI metadata.
-        "src/mhs/contracts.py": 898,
+        "src/mhs/contracts.py": 878,
         # Checkpoint advancement, retention and the loop stay co-located for review;
         # _run_retention_pass persists the checkpoint and is not split out.
         "src/market_data/streams/normalizer.py": 1112,

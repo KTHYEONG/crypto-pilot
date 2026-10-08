@@ -24,6 +24,7 @@ from src.mhs.params import (
     FUNDING_CARRY_SLEEVE_WEIGHT,
     GROWTH_RISK_ENVELOPES,
 )
+from src.mhs.resources import MhsResourceMeasurement as MhsResourceMeasurement
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -868,27 +869,6 @@ class MhsFoldReport:
 from src.mhs.report.schema import (  # noqa: E402
     MhsHorizonDiagnosticReport as MhsHorizonDiagnosticReport,
 )
-
-
-@dataclass(frozen=True, slots=True)
-class MhsResourceMeasurement:
-    """One ordered resource sample for a material diagnostic stage.
-
-    ``elapsed_ms`` is the wall time since the previous recorded stage; ``rss_bytes``
-    is the current process resident set size. Measurements are observational only
-    and must never alter control flow, replay data, or the GO gate.
-    """
-
-    stage: str
-    elapsed_ms: int
-    rss_bytes: int
-    grid_bars: int | None = None
-    n_symbols: int | None = None
-    fill_count: int | None = None
-    window_start: str | None = None
-    window_end: str | None = None
-    active_symbols: int | None = None
-    peak_rss_bytes: int | None = None
 
 
 class MhsOutputTier(StrEnum):

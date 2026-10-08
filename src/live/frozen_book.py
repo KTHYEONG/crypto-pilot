@@ -22,7 +22,7 @@ from src.market_data.services.futures_collection import (
     FUNDING_TIME_TOLERANCE_MS,
     infer_funding_interval_ms,
 )
-from src.mhs.account_sources import causal_adv_sigma
+from src.mhs.account_liquidity import causal_adv_sigma
 from src.mhs.books import clip_names_preserving_gross
 from src.mhs.frozen_research_candidate import FROZEN_MHS_TOP20_V2, build_frozen_mhs_candidate
 from src.mhs.panel import load_base_panel
