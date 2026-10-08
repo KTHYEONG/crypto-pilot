@@ -1,4 +1,4 @@
-"""Frozen parameter snapshot for research provenance.
+"""Fixed parameter snapshot for research provenance.
 
 Carries the decision-constant snapshot bound into preregistered procedures and
 run-history records. Sealed deployment params, bootstrap envelopes, digests and

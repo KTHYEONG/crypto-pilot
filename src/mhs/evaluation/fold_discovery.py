@@ -41,7 +41,7 @@ def _fold_safe_slow_book_spec(
     ``"fold_train_only_discovery"`` only when the fold-scoped gate admitted a
     candidate (spec is ``default`` with ``horizon_hours`` replaced by the
     selected horizon, keeping band/step_hours/min_symbols identical to the
-    frozen default); otherwise ``"frozen_default"`` with ``spec is default``
+    fixed default); otherwise ``"frozen_default"`` with ``spec is default``
     unchanged.
     """
     if selection.admitted and selection.selected_horizon is not None:
@@ -66,7 +66,7 @@ def _fold_safe_fast_horizon(
 
     Diagnostic-only: returns ``(horizon_hours, source)`` instead of a
     ``BookSpec`` because fast_reversal's book construction and
-    ``BOOK_BLEND_WEIGHTS`` stay frozen at 0.0 capital (the result is
+    ``BOOK_BLEND_WEIGHTS`` stay fixed at 0.0 capital (the result is
     evidence for a separate governance decision, never a weight change).
     ``source`` is ``"fold_train_only_discovery"`` only when the fold-scoped
     gate admitted a candidate (``admitted`` and ``selected_horizon`` both

@@ -91,7 +91,7 @@ def _trend_sleeve_position(
 ) -> pd.Series:
     """Ensemble trend position on the eligible market basket, held to 1h bars.
 
-    Thin wrapper reusing the frozen ``market_basket_log_price`` and
+    Thin wrapper reusing the fixed ``market_basket_log_price`` and
     ``time_series_trend_position`` primitives verbatim -- no new math.
     """
     basket = market_basket_log_price(log_close, eligible)

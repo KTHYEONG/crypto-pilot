@@ -230,7 +230,7 @@ class StageTelemetry:
         return m
 
     def absorb(self, records: tuple[_ResourceMeasurement, ...]) -> None:
-        """Merge frozen records (e.g. from a book subprocess) into this recorder."""
+        """Merge immutable records (e.g. from a book subprocess) into this recorder."""
         if not records:
             return
         self._records.extend(records)

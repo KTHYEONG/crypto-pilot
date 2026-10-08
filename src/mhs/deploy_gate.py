@@ -603,10 +603,10 @@ def evaluate_continuous_growth_survival(
     Args:
         base_returns: Unique ordered complete daily inventory returns.
         stress_returns: Same dated decisions under the registered cost stress.
-        envelope: Frozen net-growth and distributional loss budgets.
+        envelope: Fixed net-growth and distributional loss budgets.
         alpha: Already budgeted per-endpoint significance level.
         n_paths: Predeclared, sufficiently resolved block-bootstrap path count.
-        seed: Frozen random generator seed.
+        seed: Fixed random generator seed.
         batch_paths: Maximum simultaneous resample paths.
         memory_budget: Explicit admitted inference working memory.
         minimum_block_days: Registered lower bound for documented label dependence.

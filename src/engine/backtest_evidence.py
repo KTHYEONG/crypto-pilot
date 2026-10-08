@@ -1,4 +1,4 @@
-"""Paired intraday inventory evidence for the frozen MHS research candidate."""
+"""Paired intraday inventory evidence for the strategy candidate."""
 
 from __future__ import annotations
 
@@ -12,6 +12,8 @@ import numpy as np
 import pandas as pd
 
 from src.common.errors import DataIntegrityError
+from src.core.types import ExecutionSpec
+from src.engine.backtest_windows import validated_backtest_windows
 from src.engine.daily_evidence import DailyPortfolioEvidence, inventory_daily_evidence
 from src.engine.execution import (
     ExecutionReplayWindow,
@@ -20,9 +22,7 @@ from src.engine.execution import (
     replay_execution_window_batch,
 )
 from src.engine.execution.batch import _LiveAccumulatorSets
-from src.strategy.targets import FrozenMhsCandidate
-from src.engine.backtest_windows import validated_frozen_research_windows
-from src.core.types import ExecutionSpec
+from src.strategy.targets import StrategyTargets
 
 _METRIC_COLUMNS: tuple[str, ...] = (
     "base_cagr", "stress_cagr",
@@ -36,7 +36,7 @@ _METRIC_COLUMNS: tuple[str, ...] = (
     "base_coverage", "stress_coverage",
 )
 _HELD_GAP_CODES = ("MISSING_HELD_MARK", "MISSING_HELD_FUNDING")
-FrozenExecutionBound = Literal["OHLCV_IMMEDIATE_TAKER", "OHLCV_STRICT_PROXY"]
+StrategyExecutionBound = Literal["OHLCV_IMMEDIATE_TAKER", "OHLCV_STRICT_PROXY"]
 _LIMITATIONS: tuple[str, ...] = (
     "CANDLE_FILLS_NO_ORDER_BOOK_DEPTH",
     "CANDLE_FILLS_NO_QUEUE_POSITION",
@@ -47,7 +47,7 @@ _LIMITATIONS: tuple[str, ...] = (
 
 
 @dataclass(frozen=True, slots=True)
-class FrozenMhsReportPeriod:
+class StrategyReportPeriod:
     """Name one explicitly bounded historical reporting interval."""
 
     label: str
@@ -68,11 +68,11 @@ class FrozenMhsReportPeriod:
 
 
 @dataclass(frozen=True, slots=True)
-class FrozenMhsResearchEvidence:
+class StrategyBacktestEvidence:
     """Hold comparable inventory results without implying forward success.
 
     Args:
-        base: Exact frozen targets under the six-basis-point taker case.
+        base: Exact strategy targets under the six-basis-point taker case.
         stress: Same market windows and targets at threefold crossing cost.
         base_daily: Completed observed daily inventory intervals.
         stress_daily: Matching completed daily stress intervals.
@@ -89,25 +89,25 @@ class FrozenMhsResearchEvidence:
     limitations: tuple[str, ...]
 
 
-def evaluate_frozen_mhs_research(
-    candidate: FrozenMhsCandidate,
+def evaluate_strategy_backtest(
+    candidate: StrategyTargets,
     windows: Iterable[ExecutionReplayWindow],
     *,
     initial_equity: float,
     base_spec: ExecutionSpec,
     stress_spec: ExecutionSpec,
-    report_periods: tuple[FrozenMhsReportPeriod, ...],
+    report_periods: tuple[StrategyReportPeriod, ...],
     live_accumulators: _LiveAccumulatorSets | None = None,
-    execution_bound: FrozenExecutionBound = "OHLCV_IMMEDIATE_TAKER",
-) -> FrozenMhsResearchEvidence:
-    """Replay a frozen target plan through one shared, paired 3m ledger stream.
+    execution_bound: StrategyExecutionBound = "OHLCV_IMMEDIATE_TAKER",
+) -> StrategyBacktestEvidence:
+    """Replay a strategy target plan through one shared, paired 3m ledger stream.
 
     The result separates completed historical accounting from any claim of
     forward validity.  Base and stress consume the same target and market
     windows; only registered crossing cost differs.
 
     Args:
-        candidate: Exact frozen target plan.
+        candidate: Exact strategy target plan.
         windows: Validated one-pass 3m execution source.
         initial_equity: Positive finite research capital.
         base_spec: Registered six-basis-point immediate-taker cost specification.
@@ -134,7 +134,7 @@ def evaluate_frozen_mhs_research(
     if execution_bound not in ("OHLCV_IMMEDIATE_TAKER", "OHLCV_STRICT_PROXY"):
         raise DataIntegrityError(f"execution_bound must be a registered crossing model, got {execution_bound!r}")
     _require_report_periods(report_periods)
-    checked_windows = validated_frozen_research_windows(
+    checked_windows = validated_backtest_windows(
         candidate,
         windows,
         settlement_bars=-(-int(base_spec.passive_timeout_minutes) // 3),
@@ -164,16 +164,16 @@ def evaluate_frozen_mhs_research(
         raise DataIntegrityError("paired daily intervals must match by label and availability")
     metrics = _period_metrics(candidate, base, stress, base_daily, stress_daily, initial_equity, report_periods)
     gap_note = ("FUNDING_COVERAGE_GAPS_RECORDED",) if (base.funding_coverage_gaps or stress.funding_coverage_gaps) else ()
-    return FrozenMhsResearchEvidence(
+    return StrategyBacktestEvidence(
         base=base, stress=stress, base_daily=base_daily, stress_daily=stress_daily,
         period_metrics=metrics, limitations=_LIMITATIONS + gap_note,
     )
 
 
-def _require_report_periods(report_periods: tuple[FrozenMhsReportPeriod, ...]) -> None:
+def _require_report_periods(report_periods: tuple[StrategyReportPeriod, ...]) -> None:
     """Reject invalid or overlapping caller-supplied reporting intervals."""
     if not isinstance(report_periods, tuple) or len(report_periods) == 0:
-        raise DataIntegrityError("report_periods must be a non-empty tuple of FrozenMhsReportPeriod")
+        raise DataIntegrityError("report_periods must be a non-empty tuple of StrategyReportPeriod")
     labels = [p.label for p in report_periods]
     if any(not isinstance(label, str) or not label for label in labels) or len(set(labels)) != len(labels):
         raise DataIntegrityError("report period labels must be unique non-empty strings")
@@ -184,13 +184,13 @@ def _require_report_periods(report_periods: tuple[FrozenMhsReportPeriod, ...]) -
 
 
 def _period_metrics(
-    candidate: FrozenMhsCandidate,
+    candidate: StrategyTargets,
     base: StrategyExecutionReplayResult,
     stress: StrategyExecutionReplayResult,
     base_daily: DailyPortfolioEvidence,
     stress_daily: DailyPortfolioEvidence,
     initial_equity: float,
-    report_periods: tuple[FrozenMhsReportPeriod, ...],
+    report_periods: tuple[StrategyReportPeriod, ...],
 ) -> pd.DataFrame:
     """Report per-period economics with unavailable intervals left as NaN."""
     rows: dict[str, dict[str, float]] = {}
@@ -210,7 +210,7 @@ def _period_metrics(
 
 
 def _covered_row(
-    candidate: FrozenMhsCandidate,
+    candidate: StrategyTargets,
     base: StrategyExecutionReplayResult,
     stress: StrategyExecutionReplayResult,
     base_daily: DailyPortfolioEvidence,

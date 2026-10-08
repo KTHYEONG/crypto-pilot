@@ -163,7 +163,7 @@ def run_process_paths(
         clock: Registered signal-publication clock for matured-label fitting.
         member_evidence: Complete-interval member labels with knowledge masks.
         training_window: Single registered estimator window without nested selection.
-        selection_spec: Frozen comparison pool, control and uncertainty rules.
+        selection_spec: Fixed comparison pool, control and uncertainty rules.
         inner_evidence: Fixed-pool causal combined-policy evidence for selection.
 
     Returns:
@@ -410,7 +410,7 @@ def build_inner_policy_evidence(
     Args:
         data: Canonical causal books and publication clocks.
         member_evidence: Complete maturity-tagged member training labels.
-        clock: Frozen decision and fitting clock.
+        clock: Fixed decision and fitting clock.
         selection_spec: Fixed estimator/control pool and evidence requirements.
         decision_bps: Registered decision cost shared by every trial.
         leverage_cap: Existing registered exposure ceiling.
@@ -661,7 +661,7 @@ def evaluate_process_backtest(
         execution_policy: Explicit adoption control; None preserves baseline.
         risk_sizing: Research-only causal volatility sizing; None preserves baseline.
         memory_budget: Explicit process-tree limits or validated stage defaults.
-        procedure: Frozen historical definition; None preserves legacy research.
+        procedure: Fixed historical definition; None preserves legacy research.
         member_evidence: Inventory-native labels admitted only on identity match.
 
     Returns:
@@ -694,9 +694,9 @@ def evaluate_process_backtest(
         if member_evidence is not None and not isinstance(member_evidence, MaturedMemberReturns):
             raise DataIntegrityError("member_evidence must be MaturedMemberReturns or None")
         if execution_policy is not None and execution_policy != procedure.execution_policy:
-            raise DataIntegrityError("execution_policy must match the frozen procedure")
+            raise DataIntegrityError("execution_policy must match the sealed procedure")
         if risk_sizing is not None and risk_sizing != procedure.risk_sizing:
-            raise DataIntegrityError("risk_sizing must match the frozen procedure")
+            raise DataIntegrityError("risk_sizing must match the sealed procedure")
         if member_evidence is not None:
             if member_evidence.source != procedure.member_evidence_source:
                 raise DataIntegrityError("member evidence source does not match the procedure")

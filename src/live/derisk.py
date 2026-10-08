@@ -78,11 +78,11 @@ def freeze_unresolved_symbols(
         DeriskPlan preserving input order of kept intents; each blocked intent carries
         ``UNRESOLVED_ORDER_BLOCK_REASON``.
     """
-    frozen = set(frozen_symbols)
+    withheld = set(frozen_symbols)
     kept: list[OrderIntent] = []
     blocked: list[tuple[OrderIntent, str]] = []
     for intent in intents:
-        if intent.symbol in frozen:
+        if intent.symbol in withheld:
             blocked.append((intent, UNRESOLVED_ORDER_BLOCK_REASON))
             continue
         kept.append(intent)

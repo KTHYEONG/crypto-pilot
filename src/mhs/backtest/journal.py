@@ -437,12 +437,12 @@ def _decode_envelope(data: Any) -> GrowthRiskEnvelope:
 
 
 def procedure_to_json(procedure: ProcessProcedureDefinition) -> dict[str, JsonValue]:
-    """Encode a frozen procedure definition as canonical JSON-safe values."""
+    """Encode a sealed procedure definition as canonical JSON-safe values."""
     return cast('dict[str, JsonValue]', _canonical(procedure))
 
 
 def procedure_from_json(data: Any) -> ProcessProcedureDefinition:
-    """Decode a frozen procedure definition; reject unsupported or unknown fields."""
+    """Decode a sealed procedure definition; reject unsupported or unknown fields."""
     node = _require_typed_dict(
         data,
         "ProcessProcedureDefinition",
@@ -497,7 +497,7 @@ def process_procedure_digest(procedure: ProcessProcedureDefinition) -> str:
 
 
 def plan_to_json(plan: ProcessEvaluationPlan) -> dict[str, JsonValue]:
-    """Encode a frozen evaluation plan as canonical JSON-safe values."""
+    """Encode a sealed evaluation plan as canonical JSON-safe values."""
     return cast('dict[str, JsonValue]', _canonical(plan))
 
 
@@ -739,7 +739,7 @@ def record_research_consultation(
 
 
 def persist_process_registration(path: Path, plan: ProcessEvaluationPlan, *, now: pd.Timestamp) -> ProcessEvaluationPlan:
-    """Persist one frozen process registration atomically before any look.
+    """Persist one sealed process registration atomically before any look.
 
     Stores the same typed definition whose digest is checked by
     reserve_research_attempt, so a later evaluation cannot reuse the family
@@ -747,7 +747,7 @@ def persist_process_registration(path: Path, plan: ProcessEvaluationPlan, *, now
     """
     now_utc = _require_utc(now, "now")
     if process_procedure_digest(plan.procedure) != plan.procedure_digest:
-        raise DataIntegrityError("procedure digest does not match the frozen definition")
+        raise DataIntegrityError("procedure digest does not match the sealed definition")
     if plan.registration_digest is not None:
         raise DataIntegrityError("plan is already registered")
     _require_file(path)
@@ -772,7 +772,7 @@ def persist_process_registration(path: Path, plan: ProcessEvaluationPlan, *, now
         )
         if family is not None:
             if (str(family[0]), int(family[1]), int(family[2]), int(family[3]), str(family[4])) != wanted:
-                raise DataIntegrityError(f"family {plan.family_id} is already frozen under a different definition")
+                raise DataIntegrityError(f"family {plan.family_id} is already sealed under a different definition")
             conn.commit()
             return dataclasses.replace(plan, registration_digest=str(family[5]))
         payload = json.dumps(
@@ -902,7 +902,7 @@ def reserve_research_attempt(
     if not isinstance(attempt_id, str) or not attempt_id:
         raise DataIntegrityError("attempt_id must be a nonempty identity")
     if process_procedure_digest(plan.procedure) != plan.procedure_digest:
-        raise DataIntegrityError("procedure digest does not match the frozen definition")
+        raise DataIntegrityError("procedure digest does not match the sealed definition")
     _require_file(path)
     conn = _connect(path)
     try:

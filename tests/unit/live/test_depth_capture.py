@@ -158,16 +158,16 @@ def test_messages_become_wide_rows(tmp_path: Path) -> None:
 
 def test_parts_immutable_across_sessions(tmp_path: Path) -> None:
     """A retried decision adds parts without touching existing files."""
-    frozen = pd.Timestamp("2026-09-22T00:25:01Z")
+    now_fixed = pd.Timestamp("2026-09-22T00:25:01Z")
     first_calls: list[str] = []
-    first = _make_recorder(tmp_path, ["BTCUSDT"], [[_full_book("BTCUSDT")]], first_calls, now=lambda: frozen)
+    first = _make_recorder(tmp_path, ["BTCUSDT"], [[_full_book("BTCUSDT")]], first_calls, now=lambda: now_fixed)
     first.start()
     _wait_for(lambda: first._rows >= 1)
     first.stop(post_window_s=0.0)
     before = {p.name: p.read_bytes() for p in sorted((tmp_path / EXEC_DEPTH_DATASET / "20260922").glob("part_*.parquet"))}
     assert len(before) == 1
     second_calls: list[str] = []
-    second = _make_recorder(tmp_path, ["BTCUSDT"], [[_full_book("BTCUSDT")]], second_calls, now=lambda: frozen)
+    second = _make_recorder(tmp_path, ["BTCUSDT"], [[_full_book("BTCUSDT")]], second_calls, now=lambda: now_fixed)
     second.start()
     _wait_for(lambda: second._rows >= 1)
     second.stop(post_window_s=0.0)

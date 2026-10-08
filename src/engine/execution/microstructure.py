@@ -28,7 +28,7 @@ def passive_fill_shortfall_bps(
     and pays the all-in taker cost, so fee and adverse selection are always
     accounted together. ``taker_cost_bps`` overrides the flat slippage term
     when the caller supplies a liquidity-aware crossing cost; the default
-    reproduces the frozen all-in taker cost bit-identically.
+    reproduces the fixed all-in taker cost bit-identically.
     """
     if decision_price <= 0 or timeout_price <= 0:
         raise ValueError("decision_price and timeout_price must be > 0")

@@ -204,7 +204,6 @@ def test_SCENARIO_LIVE_DAEMON_07_catchup_no_extra_wait(
     assert cycle_calls == [DECISION_TIME]
 
 
-
 #: 본 모듈이 검증하는 시나리오 ID(lean_check 추적용).
 COVERED_SCENARIOS: tuple[str, ...] = (
     "SCENARIO_LIVE_DAEMON_01_NEXT_DECISION_TIME_SEQUENTIAL",
@@ -499,7 +498,6 @@ def test_run_daemon_runs_signal_then_cycle(monkeypatch, tmp_path) -> None:
     assert order[0][1] == order[1][1]
 
 
-
 # --- auto appended from contract ---
 def test_run_daemon_awaiting_data_when_refresh_fails(tmp_path, monkeypatch) -> None:
     import json
@@ -540,8 +538,6 @@ def sched_now() -> "pd.Timestamp":
     from src.live.scheduler import DECISION_RELEASE_OFFSET
 
     return pd.Timestamp("2026-08-24 00:00Z") + DECISION_RELEASE_OFFSET + pd.Timedelta(minutes=20)
-
-
 
 
 def test_daemon_runs_prune_after_execute(tmp_path, monkeypatch) -> None:
@@ -610,7 +606,7 @@ def test_default_data_refresh_splits_crypto_and_seeds_long_window(monkeypatch, t
 
     import src.live.scheduler as sched
     from src.live.data_refresh import RefreshReport
-    from src.core.params import LIVE_FROZEN_WARMUP_DAYS
+    from src.core.params import LIVE_SIGNAL_WARMUP_DAYS
 
     payload = {
         "symbols": [
@@ -652,12 +648,10 @@ def test_default_data_refresh_splits_crypto_and_seeds_long_window(monkeypatch, t
     rep = sched._default_data_refresh(settings, tmp_path / "w.parquet", decision_time)
     assert rep.ok is True
     assert captured["symbols"] == ["BTCUSDT"]
-    assert captured["seed_lookback_days"] == LIVE_FROZEN_WARMUP_DAYS + 30
+    assert captured["seed_lookback_days"] == LIVE_SIGNAL_WARMUP_DAYS + 30
     saved = json.loads((tmp_path / "non_crypto_symbols.json").read_text(encoding="utf-8"))
     assert saved["symbols"] == ["AAPLUSDT"]
     assert (tmp_path / "data" / "state" / "venue_listing" / "20260901.json.gz").exists()
-
-
 
 
 def test_run_daemon_emails_alert_on_halt_streak(tmp_path, monkeypatch) -> None:
@@ -902,8 +896,8 @@ def test_run_daemon_alerts_day_skipped_when_signal_step_fails_on_last_attempt(tm
     )
 
     assert cycle_calls == []
-    assert any(event == "halt_streak" and detail.startswith("consecutive_halts=1 cause=frozen_step CalledProcessError:") for event, detail in alerts)
-    assert any(event == "day_skipped" and detail.startswith("attempts=1 cause=frozen_step CalledProcessError:") for event, detail in alerts)
+    assert any(event == "halt_streak" and detail.startswith("consecutive_halts=1 cause=strategy_step CalledProcessError:") for event, detail in alerts)
+    assert any(event == "day_skipped" and detail.startswith("attempts=1 cause=strategy_step CalledProcessError:") for event, detail in alerts)
 
 
 def test_run_daemon_halt_streak_detail_names_crashed_cycle_exception(tmp_path, monkeypatch) -> None:
@@ -1105,8 +1099,8 @@ def test_run_daemon_halt_streak_detail_names_generic_signal_step_exception(tmp_p
     )
 
     assert cycle_calls == []
-    assert ("halt_streak", "consecutive_halts=1 cause=frozen_step RuntimeError: worker died") in alerts
-    assert ("day_skipped", "attempts=1 cause=frozen_step RuntimeError: worker died") in alerts
+    assert ("halt_streak", "consecutive_halts=1 cause=strategy_step RuntimeError: worker died") in alerts
+    assert ("day_skipped", "attempts=1 cause=strategy_step RuntimeError: worker died") in alerts
 
 
 def test_save_daemon_state_is_atomic_when_replace_fails(tmp_path, monkeypatch) -> None:
@@ -1772,7 +1766,6 @@ def test_run_daemon_signal_step_halt_waits_backoff_and_keeps_pending(tmp_path, m
     assert alerts == []
 
 
-
 def test_run_daemon_logs_elapsed_per_stage(tmp_path, monkeypatch, caplog) -> None:
     import logging
     import pandas as pd
@@ -1851,21 +1844,6 @@ def test_run_daemon_logs_stage_elapsed_even_when_stage_fails(tmp_path, monkeypat
     assert cycles == []
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 # --- halt_reason_persistence contract: new scenarios ---
 
 def test_write_heartbeat_default_detail_is_empty_string(tmp_path) -> None:
@@ -1939,7 +1917,7 @@ def test_run_daemon_persists_signal_halt_cause_to_heartbeat(tmp_path, monkeypatc
     # Then: heartbeat detail carries the same redacted cause the alert would have used
     payload = json.loads(hb_path.read_text(encoding="utf-8"))
     assert payload["status"] == "HALT"
-    assert payload["detail"] == "frozen_step ValueError: bad panel"
+    assert payload["detail"] == "strategy_step ValueError: bad panel"
 
 def test_run_daemon_persists_execute_halt_cause_to_heartbeat(tmp_path, monkeypatch) -> None:
     import json
@@ -2057,8 +2035,6 @@ def test_run_daemon_persists_state_corrupt_detail_to_heartbeat(tmp_path, monkeyp
 
 
 # --- auto appended from contract: live_alert_gaps ---
-
-
 
 
 def test_run_daemon_alerts_interrupted_stage_once_and_logs_banner(tmp_path, monkeypatch, caplog) -> None:
@@ -2290,8 +2266,6 @@ def test_scheduler_alert_gap_helpers_tolerate_bad_inputs(tmp_path, monkeypatch) 
     assert alerts[-1] == ("cycle_interrupted", "stage=refresh decision_time=2026-08-24T00:00:00+00:00 heartbeat_ts=t1")
 
 
-
-
 def test_default_data_refresh_propagates_exchange_info_failure(monkeypatch) -> None:
     import urllib.error
 
@@ -2314,11 +2288,6 @@ def test_default_data_refresh_propagates_exchange_info_failure(monkeypatch) -> N
             LiveSettings(), Path("/tmp/w.parquet"),
             pd.Timestamp("2026-09-01 00:00Z"),
         )
-
-
-
-
-
 
 
 def test_run_daemon_degraded_alert_detail_flags_funding_block(tmp_path, monkeypatch) -> None:
@@ -2354,11 +2323,6 @@ def test_run_daemon_degraded_alert_detail_flags_funding_block(tmp_path, monkeypa
 
     # Then
     assert any(ev == "data_degraded" and detail.startswith("staleness_h=0.1 failed=479/500 err=None") and "funding_blocked=True" in detail for ev, detail in alerts)
-
-
-
-
-
 
 
 def test_frozen_delivery_boundary_stays_under_deploy_mhs() -> None:
@@ -2423,7 +2387,7 @@ def test_daemon_frozen_step_integrity_error_halts_with_cause(tmp_path, monkeypat
 
     hb = json.loads((tmp_path / "hb.json").read_text(encoding="utf-8"))
     assert hb["status"] == "HALT"
-    assert hb["detail"] == "frozen_step DataIntegrityError: unit history gap"
+    assert hb["detail"] == "strategy_step DataIntegrityError: unit history gap"
     saved = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
     assert saved["pending_decision_time"] == "2026-08-24T00:00:00+00:00"
 
@@ -2655,19 +2619,19 @@ def test_default_frozen_step_wires_run_args_and_fails_without_non_crypto_list(mo
         seen.update(decision_day=decision_day, **kwargs)
         return "frozen-report"
 
-    monkeypatch.setattr("src.live.frozen_signal.run_frozen_signal_step", _fake_run)
+    monkeypatch.setattr("src.live.strategy_signal.run_strategy_signal_step", _fake_run)
     weights = tmp_path / "state" / "deployed_target_weights.parquet"
     settings = LiveSettings()
     target = pd.Timestamp("2026-08-24 00:00Z")
 
-    assert sched._default_frozen_step(target, settings, weights) == "frozen-report"
+    assert sched._default_strategy_step(target, settings, weights) == "frozen-report"
     assert seen["non_crypto"] == frozenset({"AAPLUSDT"})
     assert seen["seed_equity_usdt"] == settings.notional_equity_usdt
     assert seen["unit_forward_path"] == weights.parent / "frozen_unit_forward.parquet"
 
     monkeypatch.setattr(sched, "NON_CRYPTO_SYMBOLS_PATH", tmp_path / "missing.json")
     with pytest.raises(DataIntegrityError):
-        sched._default_frozen_step(target, settings, weights)
+        sched._default_strategy_step(target, settings, weights)
 
 
 def test_default_frozen_step_rejects_malformed_non_crypto_list(monkeypatch, tmp_path) -> None:
@@ -2685,12 +2649,12 @@ def test_default_frozen_step_rejects_malformed_non_crypto_list(monkeypatch, tmp_
     bad.write_text('{"captured_at": "2026-09-21T00:00:00+00:00", "symbols": "BTCUSDT"}', encoding="utf-8")
     monkeypatch.setattr(sched, "NON_CRYPTO_SYMBOLS_PATH", bad)
     with pytest.raises(DataIntegrityError):
-        sched._default_frozen_step(target, settings, weights)
+        sched._default_strategy_step(target, settings, weights)
     corrupt = tmp_path / "corrupt.json"
     corrupt.write_text("{not json", encoding="utf-8")
     monkeypatch.setattr(sched, "NON_CRYPTO_SYMBOLS_PATH", corrupt)
     with pytest.raises(DataIntegrityError):
-        sched._default_frozen_step(target, settings, weights)
+        sched._default_strategy_step(target, settings, weights)
 
 
 def test_sizing_note_ignores_missing_fields() -> None:
@@ -2711,7 +2675,7 @@ def test_daemon_defaults_wire_frozen_step_and_venue(monkeypatch, tmp_path) -> No
     monkeypatch.setattr(sched, "prune_old_audit_logs", lambda *a, **k: 0)
     frozen_calls: list = []
     venue_calls: list = []
-    monkeypatch.setattr(sched, "_default_frozen_step", lambda t, settings=None, weights_path=None: frozen_calls.append(t) or None)
+    monkeypatch.setattr(sched, "_default_strategy_step", lambda t, settings=None, weights_path=None: frozen_calls.append(t) or None)
     monkeypatch.setattr(sched, "_default_venue_capture", lambda settings=None, decision_time=None: venue_calls.append((settings, decision_time)) or None)
     target = pd.Timestamp("2026-08-24 00:00Z")
     ready = target + sched.DECISION_RELEASE_OFFSET + pd.Timedelta(minutes=20)
@@ -2821,9 +2785,9 @@ def test_live_mode_fetches_account_equity(tmp_path, monkeypatch) -> None:
         captured.update(kwargs)
         return type("R", (), {"status": "COMPLETE"})()
 
-    monkeypatch.setattr("src.live.frozen_signal.run_frozen_signal_step", _fake_step)
+    monkeypatch.setattr("src.live.strategy_signal.run_strategy_signal_step", _fake_step)
     settings = LiveSettings(mode=ExecutionMode.LIVE_TESTNET, order_api_key="k", order_api_secret="s", heartbeat_path=str(tmp_path / "hb.json"))
-    sched._default_frozen_step(pd.Timestamp("2026-08-24 00:00Z"), settings, tmp_path / "w.parquet")
+    sched._default_strategy_step(pd.Timestamp("2026-08-24 00:00Z"), settings, tmp_path / "w.parquet")
     assert captured.get("account_equity_usdt") == 3000.0
     assert captured.get("called") is True
 
@@ -2844,8 +2808,8 @@ def test_paper_mode_never_fetches_account_equity(tmp_path, monkeypatch) -> None:
         seen.update(kwargs)
         return type("R", (), {"status": "COMPLETE"})()
 
-    monkeypatch.setattr("src.live.frozen_signal.run_frozen_signal_step", _fake_step)
-    sched._default_frozen_step(pd.Timestamp("2026-08-24 00:00Z"), LiveSettings(), tmp_path / "w.parquet")
+    monkeypatch.setattr("src.live.strategy_signal.run_strategy_signal_step", _fake_step)
+    sched._default_strategy_step(pd.Timestamp("2026-08-24 00:00Z"), LiveSettings(), tmp_path / "w.parquet")
     assert called == []
     assert seen.get("account_equity_usdt") is None
 
@@ -2865,10 +2829,10 @@ def test_fetch_failure_halts_step(tmp_path, monkeypatch) -> None:
         raise DataIntegrityError("venue down")
 
     monkeypatch.setattr("src.live.runner.fetch_live_account_equity", _boom)
-    monkeypatch.setattr("src.live.frozen_signal.run_frozen_signal_step", lambda *a, **k: pytest.fail("must not reach signal step"))
+    monkeypatch.setattr("src.live.strategy_signal.run_strategy_signal_step", lambda *a, **k: pytest.fail("must not reach signal step"))
     settings = LiveSettings(mode=ExecutionMode.LIVE_TESTNET, order_api_key="k", order_api_secret="s", heartbeat_path=str(tmp_path / "hb.json"))
     with pytest.raises(DataIntegrityError):
-        sched._default_frozen_step(pd.Timestamp("2026-08-24 00:00Z"), settings, tmp_path / "w.parquet")
+        sched._default_strategy_step(pd.Timestamp("2026-08-24 00:00Z"), settings, tmp_path / "w.parquet")
 
 
 def _fast_pulse(monkeypatch, interval_s: float = 0.02) -> None:

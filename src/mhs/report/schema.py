@@ -123,7 +123,7 @@ class MhsHorizonDiagnosticReport:
         return _jsonable(dataclasses.asdict(self))
 
 
-# Frozen old-key → new-key map for persisted report JSON.
+# Legacy old-key → new-key map for persisted report JSON.
 # Only keys explicitly listed here may change name between versions.
 # The golden comparison applies renames to the golden before diffing.
 RENAME_REGISTRY: dict[str, str] = {

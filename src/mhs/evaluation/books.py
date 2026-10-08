@@ -94,7 +94,7 @@ def _horizon_ensemble_execution_weights(
     constructs the top-level diagnostic and fold-replay execution books, so it
     is wired to whichever band asks for it.
 
-    ``mode='single_horizon'`` reproduces the frozen production chain
+    ``mode='single_horizon'`` reproduces the fixed production chain
     byte-identically (``horizon_log_return`` -> EMA -> ``rank_weight_book`` ->
     ``phase_tranche_book`` -> ``inverse_realized_vol_tilt`` ->
     ``renormalize_within_mask``). ``mode='horizon_ensemble'`` runs that same

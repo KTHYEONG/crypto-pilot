@@ -30,7 +30,7 @@ from src.live.errors import CausalityViolation, LiveTradingError
 
 if TYPE_CHECKING:
     from src.live.data_refresh import RefreshReport
-    from src.live.frozen_signal import FrozenStepReport
+    from src.live.strategy_signal import StrategyStepReport
 from src.live.alert_outbox import default_dedupe_key
 from src.live.alerting import dispatch_alert, drain_alerts
 from src.live.audit import AUDIT_LOG_ROOT, prune_old_audit_logs
@@ -39,7 +39,7 @@ from src.live.derisk import UNRESOLVED_ORDERS_REASON
 from src.live.lifecycle import ShutdownFlag, install_shutdown_handlers  # noqa: F401
 from src.live.runner import CycleReport, run_shadow_cycle
 from src.live.settings import LiveSettings
-from src.strategy.targets import FROZEN_MHS_TOP20_V2
+from src.strategy.targets import FLOW_MOM_TOP20
 
 logger = logging.getLogger("LiveScheduler")
 
@@ -48,8 +48,8 @@ DAEMON_POLL_INTERVAL_SECONDS: float = 300.0
 # stale_after_s(2700초/45분)보다 한참 짧게 잡아, 스케줄러 지연이 겹쳐도 여유가 크다.
 DAEMON_HEARTBEAT_PULSE_INTERVAL_SECONDS: float = 120.0
 _HEARTBEAT_PULSE_JOIN_TIMEOUT_S: float = 10.0
-#: frozen 신호 공개 시각이며, 공식 메이커 원장의 제출봉과 같은 기준이다.
-DECISION_RELEASE_OFFSET: pd.Timedelta = pd.Timedelta(hours=FROZEN_MHS_TOP20_V2.release_hour_utc)
+#: strategy 신호 공개 시각이며, 공식 메이커 원장의 제출봉과 같은 기준이다.
+DECISION_RELEASE_OFFSET: pd.Timedelta = pd.Timedelta(hours=FLOW_MOM_TOP20.release_hour_utc)
 
 DAEMON_RETRY_BACKOFF_SECONDS: tuple[float, ...] = (300.0, 600.0, 1200.0, 2400.0)
 DAEMON_COLD_UNIVERSE_EXIT_CODE: int = 3
@@ -219,7 +219,7 @@ def _default_data_refresh(
 ) -> RefreshReport:
     import urllib.request
 
-    from src.core.params import LIVE_FROZEN_WARMUP_DAYS
+    from src.core.params import LIVE_SIGNAL_WARMUP_DAYS
     from src.live.data_refresh import (
         EXCHANGE_INFO_TIMEOUT_S,
         build_refresh_universe,
@@ -264,7 +264,7 @@ def _default_data_refresh(
         max_fail_fraction=settings.refresh_max_fail_fraction,
         symbols=fetch_set,
         klines_only_symbols=frozenset(universe.tracked_settled),
-        seed_lookback_days=LIVE_FROZEN_WARMUP_DAYS + 30,
+        seed_lookback_days=LIVE_SIGNAL_WARMUP_DAYS + 30,
         required_symbols=frozenset(required) & set(fetch_set),
     )
 
@@ -337,10 +337,10 @@ def _default_venue_capture(settings: LiveSettings, decision_time: pd.Timestamp) 
         return "failed"
 
 
-def _default_frozen_step(target: pd.Timestamp, settings: LiveSettings, weights_path: Path) -> FrozenStepReport:
-    from src.live.frozen_signal import run_frozen_signal_step
+def _default_strategy_step(target: pd.Timestamp, settings: LiveSettings, weights_path: Path) -> StrategyStepReport:
     from src.live.ledger import default_ledger_path
     from src.live.runner import fetch_live_account_equity
+    from src.live.strategy_signal import run_strategy_signal_step
 
     try:
         raw = json.loads(NON_CRYPTO_SYMBOLS_PATH.read_text(encoding="utf-8"))
@@ -352,7 +352,7 @@ def _default_frozen_step(target: pd.Timestamp, settings: LiveSettings, weights_p
         raise DataIntegrityError(f"non-crypto symbols file missing: {NON_CRYPTO_SYMBOLS_PATH}") from exc
     except json.JSONDecodeError as exc:
         raise DataIntegrityError(f"non-crypto symbols file corrupt: {NON_CRYPTO_SYMBOLS_PATH}") from exc
-    return run_frozen_signal_step(
+    return run_strategy_signal_step(
         target,
         now=_utc_now(),
         data_root=FUTURES_DATA_DIR,
@@ -529,13 +529,13 @@ def _refresh_note(report: Any, err: BaseException | None) -> str:
     return f"refresh fresh={getattr(report, 'fresh', 'n/a')} refreshed={getattr(report, 'refreshed', 'n/a')} failed={report.failed}/{getattr(report, 'total', 'n/a')} staleness_h={float(getattr(report, 'staleness_hours', float('nan'))):.1f}"
 
 
-def _sizing_note(frozen_report: Any) -> str:
-    if frozen_report is None:
+def _sizing_note(strategy_report: Any) -> str:
+    if strategy_report is None:
         return ""
     try:
-        exposure = float(frozen_report.exposure)
-        equity = float(frozen_report.equity_usdt)
-        unit_obs = int(frozen_report.unit_observations)
+        exposure = float(strategy_report.exposure)
+        equity = float(strategy_report.equity_usdt)
+        unit_obs = int(strategy_report.unit_observations)
     except (TypeError, ValueError, AttributeError):
         return ""
     return f" exposure={exposure:.4f} equity_usdt={equity:.2f} unit_observations={unit_obs}"
@@ -625,7 +625,7 @@ def default_step_fns(settings: LiveSettings, weights_path: Path) -> dict[str, Ca
     call convention and is verified directly.
     """
     return {
-        "signal": functools.partial(_default_frozen_step, settings=settings, weights_path=weights_path),
+        "signal": functools.partial(_default_strategy_step, settings=settings, weights_path=weights_path),
         "refresh": functools.partial(_default_data_refresh, settings, weights_path),
         "venue": functools.partial(_default_venue_capture, settings),
         "prefetch": functools.partial(_default_funding_prefetch, settings, weights_path),
@@ -664,7 +664,7 @@ def run_daemon(
     venue_fn: Callable[[pd.Timestamp], Any] | None = None,
     prefetch_fn: Callable[[pd.Timestamp], Any] | None = None,
 ) -> None:
-    """Merged autonomous loop: venue snapshot + data refresh + frozen step + execution.
+    """Merged autonomous loop: venue snapshot + data refresh + strategy step + execution.
 
     ``refresh_fn`` / ``signal_step_fn`` / ``venue_fn`` / ``prefetch_fn`` default to the live
     wiring and are injected only by tests -- there is no path-sniffing test detection.
@@ -877,20 +877,20 @@ def run_daemon(
 
         signal_status = "COMPLETE"
         failure_cause = ""
-        frozen_report = None
+        strategy_report = None
         signal_expected = _default_expected_by(settings, "signal", now_fn(), None)
         _beat("RUNNING", "signal", expected_by=signal_expected)
         stage_started = time.monotonic()
         try:
-            frozen_report = _run_with_pulse("signal", signal_expected, functools.partial(signal_step_fn, target))
+            strategy_report = _run_with_pulse("signal", signal_expected, functools.partial(signal_step_fn, target))
         except (DataIntegrityError, CausalityViolation) as exc:
-            logger.exception("[SYS] frozen step halted decision_time=%s", target)
+            logger.exception("[SYS] strategy step halted decision_time=%s", target)
             signal_status = "HALT"
-            failure_cause = f"frozen_step {type(exc).__name__}: {exc}"
+            failure_cause = f"strategy_step {type(exc).__name__}: {exc}"
         except Exception as exc:  # noqa: BLE001
-            logger.exception("[SYS] frozen step crashed decision_time=%s", target)
+            logger.exception("[SYS] strategy step crashed decision_time=%s", target)
             signal_status = "HALT"
-            failure_cause = f"frozen_step {type(exc).__name__}: {exc}"
+            failure_cause = f"strategy_step {type(exc).__name__}: {exc}"
         finally:
             _log_stage_elapsed("signal", target, stage_started)
 
@@ -915,9 +915,9 @@ def run_daemon(
             continue
         if shutdown is not None and shutdown.requested:
             break
-        if frozen_report is not None and float(getattr(frozen_report, "venue_snapshot_age_days", 0.0) or 0.0) > settings.venue_rules_warn_age_days:
+        if strategy_report is not None and float(getattr(strategy_report, "venue_snapshot_age_days", 0.0) or 0.0) > settings.venue_rules_warn_age_days:
             _daemon_alert(settings, event="venue_rules_stale",
-                          detail=f"age_days={float(getattr(frozen_report, 'venue_snapshot_age_days', 0.0)):.1f} snapshot={getattr(frozen_report, 'venue_snapshot', '')}",
+                          detail=f"age_days={float(getattr(strategy_report, 'venue_snapshot_age_days', 0.0)):.1f} snapshot={getattr(strategy_report, 'venue_snapshot', '')}",
                           decision_time=target, now=now_fn())
 
         try:
@@ -985,9 +985,9 @@ def run_daemon(
         if status == "COMPLETE":
             if settings.alert_daily_digest:
                 digest_extra = ""
-                if frozen_report is not None:
-                    digest_extra = f" decision_bar_missing={getattr(frozen_report, 'decision_bar_missing', 0)} venue_gap_excluded={','.join(getattr(frozen_report, 'venue_gap_excluded', ()) or ())}"
-                digest_detail = f"intents={getattr(report, 'intent_count', 0)} reason={getattr(report, 'reason', None)} dropped_fraction={float(getattr(report, 'dropped_notional_fraction', 0.0)):.4f} {refresh_note}{_sizing_note(frozen_report)}{digest_extra}"
+                if strategy_report is not None:
+                    digest_extra = f" decision_bar_missing={getattr(strategy_report, 'decision_bar_missing', 0)} venue_gap_excluded={','.join(getattr(strategy_report, 'venue_gap_excluded', ()) or ())}"
+                digest_detail = f"intents={getattr(report, 'intent_count', 0)} reason={getattr(report, 'reason', None)} dropped_fraction={float(getattr(report, 'dropped_notional_fraction', 0.0)):.4f} {refresh_note}{_sizing_note(strategy_report)}{digest_extra}"
                 _daemon_alert(settings, event="cycle_complete", detail=digest_detail, decision_time=target, now=now_fn(), dedupe_key=default_dedupe_key("cycle_complete", target))
             _save_daemon_state(state_path, DaemonState(last_processed_decision_time=target, pending_decision_time=None, attempts=0))
             continue

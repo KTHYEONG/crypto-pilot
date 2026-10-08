@@ -532,7 +532,7 @@ def build_process_evidence_checks(
     """Produce requirement evidence from source-owned validated outputs, not caller flags.
 
     Args:
-        procedure: Exact frozen decision and economic definition.
+        procedure: Exact fixed decision and economic definition.
         context: Journal-reserved identities and assessed interval.
         proxy: Auditable label, policy-choice and target generation evidence.
         base: Primary execution accounting and terminal observations.
@@ -609,7 +609,7 @@ def evaluate_process_inventory_backtest(
         execution_policy: Existing adoption policy or baseline.
         risk_sizing: Research-only causal volatility sizing; None preserves baseline.
         memory_budget: Explicit stage limits or validated defaults.
-        procedure: Frozen decision definition; None preserves legacy research.
+        procedure: Fixed decision definition; None preserves legacy research.
         evaluation_context: Reserved journal context; None yields historical context.
         member_evidence: Inventory-native labels admitted only on identity match.
     Returns:

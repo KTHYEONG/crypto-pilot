@@ -593,7 +593,7 @@ class _StageRecorder:
             )
 
     def absorb(self, records: tuple[MhsResourceMeasurement, ...]) -> None:
-        """Merge frozen records (e.g. from a book subprocess) into this recorder.
+        """Merge immutable records (e.g. from a book subprocess) into this recorder.
 
         Appends in arrival order, folds the peak-RSS tracking, and resets the
         elapsed baseline so the next ``record`` measures from the absorption

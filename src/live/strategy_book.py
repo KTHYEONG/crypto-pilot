@@ -1,6 +1,6 @@
-"""Live frozen Top-20 book on a short 1h window, bit-identical to the research builder.
+"""Live strategy Top-20 book on a short 1h window, bit-identical to the research builder.
 
-The live daemon recomputes the registered frozen_mhs_top20_v2 book (name clip 0.05) from
+The live daemon recomputes the registered flow_mom_top20 book (name clip 0.05) from
 the trailing 1h panel instead of loading sealed parameter artifacts, and derives the unit
 book's daily return proxy that extends the backtest unit-return bootstrap for Bayesian
 Kelly sizing.
@@ -17,7 +17,7 @@ import pandas as pd
 
 from src.common.errors import DataIntegrityError
 from src.core.panel import load_base_panel
-from src.core.params import FROZEN_GROWTH_NAME_CLIP, LIVE_FROZEN_WARMUP_DAYS
+from src.core.params import LIVE_SIGNAL_WARMUP_DAYS, STRATEGY_NAME_CLIP
 from src.core.settlement_evidence import SettlementEvidence
 from src.market_data.services.futures_collection import (
     FUNDING_DEFAULT_INTERVAL_MS,
@@ -26,16 +26,16 @@ from src.market_data.services.futures_collection import (
 )
 from src.strategy.books import clip_names_preserving_gross
 from src.strategy.liquidity import causal_adv_sigma
-from src.strategy.targets import FROZEN_MHS_TOP20_V2, build_frozen_mhs_candidate
+from src.strategy.targets import FLOW_MOM_TOP20, build_strategy_targets
 
 _REQUIRED_COLUMNS = ("close", "quote_vol", "taker_buy_quote")
 
 
 def crypto_census(disk_symbols: Iterable[str], non_crypto: frozenset[str]) -> tuple[str, ...]:
-    """Sorted USDT-perpetual census for the frozen roster, excluding non-crypto underlyings.
+    """Sorted USDT-perpetual census for the strategy roster, excluding non-crypto underlyings.
 
     Tokenized equities, commodities and indices share the USDT naming convention but the
-    research lake and every frozen backtest exclude them, so admitting them live would
+    research lake and every strategy backtest exclude them, so admitting them live would
     change the roster.
     """
     excluded = set(non_crypto)
@@ -44,8 +44,8 @@ def crypto_census(disk_symbols: Iterable[str], non_crypto: frozenset[str]) -> tu
 
 
 @dataclass(frozen=True, slots=True)
-class LiveFrozenBook:
-    """Frozen unit book and the causal market inputs sizing needs, indexed by decision day."""
+class LiveStrategyBook:
+    """Strategy unit book and the causal market inputs sizing needs, indexed by decision day."""
 
     unit_weights: pd.DataFrame
     snapshot_closes: pd.DataFrame
@@ -119,10 +119,10 @@ def snapshot_gap_blocked_decisions(
 
     Mirrors the research source-gap contract: a decision that cannot be anchored on a published
     bar is not traded. Only venue gaps block (a later bar evidences the hole as permanent);
-    refresh-incomplete days stay unblocked and are handled by the frozen step's decision-bar
+    refresh-incomplete days stay unblocked and are handled by the strategy step's decision-bar
     gate. Snapshot closes are never filled; the gap-blocked seat gives the symbol target
     weight 0 for that decision day. It is composed with the announced-delisting blocks by
-    logical OR before being passed to ``build_frozen_mhs_candidate``.
+    logical OR before being passed to ``build_strategy_targets``.
     """
     names = [str(symbol) for symbol in census]
     stamps_by_symbol = {name: _raw_1h_timestamps_ms(Path(data_root), name) for name in names}
@@ -147,17 +147,17 @@ def _require_utc(day: pd.Timestamp, label: str) -> pd.Timestamp:
     return stamp.tz_convert("UTC")
 
 
-def build_live_frozen_book(
+def build_live_strategy_book(
     data_root: Path, census: tuple[str, ...], *, panel_start: pd.Timestamp, panel_end: pd.Timestamp,
     blocked_decisions: Callable[[pd.DatetimeIndex, tuple[str, ...]], pd.DataFrame] | None = None,
-) -> LiveFrozenBook:
-    """Rebuild the frozen book from ``data_root/ohlcv/1h`` over ``[panel_start, panel_end)``.
+) -> LiveStrategyBook:
+    """Rebuild the strategy book from ``data_root/ohlcv/1h`` over ``[panel_start, panel_end)``.
 
-    Uses the research builder and roster unchanged (FROZEN_MHS_TOP20_V2, name clip
-    FROZEN_GROWTH_NAME_CLIP, full-census market close for market-relative features). Each
+    Uses the research builder and roster unchanged (FLOW_MOM_TOP20, name clip
+    STRATEGY_NAME_CLIP, full-census market close for market-relative features). Each
     hourly bar is taken as published one hour after its open, the same availability rule
     the research source loader applies. Decision rows earlier than
-    ``panel_start + LIVE_FROZEN_WARMUP_DAYS`` are dropped because their roster and features
+    ``panel_start + LIVE_SIGNAL_WARMUP_DAYS`` are dropped because their roster and features
     are not yet equal to the full-history result.
 
     ``blocked_decisions`` builds the research-contract withdrawal frame for the builder's own
@@ -179,8 +179,8 @@ def build_live_frozen_book(
     end = _require_utc(panel_end, "panel_end")
     if end <= start:
         raise DataIntegrityError("panel_end must be after panel_start")
-    if end - start < pd.Timedelta(days=int(LIVE_FROZEN_WARMUP_DAYS)):
-        raise DataIntegrityError("panel shorter than LIVE_FROZEN_WARMUP_DAYS")
+    if end - start < pd.Timedelta(days=int(LIVE_SIGNAL_WARMUP_DAYS)):
+        raise DataIntegrityError("panel shorter than LIVE_SIGNAL_WARMUP_DAYS")
     root = str(Path(data_root) / "ohlcv")
     end_inclusive = end - pd.Timedelta(hours=1)
     try:
@@ -210,25 +210,25 @@ def build_live_frozen_book(
         np.tile(completed[:, None], (1, len(census_list))),
         index=grid_1h, columns=census_list,
     ).apply(lambda col: pd.to_datetime(col).dt.tz_localize("UTC"))
-    strategy = FROZEN_MHS_TOP20_V2
+    strategy = FLOW_MOM_TOP20
     hourly_panels = {"close": close_c, "quote_vol": quote_c, "taker_buy_quote": taker_c}
     blocked_frame: pd.DataFrame | None = None
     if blocked_decisions is not None:
         # The research builder validates the frame against its own daily index
         # (``daily_close.index``) and census order, so the callable receives exactly those.
         blocked_frame = blocked_decisions(pd.DatetimeIndex(daily_close.index), tuple(census_list))
-    candidate = build_frozen_mhs_candidate(
+    candidate = build_strategy_targets(
         hourly_panels, hourly_available_at, daily_close, daily_quote_volume,
         tuple(census_list), market_close=close_c,
         strategy=strategy, blocked_decisions=blocked_frame,
     )
-    clipped = clip_names_preserving_gross(candidate.target_weights, FROZEN_GROWTH_NAME_CLIP)
+    clipped = clip_names_preserving_gross(candidate.target_weights, STRATEGY_NAME_CLIP)
     entries = pd.DatetimeIndex(clipped.index).tz_convert("UTC")
     decisions = entries - pd.Timedelta(days=1)
     unit_weights = pd.DataFrame(
         clipped.to_numpy(dtype="float64"), index=decisions, columns=census_list, dtype="float64",
     )
-    valid_from = start.normalize() + pd.Timedelta(days=int(LIVE_FROZEN_WARMUP_DAYS))
+    valid_from = start.normalize() + pd.Timedelta(days=int(LIVE_SIGNAL_WARMUP_DAYS))
     keep = decisions >= valid_from
     decisions_kept = decisions[keep]
     unit_weights = unit_weights.loc[decisions_kept]
@@ -246,7 +246,7 @@ def build_live_frozen_book(
         sigma_daily.reindex(decisions_kept).to_numpy(dtype="float64"),
         index=decisions_kept, columns=census_list, dtype="float64",
     )
-    return LiveFrozenBook(
+    return LiveStrategyBook(
         unit_weights=unit_weights, snapshot_closes=snapshot_closes,
         adv=adv, daily_sigma=daily_sigma,
         valid_from=valid_from, panel_last_bar=panel_last_bar,
@@ -285,7 +285,7 @@ def _funding_coverage_ms(series: pd.Series | None) -> tuple[int | None, int]:
 
 
 def unit_proxy_returns(
-    book: LiveFrozenBook, funding_by_symbol: Mapping[str, pd.Series], *, cost_bps: float,
+    book: LiveStrategyBook, funding_by_symbol: Mapping[str, pd.Series], *, cost_bps: float,
     settlements: Mapping[str, SettlementEvidence] | None = None,
 ) -> pd.Series:
     """Daily unit-book return proxy on the replay ledger's anchor-to-anchor convention.
@@ -318,7 +318,7 @@ def unit_proxy_returns(
     decisions = pd.DatetimeIndex(book.unit_weights.index).tz_convert("UTC").sort_values()
     if len(decisions) == 0:
         return pd.Series(dtype="float64", index=pd.DatetimeIndex([], tz="UTC"))
-    snapshot_hour = int(FROZEN_MHS_TOP20_V2.snapshot_hour_utc)
+    snapshot_hour = int(FLOW_MOM_TOP20.snapshot_hour_utc)
     snapshot_index = pd.DatetimeIndex(book.snapshot_closes.index).tz_convert("UTC")
     snapshot_lookup = {stamp: pos for pos, stamp in enumerate(snapshot_index)}
     symbols = list(book.unit_weights.columns)

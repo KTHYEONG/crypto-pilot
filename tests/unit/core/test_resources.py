@@ -611,7 +611,7 @@ def test_stage_recorder_records_ordered_measurements_and_tracks_peak() -> None:
 
 
 def test_stage_recorder_absorb_merges_records_and_folds_peak() -> None:
-    """absorb() appends frozen records and folds their peak into the recorder's own."""
+    """absorb() appends immutable records and folds their peak into the recorder's own."""
     recorder = resources._StageRecorder(log_run=False)
     recorder.record("parent_stage")
 

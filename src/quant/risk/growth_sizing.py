@@ -93,7 +93,7 @@ def scan_leverage_frontier(
     """Report per-multiple mdd-breach/ruin feasibility over one bootstrap draw.
 
     Diagnostic sibling of :func:`diagnose_growth_headroom`, following the same
-    deliberate-duplication philosophy: the frozen solver is never called here
+    deliberate-duplication philosophy: the fixed solver is never called here
     because its plateau rule zeroes out any candidate whose median log growth
     is negative, silently hiding the true constraint feasibility a wide
     leverage scan exists to expose. The block-bootstrap draw happens exactly
@@ -293,7 +293,7 @@ def diagnose_growth_headroom(
     Purely observational: independently re-runs the same risk-grid feasibility
     loop :func:`solve_growth_optimal_risk` runs (same block-bootstrap draw,
     same per-grid-point median/mdd/ruin computation, same overlay branch --
-    deliberate duplication so the frozen solver contract is never touched) and
+    deliberate duplication so the fixed solver contract is never touched) and
     reports, for grid points strictly above the selected risk, the best
     feasible median log growth vs. the selected point and whether any higher
     point that *would* beat the running peak is blocked by tail risk rather
@@ -365,7 +365,7 @@ def diagnose_growth_headroom(
 
 
 def _check_contract() -> None:
-    """Executable assertions locking the frozen growth-sizing contract surface."""
+    """Executable assertions locking the fixed growth-sizing contract surface."""
     config = GrowthSizingConfig(risk_grid=(0.0005, 0.001, 0.005))
     assert config.bars_per_year == 2190
     assert config.max_drawdown == 0.20

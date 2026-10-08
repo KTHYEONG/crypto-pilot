@@ -467,7 +467,7 @@ def _committee_execution_book(
     the raw book's own proxy return. ``target_gross`` rescales each decision row
     to an explicit gross. ``member_weights`` is an externally-fitted,
     already-normalized-or-not mapping this function applies and renormalizes over
-    admitted members. ``admission`` (production path) is the boundary's frozen member set: books
+    admitted members. ``admission`` (production path) is the boundary's fixed member set: books
     are built for exactly those members with no in-window audit, and
     ``member_weights`` (when given) must have been fit on that same boundary --
     its keys must equal ``admission.admitted`` (I-COVERAGE-PIT). Without

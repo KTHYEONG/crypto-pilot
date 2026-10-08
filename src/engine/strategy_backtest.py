@@ -1,4 +1,4 @@
-"""Historical frozen-MHS inventory runner on the shared 3m ledger."""
+"""Historical strategy inventory runner on the shared 3m ledger."""
 
 from __future__ import annotations
 
@@ -12,21 +12,6 @@ import pandas as pd
 from src.common.errors import DataIntegrityError
 from src.common.paths import FUTURES_DATA_DIR
 from src.core.data_provenance import resolve_mhs_input_layout
-from src.engine.execution import ExecutionReplayWindow, live_required_symbols
-from src.engine.execution.batch import _LiveAccumulatorSets
-from src.engine.execution.window_stream import _iter_mhs_execution_windows
-from src.strategy.targets import (
-    FrozenMhsCandidate,
-    FrozenMhsStrategySpec,
-    build_frozen_mhs_candidate,
-)
-from src.engine.backtest_evidence import (
-    FrozenExecutionBound,
-    FrozenMhsReportPeriod,
-    FrozenMhsResearchEvidence,
-    evaluate_frozen_mhs_research,
-)
-from src.strategy.universe import build_frozen_pit_roster
 from src.core.instrument_settlements import (
     InstrumentSettlementRegistry,
     settlement_registry_for_root,
@@ -44,11 +29,26 @@ from src.core.resources import (
 from src.core.settlement_evidence import assert_settlement_registry_complete
 from src.core.source_gaps import active_intervals
 from src.core.types import ExecutionSpec
+from src.engine.backtest_evidence import (
+    StrategyBacktestEvidence,
+    StrategyExecutionBound,
+    StrategyReportPeriod,
+    evaluate_strategy_backtest,
+)
+from src.engine.execution import ExecutionReplayWindow, live_required_symbols
+from src.engine.execution.batch import _LiveAccumulatorSets
+from src.engine.execution.window_stream import _iter_mhs_execution_windows
+from src.strategy.targets import (
+    StrategySpec,
+    StrategyTargets,
+    build_strategy_targets,
+)
+from src.strategy.universe import build_pit_roster
 
 
 @dataclass(frozen=True, slots=True)
-class FrozenMhsBacktestRequest:
-    """Describe one reproducible historical frozen-MHS inventory experiment.
+class StrategyBacktestRequest:
+    """Describe one reproducible historical strategy inventory experiment.
 
     Source history is distinct from the scored interval so liquidity and feature
     warm-up are observable rather than manufactured.  The request identifies
@@ -64,14 +64,14 @@ class FrozenMhsBacktestRequest:
     source_start: pd.Timestamp
     evaluation_start: pd.Timestamp
     evaluation_end: pd.Timestamp
-    strategy: FrozenMhsStrategySpec
+    strategy: StrategySpec
     initial_equity: float
     base_spec: ExecutionSpec
     stress_spec: ExecutionSpec
-    report_periods: tuple[FrozenMhsReportPeriod, ...]
+    report_periods: tuple[StrategyReportPeriod, ...]
     data_root: Path | None = None
     memory_budget: MhsMemoryBudget | None = None
-    execution_bound: FrozenExecutionBound = "OHLCV_IMMEDIATE_TAKER"
+    execution_bound: StrategyExecutionBound = "OHLCV_IMMEDIATE_TAKER"
 
     def __post_init__(self) -> None:
         for name in ("source_start", "evaluation_start", "evaluation_end"):
@@ -82,8 +82,8 @@ class FrozenMhsBacktestRequest:
                 raise DataIntegrityError(f"{name} must be timezone-aware UTC")
         if not self.source_start < self.evaluation_start < self.evaluation_end:
             raise DataIntegrityError("request must satisfy source_start < evaluation_start < evaluation_end")
-        if not isinstance(self.strategy, FrozenMhsStrategySpec):
-            raise DataIntegrityError("strategy must be a FrozenMhsStrategySpec")
+        if not isinstance(self.strategy, StrategySpec):
+            raise DataIntegrityError("strategy must be a StrategySpec")
         if (
             isinstance(self.initial_equity, bool)
             or not isinstance(self.initial_equity, (int, float))
@@ -101,9 +101,9 @@ class FrozenMhsBacktestRequest:
         if self.base_spec.decision_anchor != "submit_bar" or self.stress_spec.decision_anchor != "submit_bar":
             raise DataIntegrityError("base and stress specs must use decision_anchor='submit_bar'")
         if not isinstance(self.report_periods, tuple) or not self.report_periods:
-            raise DataIntegrityError("report_periods must be a non-empty tuple of FrozenMhsReportPeriod")
-        if any(not isinstance(p, FrozenMhsReportPeriod) for p in self.report_periods):
-            raise DataIntegrityError("report_periods must be a non-empty tuple of FrozenMhsReportPeriod")
+            raise DataIntegrityError("report_periods must be a non-empty tuple of StrategyReportPeriod")
+        if any(not isinstance(p, StrategyReportPeriod) for p in self.report_periods):
+            raise DataIntegrityError("report_periods must be a non-empty tuple of StrategyReportPeriod")
         if self.data_root is not None and not isinstance(self.data_root, Path):
             raise DataIntegrityError("data_root must be a Path or None")
         if self.memory_budget is not None and not isinstance(self.memory_budget, MhsMemoryBudget):
@@ -111,7 +111,7 @@ class FrozenMhsBacktestRequest:
 
 
 @dataclass(frozen=True, slots=True)
-class FrozenSourceContext:
+class StrategySourceContext:
     """One loaded source bundle shared by the inventory replay and alternative ledgers."""
 
     census: tuple[str, ...]
@@ -124,12 +124,12 @@ class FrozenSourceContext:
 
 
 @dataclass(frozen=True, slots=True)
-class FrozenMhsBacktestRun:
+class StrategyBacktestRun:
     """Return exact target provenance and paired 3m evidence for one request."""
 
-    request: FrozenMhsBacktestRequest
-    candidate: FrozenMhsCandidate
-    evidence: FrozenMhsResearchEvidence
+    request: StrategyBacktestRequest
+    candidate: StrategyTargets
+    evidence: StrategyBacktestEvidence
     execution_start: pd.Timestamp
     execution_end: pd.Timestamp
     source_symbols: tuple[str, ...]
@@ -138,7 +138,7 @@ class FrozenMhsBacktestRun:
     delisting_blocked_decisions: int = 0
 
 
-def _frozen_delisting_block(
+def _strategy_delisting_block(
     decision_index: pd.DatetimeIndex,
     census: list[str],
     column_of: dict[str, int],
@@ -162,11 +162,11 @@ def _frozen_delisting_block(
     return values
 
 
-def frozen_blocked_decisions(
+def strategy_blocked_decisions(
     decision_index: pd.DatetimeIndex,
     census_symbols: tuple[str, ...],
     *,
-    strategy: FrozenMhsStrategySpec,
+    strategy: StrategySpec,
     base_spec: ExecutionSpec,
     settlement_registry: InstrumentSettlementRegistry,
 ) -> pd.DataFrame:
@@ -196,7 +196,7 @@ def frozen_blocked_decisions(
     if not census:
         return frame
     column_of = {sym: pos for pos, sym in enumerate(census)}
-    values = _frozen_delisting_block(
+    values = _strategy_delisting_block(
         decision_index, census, column_of,
         snapshot_hour=snapshot_hour, settlement_registry=settlement_registry,
     )
@@ -219,7 +219,7 @@ def frozen_blocked_decisions(
     return pd.DataFrame(values, index=decision_index, columns=census, dtype=bool)
 
 
-def _frozen_execution_available_end(path: Path) -> pd.Timestamp | str:
+def _strategy_execution_available_end(path: Path) -> pd.Timestamp | str:
     """Last 3m bar open in one archive, or a reason string when no extent can be read.
 
     An absent archive and a corrupt one both block replay, but they demand different
@@ -237,7 +237,7 @@ def _frozen_execution_available_end(path: Path) -> pd.Timestamp | str:
     return pd.Timestamp(int(stamps.max()), unit="ms", tz="UTC")
 
 
-def assert_frozen_execution_coverage(
+def assert_strategy_execution_coverage(
     roster: pd.DataFrame,
     *,
     execution_end: pd.Timestamp,
@@ -280,7 +280,7 @@ def assert_frozen_execution_coverage(
         required = last_true + pd.Timedelta(days=2, hours=int(entry_hour_utc)) + settlement
         if required > execution_end:
             required = execution_end
-        available = _frozen_execution_available_end(root / "3m" / f"{symbol}.parquet")
+        available = _strategy_execution_available_end(root / "3m" / f"{symbol}.parquet")
         if isinstance(available, str):
             deficient.append(f"{symbol} (required={required.isoformat()}, available={available})")
         elif required - available > pd.Timedelta(minutes=3):
@@ -289,7 +289,7 @@ def assert_frozen_execution_coverage(
             )
     if deficient:
         raise DataIntegrityError(
-            f"frozen execution coverage incomplete for {len(deficient)} symbol(s): "
+            f"strategy execution coverage incomplete for {len(deficient)} symbol(s): "
             + "; ".join(deficient)
         )
 
@@ -297,13 +297,13 @@ def assert_frozen_execution_coverage(
 def _admit_source_stage(budget: MhsMemoryBudget, initial_swap_bytes: int | None) -> None:
     """Admit the source panel stage before any wide allocation."""
     assert_mhs_stage_allocation(
-        stage="frozen_source_panel", estimated_bytes=0,
+        stage="strategy_source_panel", estimated_bytes=0,
         budget=budget, replay=False, initial_swap_bytes=initial_swap_bytes,
     )
 
 
-def _load_frozen_source(
-    request: FrozenMhsBacktestRequest,
+def _load_strategy_source(
+    request: StrategyBacktestRequest,
     budget: MhsMemoryBudget,
     initial_swap_bytes: int | None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, pd.DataFrame], pd.DataFrame, tuple[str, ...], dict[str, pd.Series], dict[str, str], str]:
@@ -312,7 +312,7 @@ def _load_frozen_source(
 
     def _admit_panel(estimated_bytes: int) -> None:
         assert_mhs_stage_allocation(
-            stage="frozen_source_panel", estimated_bytes=int(estimated_bytes),
+            stage="strategy_source_panel", estimated_bytes=int(estimated_bytes),
             budget=budget, replay=False, initial_swap_bytes=initial_swap_bytes,
         )
 
@@ -342,14 +342,14 @@ def _load_frozen_source(
     return daily_close, daily_quote_volume, hourly_panels, hourly_available_at, census, funding_by_symbol, funding_failures, root
 
 
-def _frozen_execution_fence(candidate: FrozenMhsCandidate) -> pd.Timestamp:
+def _strategy_execution_fence(candidate: StrategyTargets) -> pd.Timestamp:
     """Extend the 3m stream past the final entry so it can be marked."""
     last = candidate.target_weights.index[-1]
     return (last.normalize() + pd.Timedelta(days=1)).tz_convert("UTC")
 
 
-def _frozen_window_stream(
-    candidate: FrozenMhsCandidate,
+def _strategy_window_stream(
+    candidate: StrategyTargets,
     stream_start: pd.Timestamp,
     stream_end: pd.Timestamp,
     root: str,
@@ -373,29 +373,29 @@ def _frozen_window_stream(
     )
 
 
-def build_frozen_request_candidate(
-    request: FrozenMhsBacktestRequest,
-) -> tuple[FrozenMhsCandidate, FrozenSourceContext]:
-    """Build the scored candidate exactly as ``run_frozen_mhs_backtest`` does, without replay.
+def build_request_targets(
+    request: StrategyBacktestRequest,
+) -> tuple[StrategyTargets, StrategySourceContext]:
+    """Build the scored candidate exactly as ``run_strategy_backtest`` does, without replay.
 
     Returns the candidate plus the loaded source context (census, funding series, OHLCV root,
     resolved memory budget) so an alternative ledger can reuse one source load."""
     budget = resolve_mhs_memory_budget(request.memory_budget)
     initial_swap_bytes = _current_tree_swap_bytes()
     _admit_source_stage(budget, initial_swap_bytes)
-    daily_close, daily_quote_volume, hourly_panels, hourly_available_at, census, funding_by_symbol, funding_failures, root = _load_frozen_source(
+    daily_close, daily_quote_volume, hourly_panels, hourly_available_at, census, funding_by_symbol, funding_failures, root = _load_strategy_source(
         request, budget, initial_swap_bytes
     )
-    blocked_decisions = frozen_blocked_decisions(
+    blocked_decisions = strategy_blocked_decisions(
         pd.DatetimeIndex(daily_close.index), census, strategy=request.strategy, base_spec=request.base_spec,
         settlement_registry=settlement_registry_for_root(root),
     )
-    roster = build_frozen_pit_roster(
+    roster = build_pit_roster(
         daily_close, daily_quote_volume, census,
         breadth=request.strategy.breadth, blocked_decisions=blocked_decisions,
     )
     ever_selected = [sym for sym in census if bool(roster[sym].any())]
-    assert_frozen_execution_coverage(
+    assert_strategy_execution_coverage(
         roster,
         execution_end=request.evaluation_end,
         settlement=pd.Timedelta(minutes=int(request.base_spec.passive_timeout_minutes)),
@@ -406,7 +406,7 @@ def build_frozen_request_candidate(
         raise DataIntegrityError("request strategy selects no historical symbol")
     selected_panels = {key: frame[ever_selected] for key, frame in hourly_panels.items()}
     selected_available = hourly_available_at[ever_selected]
-    full_candidate = build_frozen_mhs_candidate(
+    full_candidate = build_strategy_targets(
         selected_panels,
         selected_available,
         daily_close,
@@ -420,20 +420,20 @@ def build_frozen_request_candidate(
     scored = (labels >= request.evaluation_start) & (labels < request.evaluation_end)
     if not bool(scored.any()):
         raise DataIntegrityError("evaluation interval contains no candidate entry row")
-    candidate = FrozenMhsCandidate(
+    candidate = StrategyTargets(
         target_weights=full_candidate.target_weights.loc[scored],
         signal_available_at=full_candidate.signal_available_at[scored],
         strategy=request.strategy,
     )
-    context = FrozenSourceContext(
+    context = StrategySourceContext(
         census=census, funding_by_symbol=funding_by_symbol, funding_failures=funding_failures,
         root=root, budget=budget, daily_close=daily_close, daily_quote_volume=daily_quote_volume,
     )
     return candidate, context
 
 
-def run_frozen_mhs_backtest(request: FrozenMhsBacktestRequest) -> FrozenMhsBacktestRun:
-    """Build and replay a frozen PIT strategy using the shared 3m inventory ledger.
+def run_strategy_backtest(request: StrategyBacktestRequest) -> StrategyBacktestRun:
+    """Build and replay a strategy PIT target plan using the shared 3m inventory ledger.
 
     The runner first reconstructs the full historical universe from Binance
     archive sources, then materializes only historically selected hourly and
@@ -449,35 +449,35 @@ def run_frozen_mhs_backtest(request: FrozenMhsBacktestRequest) -> FrozenMhsBackt
             execution evidence is incomplete.
         MhsResourceAdmissionError: A declared memory budget cannot admit work.
     """
-    candidate, context = build_frozen_request_candidate(request)
+    candidate, context = build_request_targets(request)
     budget = context.budget
     root = context.root
     funding_by_symbol = context.funding_by_symbol
     funding_failures = context.funding_failures
     census = context.census
     settlement_registry = settlement_registry_for_root(root)
-    blocked_decisions = frozen_blocked_decisions(
+    blocked_decisions = strategy_blocked_decisions(
         pd.DatetimeIndex(context.daily_close.index), census, strategy=request.strategy, base_spec=request.base_spec,
         settlement_registry=settlement_registry,
     )
-    delisting_only = _frozen_delisting_block(
+    delisting_only = _strategy_delisting_block(
         pd.DatetimeIndex(context.daily_close.index), list(census),
         {sym: pos for pos, sym in enumerate(census)},
         snapshot_hour=int(request.strategy.snapshot_hour_utc),
         settlement_registry=settlement_registry,
     )
     execution_start = candidate.signal_available_at[0]
-    execution_end = _frozen_execution_fence(candidate)
+    execution_end = _strategy_execution_fence(candidate)
     live_accumulators: _LiveAccumulatorSets = []
 
     def _window_stream() -> Iterator[ExecutionReplayWindow]:
-        yield from _frozen_window_stream(
+        yield from _strategy_window_stream(
             candidate, candidate.signal_available_at[0], execution_end, root,
             funding_by_symbol, funding_failures, request.base_spec, budget, live_accumulators,
         )
 
     window_stream = _window_stream()
-    evidence = evaluate_frozen_mhs_research(
+    evidence = evaluate_strategy_backtest(
         candidate, window_stream, initial_equity=request.initial_equity,
         base_spec=request.base_spec, stress_spec=request.stress_spec,
         report_periods=request.report_periods, live_accumulators=live_accumulators,
@@ -487,7 +487,7 @@ def run_frozen_mhs_backtest(request: FrozenMhsBacktestRequest) -> FrozenMhsBackt
         row = evidence.period_metrics.loc[period.label]
         if float(row["base_coverage"]) != 1.0 or float(row["stress_coverage"]) != 1.0:
             raise DataIntegrityError(f"report period {period.label!r} is not fully covered by daily evidence")
-    return FrozenMhsBacktestRun(
+    return StrategyBacktestRun(
         request=request, candidate=candidate, evidence=evidence,
         execution_start=execution_start, execution_end=execution_end, source_symbols=census,
         source_gap_excluded_symbols=tuple(sorted(sym for sym in census if bool(blocked_decisions[sym].any()))),

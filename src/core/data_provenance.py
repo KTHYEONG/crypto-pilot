@@ -9,7 +9,7 @@ atomically; a partial write never clobbers the last good manifest
 (INV-MANIFEST-CANONICAL-ATOMIC). The ``data_root``/``--data-root`` override is
 always the OHLCV root; funding stays canonical. Forward live observations are immutable
 evidence: digest-less or foreign-digest rows are preserved but excluded, and
-forward data can never relabel the frozen strategy (INV-FORWARD-EVIDENCE-IMMUTABILITY).
+forward data can never relabel the strategy (INV-FORWARD-EVIDENCE-IMMUTABILITY).
 """
 
 from __future__ import annotations
@@ -255,9 +255,9 @@ def resolve_required_mhs_input_paths(
 
 
 def validate_forward_execution_observations(
-    records: pd.DataFrame, *, frozen_strategy_digest: str
+    records: pd.DataFrame, *, strategy_digest: str
 ) -> DataProvenanceResult:
-    """Gate forward evidence: frozen-digest, causally-timed, sufficiently long."""
+    """Gate forward evidence: strategy-digest, causally-timed, sufficiently long."""
     required = ("decision_time", "observed_at", "strategy_digest")
     absent = [column for column in required if column not in records.columns]
     if absent or records.empty:
@@ -265,7 +265,7 @@ def validate_forward_execution_observations(
     frame = records.copy()
     frame["decision_time"] = pd.to_datetime(frame["decision_time"], utc=True, errors="coerce")
     frame["observed_at"] = pd.to_datetime(frame["observed_at"], utc=True, errors="coerce")
-    digest_ok = frame["strategy_digest"].notna() & (frame["strategy_digest"].astype(str) == str(frozen_strategy_digest))
+    digest_ok = frame["strategy_digest"].notna() & (frame["strategy_digest"].astype(str) == str(strategy_digest))
     time_ok = frame["observed_at"].notna() & frame["decision_time"].notna() & (frame["observed_at"] >= frame["decision_time"])
     usable = frame[digest_ok & time_ok]
     reasons: list[str] = []

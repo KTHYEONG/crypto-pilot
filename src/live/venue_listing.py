@@ -352,7 +352,7 @@ def delisting_blocked_decisions(
     ``delisting_first_seen_at``, and ``d + holding_end_offset + lead >= delivery_time``. The
     same frame shape and meaning as the research ``blocked_decisions`` contract (daily UTC
     index identical to ``decision_index``, columns in ``census`` order) lets it pass straight
-    into ``build_frozen_mhs_candidate``.
+    into ``build_strategy_targets``.
 
     Returns:
         Frame of bool, all False where no snapshot is in force.

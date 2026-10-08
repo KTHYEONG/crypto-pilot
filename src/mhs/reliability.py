@@ -99,7 +99,7 @@ def gate_deployment_readiness(
     """Combine the alpha Research-GO verdict with the reliability gate.
 
     Deployment stays ready only when both agree; the input object is never
-    mutated (frozen additive gating).
+    mutated (fixed additive gating).
     """
     allowed = bool(reliability.eligible)
     return dataclasses.replace(

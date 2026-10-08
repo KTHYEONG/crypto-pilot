@@ -2,8 +2,8 @@
 
 A deterministic synthetic 1h lake (30 seeded symbols, one listed mid-window, one
 delisted with a listing-registry fixture) feeds the public live entry point
-``build_live_frozen_book`` and the account sizing path used by
-``run_frozen_signal_step``. SHA-256 digests of the canonical unit-target and
+``build_live_strategy_book`` and the account sizing path used by
+``run_strategy_signal_step``. SHA-256 digests of the canonical unit-target and
 levered-target frames pin every live decision bit; part 3 may only rename
 imports/symbols here, never the digests.
 """
@@ -21,8 +21,8 @@ import pandas as pd
 import pytest
 
 from src.live.deployed_weights import load_weights_frame
-from src.live.frozen_book import LiveFrozenBook, build_live_frozen_book
-from src.live.frozen_signal import run_frozen_signal_step
+from src.live.strategy_book import LiveStrategyBook, build_live_strategy_book
+from src.live.strategy_signal import run_strategy_signal_step
 from src.live.venue_listing import (
     VenueListingEntry,
     VenueListingSnapshot,
@@ -37,7 +37,7 @@ from src.strategy.sizing import (
     build_venue_ladders,
     choose_exposure,
 )
-from src.strategy.targets import FROZEN_MHS_TOP20_V2
+from src.strategy.targets import FLOW_MOM_TOP20
 from src.core.params import ACCOUNT_MIN_MOMENT_DAYS, ACCOUNT_PRIOR_DAYS
 
 _START = pd.Timestamp("2021-01-01", tz="UTC")
@@ -50,7 +50,7 @@ _SETTLE = 0.214
 _DELIVERY = _START + pd.Timedelta(days=136)
 _FIRST_SEEN = _START + pd.Timedelta(days=130)
 _FAR = pd.Timestamp("2049-01-01", tz="UTC")
-_SNAPSHOT_HOUR = int(FROZEN_MHS_TOP20_V2.snapshot_hour_utc)
+_SNAPSHOT_HOUR = int(FLOW_MOM_TOP20.snapshot_hour_utc)
 _SEED_EQUITY_USDT = 2100.0
 
 _UNIT_BOOK_DIGEST = "d26b96855df02f7f532b7785926b80f679c9e431ea942137b07880122f66c447"
@@ -62,7 +62,7 @@ class GoldenLayout(TypedDict):
     data: Path
     listing: Path
     venue: Path
-    book: LiveFrozenBook
+    book: LiveStrategyBook
     bootstrap: Path
 
 
@@ -180,7 +180,7 @@ def _canonical_digest(frame: pd.DataFrame) -> str:
     return hashlib.sha256(("\n".join(lines) + "\n").encode("utf-8")).hexdigest()
 
 
-def _levered_targets(book: LiveFrozenBook, venue_path: Path, bootstrap_path: Path) -> pd.DataFrame:
+def _levered_targets(book: LiveStrategyBook, venue_path: Path, bootstrap_path: Path) -> pd.DataFrame:
     """Account-policy baseline with fixed bootstrap moments and empty inventory."""
     rules = load_venue_rule_snapshot(venue_path)
     census = list(book.unit_weights.columns)
@@ -209,7 +209,7 @@ def _live_step_targets(layout: GoldenLayout, state: Path) -> pd.DataFrame:
     """Exercise production history extension, settlement handling and sizing wiring."""
     weights = state / "deployed_target_weights.parquet"
     for day in layout["book"].unit_weights.index:
-        report = run_frozen_signal_step(
+        report = run_strategy_signal_step(
             day, now=day + pd.Timedelta(hours=23), data_root=layout["data"],
             weights_path=weights, unit_bootstrap_path=layout["bootstrap"],
             unit_forward_path=state / "forward.parquet", venue_rules_dir=state / "venue",
@@ -244,7 +244,7 @@ def golden_layout(tmp_path_factory: pytest.TempPathFactory) -> GoldenLayout:
             lead=pd.Timedelta(hours=48),
         )
 
-    book = build_live_frozen_book(
+    book = build_live_strategy_book(
         data, _CENSUS, panel_start=_START, panel_end=_START + pd.Timedelta(days=_DAYS),
         blocked_decisions=_blocked,
     )
@@ -297,7 +297,7 @@ def test_golden_fixture_is_causal(golden_layout: GoldenLayout, tmp_path: Path) -
             lead=pd.Timedelta(hours=48),
         )
 
-    rebuilt = build_live_frozen_book(
+    rebuilt = build_live_strategy_book(
         perturbed, _CENSUS, panel_start=_START, panel_end=_START + pd.Timedelta(days=_DAYS),
         blocked_decisions=_blocked,
     )

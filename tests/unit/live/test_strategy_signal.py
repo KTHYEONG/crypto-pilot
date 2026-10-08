@@ -1,4 +1,4 @@
-"""Invariant guards for the live frozen signal step."""
+"""Invariant guards for the live strategy signal step."""
 
 from __future__ import annotations
 
@@ -14,8 +14,8 @@ import pytest
 
 from src.common.errors import DataIntegrityError
 from src.live.errors import CausalityViolation
-from src.live.frozen_book import build_live_frozen_book
-from src.live.frozen_signal import FROZEN_SIGNAL_REPORT_NAME, run_frozen_signal_step
+from src.live.strategy_book import build_live_strategy_book
+from src.live.strategy_signal import STRATEGY_SIGNAL_REPORT_NAME, run_strategy_signal_step
 from src.core.params import ACCOUNT_EXPOSURE_STEP
 
 _START = pd.Timestamp("2021-01-01", tz="UTC")
@@ -109,7 +109,7 @@ def _write_ledger(path: Path, positions: dict[str, str], cash: str | None) -> No
 
 @pytest.fixture(scope="module")
 def panel_root(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    root = tmp_path_factory.mktemp("frozen_panel") / "data"
+    root = tmp_path_factory.mktemp("strategy_panel") / "data"
     _write_panel(root)
     return root
 
@@ -148,11 +148,11 @@ def _run(day: pd.Timestamp, paths: dict[str, Path], **overrides: object) -> obje
         "non_crypto": frozenset(),
     }
     kwargs.update(overrides)
-    return run_frozen_signal_step(day, **kwargs)  # type: ignore[arg-type]
+    return run_strategy_signal_step(day, **kwargs)  # type: ignore[arg-type]
 
 
 def _report_path(paths: dict[str, Path]) -> Path:
-    return paths["weights"].parent / FROZEN_SIGNAL_REPORT_NAME
+    return paths["weights"].parent / STRATEGY_SIGNAL_REPORT_NAME
 
 
 def test_release_hour_guards_causality(layout: dict[str, Path]) -> None:
@@ -168,7 +168,7 @@ def test_writes_levered_row_equal_to_exposure_times_unit_book(layout: dict[str, 
     data_start = _START
     data_end = _START + pd.Timedelta(days=150)
     census = tuple(sorted(_SYMS))
-    book = build_live_frozen_book(
+    book = build_live_strategy_book(
         layout["data"], census, panel_start=data_start, panel_end=data_end,
     )
     stored = pd.read_parquet(layout["weights"]).loc[_DAY]
@@ -354,19 +354,19 @@ def test_exposure_respects_margin_cap(layout: dict[str, Path], tmp_path: Path) -
 def test_no_book_row_fails_closed(
     layout: dict[str, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import src.live.frozen_signal as signal_mod
-    from src.live.frozen_book import LiveFrozenBook
+    import src.live.strategy_signal as signal_mod
+    from src.live.strategy_book import LiveStrategyBook
 
     idx = pd.DatetimeIndex(["2021-01-02"], tz="UTC")
     cols = ["AAAUSDT"]
-    fake = LiveFrozenBook(
+    fake = LiveStrategyBook(
         unit_weights=pd.DataFrame([[0.1]], index=idx, columns=cols, dtype="float64"),
         snapshot_closes=pd.DataFrame([[1.0]], index=idx, columns=cols, dtype="float64"),
         adv=pd.DataFrame([[1.0]], index=idx, columns=cols, dtype="float64"),
         daily_sigma=pd.DataFrame([[0.01]], index=idx, columns=cols, dtype="float64"),
         valid_from=idx[0], panel_last_bar=pd.Timestamp("2021-01-10", tz="UTC"),
     )
-    monkeypatch.setattr(signal_mod, "build_live_frozen_book", lambda *args, **kwargs: fake)
+    monkeypatch.setattr(signal_mod, "build_live_strategy_book", lambda *args, **kwargs: fake)
     bare = tmp_path / "bare"
     (bare / "ohlcv" / "1h").mkdir(parents=True, exist_ok=True)
     with pytest.raises(DataIntegrityError):
@@ -590,7 +590,7 @@ def _run_listing(day: pd.Timestamp, paths: dict[str, Path], **overrides: object)
         "listing_root": paths["listing"],
     }
     kwargs.update(overrides)
-    return run_frozen_signal_step(day, **kwargs)  # type: ignore[arg-type]
+    return run_strategy_signal_step(day, **kwargs)  # type: ignore[arg-type]
 
 
 def test_delisted_roster_member_runs_across_delivery_without_halt(
@@ -720,7 +720,7 @@ def test_held_symbol_absent_from_listing_skips_evidence(tmp_path: Path, delist_p
     _write_ledger(paths["ledger"], {_D_SYMS[0]: "0.01"}, "1000")
     report = _run_listing(_DAY, paths)
     assert report.written is True
-    book = build_live_frozen_book(
+    book = build_live_strategy_book(
         paths["data"], tuple(sorted(_D_ALL)),
         panel_start=_START, panel_end=_START + pd.Timedelta(days=150),
     )
@@ -895,7 +895,7 @@ def test_sparse_incompleteness_proceeds_and_is_reported(tmp_path: Path) -> None:
     # 절단(당일 21:00 꼬리)은 전날 결정행에 영향을 주지 않으므로(인과성), 온전한 북에서
     # 전날 가중치가 0인 비보유 심볼을 골라 절단한다 -- 이후 결정일에서는 NaN 특성으로
     # 리서치 빌더와 동일하게 자동 탈락한다.
-    intact = build_live_frozen_book(
+    intact = build_live_strategy_book(
         paths["data"], tuple(sorted(_G_SYMS)),
         panel_start=_START, panel_end=_START + pd.Timedelta(days=150),
     )
@@ -914,10 +914,10 @@ def test_sparse_incompleteness_proceeds_and_is_reported(tmp_path: Path) -> None:
 
 
 def test_non_held_venue_gap_symbol_excluded_with_reason(tmp_path: Path) -> None:
-    from src.live.frozen_book import build_live_frozen_book, snapshot_gap_blocked_decisions
+    from src.live.strategy_book import build_live_strategy_book, snapshot_gap_blocked_decisions
 
     paths = _custom_layout(tmp_path, _G_SYMS)
-    intact = build_live_frozen_book(
+    intact = build_live_strategy_book(
         paths["data"], tuple(sorted(_G_SYMS)),
         panel_start=_START, panel_end=_START + pd.Timedelta(days=150),
     )
@@ -964,7 +964,7 @@ def test_non_held_venue_gap_symbol_excluded_with_reason(tmp_path: Path) -> None:
     assert report.decision_bar_missing == 0
     stored = pd.read_parquet(paths["weights"]).loc[_DAY]
     assert float(stored[gap_symbol]) == 0.0
-    book = build_live_frozen_book(
+    book = build_live_strategy_book(
         patched, tuple(sorted(_G_SYMS)),
         panel_start=_START, panel_end=_START + pd.Timedelta(days=150),
     )
@@ -1013,10 +1013,10 @@ def test_stale_fallback_snapshot_halts(layout: dict[str, Path], tmp_path: Path) 
 
 def test_deployed_nonzero_venue_gap_symbol_fails_closed(tmp_path: Path) -> None:
     from src.live.deployed_weights import append_weight_row
-    from src.live.frozen_book import build_live_frozen_book
+    from src.live.strategy_book import build_live_strategy_book
 
     paths = _custom_layout(tmp_path, _G_SYMS)
-    intact = build_live_frozen_book(
+    intact = build_live_strategy_book(
         paths["data"], tuple(sorted(_G_SYMS)),
         panel_start=_START, panel_end=_START + pd.Timedelta(days=150),
     )
@@ -1074,7 +1074,7 @@ def test_symbol_absent_from_exchange_info_is_not_counted_as_refresh_incomplete(t
     )
 
     paths = _custom_layout(tmp_path, _G_SYMS)
-    intact = build_live_frozen_book(
+    intact = build_live_strategy_book(
         paths["data"], tuple(sorted(_G_SYMS)),
         panel_start=_START, panel_end=_START + pd.Timedelta(days=150),
     )
