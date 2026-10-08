@@ -127,7 +127,7 @@ def _collect_borrow(args: argparse.Namespace) -> None:
 
 def _report_internal_gaps(args: argparse.Namespace) -> None:
     from src.common.paths import FUTURES_DATA_DIR
-    from src.mhs.panel import load_base_panel
+    from src.core.panel import load_base_panel
 
     panel = load_base_panel(
         str(FUTURES_DATA_DIR / "ohlcv"), args.timeframe,
@@ -380,7 +380,7 @@ def _build_settlement_registry(args: argparse.Namespace) -> None:
     )
     from src.common.errors import DataIntegrityError
     from src.common.paths import FUTURES_DATA_DIR
-    from src.mhs.instrument_settlements import (
+    from src.core.instrument_settlements import (
         EMPTY_SETTLEMENT_REGISTRY,
         default_instrument_settlement_registry_path,
         load_instrument_settlement_registry,
@@ -430,12 +430,12 @@ def _build_venue_halts(args: argparse.Namespace) -> None:
     )
     from src.common.errors import DataIntegrityError
     from src.common.paths import FUTURES_DATA_DIR
-    from src.mhs.instrument_settlements import (
+    from src.core.instrument_settlements import (
         EMPTY_SETTLEMENT_REGISTRY,
         default_instrument_settlement_registry_path,
         load_instrument_settlement_registry,
     )
-    from src.mhs.venue_halts import default_venue_halt_registry_path
+    from src.core.venue_halts import default_venue_halt_registry_path
 
     committed_path = default_instrument_settlement_registry_path()
     try:
@@ -520,7 +520,7 @@ def _seal_mhs_inputs(args: argparse.Namespace) -> None:
     """
     from pathlib import Path
 
-    from src.mhs.data_provenance import (
+    from src.core.data_provenance import (
         mhs_input_layout_for_lake,
         mhs_sealable_input_paths,
         seal_mhs_input_manifest,

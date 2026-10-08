@@ -6,24 +6,24 @@ from typing import Literal
 import numpy as np
 import pandas as pd
 
+from src.core.params import (
+    DISCOVERY_GATE_TRANCHE_COUNT,
+    DISCOVERY_MOMENTUM_CANDIDATES,
+    DISCOVERY_REVERSAL_CANDIDATES,
+    FUNDING_CARRY_LOOKBACK_CANDIDATES_HOURS,
+)
+from src.core.types import BOOK_BLEND_WEIGHTS, BookSpec  # noqa: F401 - re-exported for monkeypatch seams
 from src.mhs import scaling as _scaling
-from src.mhs.books import (
+from src.mhs.discovery import build_candidate_weights
+from src.mhs.funding import build_funding_carry_candidate_weights
+from src.strategy.books import (
     equal_weight_book_ensemble,
     inverse_realized_vol_tilt,
     phase_tranche_book,
     rank_weight_book,
     renormalize_within_mask,
 )
-from src.mhs.discovery import build_candidate_weights
-from src.mhs.funding import build_funding_carry_candidate_weights
-from src.mhs.horizons import horizon_log_return, realized_vol, vol_normalized_horizon_signal
-from src.mhs.params import (
-    DISCOVERY_GATE_TRANCHE_COUNT,
-    DISCOVERY_MOMENTUM_CANDIDATES,
-    DISCOVERY_REVERSAL_CANDIDATES,
-    FUNDING_CARRY_LOOKBACK_CANDIDATES_HOURS,
-)
-from src.mhs.types import BOOK_BLEND_WEIGHTS, BookSpec  # noqa: F401 - re-exported for monkeypatch seams
+from src.strategy.horizons import horizon_log_return, realized_vol, vol_normalized_horizon_signal
 
 
 def _book_structure_trace(target_weights: pd.DataFrame) -> dict[str, float]:

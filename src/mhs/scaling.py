@@ -9,10 +9,7 @@ import numpy as np
 import pandas as pd
 
 from src.common.errors import DataIntegrityError
-from src.mhs.contracts import MhsDiagnosticRequest
-from src.mhs.deployment_policy import SizingPolicy
-from src.mhs.horizons import efficiency_ratio, realized_vol
-from src.mhs.params import (
+from src.core.params import (
     COMMITTEE_KELLY_FRACTION,
     COMMITTEE_KELLY_LCB_Z,
     COMMITTEE_KELLY_WINDOW_DAYS,
@@ -35,7 +32,10 @@ from src.mhs.params import (
     REGIME_CASH_SCALE_FLOOR,
     GrowthRiskEnvelope,
 )
+from src.mhs.contracts import MhsDiagnosticRequest
+from src.mhs.deployment_policy import SizingPolicy
 from src.mhs.regime import trend_efficiency_scale
+from src.strategy.horizons import efficiency_ratio, realized_vol
 
 
 def _smooth_signal_ema(signal: pd.DataFrame, span_steps: int) -> pd.DataFrame:
@@ -656,7 +656,7 @@ def _envelope_exposure_cap(
     cap is budget-derived and no longer scales with nominal gross.)
     """
     del target_gross
-    from src.mhs.params import COMMITTEE_GROWTH_BARS_PER_YEAR, COMMITTEE_GROWTH_N_PATHS, COMMITTEE_GROWTH_RISK_GRID_MULTIPLIERS  # noqa: I001
+    from src.core.params import COMMITTEE_GROWTH_BARS_PER_YEAR, COMMITTEE_GROWTH_N_PATHS, COMMITTEE_GROWTH_RISK_GRID_MULTIPLIERS  # noqa: I001
     from src.quant.risk.growth_sizing import GrowthSizingConfig, solve_growth_optimal_risk
 
     r = reference_daily_returns.dropna().replace([np.inf, -np.inf], np.nan).dropna()

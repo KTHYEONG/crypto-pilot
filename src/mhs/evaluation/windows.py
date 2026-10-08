@@ -17,10 +17,36 @@ import pyarrow.ipc as pa_ipc
 
 from src.common.errors import DataIntegrityError
 from src.common.paths import BASE_DIR
+from src.core.parallel import resolve_fork_shared
+from src.core.params import (
+    MEASURED_EXECUTION_COST_TIERS_BPS,
+    REBALANCE_TRACKING_ERROR_THRESHOLD,
+    REFERENCE_PASS_EQUITY_FLOOR,
+)
+from src.core.params import PERIODS_PER_YEAR_1H as _PERIODS_PER_YEAR_1H
+from src.core.resources import _assert_execution_rss_budget, _resolve_ram_budget, _StageRecorder
+from src.core.types import BookSpec, ExecutionSpec
+from src.engine.execution import (
+    ExecutionReplayWindow,
+    StrategyExecutionReplayResult,
+    _ExecutionBound,
+    replay_execution_window_batch_isolated,
+    replay_execution_windows,
+    replay_execution_windows_coupled,
+)
+from src.engine.execution.settlement import settlement_event_from_json as _settlement_event_from_json
+from src.engine.execution.settlement import settlement_event_to_json as _settlement_event_to_json
+from src.engine.execution.settlement import venue_halt_from_json as _venue_halt_from_json
+from src.engine.execution.settlement import venue_halt_to_json as _venue_halt_to_json
+from src.engine.execution.window_stream import MhsExecutionWindow as MhsExecutionWindow
+from src.engine.execution.window_stream import _estimate_mhs_execution_allocation as _estimate_mhs_execution_allocation
+from src.engine.execution.window_stream import _iter_mhs_execution_windows as _iter_mhs_execution_windows
+from src.engine.execution.window_stream import _materialize_execution_piece as _materialize_execution_piece
+from src.engine.execution.window_stream import _minimum_mhs_execution_bars as _minimum_mhs_execution_bars
+from src.engine.execution.window_stream import _resolve_ns_vectorized as _resolve_ns_vectorized
 from src.mhs import research_go as _research_go
 from src.mhs import scaling as _scaling
 from src.mhs import statistics as _statistics
-from src.mhs.books import portfolio_rebalance_trigger
 from src.mhs.contracts import MhsBookFailure, MhsBookReport, MhsDiagnosticRequest, MhsResourceMeasurement
 from src.mhs.evidence import (
     CostResponsePoint,
@@ -30,33 +56,7 @@ from src.mhs.evidence import (
     required_cost_tiers,
     resolved_anchored_folds,
 )
-from src.mhs.execution import (
-    ExecutionReplayWindow,
-    StrategyExecutionReplayResult,
-    _ExecutionBound,
-    replay_execution_window_batch_isolated,
-    replay_execution_windows,
-    replay_execution_windows_coupled,
-)
-from src.mhs.execution.settlement import settlement_event_from_json as _settlement_event_from_json
-from src.mhs.execution.settlement import settlement_event_to_json as _settlement_event_to_json
-from src.mhs.execution.settlement import venue_halt_from_json as _venue_halt_from_json
-from src.mhs.execution.settlement import venue_halt_to_json as _venue_halt_to_json
-from src.mhs.execution.window_stream import MhsExecutionWindow as MhsExecutionWindow
-from src.mhs.execution.window_stream import _estimate_mhs_execution_allocation as _estimate_mhs_execution_allocation
-from src.mhs.execution.window_stream import _iter_mhs_execution_windows as _iter_mhs_execution_windows
-from src.mhs.execution.window_stream import _materialize_execution_piece as _materialize_execution_piece
-from src.mhs.execution.window_stream import _minimum_mhs_execution_bars as _minimum_mhs_execution_bars
-from src.mhs.execution.window_stream import _resolve_ns_vectorized as _resolve_ns_vectorized
-from src.mhs.parallel import resolve_fork_shared
-from src.mhs.params import (
-    MEASURED_EXECUTION_COST_TIERS_BPS,
-    REBALANCE_TRACKING_ERROR_THRESHOLD,
-    REFERENCE_PASS_EQUITY_FLOOR,
-)
-from src.mhs.params import PERIODS_PER_YEAR_1H as _PERIODS_PER_YEAR_1H
-from src.mhs.resources import _assert_execution_rss_budget, _resolve_ram_budget, _StageRecorder
-from src.mhs.types import BookSpec, ExecutionSpec
+from src.strategy.books import portfolio_rebalance_trigger
 
 from . import books, integrity, specs
 
@@ -218,7 +218,7 @@ def _load_window_from_ipc(target_path: str) -> ExecutionReplayWindow:
         known_frame = funding_known.astype(bool) if funding_known is not None else None
         available = pd.DatetimeIndex(pd.to_datetime(np.asarray(meta.get("bar_available_ns"), dtype="int64"), unit="ns", utc=True)) if meta.get("bar_available_ns") is not None else None
         logical_partition = meta.get("logical_partition")
-        from src.mhs.execution.contracts import FundingCoverageGap as _FundingCoverageGap
+        from src.engine.execution.contracts import FundingCoverageGap as _FundingCoverageGap
 
         coverage = tuple(
             _FundingCoverageGap(

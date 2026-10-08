@@ -20,7 +20,7 @@ from src.application.mhs_frozen_account import (
     run_frozen_account,
     run_frozen_exposure,
 )
-from src.mhs.resources import MhsMemoryBudget
+from src.core.resources import MhsMemoryBudget
 
 
 def _account_request(tmp_path: Path, **overrides) -> FrozenAccountRequest:
@@ -41,13 +41,13 @@ def _install_frozen_account_fakes(
     unit_intraday: float = 0.05, account_intraday: float = 0.05,
 ) -> dict:
     import src.market_data.binance.venue_rules as venue_mod
-    import src.mhs.account_ledger as ledger_mod
-    import src.mhs.account_sources as sources_mod
-    import src.mhs.frozen_research_run as run_mod
+    import src.engine.account_ledger as ledger_mod
+    import src.engine.account_sources as sources_mod
+    import src.engine.strategy_backtest as run_mod
     from src.common.errors import DataIntegrityError
-    from src.mhs.account_ledger import AccountLedgerResult
-    from src.mhs.frozen_research_candidate import FROZEN_MHS_TOP20_V2, FrozenMhsCandidate
-    from src.mhs.frozen_research_run import FrozenSourceContext
+    from src.engine.account_ledger import AccountLedgerResult
+    from src.strategy.targets import FROZEN_MHS_TOP20_V2, FrozenMhsCandidate
+    from src.engine.strategy_backtest import FrozenSourceContext
     from src.market_data.binance.venue_rules import VenueRuleSnapshot
 
     seen: dict = {}
@@ -162,10 +162,10 @@ def _fake_run_dir(tmp_path: Path, multiplier: float = 2.5) -> Path:
 
 
 def _install_exposure_fakes(monkeypatch: pytest.MonkeyPatch) -> dict:
-    import src.mhs.frozen_research_universe as universe_mod
-    import src.mhs.growth_exposure as growth_mod
-    import src.mhs.panel as panel_mod
-    import src.mhs.resources as resources_mod
+    import src.strategy.universe as universe_mod
+    import src.evaluation.exposure as growth_mod
+    import src.core.panel as panel_mod
+    import src.core.resources as resources_mod
 
     seen: dict = {}
 
@@ -250,8 +250,8 @@ def test_account_payload_golden_schema(tmp_path: Path, monkeypatch: pytest.Monke
 
 def test_account_unit_reference_replays_before_account(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Default request replays unit reference first with fixed/1.0 then the growth account."""
-    from src.mhs.account_policy import account_growth_policy
-    from src.mhs.params import ACCOUNT_DEFAULT_CAPITAL_USDT, ACCOUNT_TAKER_FEE_BPS, ACCOUNT_UNIT_REFERENCE_CAPITAL
+    from src.strategy.sizing import account_growth_policy
+    from src.core.params import ACCOUNT_DEFAULT_CAPITAL_USDT, ACCOUNT_TAKER_FEE_BPS, ACCOUNT_UNIT_REFERENCE_CAPITAL
 
     seen = _install_frozen_account_fakes(monkeypatch, tmp_path)
     run_frozen_account(_account_request(tmp_path))
@@ -272,8 +272,8 @@ def test_account_unit_reference_replays_before_account(tmp_path: Path, monkeypat
 
 def test_account_candidate_is_unlevered(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The account book is the registered unlevered clip unit book; both replays use its anchors."""
-    from src.mhs.frozen_research_candidate import FROZEN_MHS_TOP20_ACCOUNT_UNIT_V2
-    from src.mhs.params import FROZEN_GROWTH_NAME_CLIP
+    from src.strategy.targets import FROZEN_MHS_TOP20_ACCOUNT_UNIT_V2
+    from src.core.params import FROZEN_GROWTH_NAME_CLIP
 
     seen = _install_frozen_account_fakes(monkeypatch, tmp_path)
     run_frozen_account(_account_request(tmp_path))
@@ -287,7 +287,7 @@ def test_account_candidate_is_unlevered(tmp_path: Path, monkeypatch: pytest.Monk
 
 def test_account_maker_threads_identical_controls(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Maker execution passes identical maker controls to both ledgers."""
-    from src.mhs.params import ACCOUNT_MAKER_FEE_BPS, ACCOUNT_PASSIVE_WINDOW_BARS
+    from src.core.params import ACCOUNT_MAKER_FEE_BPS, ACCOUNT_PASSIVE_WINDOW_BARS
 
     seen = _install_frozen_account_fakes(monkeypatch, tmp_path)
     run_frozen_account(_account_request(tmp_path, execution="maker"))
@@ -362,7 +362,7 @@ def test_account_unit_reference_liquidation_fails_closed(tmp_path: Path, monkeyp
 
 def test_account_replay_failure_fails_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """An account replay failure raises without persisting."""
-    import src.mhs.account_ledger as ledger_mod
+    import src.engine.account_ledger as ledger_mod
     from src.application.mhs_frozen_account import FrozenAccountError
     from src.common.errors import DataIntegrityError
 
@@ -379,7 +379,7 @@ def test_account_replay_failure_fails_closed(tmp_path: Path, monkeypatch: pytest
 
 def test_account_source_failure_fails_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A source assembly failure raises before any replay."""
-    import src.mhs.frozen_research_run as run_mod
+    import src.engine.strategy_backtest as run_mod
     from src.application.mhs_frozen_account import FrozenAccountError
     from src.common.errors import DataIntegrityError
 
@@ -396,7 +396,7 @@ def test_account_source_failure_fails_closed(tmp_path: Path, monkeypatch: pytest
 
 def test_account_missing_venue_snapshot_fails_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """An empty venue root fails before the candidate build."""
-    import src.mhs.frozen_research_run as run_mod
+    import src.engine.strategy_backtest as run_mod
     from src.application.mhs_frozen_account import FrozenAccountError
 
     seen = _install_frozen_account_fakes(monkeypatch, tmp_path, stub_venue=False)
@@ -410,7 +410,7 @@ def test_account_missing_venue_snapshot_fails_closed(tmp_path: Path, monkeypatch
 def test_account_invalid_request_rejected_before_io(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Invalid controls raise ValueError without touching venue or candidate seams."""
     import src.market_data.binance.venue_rules as venue_mod
-    import src.mhs.frozen_research_run as run_mod
+    import src.engine.strategy_backtest as run_mod
 
     _install_frozen_account_fakes(monkeypatch, tmp_path)
     monkeypatch.setattr(venue_mod, "latest_venue_rule_snapshot", lambda root: (_ for _ in ()).throw(AssertionError("no io")))
@@ -500,7 +500,7 @@ def test_reconcile_missing_reference() -> None:
 
 def test_reconcile_boundary_inclusive() -> None:
     """Gaps exactly at tolerance are ok; twice the CAGR tolerance is mismatch."""
-    from src.mhs.params import ACCOUNT_RECON_CAGR_TOLERANCE
+    from src.core.params import ACCOUNT_RECON_CAGR_TOLERANCE
 
     ref = {"strategy_id": "s", "run_dir": "r", "evaluation_start": "a", "evaluation_end": "b", "base_cagr": 0.0, "base_max_drawdown": 0.0, "name_clip": 0.05, "exposure_multiplier": 1.0}
     ok = reconcile_unit_reference(ref, unit_cagr=ACCOUNT_RECON_CAGR_TOLERANCE, unit_mdd=0.0)
@@ -664,7 +664,7 @@ def test_account_unclipped_primary_never_reference(tmp_path: Path, monkeypatch: 
 
 def test_account_gap_beyond_tolerance_is_mismatch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
     """A same-book gap beyond tolerance is a disclosed mismatch."""
-    from src.mhs.params import ACCOUNT_RECON_CAGR_TOLERANCE
+    from src.core.params import ACCOUNT_RECON_CAGR_TOLERANCE
 
     _install_frozen_account_fakes(monkeypatch, tmp_path)
     index = _write_catalog_index(tmp_path, [])
@@ -726,7 +726,7 @@ def test_account_same_book_skips_unreadable_rows(tmp_path: Path, monkeypatch: py
 
 def test_frozen_exposure_unlevers_by_run_multiplier(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The solver receives base returns and mean name weight divided by the run multiplier."""
-    from src.mhs.params import COMMITTEE_GROWTH_HORIZON_YEARS, COMMITTEE_GROWTH_N_PATHS, FROZEN_EXPOSURE_MEAN_HAIRCUT, NULL_BOOTSTRAP_MEAN_BLOCK_DAYS
+    from src.core.params import COMMITTEE_GROWTH_HORIZON_YEARS, COMMITTEE_GROWTH_N_PATHS, FROZEN_EXPOSURE_MEAN_HAIRCUT, NULL_BOOTSTRAP_MEAN_BLOCK_DAYS
 
     run_dir = _fake_run_dir(tmp_path)
     seen = _install_exposure_fakes(monkeypatch)
@@ -752,7 +752,7 @@ def test_frozen_exposure_gap_roster_ignores_trading_exclusions(tmp_path: Path, m
 
 def test_frozen_exposure_gap_population_restricted_to_delisted_symbols(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Only DELISTED symbols feed the gap sampler."""
-    import src.mhs.growth_exposure as growth_mod
+    import src.evaluation.exposure as growth_mod
 
     run_dir = _fake_run_dir(tmp_path)
     _install_exposure_fakes(monkeypatch)
@@ -772,7 +772,7 @@ def test_frozen_exposure_gap_population_restricted_to_delisted_symbols(tmp_path:
 
 def test_frozen_exposure_empty_exclusion_registry_skips_sampler(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """No registered exclusion yields a zero-event gap sample without calling the sampler."""
-    import src.mhs.growth_exposure as growth_mod
+    import src.evaluation.exposure as growth_mod
 
     run_dir = _fake_run_dir(tmp_path)
     seen = _install_exposure_fakes(monkeypatch)
@@ -784,8 +784,8 @@ def test_frozen_exposure_empty_exclusion_registry_skips_sampler(tmp_path: Path, 
 
 def test_exclusion_registry_read_at_most_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The exclusion registry is read once for a non-empty census and never for an empty one."""
-    import src.mhs.growth_exposure as growth_mod
-    import src.mhs.panel as panel_mod
+    import src.evaluation.exposure as growth_mod
+    import src.core.panel as panel_mod
     from src.application.mhs_frozen_account import FrozenAccountError
 
     run_dir = _fake_run_dir(tmp_path)
@@ -813,7 +813,7 @@ def test_exclusion_registry_read_at_most_once(tmp_path: Path, monkeypatch: pytes
 def test_derive_frozen_exposure_pure_and_deterministic(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Fixed in-memory inputs give equal mappings without a created_at key."""
     _install_exposure_fakes(monkeypatch)
-    import src.mhs.growth_exposure as growth_mod
+    import src.evaluation.exposure as growth_mod
 
     monkeypatch.setattr(growth_mod, "structurally_excluded_symbols", lambda: frozenset())
     artifacts = load_frozen_run_artifacts(_fake_run_dir(tmp_path))
@@ -828,7 +828,7 @@ def test_derive_frozen_exposure_pure_and_deterministic(tmp_path: Path, monkeypat
 
 def test_frozen_exposure_fresh_only_before_any_load(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """An existing exposure.json fails before any panel load."""
-    import src.mhs.panel as panel_mod
+    import src.core.panel as panel_mod
     from src.application.mhs_frozen_account import FrozenAccountError
 
     run_dir = _fake_run_dir(tmp_path)
@@ -840,7 +840,7 @@ def test_frozen_exposure_fresh_only_before_any_load(tmp_path: Path, monkeypatch:
 
 def test_frozen_exposure_solver_rejection_leaves_no_artifact(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A solver rejection raises without persisting exposure.json."""
-    import src.mhs.growth_exposure as growth_mod
+    import src.evaluation.exposure as growth_mod
     from src.application.mhs_frozen_account import FrozenAccountError
 
     run_dir = _fake_run_dir(tmp_path)
@@ -967,7 +967,7 @@ def test_invalid_frozen_request_construction_fails_closed(tmp_path: Path, monkey
 
 def test_account_second_replay_failure_fails_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Only the account replay failing still leaves no run dir."""
-    import src.mhs.account_ledger as ledger_mod
+    import src.engine.account_ledger as ledger_mod
     from src.application.mhs_frozen_account import FrozenAccountError
     from src.common.errors import DataIntegrityError
 
@@ -997,7 +997,7 @@ def test_account_persistence_failure_fails_closed(tmp_path: Path, monkeypatch: p
 
 def test_derive_roster_integrity_error_is_value_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A roster DataIntegrityError surfaces as ValueError from the derivation."""
-    import src.mhs.frozen_research_universe as universe_mod
+    import src.strategy.universe as universe_mod
     from src.common.errors import DataIntegrityError
 
     _install_exposure_fakes(monkeypatch)
@@ -1012,7 +1012,7 @@ def test_derive_roster_integrity_error_is_value_error(tmp_path: Path, monkeypatc
 
 def test_derive_unexpected_solver_error_propagates(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A non-ValueError solver failure propagates unwrapped."""
-    import src.mhs.growth_exposure as growth_mod
+    import src.evaluation.exposure as growth_mod
 
     _install_exposure_fakes(monkeypatch)
     monkeypatch.setattr(growth_mod, "solve_log_growth_exposure", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("solver bug")))

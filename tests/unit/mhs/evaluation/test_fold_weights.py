@@ -63,7 +63,7 @@ def test_fold_weights_module_present() -> None:
 def test_slice_base_panel_in_memory_identity() -> None:
     import pandas as pd
     import numpy as np
-    from src.mhs.panel import slice_base_panel
+    from src.core.panel import slice_base_panel
 
     dates = pd.date_range("2021-01-01", periods=3000, freq="1h", tz="UTC")
     close_df = pd.DataFrame({
@@ -92,7 +92,7 @@ def test_slice_base_panel_in_memory_identity() -> None:
 def test_slice_base_panel_validation_errors() -> None:
     import pytest
     import pandas as pd
-    from src.mhs.panel import slice_base_panel
+    from src.core.panel import slice_base_panel
 
     start = pd.Timestamp("2021-01-01", tz="UTC")
     end = pd.Timestamp("2021-02-01", tz="UTC")
@@ -114,7 +114,7 @@ def test_build_fold_target_weights_threads_panel_quarantine_to_loader(monkeypatc
     import src.mhs.evaluation.fold_weights as fold_weights
     from src.mhs.contracts import MhsDiagnosticRequest
     from src.mhs.evidence import AnchoredPurgedFold
-    from src.mhs.panel import PanelQuarantine
+    from src.core.panel import PanelQuarantine
 
     class _StopError(Exception):
         pass
@@ -128,7 +128,7 @@ def test_build_fold_target_weights_threads_panel_quarantine_to_loader(monkeypatc
     monkeypatch.setattr(fold_weights, "load_base_panel", _fake_loader)
     request = MhsDiagnosticRequest()
     from src.mhs import research_go as _research_go
-    from src.mhs.features import FeatureAdmission as _FeatureAdmission
+    from src.strategy.features import FeatureAdmission as _FeatureAdmission
 
     dt = pd.Timestamp("2026-09-05", tz="UTC")
     _admission = (
@@ -172,7 +172,7 @@ def test_build_fold_target_weights_threads_request_data_policy_to_loader(monkeyp
     monkeypatch.setattr(fold_weights, "load_base_panel", _fake_loader)
     request = MhsDiagnosticRequest(data_policy="zombie_mask_v1")
     from src.mhs import research_go as _research_go_dp
-    from src.mhs.features import FeatureAdmission as _FeatureAdmissionDp
+    from src.strategy.features import FeatureAdmission as _FeatureAdmissionDp
 
     dt = pd.Timestamp("2026-09-05", tz="UTC")
     _admission_dp = (
@@ -279,7 +279,7 @@ def _committee_fold_panel():
 def _run_fold_target(request, base_panel, fold, funding):
     from src.mhs import research_go as _research_go
     from src.mhs.evaluation.fold_weights import _build_fold_target_weights
-    from src.mhs.features import FeatureAdmission
+    from src.strategy.features import FeatureAdmission
 
     admission = (
         FeatureAdmission(fold.train_end, _research_go._resolved_committee_members(request))
@@ -354,7 +354,7 @@ def test_non_committee_fold_book_still_uses_fast_slow_knobs(monkeypatch) -> None
     import dataclasses
 
     import src.mhs.evaluation.books as books_mod
-    from src.mhs.types import BOOK_SPECS
+    from src.core.types import BOOK_SPECS
     from tests.fixtures.mhs_requests import research_baseline
 
     base_panel, fold, funding = _committee_fold_panel()
@@ -482,9 +482,9 @@ def _pit_admission(panel, fold, request):
 
     from src.mhs import research_go as _research_go
     from src.mhs.evaluation.committee import _committee_boundary_admission_and_weights
-    from src.mhs.marks import _pit_execution_mask
-    from src.mhs.panel import liquid_half_eligibility
-    from src.mhs.params import (
+    from src.core.marks import _pit_execution_mask
+    from src.core.panel import liquid_half_eligibility
+    from src.core.params import (
         UNIVERSE_ELIGIBILITY_LOOKBACK_BARS,
         UNIVERSE_ELIGIBILITY_MIN_HISTORY_BARS,
     )
@@ -540,7 +540,7 @@ def test_admission_cutoff_after_validation_start_fails_closed() -> None:
     import pytest
 
     from src.mhs.evaluation.integrity import CommitteeAdmissionIntegrityError
-    from src.mhs.features import FeatureAdmission
+    from src.strategy.features import FeatureAdmission
 
     panel, fold, funding, request, _ = _pit_market()
     admission = _pit_admission(panel, fold, request)
@@ -556,7 +556,7 @@ def test_admission_cutoff_must_equal_train_end() -> None:
     import pytest
 
     from src.mhs.evaluation.integrity import CommitteeAdmissionIntegrityError
-    from src.mhs.features import FeatureAdmission
+    from src.strategy.features import FeatureAdmission
 
     panel, fold, funding, request, _ = _pit_market()
     admission = _pit_admission(panel, fold, request)
@@ -846,7 +846,7 @@ def test_fold_executes_boundary_admission_verbatim() -> None:
     import pytest
 
     from src.mhs.evaluation.integrity import CommitteeAdmissionIntegrityError
-    from src.mhs.features import FeatureAdmission
+    from src.strategy.features import FeatureAdmission
 
     panel, fold, funding, request, _ = _pit_market()
     admission = _pit_admission(panel, fold, request)

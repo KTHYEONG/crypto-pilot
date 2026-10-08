@@ -6,21 +6,21 @@ import numpy as np
 import pandas as pd
 import pytest
 import src.mhs.evaluation.concurrency as concurrency_mod
-from src.mhs.data_policy import SOURCE_GAP_EXCLUDED_SYMBOLS
+from src.core.data_policy import SOURCE_GAP_EXCLUDED_SYMBOLS
 from src.mhs.diagnostic_run import run_mhs_horizon_diagnostic
 import src.mhs.evaluation.folds as folds_mod
 import src.mhs.statistics as statistics
 from src.mhs.evaluation.diagnostics import _trend_sleeve_diagnostic
 from src.mhs.evaluation.folds import _apply_trend_sleeve, _trend_sleeve_position
 from src.mhs.evaluation.fold_weights import _build_fold_target_weights
-from src.mhs.features import FeatureAdmission
+from src.strategy.features import FeatureAdmission
 from src.mhs import research_go as _research_go
-from src.mhs.execution.contracts import bar_funding_panel
-from src.mhs.execution.pnl import mhs_ledger_pnl
-from src.mhs.marks import _load_funding_series, _pit_execution_mask
-from src.mhs.panel import liquid_half_eligibility, load_base_panel
-from src.mhs.params import MEASURED_EXECUTION_COST_TIERS_BPS, TREND_SLEEVE_HORIZONS_HOURS
-from src.mhs.params import UNIVERSE_ELIGIBILITY_LOOKBACK_BARS, UNIVERSE_ELIGIBILITY_MIN_HISTORY_BARS
+from src.engine.execution.contracts import bar_funding_panel
+from src.engine.execution.pnl import mhs_ledger_pnl
+from src.core.marks import _load_funding_series, _pit_execution_mask
+from src.core.panel import liquid_half_eligibility, load_base_panel
+from src.core.params import MEASURED_EXECUTION_COST_TIERS_BPS, TREND_SLEEVE_HORIZONS_HOURS
+from src.core.params import UNIVERSE_ELIGIBILITY_LOOKBACK_BARS, UNIVERSE_ELIGIBILITY_MIN_HISTORY_BARS
 from src.mhs.trend_sleeve import (
     market_basket_log_price,
     time_series_trend_position,

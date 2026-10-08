@@ -42,11 +42,11 @@ def test_single_window_producer() -> None:
             if name == "InstrumentSettlementEvent":
                 event_ctors.append(rel)
     assert sorted(set(window_ctors)) == sorted([
-        "src/mhs/execution/window_stream.py",
+        "src/engine/execution/window_stream.py",
         "src/mhs/evaluation/windows.py",
     ])
     assert set(event_ctors) <= {
-        "src/mhs/execution/settlement.py",
-        "src/mhs/execution/contracts.py",
+        "src/engine/execution/settlement.py",
+        "src/engine/execution/contracts.py",
     }
-    assert "src/mhs/execution/settlement.py" in set(event_ctors)
+    assert "src/engine/execution/settlement.py" in set(event_ctors)

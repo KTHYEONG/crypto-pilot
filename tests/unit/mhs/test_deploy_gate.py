@@ -166,7 +166,7 @@ def test_evaluate_deploy_gate_short_circuits_on_integrity() -> None:
         GATE_LIVE_PARITY_BLOCKED,
         evaluate_deploy_gate,
     )
-    from src.mhs.params import GROWTH_RISK_ENVELOPES
+    from src.core.params import GROWTH_RISK_ENVELOPES
 
     # Given: 무결성 실패 2건, fold 증거는 아예 비어 있음
     envelope = GROWTH_RISK_ENVELOPES["growth_extreme_budgeted"]
@@ -195,7 +195,7 @@ def test_evaluate_deploy_gate_blocks_on_edge_axis_before_survival() -> None:
         GATE_STRESS_GROWTH,
         evaluate_deploy_gate,
     )
-    from src.mhs.params import GROWTH_RISK_ENVELOPES
+    from src.core.params import GROWTH_RISK_ENVELOPES
 
     # Given: 16개 무엣지 fold
     rng = np.random.default_rng(77)
@@ -231,7 +231,7 @@ def test_evaluate_deploy_gate_passes_all_three_axes() -> None:
     import pandas as pd
 
     from src.mhs.deploy_gate import evaluate_deploy_gate
-    from src.mhs.params import GROWTH_RISK_ENVELOPES
+    from src.core.params import GROWTH_RISK_ENVELOPES
 
     # Given: 16개 균질 + 뚜렷한 드리프트 fold
     rng = np.random.default_rng(4242)
@@ -392,7 +392,7 @@ def test_deploy_gate_fail_closed_guards() -> None:
         fold_daily_returns,
         profitable_fold_critical_count,
     )
-    from src.mhs.params import GROWTH_RISK_ENVELOPES
+    from src.core.params import GROWTH_RISK_ENVELOPES
 
     with pytest.raises(ValueError, match="at least 2 rows"):
         annualized_log_growth_lcb(pd.Series([0.01], dtype="float64"), n_paths=10, seed=1)
@@ -422,7 +422,7 @@ def test_evaluate_deploy_gate_blocks_on_mdd_and_ruin_budgets() -> None:
     import pandas as pd
 
     from src.mhs.deploy_gate import GATE_MDD_BUDGET, GATE_RUIN_BUDGET, GATE_TIME_CONCENTRATION, evaluate_deploy_gate
-    from src.mhs.params import GrowthRiskEnvelope
+    from src.core.params import GrowthRiskEnvelope
 
     # Given: 축1을 여유롭게 통과하는 16개 균질 fold
     rng = np.random.default_rng(4242)
@@ -473,7 +473,7 @@ def test_evaluate_deploy_gate_blocks_on_time_concentrated_growth() -> None:
         GATE_TIME_CONCENTRATION,
         evaluate_deploy_gate,
     )
-    from src.mhs.params import GROWTH_RISK_ENVELOPES
+    from src.core.params import GROWTH_RISK_ENVELOPES
 
     # Given: 앞 12개는 약하지만 확실한 양(+), 마지막 4개에 성장이 몰린 16 fold
     rng = np.random.default_rng(909)
@@ -512,7 +512,7 @@ def test_integrity_reasons_rejects_terminal_only_blend_ledger() -> None:
     import pandas as pd
 
     from src.mhs.deploy_gate import GATE_BLEND_LEDGER_INVALID, integrity_reasons_from_report
-    from src.mhs.execution import ExecutionDataGap
+    from src.engine.execution import ExecutionDataGap
 
     terminal_gaps = (
         ExecutionDataGap(

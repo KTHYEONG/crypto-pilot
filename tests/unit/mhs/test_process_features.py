@@ -10,11 +10,11 @@ import pandas as pd
 import pytest
 
 from src.common.errors import DataIntegrityError
-from src.mhs.books import rank_weight_book
-from src.mhs.features import FEATURE_REGISTRY, _finite
+from src.strategy.books import rank_weight_book
+from src.strategy.features import FEATURE_REGISTRY, _finite
 from src.mhs.funding import funding_carry_signal
-from src.mhs.horizons import horizon_log_return
-from src.mhs.params import (
+from src.strategy.horizons import horizon_log_return
+from src.core.params import (
     CAUSAL_BETA_LOOKBACK_BARS,
     CAUSAL_BETA_MIN_PERIODS,
     PROCESS_FEATURE_CANDIDATES,
@@ -147,7 +147,7 @@ def test_process_feature_grid_rejects_invalid_inputs() -> None:
     shuffled["close"] = panels["close"].iloc[:, ::-1]
     with pytest.raises(ValueError, match="order"):
         build_process_feature_grid(spec, shuffled, decisions)
-    from src.mhs.features import FeatureSpec
+    from src.strategy.features import FeatureSpec
 
     outsider = FeatureSpec(name="nope", required_columns=("close",), min_coverage=0.0, builder=lambda p: p["close"])
     with pytest.raises(ValueError, match="unsupported"):

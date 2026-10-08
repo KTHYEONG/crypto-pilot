@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 import pytest
 from src.mhs.evaluation.fold_weights import _build_fold_target_weights
-from src.mhs.marks import _load_funding_series
+from src.core.marks import _load_funding_series
 from src.quant.universe.pit_universe import symbol_partition
 
 from tests.unit.mhs.test_evaluation_appresearch import (  # noqa: F401

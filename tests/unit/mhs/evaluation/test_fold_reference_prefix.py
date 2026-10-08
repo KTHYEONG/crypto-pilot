@@ -18,13 +18,13 @@ from src.mhs.evaluation.folds import (
     _train_reference_group_key,
 )
 from src.mhs.evidence import AnchoredPurgedFold
-from src.mhs.params import (
+from src.core.params import (
     PNL_VOL_TARGET_BURN_IN_DAYS,
     TRAIN_REFERENCE_PREFIX_RETURN_ATOL,
     TRAIN_REFERENCE_PREFIX_TARGET_ATOL,
 )
-from src.mhs.resources import MhsResourceAdmissionError
-from src.mhs.types import ExecutionSpec
+from src.core.resources import MhsResourceAdmissionError
+from src.core.types import ExecutionSpec
 
 _TRAIN_START = pd.Timestamp("2021-01-01", tz="UTC")
 _REF_START = _TRAIN_START + pd.Timedelta(hours=912)
@@ -338,7 +338,7 @@ def test_group_key_separates_member_sets_not_cutoffs() -> None:
     # I-FOLD-ADMISSION-PIT: the admitted member tuple joins the train-reference
     # group key (never the admission cutoff, which differs per fold by
     # construction), so folds executing different member sets never share a replay.
-    from src.mhs.features import FeatureAdmission
+    from src.strategy.features import FeatureAdmission
 
     fold_k = _fold(_TE_K)
     fold_h = _fold(_TE_H)
@@ -361,7 +361,7 @@ def test_group_key_separates_member_sets_not_cutoffs() -> None:
 def test_shared_reference_rejects_mixed_member_sets() -> None:
     # I-FOLD-ADMISSION-PIT: folds executing different member sets never share
     # a reference replay -- the group build fails closed before any replay.
-    from src.mhs.features import FeatureAdmission
+    from src.strategy.features import FeatureAdmission
 
     fold0 = _fold(_TE_K)
     fold1 = _fold(_TE_H)
@@ -379,7 +379,7 @@ def test_shared_reference_rejects_mixed_member_sets() -> None:
 def test_reference_from_shared_threads_admission(monkeypatch) -> None:
     # Line 879: _reference_from_shared forwards the fold's own admission into
     # both the own-target build and the group-key comparison.
-    from src.mhs.features import FeatureAdmission
+    from src.strategy.features import FeatureAdmission
 
     fold_k, own, signals, shared = _shared_fixture()
     admission = FeatureAdmission(cutoff=_TE_K, admitted=("a",))

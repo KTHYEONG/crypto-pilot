@@ -18,7 +18,7 @@ import numpy as np
 import pandas as pd
 
 from src.common.errors import DataIntegrityError
-from src.mhs.params import (
+from src.core.params import (
     COMMITTEE_GROWTH_BARS_PER_YEAR,
     COMMITTEE_GROWTH_N_PATHS,
     COMMITTEE_OOS_START,

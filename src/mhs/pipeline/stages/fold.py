@@ -24,6 +24,10 @@ import src.mhs.evaluation.evidence as evidence
 import src.mhs.evaluation.guards as guards
 import src.mhs.evaluation.regime as regime
 from src.common.errors import DataIntegrityError
+from src.core.marks import clear_mhs_market_data_caches
+from src.core.params import COMMITTEE_MEMBERS, COMMITTEE_OOS_START
+from src.core.params import PERIODS_PER_YEAR_1H as _PERIODS_PER_YEAR_1H
+from src.core.resources import _assert_stage_rss_budget
 from src.mhs import research_go as _research_go
 from src.mhs import statistics as _statistics
 from src.mhs.calibration import NullShareCalibration, calibrate_max_share_null
@@ -32,18 +36,14 @@ from src.mhs.evidence import (
     regime_conditional_sharpe_blocks,
     selection_overlap_fraction,
 )
-from src.mhs.features import FEATURE_REGISTRY, feature_registry_panel_columns
-from src.mhs.marks import clear_mhs_market_data_caches
-from src.mhs.params import COMMITTEE_MEMBERS, COMMITTEE_OOS_START
-from src.mhs.params import PERIODS_PER_YEAR_1H as _PERIODS_PER_YEAR_1H
 from src.mhs.pipeline.context import PipelineContext
-from src.mhs.resources import _assert_stage_rss_budget
 from src.mhs.run_history import (
     derive_trials_attempted,
     window_trial_sharpes,
 )
 from src.mhs.telemetry import StageTelemetry
 from src.mhs.trial_pool_disclosure import trial_pool_disclosure
+from src.strategy.features import FEATURE_REGISTRY, feature_registry_panel_columns
 
 
 def _committee_weight_leak_fraction(validation_start: str, validation_end: str) -> float:

@@ -25,7 +25,7 @@ def test_windows_module_present() -> None:
 def test_window_ipc_spill_roundtrip_identity(tmp_path) -> None:
     import pandas as pd
     import numpy as np
-    from src.mhs.execution.contracts import ExecutionReplayWindow
+    from src.engine.execution.contracts import ExecutionReplayWindow
     from src.mhs.evaluation.windows import _spill_window_to_ipc, _load_window_from_ipc
 
     minute_grid = pd.date_range("2021-01-01", periods=100, freq="3min", tz="UTC")
@@ -78,7 +78,7 @@ def test_window_ipc_spill_roundtrip_identity(tmp_path) -> None:
 def test_spill_and_stream_windows_lifecycle(tmp_path) -> None:
     import pandas as pd
     import numpy as np
-    from src.mhs.execution.contracts import ExecutionReplayWindow
+    from src.engine.execution.contracts import ExecutionReplayWindow
     from src.mhs.evaluation.windows import _spill_and_stream_windows, _iter_spilled_windows
 
     windows_in = []
@@ -117,7 +117,7 @@ def test_load_window_minute_frames_threaded_equivalence(tmp_path) -> None:
     import numpy as np
     import pyarrow as pa
     import pyarrow.parquet as pq
-    from src.mhs.marks import _load_window_minute_frames
+    from src.core.marks import _load_window_minute_frames
 
     timeframe = "3m"
     tf_dir = tmp_path / timeframe
@@ -147,7 +147,7 @@ def test_mark_frame_path_keyed_cache_retired(tmp_path) -> None:
     # The path-keyed mark frame cache is retired: canonical preparation and
     # replay use completed trade OHLCV; retained minute-frame loaders read the
     # lake directly with no process cache to isolate.
-    from src.mhs import marks
+    from src.core import marks
 
     assert not hasattr(marks, "_get_symbol_mark_frame_for_path")
     assert not hasattr(marks, "_get_symbol_mark_frame")
@@ -180,7 +180,7 @@ def test_window_ipc_numpy_restore_preserves_exact_bits(tmp_path) -> None:
     import pandas as pd
 
     from src.mhs.evaluation.windows import _load_window_from_ipc, _spill_window_to_ipc
-    from src.mhs.execution.contracts import ExecutionReplayWindow
+    from src.engine.execution.contracts import ExecutionReplayWindow
 
     minute_grid = pd.date_range("2026-01-01", periods=4, freq="3min", tz="UTC")
     decision_grid = pd.date_range("2026-01-01", periods=2, freq="6h", tz="UTC")
@@ -241,7 +241,7 @@ def test_window_ipc_loader_has_no_python_value_list_conversion(tmp_path, monkeyp
 
     import src.mhs.evaluation.windows as windows
     from src.mhs.evaluation.windows import _load_window_from_ipc, _spill_window_to_ipc
-    from src.mhs.execution.contracts import ExecutionReplayWindow
+    from src.engine.execution.contracts import ExecutionReplayWindow
 
     minute_grid = pd.date_range("2026-01-01", periods=4, freq="3min", tz="UTC")
     decision_grid = pd.date_range("2026-01-01", periods=2, freq="6h", tz="UTC")
@@ -323,7 +323,7 @@ def test_iter_spilled_windows_keeps_filename_order_and_exact_values(tmp_path) ->
     import pandas as pd
 
     from src.mhs.evaluation.windows import _iter_spilled_windows, _spill_window_to_ipc
-    from src.mhs.execution.contracts import ExecutionReplayWindow
+    from src.engine.execution.contracts import ExecutionReplayWindow
 
     spill = tmp_path / "spill"
     spill.mkdir()
@@ -411,7 +411,7 @@ def test_targeted_symbol_without_execution_source_fails_closed(tmp_path) -> None
     from src.common.errors import DataIntegrityError
     from src.mhs.evaluation import integrity
     from src.mhs.evaluation.windows import _iter_mhs_execution_windows
-    from src.mhs.types import ExecutionSpec
+    from src.core.types import ExecutionSpec
 
     start, end, idx, weights = _two_symbol_daily_targets()
     _write_3m_execution_file(tmp_path, "AAAUSDT", start, end)
@@ -429,10 +429,10 @@ def test_execution_source_preflight_runs_before_materialization(tmp_path, monkey
     import pandas as pd
     import pytest
 
-    import src.mhs.execution.window_stream as window_stream
+    import src.engine.execution.window_stream as window_stream
     from src.common.errors import DataIntegrityError
     from src.mhs.evaluation.windows import _iter_mhs_execution_windows
-    from src.mhs.types import ExecutionSpec
+    from src.core.types import ExecutionSpec
 
     start, end, idx, weights = _two_symbol_daily_targets()
     _write_3m_execution_file(tmp_path, "AAAUSDT", start, end)
@@ -454,8 +454,8 @@ def test_untargeted_symbol_without_execution_source_is_invisible(tmp_path, untar
     import pandas as pd
 
     from src.mhs.evaluation.windows import _iter_mhs_execution_windows
-    from src.mhs.execution.batch import replay_execution_windows
-    from src.mhs.types import ExecutionSpec
+    from src.engine.execution.batch import replay_execution_windows
+    from src.core.types import ExecutionSpec
 
     start, end, idx, weights = _two_symbol_daily_targets()
     weights = weights.assign(ZZZUSDT=untargeted_value)
@@ -484,9 +484,9 @@ def test_all_execution_sources_present_is_unchanged(tmp_path) -> None:
     import pandas as pd
 
     from src.mhs.evaluation.windows import _iter_mhs_execution_windows
-    from src.mhs.execution.integrity import replay_ledger_certified
-    from src.mhs.execution.batch import replay_execution_windows
-    from src.mhs.types import ExecutionSpec
+    from src.engine.execution.integrity import replay_ledger_certified
+    from src.engine.execution.batch import replay_execution_windows
+    from src.core.types import ExecutionSpec
 
     start, end, idx, weights = _two_symbol_daily_targets()
     _write_3m_execution_file(tmp_path, "AAAUSDT", start, end)
@@ -505,8 +505,8 @@ def test_present_file_without_rows_in_range_keeps_gap_evidence(tmp_path) -> None
     import pandas as pd
 
     from src.mhs.evaluation.windows import _iter_mhs_execution_windows
-    from src.mhs.execution.batch import replay_execution_windows
-    from src.mhs.types import ExecutionSpec
+    from src.engine.execution.batch import replay_execution_windows
+    from src.core.types import ExecutionSpec
 
     start, end, idx, weights = _two_symbol_daily_targets()
     _write_3m_execution_file(tmp_path, "AAAUSDT", start, end)
@@ -560,7 +560,7 @@ def _local_replay_fixtures(n_decisions: int = 2):
     """Canonical five-column path with two-symbol local windows."""
     import pandas as pd
 
-    from src.mhs.execution.contracts import ExecutionReplayWindow
+    from src.engine.execution.contracts import ExecutionReplayWindow
     from src.mhs.process import ProcessExecutionPolicy
 
     cols = ["AUSDT", "BUSDT", "CUSDT", "DUSDT", "EUSDT"]
@@ -605,8 +605,8 @@ def _local_replay_fixtures(n_decisions: int = 2):
 
 def test_validate_local_targets_accepted() -> None:
     """Ordered local targets validate against the canonical book and replay."""
-    from src.mhs.execution.batch import replay_execution_windows
-    from src.mhs.types import ExecutionSpec
+    from src.engine.execution.batch import replay_execution_windows
+    from src.core.types import ExecutionSpec
 
     path, windows = _local_replay_fixtures(2)
     spec = ExecutionSpec()
@@ -626,7 +626,7 @@ def test_validate_omitted_nonzero_target_rejected() -> None:
     import pytest
 
     from src.common.errors import DataIntegrityError
-    from src.mhs.types import ExecutionSpec
+    from src.core.types import ExecutionSpec
 
     path, windows = _local_replay_fixtures(2)
     tainted = path.target_weights.copy()
@@ -687,7 +687,7 @@ def test_validate_partition_skip_rejected() -> None:
     import pytest
 
     from src.common.errors import DataIntegrityError
-    from src.mhs.types import ExecutionSpec
+    from src.core.types import ExecutionSpec
 
     path, windows = _local_replay_fixtures(3)
     with pytest.raises(DataIntegrityError, match=r".+"):
@@ -736,7 +736,7 @@ def test_generator_required_symbols_stay_in_roster(tmp_path) -> None:
     import pandas as pd
 
     from src.mhs.evaluation.windows import _iter_mhs_execution_windows
-    from src.mhs.types import ExecutionSpec
+    from src.core.types import ExecutionSpec
 
     grid, decisions, funding = _stream_market(tmp_path, ["AUSDT", "BUSDT"], n_days=70)
     targets = pd.DataFrame(0.0, index=decisions, columns=["AUSDT", "BUSDT"])
@@ -763,7 +763,7 @@ def test_generator_unknown_required_symbol_rejected(tmp_path) -> None:
 
     from src.common.errors import DataIntegrityError
     from src.mhs.evaluation.windows import _iter_mhs_execution_windows
-    from src.mhs.types import ExecutionSpec
+    from src.core.types import ExecutionSpec
 
     grid, decisions, funding = _stream_market(tmp_path, ["AUSDT"], n_days=3)
     targets = pd.DataFrame(0.0, index=decisions, columns=["AUSDT"])
@@ -817,8 +817,8 @@ def _run_split_parity(tmp_path, cost_model: str):
     import pandas as pd
 
     from src.mhs.evaluation.windows import _iter_mhs_execution_windows
-    from src.mhs.execution import replay_execution_windows
-    from src.mhs.types import ExecutionSpec
+    from src.engine.execution import replay_execution_windows
+    from src.core.types import ExecutionSpec
 
     grid, decisions, funding = _stream_market(tmp_path, ["AUSDT", "BUSDT"], n_days=40)
     targets = pd.DataFrame(0.0, index=decisions, columns=["AUSDT", "BUSDT"])
@@ -875,8 +875,8 @@ def test_no_future_pricing_across_pieces(tmp_path) -> None:
     import pandas as pd
 
     from src.mhs.evaluation.windows import _iter_mhs_execution_windows
-    from src.mhs.execution import replay_execution_windows
-    from src.mhs.types import ExecutionSpec
+    from src.engine.execution import replay_execution_windows
+    from src.core.types import ExecutionSpec
 
     grid, decisions, funding = _stream_market(tmp_path, ["AUSDT"], n_days=40)
     targets = pd.DataFrame(0.05, index=decisions, columns=["AUSDT"])
@@ -915,9 +915,9 @@ def test_required_symbols_track_units_without_pruning() -> None:
     import numpy as np
     import pandas as pd
 
-    from src.mhs.execution.accumulator import _BoundExecutionReplayAccumulator
-    from src.mhs.execution.contracts import ExecutionReplayWindow
-    from src.mhs.types import ExecutionSpec
+    from src.engine.execution.accumulator import _BoundExecutionReplayAccumulator
+    from src.engine.execution.contracts import ExecutionReplayWindow
+    from src.core.types import ExecutionSpec
 
     grid = pd.date_range("2022-01-01", periods=8, freq="3min", tz="UTC")
     cols = ("AUSDT", "BUSDT")
@@ -941,7 +941,7 @@ def test_required_symbols_track_units_without_pruning() -> None:
 
 def test_live_required_symbols_union_and_empty() -> None:
     """The batch union skips dead bounds and starts empty."""
-    from src.mhs.execution.batch import live_required_symbols
+    from src.engine.execution.batch import live_required_symbols
 
     assert live_required_symbols([]) == frozenset()
 
@@ -980,8 +980,8 @@ def _held_exit_market(tmp_path, n_days=70):
 def test_batch_live_roster_holds_unfilled_exit(tmp_path) -> None:
     """Held inventory stays in every required roster across windows."""
     from src.mhs.evaluation.windows import _iter_mhs_execution_windows
-    from src.mhs.execution import live_required_symbols, replay_execution_window_batch_isolated
-    from src.mhs.types import ExecutionSpec
+    from src.engine.execution import live_required_symbols, replay_execution_window_batch_isolated
+    from src.core.types import ExecutionSpec
 
     grid, decisions, funding, targets, signals = _held_exit_market(tmp_path)
     spec = ExecutionSpec()
@@ -1013,8 +1013,8 @@ def test_batch_live_roster_holds_unfilled_exit(tmp_path) -> None:
 def test_batch_without_live_cell_carries_held_symbol(tmp_path) -> None:
     """Without live requirements the sticky carry keeps the held symbol rostered."""
     from src.mhs.evaluation.windows import _iter_mhs_execution_windows
-    from src.mhs.execution import replay_execution_window_batch_isolated
-    from src.mhs.types import ExecutionSpec
+    from src.engine.execution import replay_execution_window_batch_isolated
+    from src.core.types import ExecutionSpec
 
     grid, decisions, funding, targets, signals = _held_exit_market(tmp_path)
     spec = ExecutionSpec()
@@ -1037,12 +1037,12 @@ def test_single_and_coupled_live_cells_populated(tmp_path) -> None:
     import pandas as pd
 
     from src.mhs.evaluation.windows import _iter_mhs_execution_windows
-    from src.mhs.execution import (
+    from src.engine.execution import (
         live_required_symbols,
         replay_execution_windows,
         replay_execution_windows_coupled,
     )
-    from src.mhs.types import ExecutionSpec
+    from src.core.types import ExecutionSpec
 
     grid, decisions, funding = _stream_market(tmp_path, ["AUSDT"], n_days=10)
     targets = pd.DataFrame(0.05, index=decisions, columns=["AUSDT"])
@@ -1085,7 +1085,7 @@ def test_ipc_round_trip_preserves_logical_partition(tmp_path) -> None:
         _load_window_from_ipc,
         _spill_window_to_ipc,
     )
-    from src.mhs.types import ExecutionSpec
+    from src.core.types import ExecutionSpec
 
     grid, decisions, funding = _stream_market(tmp_path, ["AUSDT"], n_days=40)
     targets = pd.DataFrame(0.05, index=decisions, columns=["AUSDT"])
@@ -1108,10 +1108,10 @@ def test_untagged_corwin_windows_keep_legacy_per_window_update() -> None:
     import numpy as np
     import pandas as pd
 
-    from src.mhs.execution import replay_execution_windows
-    from src.mhs.execution.accumulator import _BoundExecutionReplayAccumulator
-    from src.mhs.execution.contracts import ExecutionReplayWindow
-    from src.mhs.types import ExecutionSpec
+    from src.engine.execution import replay_execution_windows
+    from src.engine.execution.accumulator import _BoundExecutionReplayAccumulator
+    from src.engine.execution.contracts import ExecutionReplayWindow
+    from src.core.types import ExecutionSpec
 
     grid = pd.date_range("2022-01-01", periods=24, freq="3min", tz="UTC")
     cols = ["AUSDT"]
@@ -1182,7 +1182,7 @@ def test_validate_symbol_contract_rejected() -> None:
 def _completed_fixture(tmp_path, start, end, decisions):
     import pandas as pd
 
-    from src.mhs.types import ExecutionSpec
+    from src.core.types import ExecutionSpec
 
     grid = pd.date_range(start, end, freq="3min", tz="UTC")
     lake = tmp_path / "ohlcv" / "3m"
@@ -1267,8 +1267,8 @@ def test_generator_never_decodes_out_of_fence_row(tmp_path, monkeypatch) -> None
     """Source rows past the fence exist on disk but are never decoded."""
     import pandas as pd
 
-    import src.mhs.marks as marks
-    import src.mhs.execution.window_stream as window_stream
+    import src.core.marks as marks
+    import src.engine.execution.window_stream as window_stream
     from src.mhs.evaluation.windows import _iter_mhs_execution_windows
 
     start = pd.Timestamp("2023-06-01", tz="UTC")
@@ -1405,8 +1405,8 @@ def test_book_outcome_failure_path_records_telemetry(monkeypatch) -> None:
     import src.mhs.evaluation.windows as windows_mod
     from src.common.errors import DataIntegrityError
     from src.mhs.evaluation.windows import _book_outcome
-    from src.mhs.resources import _StageRecorder
-    from src.mhs.types import BOOK_SPECS
+    from src.core.resources import _StageRecorder
+    from src.core.types import BOOK_SPECS
 
     grid_1h = pd.date_range("2021-01-01", periods=800, freq="1h", tz="UTC")
     step_grid = grid_1h[::24]
@@ -1435,7 +1435,7 @@ def test_book_outcome_failure_path_records_telemetry(monkeypatch) -> None:
 def test_spill_preserves_settlement_events(tmp_path) -> None:
     import pandas as pd
     import numpy as np
-    from src.mhs.execution.contracts import ExecutionReplayWindow, InstrumentSettlementEvent
+    from src.engine.execution.contracts import ExecutionReplayWindow, InstrumentSettlementEvent
     from src.mhs.evaluation.windows import _spill_window_to_ipc, _load_window_from_ipc
     minute_grid = pd.date_range("2021-01-01", periods=10, freq="3min", tz="UTC")
     decision_grid = pd.date_range("2021-01-01", periods=2, freq="6h", tz="UTC")

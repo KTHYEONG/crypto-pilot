@@ -11,7 +11,7 @@ from src.mhs.calibration import (
     sharpe_lower_confidence_bound,
     stationary_block_bootstrap,
 )
-from src.mhs.params import NULL_BOOTSTRAP_MIN_ROWS
+from src.core.params import NULL_BOOTSTRAP_MIN_ROWS
 
 
 def _ar1_series(n_rows: int, phi: float, seed: int) -> np.ndarray:

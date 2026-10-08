@@ -160,7 +160,7 @@ def test_SCENARIO_MHS_ORCHESTRATOR_RECORDS_CANONICAL_WINDOW(
     final-OOS path records MHS_FINAL_OOS_CUTOFF_2026H1 (never 'None') and the
     default path stays byte-identical to the pre-change recorded value."""
     from src.mhs.pipeline.context import PipelineContext
-    from src.mhs.params import MHS_FINAL_OOS_CUTOFF_2026H1
+    from src.core.params import MHS_FINAL_OOS_CUTOFF_2026H1
 
     import src.mhs.pipeline.orchestrator as orchestrator
 

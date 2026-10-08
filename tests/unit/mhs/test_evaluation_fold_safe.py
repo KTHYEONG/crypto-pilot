@@ -17,9 +17,9 @@ from src.mhs.evaluation.folds import (
     _run_anchored_fold,
 )
 from src.mhs.evidence import phase_1_anchored_purged_folds
-from src.mhs.marks import _load_funding_series
-from src.mhs.params import FUNDING_CARRY_LOOKBACK_CANDIDATES_HOURS
-from src.mhs.types import BOOK_SPECS
+from src.core.marks import _load_funding_series
+from src.core.params import FUNDING_CARRY_LOOKBACK_CANDIDATES_HOURS
+from src.core.types import BOOK_SPECS
 from src.quant.universe.pit_universe import symbol_partition
 
 from tests.fixtures.mhs_fold_market import COMPLETING_FOLD

@@ -10,7 +10,7 @@ from src.mhs.diagnostic_run import run_mhs_horizon_diagnostic
 import src.mhs.statistics as statistics
 from src.mhs.evaluation.diagnostics import _multi_feature_diagnostic
 from src.mhs.evidence import effective_breadth
-from src.mhs.params import MEASURED_EXECUTION_COST_TIERS_BPS
+from src.core.params import MEASURED_EXECUTION_COST_TIERS_BPS
 
 from tests.unit.mhs.test_evaluation_appresearch import (  # noqa: F401
     _START,
@@ -134,8 +134,8 @@ def test_multi_feature_streaming_combined_bit_identical() -> None:
     # combined.net_sharpe_per_tier and feature_book_effective_breadth EXACTLY
     # equal to a batch reference built from the same panels with the existing
     # primitives (build_feature_books + mhs_ledger_pnl + equal_risk_combination).
-    from src.mhs.execution import mhs_ledger_pnl
-    from src.mhs.features import (
+    from src.engine.execution import mhs_ledger_pnl
+    from src.strategy.features import (
         FEATURE_REGISTRY,
         build_feature_books,
         equal_risk_combination,

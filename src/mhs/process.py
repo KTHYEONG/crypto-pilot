@@ -15,13 +15,13 @@ from scipy.linalg import solve_triangular
 from scipy.optimize import nnls
 
 from src.common.errors import DataIntegrityError
-from src.mhs.books import portfolio_rebalance_trigger
-from src.mhs.params import (
+from src.core.params import (
     PNL_VOL_TARGET_EWMA_HALFLIFE_DAYS,
     PROCESS_MIN_TRAIN_DAYS,
     PROCESS_PURGE_HOURS,
     PROCESS_REFIT_FREQUENCY,
 )
+from src.strategy.books import portfolio_rebalance_trigger
 
 if TYPE_CHECKING:
     from src.mhs.backtest.labels import MaturedMemberReturns

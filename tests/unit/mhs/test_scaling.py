@@ -9,7 +9,7 @@ import pytest
 
 from src.mhs import scaling
 from src.common.errors import DataIntegrityError
-from src.mhs.params import (
+from src.core.params import (
     COMMITTEE_OOS_START,
     COMMITTEE_TARGET_GROSS,
     GROWTH_RISK_ENVELOPES,
@@ -142,7 +142,7 @@ _ENVELOPE_CAP_AUDIT_RETURNS = pd.Series(
 
 def _frontier_multiple(r: pd.Series, envelope_name: str) -> float | None:
     """Direct conservative-style frontier readout used to pin fixture facts."""
-    from src.mhs.params import (
+    from src.core.params import (
         COMMITTEE_GROWTH_BARS_PER_YEAR,
         COMMITTEE_GROWTH_N_PATHS,
         COMMITTEE_GROWTH_RISK_GRID_MULTIPLIERS,
@@ -261,7 +261,7 @@ def test_scenario_mhs_exposure_ceiling_03_audit_noop_on_fold_local_window(
 
 # SCENARIO_MHS_EXPOSURE_CEILING_03
 def test_scenario_mhs_exposure_ceiling_03_audit_propagates_fail_closed_breach() -> None:
-    from src.mhs.params import PNL_VOL_TARGET_BURN_IN_DAYS
+    from src.core.params import PNL_VOL_TARGET_BURN_IN_DAYS
 
     assert len(_ENVELOPE_CAP_AUDIT_RETURNS) >= 2 * PNL_VOL_TARGET_BURN_IN_DAYS
     with pytest.raises(ValueError, match="must not exceed"):
@@ -303,7 +303,7 @@ def test_scenario_mhs_kelly_two_sided_01_resolved_cap_policy_matrix() -> None:
     """resolved_exposure_cap is the single data-independent cap owner (I1/I2):
     two_sided=False or median_relative -> 1.0, conservative exante ->
     PNL_VOL_TARGET_MAX_SCALE, otherwise the envelope's leverage_ceiling."""
-    from src.mhs.params import PNL_VOL_TARGET_MAX_SCALE
+    from src.core.params import PNL_VOL_TARGET_MAX_SCALE
 
     cases: list[tuple[dict, float]] = [
         (
@@ -364,7 +364,7 @@ _KELLY_DRIFT_RETURNS = pd.Series(
 
 
 def _raw_kelly_ratio(r: pd.Series) -> pd.Series:
-    from src.mhs.params import (
+    from src.core.params import (
         COMMITTEE_KELLY_FRACTION,
         COMMITTEE_KELLY_LCB_Z,
         COMMITTEE_KELLY_WINDOW_DAYS,
@@ -381,7 +381,7 @@ def _raw_kelly_ratio(r: pd.Series) -> pd.Series:
 
 # SCENARIO_MHS_KELLY_TWO_SIDED_02
 def test_scenario_mhs_kelly_two_sided_02_kelly_cap_param_and_guard() -> None:
-    from src.mhs.params import PNL_VOL_TARGET_SCALE_FLOOR
+    from src.core.params import PNL_VOL_TARGET_SCALE_FLOOR
 
     r = _KELLY_DRIFT_RETURNS
     raw = _raw_kelly_ratio(r)
@@ -517,7 +517,7 @@ def test_constant_risk_scale_causal() -> None:
 
 # SCENARIO_MHS_CONSTANT_RISK_WARMUP_REMOVES_DEAD_ZONE
 def test_constant_risk_warmup_removes_dead_zone() -> None:
-    from src.mhs.params import CONSTANT_RISK_MIN_PERIODS_DAYS
+    from src.core.params import CONSTANT_RISK_MIN_PERIODS_DAYS
 
     rng = np.random.default_rng(5)
     idx = pd.date_range("2023-01-01", periods=200, freq="D", tz="UTC")
@@ -547,7 +547,7 @@ def test_constant_risk_warmup_overlap_fails_closed() -> None:
 
 # SCENARIO_MHS_FEASIBLE_TARGET_CLAMPS_TO_LEVERAGE_CEILING
 def test_feasible_constant_risk_target_clamps_to_leverage_ceiling() -> None:
-    from src.mhs.params import (
+    from src.core.params import (
         CONSTANT_RISK_CAP_BINDING_QUANTILE,
         CONSTANT_RISK_EWMA_HALFLIFE_DAYS,
         CONSTANT_RISK_MIN_PERIODS_DAYS,
@@ -573,7 +573,7 @@ def test_feasible_constant_risk_target_clamps_to_leverage_ceiling() -> None:
 
 # SCENARIO_MHS_FEASIBLE_TARGET_INSUFFICIENT_HISTORY_FAILS_CLOSED
 def test_feasible_constant_risk_target_insufficient_history_fails_closed() -> None:
-    from src.mhs.params import CONSTANT_RISK_MIN_PERIODS_DAYS
+    from src.core.params import CONSTANT_RISK_MIN_PERIODS_DAYS
 
     envelope = GROWTH_RISK_ENVELOPES["growth_extreme"]
     rng = np.random.default_rng(19)
@@ -836,7 +836,7 @@ def test_scenario_mhs_dd_brake_06_drawdown_brake_replay_default_bit_identical() 
 
 # SCENARIO_MHS_DD_BRAKE_07_NON_FITTED_TARGET_VOL
 def test_scenario_mhs_dd_brake_07_drawdown_brake_non_fitted_target_vol() -> None:
-    from src.mhs.params import (
+    from src.core.params import (
         CONSTANT_RISK_CAP_BINDING_QUANTILE,
         CONSTANT_RISK_EWMA_HALFLIFE_DAYS,
         CONSTANT_RISK_MIN_PERIODS_DAYS,
@@ -900,7 +900,7 @@ def test_scenario_kelly_lcb_01_defaults_are_registered_constants() -> None:
     # Given: 등록 상수와 결정론적 레퍼런스 수익률
     import inspect
 
-    from src.mhs.params import (
+    from src.core.params import (
         COMMITTEE_KELLY_FRACTION,
         COMMITTEE_KELLY_LCB_Z,
         COMMITTEE_KELLY_WINDOW_DAYS,
@@ -948,7 +948,7 @@ def test_scenario_kelly_lcb_03_rejects_fraction_above_half_kelly() -> None:
 
 def test_scenario_kelly_lcb_04_lcb_no_longer_pinned_to_floor_at_book_edge() -> None:
     # Given: 배포 레퍼런스 북의 학습구간 에지(mu/sigma = 0.165)를 재현한 합성 일간 수익률
-    from src.mhs.params import PNL_VOL_TARGET_SCALE_FLOOR
+    from src.core.params import PNL_VOL_TARGET_SCALE_FLOOR
 
     idx = pd.date_range("2021-01-01", periods=400, freq="D", tz="UTC")
     r = pd.Series(np.random.default_rng(20260912).normal(0.00165, 0.01, 400), index=idx)
@@ -969,7 +969,7 @@ def test_scenario_kelly_lcb_04_lcb_no_longer_pinned_to_floor_at_book_edge() -> N
 
 def test_scenario_kelly_lcb_05_min_periods_tracks_widened_window() -> None:
     # Given: 워밍업 경계를 관찰할 수 있는 짧은 시계열
-    from src.mhs.params import COMMITTEE_KELLY_WINDOW_DAYS
+    from src.core.params import COMMITTEE_KELLY_WINDOW_DAYS
 
     idx = pd.date_range("2021-01-01", periods=60, freq="D", tz="UTC")
     r = pd.Series(np.random.default_rng(1).normal(0.002, 0.01, 60), index=idx)
@@ -988,7 +988,7 @@ def test_mhs_kelly_z0_default_is_causal_and_registered() -> None:
     import numpy as np
     import pandas as pd
     from src.mhs import scaling
-    from src.mhs.params import COMMITTEE_KELLY_FRACTION, COMMITTEE_KELLY_LCB_Z, COMMITTEE_KELLY_WINDOW_DAYS, PNL_VOL_TARGET_SCALE_FLOOR
+    from src.core.params import COMMITTEE_KELLY_FRACTION, COMMITTEE_KELLY_LCB_Z, COMMITTEE_KELLY_WINDOW_DAYS, PNL_VOL_TARGET_SCALE_FLOOR
 
     index = pd.date_range('2024-01-01', periods=64, freq='D', tz='UTC')
     returns = pd.Series(np.linspace(-0.004, 0.008, len(index)), index=index, dtype='float64')
@@ -1121,7 +1121,7 @@ def test_regime_cash_scale_1h_uses_hourly_median_window() -> None:
     import numpy as np
     import pandas as pd
     from src.mhs import scaling
-    from src.mhs.horizons import realized_vol
+    from src.strategy.horizons import realized_vol
 
     rng = np.random.default_rng(11)
     grid = pd.date_range("2025-01-01", periods=24 * 80, freq="1h", tz="UTC")
@@ -1173,7 +1173,7 @@ def _edge_returns():
 def test_envelope_exposure_cap_accepts_ceiling_at_grid_maximum(monkeypatch) -> None:
     import src.quant.risk.growth_sizing as growth_sizing
     from src.mhs import scaling
-    from src.mhs.params import GROWTH_RISK_ENVELOPES
+    from src.core.params import GROWTH_RISK_ENVELOPES
 
     # Given: the grid point is exactly reference_risk * 3.0, but the reverse
     # division rounds to 2.9999999999999996.
@@ -1193,7 +1193,7 @@ def test_envelope_exposure_cap_still_fails_closed_below_frontier(monkeypatch) ->
 
     import src.quant.risk.growth_sizing as growth_sizing
     from src.mhs import scaling
-    from src.mhs.params import GROWTH_RISK_ENVELOPES
+    from src.core.params import GROWTH_RISK_ENVELOPES
 
     # Given: the solver selects 2.5x, one registered grid point below the 3.0 ceiling.
     monkeypatch.setattr(growth_sizing, "solve_growth_optimal_risk", _grid_max_solver(-2))
@@ -1209,7 +1209,7 @@ def test_envelope_exposure_cap_infeasible_frontier_still_raises(monkeypatch) -> 
 
     import src.quant.risk.growth_sizing as growth_sizing
     from src.mhs import scaling
-    from src.mhs.params import GROWTH_RISK_ENVELOPES
+    from src.core.params import GROWTH_RISK_ENVELOPES
 
     def _infeasible(unit_returns, config, *, use_drawdown_overlay=True):
         return growth_sizing.GrowthSizingResult(None, 0.0, 0.0, 0.0, (), "infeasible", 8)
@@ -1227,7 +1227,7 @@ def test_leverage_ceiling_audit_survives_grid_maximum_frontier(monkeypatch) -> N
 
     import src.quant.risk.growth_sizing as growth_sizing
     from src.mhs import scaling
-    from src.mhs.params import GROWTH_RISK_ENVELOPES
+    from src.core.params import GROWTH_RISK_ENVELOPES
 
     # Given: 95 pre-OOS rows (>= PNL_VOL_TARGET_BURN_IN_DAYS) hitting the same float edge.
     values = np.random.default_rng(17).normal(0.001, 0.02, 95)
@@ -1247,7 +1247,7 @@ def test_fold_local_target_vol_is_unchanged_by_future_reference_suffix() -> None
     import pandas as pd
 
     from src.mhs import scaling
-    from src.mhs.params import GROWTH_RISK_ENVELOPES
+    from src.core.params import GROWTH_RISK_ENVELOPES
 
     index = pd.date_range("2021-01-01", periods=500, freq="1D", tz="UTC")
     reference = pd.Series(np.full(len(index), 0.001), index=index)

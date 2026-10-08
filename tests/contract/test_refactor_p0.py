@@ -41,7 +41,7 @@ def test_discovery_window_constants_are_ordered() -> None:
     """Discovery window constants must be strictly ordered."""
     import pandas as pd
 
-    from src.mhs.params import DISCOVERY_START
+    from src.core.params import DISCOVERY_START
     from src.quant.evaluation.policy import DISCOVERY_END, HOLDOUT_CUTOFF
 
     assert DISCOVERY_START == pd.Timestamp("2021-01-01", tz="UTC")

@@ -83,8 +83,8 @@ def test_panel_stage_fails_closed_on_incomplete_registry(
 
 
 def test_panel_audit_horizon_covers_fold_calendar(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from src.mhs.settlement_evidence import audit_settlement_registry
-    from src.mhs.instrument_settlements import EMPTY_SETTLEMENT_REGISTRY
+    from src.core.settlement_evidence import audit_settlement_registry
+    from src.core.instrument_settlements import EMPTY_SETTLEMENT_REGISTRY
 
     _write_3m(tmp_path, "AAAUSDT", pd.Timestamp("2025-05-01T00:00:00Z"), 20)
     end = pd.Timestamp("2025-01-01T00:00:00Z")
@@ -99,10 +99,10 @@ def test_panel_audit_horizon_covers_fold_calendar(tmp_path, monkeypatch: pytest.
 
 
 def test_frozen_source_fails_closed(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
-    import src.mhs.frozen_research_run as frozen_mod
-    from src.mhs.frozen_research_run import _load_frozen_source
-    from src.mhs.resources import resolve_mhs_memory_budget
-    from tests.unit.mhs.test_frozen_research_run import _request
+    import src.engine.strategy_backtest as frozen_mod
+    from src.engine.strategy_backtest import _load_frozen_source
+    from src.core.resources import resolve_mhs_memory_budget
+    from tests.unit.engine.test_frozen_research_run import _request
 
     _write_3m(tmp_path, "AAAUSDT", T0, 20)
     grid = pd.date_range("2025-01-01", periods=10, freq="1h", tz="UTC")

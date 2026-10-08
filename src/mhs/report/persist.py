@@ -21,6 +21,9 @@ import numpy as np
 import pandas as pd
 
 from src.common.errors import DataIntegrityError
+from src.core.params import ARTIFACT_CATEGORIES
+from src.core.resources import _peak_rss_bytes
+from src.engine.execution import StrategyExecutionReplayResult
 from src.mhs.contracts import (
     MhsBookReport,
     MhsDiagnosticRequest,
@@ -29,8 +32,6 @@ from src.mhs.contracts import (
 )
 from src.mhs.deploy_gate import deploy_gate_from_report
 from src.mhs.deployment_policy import live_parity_blockers
-from src.mhs.execution import StrategyExecutionReplayResult
-from src.mhs.params import ARTIFACT_CATEGORIES
 from src.mhs.report.artifacts import (
     _artifact_reference,
     _build_replay_artifact_reference,
@@ -39,7 +40,6 @@ from src.mhs.report.artifacts import (
     _verify_ledger_artifact,
 )
 from src.mhs.report.schema import MhsHorizonDiagnosticReport
-from src.mhs.resources import _peak_rss_bytes
 from src.mhs.run_history import append_run_history_record
 
 logger = logging.getLogger("MhsHorizonDiagnostic")

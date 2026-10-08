@@ -6,8 +6,8 @@ import dataclasses
 from collections.abc import Mapping
 from typing import Any, cast
 
+from src.core.params import COMMITTEE_MEMBER_SET_INERT
 from src.mhs.contracts import MhsDiagnosticRequest
-from src.mhs.params import COMMITTEE_MEMBER_SET_INERT
 
 
 def resolve_cli_request(explicit: Mapping[str, Any]) -> MhsDiagnosticRequest:

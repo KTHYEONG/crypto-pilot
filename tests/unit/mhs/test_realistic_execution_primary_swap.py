@@ -33,21 +33,21 @@ from src.mhs.evidence import (
     TailSensitivityResult,
 )
 from tests.fixtures.mhs_fold_market import COMPLETING_FOLD
-from src.mhs.execution import strategy_aware_execution_replay
-from src.mhs.execution.contracts import (
+from src.engine.execution import strategy_aware_execution_replay
+from src.engine.execution.contracts import (
     StrategyExecutionReplayResult,
     bar_funding_panel,
 )
-from src.mhs.execution.specs import _stress_cost_execution_spec
-from src.mhs.marks import _load_funding_series, _pit_execution_mask
-from src.mhs.panel import liquid_half_eligibility, load_base_panel
-from src.mhs.params import GO_PRIMARY_SHARPE_FLOOR, STRESS_COST_MULTIPLIER
-from src.mhs.params import UNIVERSE_ELIGIBILITY_LOOKBACK_BARS, UNIVERSE_ELIGIBILITY_MIN_HISTORY_BARS
+from src.engine.execution.specs import _stress_cost_execution_spec
+from src.core.marks import _load_funding_series, _pit_execution_mask
+from src.core.panel import liquid_half_eligibility, load_base_panel
+from src.core.params import GO_PRIMARY_SHARPE_FLOOR, STRESS_COST_MULTIPLIER
+from src.core.params import UNIVERSE_ELIGIBILITY_LOOKBACK_BARS, UNIVERSE_ELIGIBILITY_MIN_HISTORY_BARS
 from src.mhs.report.persist import persist_mhs_horizon_diagnostic_report
 from src.mhs.report.schema import MhsHorizonDiagnosticReport
 from src.mhs.research_go import GO_REASON_PRIMARY_SHARPE, GO_REASON_STRESS_SHARPE
-from src.mhs.books import renormalize_within_mask
-from src.mhs.types import BOOK_SPECS, ExecutionSpec
+from src.strategy.books import renormalize_within_mask
+from src.core.types import BOOK_SPECS, ExecutionSpec
 from src.quant.universe.pit_universe import symbol_partition
 
 pytestmark = pytest.mark.slow

@@ -3,10 +3,10 @@ from __future__ import annotations
 from dataclasses import replace as dataclass_replace
 from typing import Any
 
-from src.mhs.execution import StrategyExecutionReplayResult
-from src.mhs.execution.specs import _stress_cost_execution_spec as _stress_cost_execution_spec
-from src.mhs.params import NAME_DRIFT_TRIM_INTERVAL_HOURS, NAME_DRIFT_TRIM_MAX_WEIGHT, SIGNAL_EMA_HORIZON_SPAN
-from src.mhs.types import ExecutionSpec
+from src.core.params import NAME_DRIFT_TRIM_INTERVAL_HOURS, NAME_DRIFT_TRIM_MAX_WEIGHT, SIGNAL_EMA_HORIZON_SPAN
+from src.core.types import ExecutionSpec
+from src.engine.execution import StrategyExecutionReplayResult
+from src.engine.execution.specs import _stress_cost_execution_spec as _stress_cost_execution_spec
 
 
 def _resolved_base_execution_spec(request: Any) -> ExecutionSpec:

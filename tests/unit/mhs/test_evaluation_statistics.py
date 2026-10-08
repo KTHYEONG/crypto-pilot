@@ -15,9 +15,9 @@ from src.mhs.diagnostic_run import run_mhs_horizon_diagnostic
 import src.mhs.statistics as statistics
 import src.mhs.research_go as _research_go
 from src.mhs.contracts import MhsBookReport
-from src.mhs.params import PERIODS_PER_YEAR_1H
-from src.mhs.types import ExecutionSpec
-from src.mhs.execution import strategy_aware_execution_replay
+from src.core.params import PERIODS_PER_YEAR_1H
+from src.core.types import ExecutionSpec
+from src.engine.execution import strategy_aware_execution_replay
 from tests.unit.mhs.test_evaluation_appresearch import (  # noqa: F401
     _FOLD,
     _START,
@@ -412,7 +412,7 @@ def test_registered_policy_thresholds_contract() -> None:
     values -- cap_60_roster mirrors the registered execution_universe_size
     roster entry cap (attestation only), primary_annual_return is enforced per
     anchored fold."""
-    from src.mhs.types import REGISTERED_POLICY_THRESHOLDS, SEARCH_TRIALS_ATTEMPTED
+    from src.core.types import REGISTERED_POLICY_THRESHOLDS, SEARCH_TRIALS_ATTEMPTED
 
     assert REGISTERED_POLICY_THRESHOLDS == {
         "cap_60_roster": 60.0, "primary_annual_return": 0.05,
@@ -429,7 +429,7 @@ def test_scenario_mhs_kelly_two_sided_08_go_reason_iff_none_registration(
     """After the cap_60_roster rename the source contract still registers both
     gates at non-None values, and ``_mhs_research_go`` emits
     GO_REASON_UNSPECIFIED_POLICY iff some registered value is None."""
-    from src.mhs.types import REGISTERED_POLICY_THRESHOLDS as SOURCE_THRESHOLDS
+    from src.core.types import REGISTERED_POLICY_THRESHOLDS as SOURCE_THRESHOLDS
 
     assert SOURCE_THRESHOLDS == {
         "cap_60_roster": 60.0, "primary_annual_return": 0.05,

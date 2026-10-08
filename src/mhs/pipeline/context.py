@@ -17,7 +17,7 @@ from src.mhs.telemetry import StageTelemetry
 
 if TYPE_CHECKING:
     from src.mhs.contracts import MhsDiagnosticRequest
-    from src.mhs.features import FeatureAdmission
+    from src.strategy.features import FeatureAdmission
 
 
 @dataclass

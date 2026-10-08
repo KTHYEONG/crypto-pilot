@@ -305,7 +305,7 @@ def _write_lake_member(path, symbol: str, closes: np.ndarray, grid: pd.DatetimeI
 
 def test_load_base_panel_causal_history_retains_short_lived_instrument(tmp_path) -> None:
     """Short instrument life: early observations survive without whole-window bars."""
-    from src.mhs.panel import load_base_panel
+    from src.core.panel import load_base_panel
 
     grid = _hourly(500)
     lake = tmp_path / "ohlcv"
@@ -341,7 +341,7 @@ def test_load_base_panel_causal_history_retains_short_lived_instrument(tmp_path)
 
 def test_load_base_panel_window_extension_preserves_prefix(tmp_path) -> None:
     """Window extension: old planes and eligibility prefixes are unchanged."""
-    from src.mhs.panel import load_base_panel
+    from src.core.panel import load_base_panel
 
     grid = _hourly(300)
     lake = tmp_path / "ohlcv"
@@ -369,7 +369,7 @@ def test_load_base_panel_unreadable_required_source_fails_closed(tmp_path) -> No
     """Unreadable required source: input integrity fails instead of recomputing."""
     import pyarrow as pa
 
-    from src.mhs.panel import load_base_panel
+    from src.core.panel import load_base_panel
 
     grid = _hourly(50)
     lake = tmp_path / "ohlcv"
@@ -387,7 +387,7 @@ def test_load_base_panel_unreadable_required_source_fails_closed(tmp_path) -> No
 
 
 def test_load_base_panel_rejects_unknown_selection_mode(tmp_path) -> None:
-    from src.mhs.panel import load_base_panel
+    from src.core.panel import load_base_panel
 
     grid = _hourly(10)
     lake = tmp_path / "ohlcv"

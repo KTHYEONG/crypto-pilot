@@ -9,7 +9,7 @@ import pandas as pd
 import pytest
 
 from src.common.errors import DataIntegrityError
-from src.mhs.params import (
+from src.core.params import (
     DISCOVERY_START,
     PROCESS_EVALUATION_CEILING,
     PROCESS_FEATURE_CANDIDATES,
@@ -555,7 +555,7 @@ def test_persist_process_targets_round_trip(tmp_path) -> None:
 
 
 def test_execution_fence_uses_earlier_day() -> None:
-    from src.mhs.params import PROCESS_EVALUATION_CEILING
+    from src.core.params import PROCESS_EVALUATION_CEILING
 
     early_idx = pd.date_range("2022-01-01", periods=2, freq="24h", tz="UTC")
     early = pd.DataFrame([[0.5]], index=early_idx, columns=["A"])
@@ -581,7 +581,7 @@ def test_require_utc_index_rejects() -> None:
 
 
 def _replay_fixtures(n_decisions: int = 2):
-    from src.mhs.execution.contracts import ExecutionReplayWindow
+    from src.engine.execution.contracts import ExecutionReplayWindow
 
     cols = ["AUSDT", "BUSDT"]
     idx = pd.date_range("2022-01-01", periods=n_decisions, freq="24h", tz="UTC")
@@ -623,8 +623,8 @@ def _replay_fixtures(n_decisions: int = 2):
 
 
 def test_replay_parity_and_coverage() -> None:
-    from src.mhs.execution.batch import replay_execution_windows
-    from src.mhs.types import ExecutionSpec
+    from src.engine.execution.batch import replay_execution_windows
+    from src.core.types import ExecutionSpec
 
     path, windows = _replay_fixtures(2)
     spec = ExecutionSpec()
@@ -643,7 +643,7 @@ def test_replay_parity_and_coverage() -> None:
 
 
 def test_replay_rejects_empty_path() -> None:
-    from src.mhs.types import ExecutionSpec
+    from src.core.types import ExecutionSpec
 
     path, windows = _replay_fixtures(2)
     import dataclasses
@@ -665,7 +665,7 @@ def test_replay_rejects_empty_path() -> None:
 def test_replay_rejects_bad_windows() -> None:
     import dataclasses
 
-    from src.mhs.types import ExecutionSpec
+    from src.core.types import ExecutionSpec
 
     path, windows = _replay_fixtures(2)
     spec = ExecutionSpec()
@@ -719,7 +719,7 @@ def test_replay_rejects_provenance_gaps() -> None:
 
     import pandas as pd
 
-    from src.mhs.types import ExecutionSpec
+    from src.core.types import ExecutionSpec
 
     path, windows = _replay_fixtures(2)
     spec = ExecutionSpec()
@@ -787,7 +787,7 @@ def test_replay_rejects_remaining_provenance_branches() -> None:
 
     import pandas as pd
 
-    from src.mhs.types import ExecutionSpec
+    from src.core.types import ExecutionSpec
 
     path, windows = _replay_fixtures(2)
     spec = ExecutionSpec()
@@ -942,8 +942,8 @@ def test_refit_effective_slices_partition_oos_exactly_once() -> None:
 
 def test_refit_slice_matches_full_history_book_restriction() -> None:
     """A single-refit slice reproduces the scaled book through manual EMA."""
-    from src.mhs.books import scale_book_to_target_gross
-    from src.mhs.params import PROCESS_SMOOTHING_HALFLIFE_DAYS
+    from src.strategy.books import scale_book_to_target_gross
+    from src.core.params import PROCESS_SMOOTHING_HALFLIFE_DAYS
     from src.mhs.process import RefitPoint, ema_smoothing_rate
 
     data = _synthetic_data()
@@ -1075,7 +1075,7 @@ def test_execution_availability_rejects_misaligned_mask() -> None:
 
 def test_zeroed_target_with_unfillable_exit_holds_inventory_as_open_marked() -> None:
     """A masked exit that cannot fill keeps units held as priced open inventory with a disclosed retry."""
-    from src.mhs.execution import ExecutionReplayWindow, ExecutionSpec, replay_execution_windows
+    from src.engine.execution import ExecutionReplayWindow, ExecutionSpec, replay_execution_windows
 
     data = _synthetic_data(n_days=60)
     grid = pd.date_range(data.decision_grid[0], periods=24, freq="3min", tz="UTC")
@@ -1167,7 +1167,7 @@ def _inventory_test_windows(
     local_symbols: tuple[str, ...] | None = None,
     final_availability_offset: pd.Timedelta | None = None,
 ) -> list:
-    from src.mhs.execution.contracts import ExecutionReplayWindow
+    from src.engine.execution.contracts import ExecutionReplayWindow
 
     availability_offset = final_availability_offset or pd.Timedelta(0)
 
@@ -1247,7 +1247,7 @@ def _inventory_empty_proxy() -> ProcessBacktestReport:
 def _inventory_fake_result(
     equity: pd.Series, *, valid: bool, fill_count: int = 0, n_fills: int = 0
 ):
-    from src.mhs.execution.contracts import SimulatedInventoryLedgerResult, StrategyExecutionReplayResult
+    from src.engine.execution.contracts import SimulatedInventoryLedgerResult, StrategyExecutionReplayResult
 
     zeros = pd.Series(0.0, index=equity.index, dtype="float64")
     ledger = SimulatedInventoryLedgerResult(
@@ -1336,7 +1336,7 @@ def test_evaluate_inventory_replays_identical_sized_targets(monkeypatch) -> None
 
 def test_replay_process_execution_accepts_local_and_final_bar() -> None:
     """Local rosters and the fence-aligned final bar pass the adapter."""
-    from src.mhs.types import ExecutionSpec
+    from src.core.types import ExecutionSpec
 
     targets = _inventory_test_targets(n_days=2, symbols=("AUSDT", "BUSDT", "CUSDT"))
     path = _inventory_test_path(targets)
@@ -1610,8 +1610,8 @@ def test_inventory_wires_live_required_symbols(monkeypatch) -> None:
 
 def test_inventory_window_stream_keeps_held_symbols_in_roster(monkeypatch) -> None:
     """Live held symbols join the active roster even when targets go flat."""
-    from src.mhs.resources import _StageRecorder
-    from src.mhs.types import ExecutionSpec
+    from src.core.resources import _StageRecorder
+    from src.core.types import ExecutionSpec
 
     targets = _inventory_test_targets(n_days=2)
     path = _inventory_test_path(targets)
@@ -1717,7 +1717,7 @@ def test_process_mask_preblocks_3m_missing_symbol(tmp_path, monkeypatch) -> None
 
 def test_inventory_replay_uses_single_resolved_budget(monkeypatch) -> None:
     """One replay budget: preparation, entry admission, window planning and barriers share resolved limits."""
-    from src.mhs.resources import MhsMemoryBudget
+    from src.core.resources import MhsMemoryBudget
 
     targets = _inventory_test_targets()
     _patch_inventory_stack(monkeypatch, targets)
@@ -1842,8 +1842,8 @@ def test_inventory_production_fence_covers_all_targets(tmp_path) -> None:
     import pandas as pd
 
     from src.mhs.evaluation.windows import _iter_mhs_execution_windows
-    from src.mhs.execution.batch import replay_execution_window_batch
-    from src.mhs.types import ExecutionSpec
+    from src.engine.execution.batch import replay_execution_window_batch
+    from src.core.types import ExecutionSpec
 
     start, fence, decisions, funding = _completed_inventory_market(tmp_path)
     targets = pd.DataFrame(0.0, index=decisions, columns=["AUSDT", "BUSDT"])
@@ -1877,8 +1877,8 @@ def test_inventory_nonzero_fills_reconcile_across_bounds(tmp_path) -> None:
     import pandas as pd
 
     from src.mhs.evaluation.windows import _iter_mhs_execution_windows
-    from src.mhs.execution.batch import replay_execution_window_batch
-    from src.mhs.types import ExecutionSpec
+    from src.engine.execution.batch import replay_execution_window_batch
+    from src.core.types import ExecutionSpec
 
     start, fence, decisions, funding = _completed_inventory_market(tmp_path, n_days=4)
     targets = pd.DataFrame(0.0, index=decisions, columns=["AUSDT", "BUSDT"])
@@ -2032,8 +2032,8 @@ def test_process_held_exit_survives_availability_mask() -> None:
     """A blocked hold never deletes the exit row; valid exit data still closes."""
     import pandas as pd
 
-    from src.mhs.execution.batch import replay_execution_windows
-    from src.mhs.types import ExecutionSpec
+    from src.engine.execution.batch import replay_execution_windows
+    from src.core.types import ExecutionSpec
 
     targets = _inventory_test_targets(n_days=3, symbols=("AUSDT",))
     targets.iloc[0, 0] = 0.5
@@ -2126,7 +2126,7 @@ def test_source_panels_not_mutated_by_setup(monkeypatch) -> None:
 def test_full_preparation_admission_rejects_small_budget(monkeypatch) -> None:
     """A tiny budget rejects before decoding with a named stage."""
     from src.common.errors import DataIntegrityError
-    from src.mhs.resources import MhsMemoryBudget
+    from src.core.resources import MhsMemoryBudget
 
     tiny = MhsMemoryBudget(total_tree_pss_bytes=1, replay_tree_pss_bytes=1, min_available_bytes=1)
     called: list[str] = []
@@ -2147,7 +2147,7 @@ def test_full_preparation_admission_rejects_small_budget(monkeypatch) -> None:
 def test_budget_propagation_preserves_policy_and_tiers(monkeypatch) -> None:
     """Explicit budgets never change tier ordering or policy semantics."""
     from src.mhs.process import ProcessExecutionPolicy
-    from src.mhs.resources import MhsMemoryBudget
+    from src.core.resources import MhsMemoryBudget
 
     data = _synthetic_data()
     schedule = _schedule_for(data)
@@ -2219,7 +2219,7 @@ def _failure_report_fixture(**overrides):
 
 def test_inventory_preparation_failure_reports_typed_stage(monkeypatch) -> None:
     """Typed rejection before targets yields null totals and chained cause."""
-    from src.mhs.resources import MhsResourceAdmissionError
+    from src.core.resources import MhsResourceAdmissionError
 
     targets = _inventory_test_targets()
     start = targets.index[0]
@@ -2299,7 +2299,7 @@ def test_inventory_validated_coverage_excludes_failed_bound(monkeypatch) -> None
 
 def test_inventory_partial_replay_reports_consumed_prefix(monkeypatch) -> None:
     """Allocation rejection after two windows keeps exact prefix endpoints."""
-    from src.mhs.resources import MhsResourceAdmissionError
+    from src.core.resources import MhsResourceAdmissionError
 
     targets = _inventory_test_targets()
     proxy = _inventory_test_proxy(targets)
@@ -2334,8 +2334,8 @@ def test_inventory_partial_replay_reports_consumed_prefix(monkeypatch) -> None:
 
 def test_inventory_empty_piece_advances_windows_only(monkeypatch) -> None:
     """Held-only terminal piece counts windows without inventing decisions."""
-    from src.mhs.resources import _StageRecorder
-    from src.mhs.types import ExecutionSpec
+    from src.core.resources import _StageRecorder
+    from src.core.types import ExecutionSpec
 
     targets = _inventory_test_targets(n_days=1)
     path = _inventory_test_path(targets)
@@ -2385,7 +2385,7 @@ def test_inventory_empty_piece_advances_windows_only(monkeypatch) -> None:
 
 def test_inventory_observed_gaps_preserve_provenance(monkeypatch) -> None:
     """Live accumulator gaps survive without calling finalize."""
-    from src.mhs.execution.contracts import ExecutionDataGap
+    from src.engine.execution.contracts import ExecutionDataGap
 
     targets = _inventory_test_targets()
     _patch_inventory_stack(monkeypatch, targets)
@@ -2504,7 +2504,7 @@ def test_inventory_finalize_failure_stage(monkeypatch) -> None:
 
 def test_inventory_failure_json_round_trip(tmp_path) -> None:
     """Partial failure persists exact coverage without performance sections."""
-    from src.mhs.execution.contracts import ExecutionDataGap
+    from src.engine.execution.contracts import ExecutionDataGap
 
     gap = ExecutionDataGap(
         code="MISSING_HELD_FUNDING", symbol="BUSDT",
@@ -2606,7 +2606,7 @@ def _panel_lake(tmp_path, n_symbols: int, n_bars: int = 8):
 
 def test_panel_admission_uses_actual_source_dimensions(tmp_path) -> None:
     """Actual source dimensions: the pre-allocation estimate uses actual survivors, not 60."""
-    from src.mhs.panel import load_base_panel
+    from src.core.panel import load_base_panel
 
     root, grid, _symbols = _panel_lake(tmp_path, 65)
     seen: list[int] = []
@@ -2622,9 +2622,9 @@ def test_panel_admission_uses_actual_source_dimensions(tmp_path) -> None:
 
 def test_panel_admission_rejection_prevents_decoding(tmp_path, monkeypatch) -> None:
     """Decode prevented by rejection: a rejecting callback stops wide-plane decode with sources untouched."""
-    import src.mhs.panel as panel_mod
-    from src.mhs.panel import load_base_panel
-    from src.mhs.resources import MhsResourceAdmissionError
+    import src.core.panel as panel_mod
+    from src.core.panel import load_base_panel
+    from src.core.resources import MhsResourceAdmissionError
 
     root, grid, _symbols = _panel_lake(tmp_path, 4)
     requested: list[list[str]] = []
@@ -2662,7 +2662,7 @@ def _process_lake_symbols(n: int = 10) -> list[str]:
 
 def test_inventory_typed_window_failure_keeps_consumed_coverage(monkeypatch) -> None:
     """Typed window failure evidence: a later piece rejection keeps typed code, cause and consumed coverage."""
-    from src.mhs.resources import MhsResourceAdmissionError
+    from src.core.resources import MhsResourceAdmissionError
 
     targets = _inventory_test_targets()
     _patch_inventory_stack(monkeypatch, targets)
@@ -2863,9 +2863,9 @@ def _ohlcv_3m_root(tmp_path, symbols, start, end, *, seed=9, close=100.0):
 def test_streamed_ohlcv_window_leaves_marks_absent(tmp_path) -> None:
     import inspect
 
-    from src.mhs.execution.window_stream import _iter_mhs_execution_windows
-    import src.mhs.execution.window_stream as ws
-    from src.mhs.types import ExecutionSpec
+    from src.engine.execution.window_stream import _iter_mhs_execution_windows
+    import src.engine.execution.window_stream as ws
+    from src.core.types import ExecutionSpec
 
     symbols = ["LITUSDT", "AUSDT"]
     start = pd.Timestamp("2026-01-22", tz="UTC")
@@ -2901,7 +2901,7 @@ def test_streamed_ohlcv_window_leaves_marks_absent(tmp_path) -> None:
 def test_missing_held_close_invalidates_replay() -> None:
     import dataclasses
 
-    from src.mhs.types import ExecutionSpec
+    from src.core.types import ExecutionSpec
 
     path, windows = _replay_fixtures(2)
     w1, w2 = windows
@@ -2925,7 +2925,7 @@ def test_missing_held_close_invalidates_replay() -> None:
 def test_missing_active_execution_bar_not_filled_from_hourly() -> None:
     import dataclasses
 
-    from src.mhs.types import ExecutionSpec
+    from src.core.types import ExecutionSpec
 
     path, windows = _replay_fixtures(2)
     w1, w2 = windows
@@ -2952,7 +2952,7 @@ def test_missing_active_execution_bar_not_filled_from_hourly() -> None:
 
 
 def _ohlcv_known_window(targets: pd.DataFrame, day: pd.Timestamp, *, known_a: bool, known_b: bool):
-    from src.mhs.execution.contracts import ExecutionReplayWindow
+    from src.engine.execution.contracts import ExecutionReplayWindow
 
     cols = list(targets.columns)
     days = list(targets.index)
@@ -2981,7 +2981,7 @@ def _ohlcv_known_window(targets: pd.DataFrame, day: pd.Timestamp, *, known_a: bo
 
 
 def test_funding_gap_invalid_only_when_held() -> None:
-    from src.mhs.types import ExecutionSpec
+    from src.core.types import ExecutionSpec
 
     days = pd.DatetimeIndex([pd.Timestamp("2022-01-01", tz="UTC"), pd.Timestamp("2022-01-02", tz="UTC")])
     held_targets = pd.DataFrame(
@@ -3018,8 +3018,8 @@ def test_funding_gap_invalid_only_when_held() -> None:
 
 
 def test_hour_to_minute_publication_boundary() -> None:
-    from src.mhs.execution.contracts import ExecutionReplayWindow
-    from src.mhs.types import ExecutionSpec
+    from src.engine.execution.contracts import ExecutionReplayWindow
+    from src.core.types import ExecutionSpec
 
     day = pd.Timestamp("2022-01-01", tz="UTC")
     signal = day + pd.Timedelta(hours=1)
@@ -3057,9 +3057,9 @@ def test_hour_to_minute_publication_boundary() -> None:
 
 
 def test_replay_positions_carry_across_bounded_pieces(tmp_path, monkeypatch) -> None:
-    from src.mhs.execution import window_stream as ws_stream
-    from src.mhs.execution.window_stream import _iter_mhs_execution_windows
-    from src.mhs.types import ExecutionSpec
+    from src.engine.execution import window_stream as ws_stream
+    from src.engine.execution.window_stream import _iter_mhs_execution_windows
+    from src.core.types import ExecutionSpec
 
     symbols = ["AUSDT", "BUSDT"]
     start = pd.Timestamp("2022-01-01", tz="UTC")
@@ -3088,7 +3088,7 @@ def test_replay_positions_carry_across_bounded_pieces(tmp_path, monkeypatch) -> 
     )
     assert len(windows) > 1
     assert any(len(window.target_weights) == 0 for window in windows)
-    from src.mhs.execution.batch import replay_execution_window_batch
+    from src.engine.execution.batch import replay_execution_window_batch
 
     base, stress = replay_execution_window_batch(
         iter(windows), 1000.0, [("OHLCV_IMMEDIATE_TAKER", spec), ("OHLCV_IMMEDIATE_TAKER", spec)],

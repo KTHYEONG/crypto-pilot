@@ -9,8 +9,6 @@ import gzip
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
-from decimal import Decimal
-from itertools import pairwise
 from pathlib import Path
 from typing import Any
 
@@ -19,9 +17,8 @@ import pandas as pd
 
 from src.common.durable_io import durable_replace
 from src.common.errors import DataIntegrityError
-
-_REQUIRED_BAR_COLUMNS = ("timestamp", "open", "high", "low", "close", "volume")
-_MS_PER_HOUR = 3_600_000
+from src.core.settlement_evidence import SettlementEvidence as SettlementEvidence
+from src.core.settlement_evidence import settlement_evidence_from_bars as settlement_evidence_from_bars
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,17 +45,6 @@ class VenueListingSnapshot:
     #: slot D with ``captured_at`` on D+1, so applicability must follow the slot, not the capture
     #: instant; None only for in-memory snapshots that were never persisted.
     slot_day: pd.Timestamp | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class SettlementEvidence:
-    """Venue-published settlement price of a delivered (delisted) perpetual."""
-
-    symbol: str
-    delivery_time: pd.Timestamp
-    price: Decimal
-    flat_bars: int
-    source: str  # "flat_1h_klines"
 
 
 def _require_utc(stamp: pd.Timestamp, label: str) -> pd.Timestamp:
@@ -404,78 +390,3 @@ def delisting_blocked_decisions(
                     values[row, col] = True
     frame = pd.DataFrame(values, index=decision_index, columns=names)
     return frame.astype(bool)
-
-
-def settlement_evidence_from_bars(
-    hourly_path: Path,
-    *,
-    symbol: str,
-    delivery_time: pd.Timestamp,
-    min_flat_bars: int,
-    price_rtol: float,
-) -> SettlementEvidence | None:
-    """Settlement price read from the venue's post-delivery flat 1h klines, or None when not yet evidenced.
-
-    After delivery the venue publishes zero-volume bars with open == high == low == close at the
-    settlement price. Only a contiguous run of at least ``min_flat_bars`` such bars, starting at or
-    after ``delivery_time`` and agreeing on close within ``price_rtol``, counts as evidence. Any
-    traded bar after delivery, a non-flat bar, or disagreement returns None. The price is
-    therefore never synthesized from the last traded close, a mark candle, or zero.
-
-    Raises:
-        DataIntegrityError: file unreadable or lacks timestamp/open/high/low/close/volume columns.
-    """
-    delivery = _require_utc(delivery_time, "delivery_time")
-    if min_flat_bars < 1:
-        raise DataIntegrityError("min_flat_bars must be >= 1")
-    path = Path(hourly_path)
-    try:
-        frame = pd.read_parquet(path)
-    except (OSError, ValueError) as exc:
-        raise DataIntegrityError(f"settlement bars unreadable: {path.name}") from exc
-    if not all(col in frame.columns for col in _REQUIRED_BAR_COLUMNS):
-        raise DataIntegrityError(f"settlement bars lack required columns: {path.name}")
-    if frame.empty:
-        return None
-    stamps = pd.to_numeric(frame["timestamp"], errors="coerce")
-    work = pd.DataFrame(
-        {
-            "timestamp": stamps,
-            "open": pd.to_numeric(frame["open"], errors="coerce"),
-            "high": pd.to_numeric(frame["high"], errors="coerce"),
-            "low": pd.to_numeric(frame["low"], errors="coerce"),
-            "close": pd.to_numeric(frame["close"], errors="coerce"),
-            "volume": pd.to_numeric(frame["volume"], errors="coerce"),
-        }
-    ).dropna()
-    if work.empty:
-        return None
-    work = work.sort_values("timestamp", kind="mergesort")
-    delivery_ms = int(delivery.value // 1_000_000)
-    post = work.loc[work["timestamp"] >= delivery_ms]
-    if len(post) < min_flat_bars:
-        return None
-    post_times = [int(v) for v in post["timestamp"].tolist()]
-    for prev_ms, cur_ms in pairwise(post_times):
-        if cur_ms - prev_ms != _MS_PER_HOUR:
-            return None
-    for _, row in post.iterrows():
-        if float(row["volume"]) != 0.0:
-            return None
-        o, h, low, c = float(row["open"]), float(row["high"]), float(row["low"]), float(row["close"])
-        if not (o == h == low == c):
-            return None
-    closes = [float(v) for v in post["close"].tolist()]
-    ref = closes[0]
-    if ref == 0.0:
-        if any(c != 0.0 for c in closes):
-            return None
-    elif max(abs(c - ref) for c in closes) / abs(ref) > price_rtol:
-        return None
-    return SettlementEvidence(
-        symbol=str(symbol),
-        delivery_time=delivery,
-        price=Decimal(str(ref)),
-        flat_bars=len(post),
-        source="flat_1h_klines",
-    )

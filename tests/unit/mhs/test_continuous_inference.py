@@ -11,8 +11,8 @@ import pytest
 from src.common.errors import DataIntegrityError
 from src.mhs.backtest.certification import ValidationInferenceSpec
 from src.mhs.deploy_gate import evaluate_continuous_growth_survival
-from src.mhs.params import GrowthRiskEnvelope
-from src.mhs.resources import MhsMemoryBudget
+from src.core.params import GrowthRiskEnvelope
+from src.core.resources import MhsMemoryBudget
 
 
 def _envelope() -> GrowthRiskEnvelope:
@@ -261,11 +261,13 @@ def test_continuous_inference_rejects_invalid_inputs() -> None:
 
 def test_certification_contracts_reject_invalid_shapes() -> None:
     from src.mhs.backtest.certification import (
-        DailyPortfolioEvidence,
         EvaluationContext,
         EvidenceCheck,
         ValidationInferenceSpec,
         assess_process_validation,
+    )
+    from src.engine.daily_evidence import (
+        DailyPortfolioEvidence,
         inventory_daily_evidence,
     )
 
@@ -502,7 +504,7 @@ def test_certification_contracts_reject_invalid_shapes() -> None:
 
 
 def _replay_like(equity: pd.Series):  # type: ignore[no-untyped-def]
-    from src.mhs.execution.contracts import SimulatedInventoryLedgerResult, StrategyExecutionReplayResult
+    from src.engine.execution.contracts import SimulatedInventoryLedgerResult, StrategyExecutionReplayResult
 
     zeros = pd.Series(dtype="float64", index=equity.index)
     ledger = SimulatedInventoryLedgerResult(

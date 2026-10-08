@@ -8,7 +8,7 @@ import pandas as pd
 import pytest
 import src.mhs.scaling as scaling
 from src.mhs.evaluation.windows import _book_outcome
-from src.mhs.params import PNL_VOL_TARGET_BURN_IN_DAYS, PNL_VOL_TARGET_SCALE_FLOOR
+from src.core.params import PNL_VOL_TARGET_BURN_IN_DAYS, PNL_VOL_TARGET_SCALE_FLOOR
 
 from tests.unit.mhs.test_evaluation_appresearch import (  # noqa: F401
     _build_book_outcome_args,

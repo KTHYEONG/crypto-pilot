@@ -54,8 +54,8 @@ def test_fold_weights_mark_independence(monkeypatch) -> None:
     """Fold weights use the panel constant and ignore Mark loaders."""
 
     import src.mhs.evaluation.fold_weights as fw
-    import src.mhs.marks as marks_mod
-    from src.mhs.params import PANEL_MIN_HISTORY_BARS
+    import src.core.marks as marks_mod
+    from src.core.params import PANEL_MIN_HISTORY_BARS
 
     idx, cols, base_panel, fold, funding = _synthetic_fold_panel()
     real_eligibility = fw.liquid_half_eligibility
@@ -90,7 +90,7 @@ def test_top_level_fold_eligibility_parity(monkeypatch) -> None:
 
     import src.mhs.evaluation.fold_weights as fw
     import src.mhs.pipeline.stages.selection as sel
-    from src.mhs.params import PANEL_MIN_HISTORY_BARS
+    from src.core.params import PANEL_MIN_HISTORY_BARS
     from src.mhs.pipeline.context import PipelineContext
     from src.mhs.telemetry import StageTelemetry
 
@@ -129,7 +129,7 @@ def test_fold_weights_funding_gap_preservation() -> None:
     """Unknown funding coverage still blocks fold weights explicitly."""
 
     import src.mhs.evaluation.fold_weights as fw
-    import src.mhs.data_policy as data_policy_mod
+    import src.core.data_policy as data_policy_mod
 
     idx, cols, base_panel, fold, _funding = _synthetic_fold_panel()
     request = research_baseline()

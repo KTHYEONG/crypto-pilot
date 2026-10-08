@@ -5,7 +5,7 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from src.mhs.params import MHS_FINAL_OOS_CUTOFF_2026H1
+from src.core.params import MHS_FINAL_OOS_CUTOFF_2026H1
 from src.quant.evaluation.policy import HOLDOUT_CUTOFF, resolve_evaluation_end
 
 

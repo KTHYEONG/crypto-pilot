@@ -12,17 +12,23 @@ from typing import Any
 import pandas as pd
 
 from src.common.paths import DATA_DIR
-from src.live.audit import AUDIT_LOG_RETENTION_DAYS
+from src.core.params import (
+    AUDIT_LOG_RETENTION_DAYS as AUDIT_LOG_RETENTION_DAYS,
+)
+from src.core.params import (
+    EXECUTION_QUALITY_MIN_EVIDENCE_DAYS as EXECUTION_QUALITY_MIN_EVIDENCE_DAYS,
+)
+from src.core.params import (
+    MEASURED_EXECUTION_COST_TIERS_BPS,
+)
 from src.live.records import (
     LIVE_RECORD_MAX_SHARDS,
     LIVE_RECORD_SHARD_MAX_BYTES,
     append_typed_frame,
 )
-from src.mhs.params import MEASURED_EXECUTION_COST_TIERS_BPS
 
 logger = logging.getLogger("ExecutionQuality")
 
-EXECUTION_QUALITY_MIN_EVIDENCE_DAYS: int = AUDIT_LOG_RETENTION_DAYS
 EXECUTION_QUALITY_SHARD_MAX_BYTES: int = LIVE_RECORD_SHARD_MAX_BYTES
 EXECUTION_QUALITY_MAX_SHARDS: int = LIVE_RECORD_MAX_SHARDS
 

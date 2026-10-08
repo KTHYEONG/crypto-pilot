@@ -5,6 +5,9 @@ import dataclasses
 import pandas as pd
 
 from src.common.errors import DataIntegrityError
+from src.core.params import FEATURE_NAME
+from src.core.params import PERIODS_PER_YEAR_1H as _PERIODS_PER_YEAR_1H
+from src.core.resources import _assert_stage_rss_budget, _StageRecorder
 from src.mhs import statistics as _statistics
 from src.mhs.contracts import (
     MhsBookFailure,
@@ -19,10 +22,7 @@ from src.mhs.evidence import (
     compute_deployment_readiness,
     required_cost_tiers,
 )
-from src.mhs.params import FEATURE_NAME
-from src.mhs.params import PERIODS_PER_YEAR_1H as _PERIODS_PER_YEAR_1H
 from src.mhs.research_go import GO_REASON_RESOURCE_BREACH
-from src.mhs.resources import _assert_stage_rss_budget, _StageRecorder
 
 
 def _terminal_resource_breach_report(

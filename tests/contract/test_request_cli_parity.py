@@ -211,8 +211,8 @@ def test_metadata_key_set_closed() -> None:
 
 
 def test_choices_come_from_registries() -> None:
-    from src.mhs.panel import DATA_POLICIES
-    from src.mhs.params import (
+    from src.core.panel import DATA_POLICIES
+    from src.core.params import (
         CLI_GROWTH_ENVELOPE_DEFAULT,
         COMMITTEE_MEMBER_SETS,
         GROWTH_RISK_ENVELOPES,
@@ -292,7 +292,7 @@ def test_execution_grids_use_three_minute_steps() -> None:
 
     from src.mhs.contracts import MhsDiagnosticRequest
     from src.mhs.evaluation.windows import _iter_mhs_execution_windows
-    from src.mhs.types import ExecutionSpec
+    from src.core.types import ExecutionSpec
 
     request = MhsDiagnosticRequest()
     start = pd.Timestamp("2025-01-01", tz="UTC")
@@ -315,7 +315,7 @@ def test_execution_grids_use_three_minute_steps() -> None:
 def test_marks_align_on_three_minute_grid() -> None:
     import pandas as pd
 
-    from src.mhs.marks import _align_minute_frames
+    from src.core.marks import _align_minute_frames
 
     idx = pd.date_range("2025-01-01", periods=4, freq="3min", tz="UTC")
     frame = pd.DataFrame({"high": [1.0, 2.0, 3.0, 4.0], "low": [1.0, 2.0, 3.0, 4.0], "close": [1.0, 2.0, 3.0, 4.0]}, index=idx)
@@ -374,7 +374,7 @@ def test_hourly_and_generic_contracts_preserved() -> None:
 def test_sealed_inputs_require_explicit_3m() -> None:
     from pathlib import Path
 
-    from src.mhs.data_provenance import mhs_input_layout_for_lake, resolve_required_mhs_input_paths
+    from src.core.data_provenance import mhs_input_layout_for_lake, resolve_required_mhs_input_paths
 
     paths = resolve_required_mhs_input_paths(
         layout=mhs_input_layout_for_lake(Path("/data")), panel_symbols=["AAA"], execution_symbols=["AAA"], execution_timeframe="3m",

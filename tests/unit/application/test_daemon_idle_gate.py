@@ -90,7 +90,7 @@ def test_max_wait_still_escapes() -> None:
 
 def test_constants_mirror_strategy_and_settings() -> None:
     from src.live.settings import LiveSettings
-    from src.mhs.frozen_research_candidate import FROZEN_MHS_TOP20_V2
+    from src.strategy.targets import FROZEN_MHS_TOP20_V2
 
     assert FROZEN_MHS_TOP20_V2.release_hour_utc == DECISION_RELEASE_HOUR_UTC
     assert LiveSettings().max_signal_staleness_hours == DECISION_SIGNAL_STALENESS_HOURS

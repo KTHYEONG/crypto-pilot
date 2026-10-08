@@ -5,8 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 
 import pandas as pd
-import src.mhs.marks as marks
-from src.mhs.marks import clear_mhs_market_data_caches
+import src.core.marks as marks
+from src.core.marks import clear_mhs_market_data_caches
 from tests.fixtures.mhs_fold_market import write_completing_fold_market
 from tests.fixtures.settlement_audit import patch_settlement_registry_for_fixture
 from tests.unit.mhs.test_evaluation_appresearch import (

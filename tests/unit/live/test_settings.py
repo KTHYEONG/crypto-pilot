@@ -185,7 +185,7 @@ def test_live_settings_backtest_parity_defaults() -> None:
     from pydantic import ValidationError
     from src.live.settings import LiveSettings
     from src.market_data.retention import MARKET_DATA_MIN_RETENTION_DAYS
-    from src.mhs.params import SIGNAL_PANEL_WINDOW_DAYS
+    from src.core.params import SIGNAL_PANEL_WINDOW_DAYS
 
     settings = LiveSettings()
     assert SIGNAL_PANEL_WINDOW_DAYS == 400
@@ -251,7 +251,7 @@ def test_live_settings_reject_cross_venue_in_live_modes() -> None:
 
 def test_execution_policy_defaults_to_taker_parity() -> None:
     """Default settings replay the taker parity book with the registered timeout."""
-    from src.mhs.types import ExecutionSpec
+    from src.core.types import ExecutionSpec
 
     settings = LiveSettings()
     assert settings.execution_policy == "taker_parity"
@@ -319,7 +319,7 @@ def test_live_settings_testnet_requires_dedicated_order_credentials() -> None:
 
 def test_risk_rails_derive_from_account_exposure_max() -> None:
     from src.live.settings import LiveSettings
-    from src.mhs.params import ACCOUNT_EXPOSURE_MAX
+    from src.core.params import ACCOUNT_EXPOSURE_MAX
 
     settings = LiveSettings()
     assert settings.max_gross_leverage == ACCOUNT_EXPOSURE_MAX

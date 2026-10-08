@@ -27,7 +27,7 @@ import pandas as pd
 import pytest
 
 from src.mhs.scaling import _pnl_vol_target_scale, is_streaming_scale_mode
-from src.mhs.execution import (
+from src.engine.execution import (
     DataIntegrityError,
     ExecutionReplayWindow,
     ExecutionSpec,
@@ -36,7 +36,7 @@ from src.mhs.execution import (
     replay_execution_windows,
     replay_execution_windows_coupled,
 )
-from src.mhs.params import PNL_VOL_TARGET_BURN_IN_DAYS
+from src.core.params import PNL_VOL_TARGET_BURN_IN_DAYS
 
 pytestmark = pytest.mark.slow
 

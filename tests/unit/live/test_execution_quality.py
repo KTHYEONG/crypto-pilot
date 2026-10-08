@@ -20,7 +20,7 @@ from src.live.execution_quality import (
 from src.live.planner import OrderIntent
 from src.live.executor import ExecutionOutcome
 from src.live.audit import AUDIT_LOG_RETENTION_DAYS
-from src.mhs.params import MEASURED_EXECUTION_COST_TIERS_BPS
+from src.core.params import MEASURED_EXECUTION_COST_TIERS_BPS
 
 
 def _intent(symbol: str, side: str, qty: str = "1.0", *, leg_index: int = 0, client_order_prefix: str = "20260101") -> OrderIntent:

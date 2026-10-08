@@ -12,12 +12,12 @@ from src.application.ops.settlement_registry import (
     write_settlement_registry,
 )
 from src.common.errors import DataIntegrityError
-from src.mhs.instrument_settlements import (
+from src.core.instrument_settlements import (
     EMPTY_SETTLEMENT_REGISTRY,
     assemble_instrument_settlement_registry,
     parse_instrument_settlement_registry,
 )
-from src.mhs.settlement_evidence import audit_settlement_registry
+from src.core.settlement_evidence import audit_settlement_registry
 
 T0 = pd.Timestamp("2025-01-01T00:00:00Z")
 STEP = pd.Timedelta(minutes=3)
@@ -294,7 +294,7 @@ def test_curated_price_survives_loss_of_proxy_evidence(tmp_path) -> None:
 
 
 def test_subset_build_preserves_other_symbols_and_collection_declarations(tmp_path) -> None:
-    from src.mhs.instrument_settlements import DataTruncationRecord
+    from src.core.instrument_settlements import DataTruncationRecord
 
     _lake(tmp_path)
     initial = _build(tmp_path)
@@ -321,7 +321,7 @@ def _halt_lake(root, n_live: int, n_zombie: int = 0) -> None:
 
 
 def _zombie_registry(symbols: list[str]) -> object:
-    from src.mhs.instrument_settlements import InstrumentSettlementRecord
+    from src.core.instrument_settlements import InstrumentSettlementRecord
 
     last_trade = T0 + STEP * 3
     records = [

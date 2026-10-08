@@ -14,8 +14,8 @@ from tests.unit.mhs.evaluation.test_windows import (
 
 
 def _tight_telemetry(monkeypatch, *, pss: int = 0, available: int = 10**12) -> None:
-    from src.mhs import resources as _res
-    from src.mhs.tree_memory import TreeMemoryObservation
+    from src.core import resources as _res
+    from src.core.tree_memory import TreeMemoryObservation
 
     monkeypatch.setattr(_res, "_current_tree_pss_bytes", lambda: pss)
     monkeypatch.setattr(_res, "_current_available_bytes", lambda: available)
@@ -39,8 +39,8 @@ def test_adaptive_decode_splits_with_no_missing_decisions(tmp_path, monkeypatch)
     """Tight envelope emits smaller admitted pieces with every decision exactly once."""
     import pandas as pd
 
-    from src.mhs import resources as _res
-    import src.mhs.execution.window_stream as window_stream
+    from src.core import resources as _res
+    import src.engine.execution.window_stream as window_stream
     from src.mhs.evaluation.windows import _iter_mhs_execution_windows
 
     start, end, decisions, funding, targets, spec = _adaptive_fixture(tmp_path, days=3)
@@ -71,7 +71,7 @@ def test_adaptive_decode_streams_empty_pieces_before_next_daily_decision(tmp_pat
 
     import pandas as pd
 
-    import src.mhs.execution.window_stream as _stream
+    import src.engine.execution.window_stream as _stream
     import src.mhs.evaluation.windows as _w
 
     start, end, decisions, funding, targets, spec = _adaptive_fixture(tmp_path, days=3)
@@ -114,7 +114,7 @@ def test_adaptive_decode_rejects_plan_shorter_than_first_signal_span(tmp_path, m
     """A malformed plan cannot split the first decision from its signal span."""
     import pandas as pd
 
-    import src.mhs.execution.window_stream as _stream
+    import src.engine.execution.window_stream as _stream
     import src.mhs.evaluation.windows as _w
     from src.common.errors import DataIntegrityError
 
@@ -137,7 +137,7 @@ def test_adaptive_empty_piece_rejects_unknown_live_roster(tmp_path, monkeypatch)
 
     import pandas as pd
 
-    import src.mhs.execution.window_stream as _stream
+    import src.engine.execution.window_stream as _stream
     import src.mhs.evaluation.windows as _w
     from src.common.errors import DataIntegrityError
 
@@ -315,7 +315,7 @@ def test_materialize_covers_empty_and_missing_branches(tmp_path, monkeypatch) ->
     import pandas as pd
 
     import src.mhs.evaluation.windows as _w
-    from src.mhs.resources import MhsExecutionAllocation
+    from src.core.resources import MhsExecutionAllocation
 
     _tight_telemetry(monkeypatch)
     grid = pd.date_range("2022-01-01", periods=5, freq="3min", tz="UTC")
@@ -334,7 +334,7 @@ def test_materialize_covers_empty_and_missing_branches(tmp_path, monkeypatch) ->
     assert win.marks is None
     w2 = pd.DataFrame(0.0, index=pd.DatetimeIndex([grid[0]]), columns=list(cols))
     s2 = pd.DatetimeIndex([grid[0] + pd.Timedelta(hours=1)])
-    import src.mhs.execution.window_stream as _ws
+    import src.engine.execution.window_stream as _ws
 
     monkeypatch.setattr(_ws, "_load_window_minute_frames", lambda *a, **k: {})
     win2 = _w._materialize_execution_piece(
@@ -419,7 +419,7 @@ def test_adaptive_offgrid_timeout_fallback(tmp_path, monkeypatch) -> None:
     import pandas as pd
 
     from src.mhs.evaluation.windows import _iter_mhs_execution_windows
-    from src.mhs.types import ExecutionSpec
+    from src.core.types import ExecutionSpec
 
     start, end, decisions, funding, targets, _ = _adaptive_fixture(tmp_path, days=2)
     spec = ExecutionSpec(passive_timeout_minutes=31)
@@ -601,7 +601,7 @@ def test_book_outcome_propagates_live_bound_count(monkeypatch, tmp_path) -> None
     import pandas as pd
 
     import src.mhs.evaluation.windows as _w
-    from src.mhs.types import BOOK_SPECS, ExecutionSpec
+    from src.core.types import BOOK_SPECS, ExecutionSpec
 
     start = pd.Timestamp("2022-01-01", tz="UTC")
     end = pd.Timestamp("2022-01-02", tz="UTC")

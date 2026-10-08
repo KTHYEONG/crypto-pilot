@@ -17,7 +17,7 @@ BASE = ["research", "run", "portfolio", "mhs-horizon-diagnostic"]
 
 def test_single_configuration_type() -> None:
     import src.mhs.deployment_policy as deployment_policy
-    import src.mhs.params as params
+    import src.core.params as params
     import src.mhs.pipeline.config as config
     import src.mhs.research_go as research_go
 
@@ -42,7 +42,7 @@ def test_defaults_are_json_native() -> None:
 
 
 def test_research_baseline_is_identity_empty() -> None:
-    from src.mhs.data_policy import MHS_DATA_POLICY_DEFAULT
+    from src.core.data_policy import MHS_DATA_POLICY_DEFAULT
     from src.mhs.run_history import trial_identity_key
 
     snapshot = {"K": 1}
@@ -59,7 +59,7 @@ def test_research_baseline_is_identity_empty() -> None:
 
 
 def test_research_baseline_reproduces_sentinel_resolution() -> None:
-    from src.mhs.types import COMMITTEE_TARGET_GROSS
+    from src.core.types import COMMITTEE_TARGET_GROSS
 
     assert research_baseline().committee_target_gross is None
     assert research_baseline(committee_capital=True).committee_target_gross == COMMITTEE_TARGET_GROSS

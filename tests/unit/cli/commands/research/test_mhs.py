@@ -858,7 +858,7 @@ def test_cli_flags_threaded(monkeypatch) -> None:
     from src.mhs.contracts import MhsDiagnosticRequest
     from src.mhs.pipeline.config import resolve_cli_request as real_resolve_cli_request
     import src.mhs.pipeline.orchestrator as orchestrator
-    from src.mhs.types import FUNDING_CARRY_SLEEVE_WEIGHT
+    from src.core.types import FUNDING_CARRY_SLEEVE_WEIGHT
 
     captured: dict = {}
     def _spy(explicit):
@@ -924,7 +924,7 @@ def test_mhs_diagnostic_leverage_frontier_scan_short_circuit_scenario_mhs_levera
     the scan path, while the flag=False path still reaches the pipeline."""
     from src.cli.dataclass_args import explicit_field_values
     from src.mhs.contracts import MhsDiagnosticRequest
-    from src.mhs.params import LEVERAGE_FRONTIER_SCAN_MULTIPLES
+    from src.core.params import LEVERAGE_FRONTIER_SCAN_MULTIPLES
     import src.mhs.leverage_scan as leverage_scan
 
     def _boom(config, **kwargs):
@@ -948,7 +948,7 @@ def test_mhs_diagnostic_leverage_frontier_scan_short_circuit_scenario_mhs_levera
     assert args.leverage_frontier_scan is True
     assert args.leverage_frontier_multiples == LEVERAGE_FRONTIER_SCAN_MULTIPLES
     _run_mhs_horizon_diagnostic(args)
-    from src.mhs.params import (
+    from src.core.params import (
         CLI_GROWTH_ENVELOPE_DEFAULT as _CLI_GROWTH_ENVELOPE_DEFAULT,
     )
 
@@ -1027,7 +1027,7 @@ def test_mhs_collection_rejects_unsupported_timeframe_programmatically(tmp_path)
     import pytest
 
     import src.market_data.services.mhs_execution as mc
-    from src.mhs.data_provenance import mhs_input_layout_for_lake, mhs_sealable_input_paths, resolve_required_mhs_input_paths
+    from src.core.data_provenance import mhs_input_layout_for_lake, mhs_sealable_input_paths, resolve_required_mhs_input_paths
 
     with pytest.raises(ValueError, match="unknown execution_timeframe"):
         mc.build_mhs_execution_plan("2021-01-01", "2021-02-01", timeframe="5m")

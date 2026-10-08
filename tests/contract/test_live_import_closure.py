@@ -24,13 +24,15 @@ _LIVE_DENYLIST: tuple[str, ...] = (
     "src.mhs.report*",
     "src.mhs.reporting*",
     "src.mhs.contracts",
-    "src.mhs.frozen_research_run",
-    "src.mhs.frozen_research_evidence",
-    "src.mhs.frozen_research_report",
-    "src.mhs.frozen_research_windows",
-    "src.mhs.execution*",
-    "src.mhs.account_sources",
-    "src.mhs.account_ledger",
+    "src.engine.strategy_backtest",
+    "src.engine.backtest_evidence",
+    "src.engine.backtest_persist",
+    "src.engine.backtest_windows",
+    "src.engine.execution*",
+    "src.engine.account_sources",
+    "src.engine.account_ledger",
+    "src.engine.daily_evidence",
+    "src.evaluation*",
 )
 
 

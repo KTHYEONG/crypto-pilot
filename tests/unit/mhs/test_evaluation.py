@@ -24,13 +24,13 @@ from src.mhs.evidence import (
     tail_sensitivity_curve,
     year_restricted_correlation,
 )
-from src.mhs.execution import mhs_ledger_pnl
-from src.mhs.execution import simulated_inventory_ledger
+from src.engine.execution import mhs_ledger_pnl
+from src.engine.execution import simulated_inventory_ledger
 
 
 def test_mhs_5m_02_pit_roster_uses_only_eligible_trailing_volume() -> None:
     """MHS-5M-02-PIT-ROSTER: ranking is causal and eligibility masked."""
-    from src.mhs.marks import _pit_execution_mask
+    from src.core.marks import _pit_execution_mask
 
     idx = pd.date_range("2025-01-01", periods=720, freq="1h", tz="UTC")
     volume = pd.DataFrame({"A": 10.0, "B": 20.0, "C": 30.0}, index=idx)
@@ -48,7 +48,7 @@ def test_mhs_roster_hysteresis_enter_unchanged_from_baseline() -> None:
     mask is exactly ``{A: True, B: True, C: False}`` as before hysteresis was
     added -- entry via the top ``universe_size`` trailing-volume rank is
     unchanged."""
-    from src.mhs.marks import _pit_execution_mask
+    from src.core.marks import _pit_execution_mask
 
     idx = pd.date_range("2025-01-01", periods=720, freq="1h", tz="UTC")
     volume = pd.DataFrame({"A": 10.0, "B": 20.0, "C": 30.0}, index=idx)
@@ -63,8 +63,8 @@ def test_mhs_roster_hysteresis_member_survives_rank_dip_within_exit_band() -> No
     a member whose rank worsens past ``universe_size`` but stays within the
     ``universe_size * EXECUTION_ROSTER_EXIT_MULTIPLIER`` band is retained,
     unlike the pre-fix hard cutoff which dropped it."""
-    from src.mhs.marks import _pit_execution_mask
-    from src.mhs.params import EXECUTION_ROSTER_EXIT_MULTIPLIER
+    from src.core.marks import _pit_execution_mask
+    from src.core.params import EXECUTION_ROSTER_EXIT_MULTIPLIER
 
     universe_size = 2
     exit_size = universe_size * EXECUTION_ROSTER_EXIT_MULTIPLIER
@@ -93,8 +93,8 @@ def test_mhs_roster_hysteresis_member_exits_past_exit_band() -> None:
     """SCENARIO_MHS_HYSTERESIS_03_MEMBER_EXITS_PAST_EXIT_BAND: a member whose
     rank worsens past ``universe_size * EXECUTION_ROSTER_EXIT_MULTIPLIER``
     is dropped on that bar."""
-    from src.mhs.marks import _pit_execution_mask
-    from src.mhs.params import EXECUTION_ROSTER_EXIT_MULTIPLIER
+    from src.core.marks import _pit_execution_mask
+    from src.core.params import EXECUTION_ROSTER_EXIT_MULTIPLIER
 
     universe_size = 2
     exit_size = universe_size * EXECUTION_ROSTER_EXIT_MULTIPLIER
@@ -120,7 +120,7 @@ def test_mhs_roster_hysteresis_ineligible_exits_immediately() -> None:
     """SCENARIO_MHS_HYSTERESIS_04_INELIGIBLE_EXITS_IMMEDIATELY_REGARDLESS_OF_HYSTERESIS:
     a held member whose eligible flag becomes False is excluded on that same bar
     even though its raw trailing-volume rank is still inside the exit band."""
-    from src.mhs.marks import _pit_execution_mask
+    from src.core.marks import _pit_execution_mask
 
     idx = pd.date_range("2025-01-01", periods=721, freq="1h", tz="UTC")
     volume = pd.DataFrame(
@@ -181,7 +181,7 @@ class TestCostResponseCurve:
         assert set(rates) == {0.0, 2.0, 4.0, 8.0}
 
     def test_must_include_measured_tiers(self) -> None:
-        from src.mhs.types import MEASURED_EXECUTION_COST_TIERS_BPS
+        from src.core.types import MEASURED_EXECUTION_COST_TIERS_BPS
 
         weights, opens, funding = _wsf()
         grid = tuple(MEASURED_EXECUTION_COST_TIERS_BPS.values())
@@ -351,7 +351,7 @@ class TestCompoundingAlphaAxesFolds:
         assert max(f.validation_end for f in folds) == HOLDOUT_CUTOFF.normalize()
 
     def test_all_folds_share_train_start_identity(self) -> None:
-        from src.mhs.types import DISCOVERY_START
+        from src.core.types import DISCOVERY_START
         folds = phase_1_anchored_purged_folds()
         for fold in folds:
             assert fold.train_start is DISCOVERY_START
@@ -805,7 +805,7 @@ def _passing_fold(index: int):  # type: ignore[no-untyped-def]
     from typing import cast
 
     from src.mhs.contracts import MhsFoldReport
-    from src.mhs.execution import StrategyExecutionReplayResult
+    from src.engine.execution import StrategyExecutionReplayResult
 
     return MhsFoldReport(
         fold_index=index,
@@ -839,7 +839,7 @@ def test_SCENARIO_MHS_EVID_01_DSR_GATE_BLOCKS_WEAK_EVIDENCE() -> None:
         GO_REASON_DEFLATED_SHARPE_UNAVAILABLE,
         _mhs_research_go,
     )
-    from src.mhs.params import REGISTERED_POLICY_THRESHOLDS
+    from src.core.params import REGISTERED_POLICY_THRESHOLDS
 
     assert REGISTERED_POLICY_THRESHOLDS["deflated_sharpe_ratio"] == 0.95
 

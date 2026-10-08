@@ -1,7 +1,7 @@
 
 
 def test_reliability_blocks_invalid_primary_and_overlap() -> None:
-    from src.mhs.data_provenance import DataEvidenceTier, DataProvenanceResult
+    from src.core.data_provenance import DataEvidenceTier, DataProvenanceResult
     from src.mhs.reliability import BacktestCertificationLevel, evaluate_backtest_reliability
     provenance = DataProvenanceResult(DataEvidenceTier.REPRODUCIBLE_ARCHIVE, True, (), 'a'*64, 3)
     result = evaluate_backtest_reliability(primary_valid=False, primary_invalid_reasons=('MISSING_ORDER_OHLCV',), selection_overlap_fraction=0.5, fold_committee_weight_leak=None, input_provenance=provenance, data_limitations=())
@@ -12,7 +12,7 @@ def test_reliability_blocks_invalid_primary_and_overlap() -> None:
 
 
 def test_reliability_separates_historical_from_forward_validation() -> None:
-    from src.mhs.data_provenance import DataEvidenceTier, DataProvenanceResult
+    from src.core.data_provenance import DataEvidenceTier, DataProvenanceResult
     from src.mhs.reliability import BacktestCertificationLevel, evaluate_backtest_reliability
     archive = DataProvenanceResult(DataEvidenceTier.REPRODUCIBLE_ARCHIVE, True, (), 'a'*64, 3)
     observed = DataProvenanceResult(DataEvidenceTier.FORWARD_OBSERVED, True, (), None, 100)
@@ -35,7 +35,7 @@ def test_validation_tracks_never_label_retrospective_as_oos() -> None:
 
 def test_reliability_unsealed_inputs_and_fold_leak_cap_history() -> None:
     import pandas as pd
-    from src.mhs.data_provenance import DataEvidenceTier, DataProvenanceResult
+    from src.core.data_provenance import DataEvidenceTier, DataProvenanceResult
     from src.mhs.reliability import (
         BacktestCertificationLevel,
         build_validation_track_disclosure,

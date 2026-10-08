@@ -52,7 +52,7 @@ def test_config_defaults_match_cli_derived():
 
 def test_member_set_values():
     """Registered committee member sets have no _v<N> suffix (I_NOVERSION)."""
-    from src.mhs.params import COMMITTEE_MEMBER_SETS
+    from src.core.params import COMMITTEE_MEMBER_SETS
 
     assert set(COMMITTEE_MEMBER_SETS) == {"risk_premia", "flow_momentum"}
 
@@ -161,7 +161,7 @@ def test_scenario_mhs_exposure_ceiling_06_two_sided_default_flipped_universe_wir
 def test_scenario_mhs_kelly_two_sided_06_universe_default_promotion() -> None:
     """Breadth default is 60 on the single request type, matching the CLI;
     an explicit --execution-universe-size still overrides."""
-    from src.mhs.params import CLI_EXECUTION_UNIVERSE_SIZE_DEFAULT
+    from src.core.params import CLI_EXECUTION_UNIVERSE_SIZE_DEFAULT
 
     assert MhsDiagnosticRequest().execution_universe_size == 60
     assert MhsDiagnosticRequest().execution_universe_size == CLI_EXECUTION_UNIVERSE_SIZE_DEFAULT
@@ -350,7 +350,7 @@ def test_mutually_exclusive_gross_flags() -> None:
 
 
 def test_capital_opt_out_yields_canonical_dependents() -> None:
-    from src.mhs.params import COMMITTEE_TRANCHE_COUNT
+    from src.core.params import COMMITTEE_TRANCHE_COUNT
 
     config = _resolve(["--no-committee-capital"])
     assert config.committee_member_set == "risk_premia"

@@ -17,7 +17,7 @@ def test_diagnostics_module_present() -> None:
 def test_phase_diagnostics_threadpool_equivalence() -> None:
     import pandas as pd
     import numpy as np
-    from src.mhs.types import BookSpec, HorizonBand
+    from src.core.types import BookSpec, HorizonBand
     from src.mhs.evaluation.diagnostics import _phase_diagnostics
 
     grid = pd.date_range("2021-01-01", periods=48, freq="1h", tz="UTC")

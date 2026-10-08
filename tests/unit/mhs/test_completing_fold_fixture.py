@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from src.mhs.params import FOLD_PANEL_WARMUP_HOURS, PNL_VOL_TARGET_BURN_IN_DAYS
+from src.core.params import FOLD_PANEL_WARMUP_HOURS, PNL_VOL_TARGET_BURN_IN_DAYS
 from tests.fixtures.mhs_fold_market import COMPLETING_FOLD, COMPLETING_FOLD_MARKET_HOURS
 
 

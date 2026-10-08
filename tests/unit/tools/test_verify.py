@@ -122,15 +122,15 @@ def test_timeout_terminates_forked_child_and_releases_pipes(tmp_path: Path) -> N
 def test_coverage_sources_are_parent_directories() -> None:
     result = _coverage_args(
         [
-            "src/mhs/execution/accumulator.py",
-            "src/mhs/execution/integrity.py",
+            "src/engine/execution/accumulator.py",
+            "src/engine/execution/integrity.py",
             "src/common/paths.py",
         ],
         "x/coverage.json",
     )
     assert result == [
         "--cov=src/common",
-        "--cov=src/mhs/execution",
+        "--cov=src/engine/execution",
         "--cov-report=json:x/coverage.json",
     ]
     assert all("src." not in arg for arg in result)
@@ -151,7 +151,7 @@ def test_directory_source_measures_numpy_package_without_reloading(
         encoding="utf-8",
     )
     cov_json = tmp_path / "coverage.json"
-    argv = _coverage_args(["src/mhs/execution/accumulator.py"], str(cov_json))
+    argv = _coverage_args(["src/engine/execution/accumulator.py"], str(cov_json))
     log_dir = tmp_path / "logs"
     backtests_dir = tmp_path / "backtests"
     result = run_cmd(
@@ -168,7 +168,7 @@ def test_directory_source_measures_numpy_package_without_reloading(
     assert "cannot load module more than once" not in combined
 
     report = json.loads(cov_json.read_text(encoding="utf-8"))
-    assert "src/mhs/execution/accumulator.py" in report.get("files", {})
+    assert "src/engine/execution/accumulator.py" in report.get("files", {})
     assert not log_dir.exists()
 
 
@@ -210,7 +210,7 @@ def test_report_keys_match_repo_relative_posix_paths(
         json.dumps(
             {
                 "files": {
-                    "src/mhs/execution/accumulator.py": {
+                    "src/engine/execution/accumulator.py": {
                         "executed_lines": [9],
                         "missing_lines": [10],
                     }
@@ -220,10 +220,10 @@ def test_report_keys_match_repo_relative_posix_paths(
         encoding="utf-8",
     )
     monkeypatch.setattr("tools.verify._git_diff_added_lines", lambda file: {9, 10})
-    diags, pct = _check_diff_coverage(["src/mhs/execution/accumulator.py"], str(cov_json), [])
+    diags, pct = _check_diff_coverage(["src/engine/execution/accumulator.py"], str(cov_json), [])
     assert pct == 50
     assert len(diags) == 1
-    assert diags[0]["file"] == "src/mhs/execution/accumulator.py"
+    assert diags[0]["file"] == "src/engine/execution/accumulator.py"
     assert "[10]" in diags[0]["error"]
 
 

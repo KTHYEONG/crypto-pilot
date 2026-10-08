@@ -11,7 +11,7 @@ from collections.abc import Sequence
 
 import pandas as pd
 
-from src.mhs.books import renormalize_within_mask
+from src.strategy.books import renormalize_within_mask
 
 
 def causal_market_beta(

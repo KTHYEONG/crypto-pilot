@@ -23,7 +23,7 @@ import pandas as pd
 import pyarrow.parquet as pq
 import pytest
 
-from src.mhs import marks as mhs_marks
+from src.core import marks as mhs_marks
 from src.mhs.evaluation.books import (
     _candidate_weight_books,
 )
@@ -32,14 +32,14 @@ from src.mhs.evaluation.folds import (
     _run_fold_safe_discovery_parallel,
 )
 from src.mhs.evaluation.windows import _rescaled_windows
-from src.mhs.execution.window_stream import _iter_mhs_execution_windows
-from src.mhs.marks import _load_window_minute_frames
-from src.mhs.params import UNIVERSE_ELIGIBILITY_LOOKBACK_BARS, UNIVERSE_ELIGIBILITY_MIN_HISTORY_BARS
+from src.engine.execution.window_stream import _iter_mhs_execution_windows
+from src.core.marks import _load_window_minute_frames
+from src.core.params import UNIVERSE_ELIGIBILITY_LOOKBACK_BARS, UNIVERSE_ELIGIBILITY_MIN_HISTORY_BARS
 from src.common.errors import DataIntegrityError
-from src.mhs.types import BOOK_SPECS, ExecutionSpec
+from src.core.types import BOOK_SPECS, ExecutionSpec
 from src.mhs.evidence import phase_1_anchored_purged_folds
-from src.mhs.execution import replay_execution_windows
-from src.mhs.parallel import fork_shared_payload
+from src.engine.execution import replay_execution_windows
+from src.core.parallel import fork_shared_payload
 
 _START = pd.Timestamp("2021-01-01", tz="UTC")
 _SYMBOLS = ["MHSAUSDT", "MHSBUSDT", "MHSCUSDT"]
@@ -279,7 +279,7 @@ def test_scenario_04_candidate_weight_books_covers_union() -> None:
     ``build_candidate_weights`` would have produced for that key."""
     from src.mhs.discovery import build_candidate_weights as _bcw
     from src.mhs.funding import build_funding_carry_candidate_weights
-    from src.mhs.params import (
+    from src.core.params import (
         DISCOVERY_MOMENTUM_CANDIDATES,
         DISCOVERY_REVERSAL_CANDIDATES,
         FUNDING_CARRY_LOOKBACK_CANDIDATES_HOURS,
@@ -365,15 +365,15 @@ def test_scenario_06_no_dataframe_in_submit_args(tmp_path, monkeypatch) -> None:
 def _build_books_args_from_market(root: Path, n_hours: int) -> dict[str, object]:
     """Minimal ``_run_books_concurrent`` arg set from a written market."""
     from src.mhs import scaling as scaling_mod
-    from src.mhs.books import renormalize_within_mask
+    from src.strategy.books import renormalize_within_mask
     from src.mhs.evaluation.books import _book_weights
     from src.mhs.evaluation.diagnostics import _phase_diagnostics
-    from src.mhs.execution.contracts import bar_funding_panel
-    from src.mhs.horizons import realized_vol
-    from src.mhs.marks import _pit_execution_mask
-    from src.mhs.panel import liquid_half_eligibility, load_base_panel
-    from src.mhs.params import BOOK_BLEND_WEIGHTS
-    from src.mhs.types import BOOK_SPECS
+    from src.engine.execution.contracts import bar_funding_panel
+    from src.strategy.horizons import realized_vol
+    from src.core.marks import _pit_execution_mask
+    from src.core.panel import liquid_half_eligibility, load_base_panel
+    from src.core.params import BOOK_BLEND_WEIGHTS
+    from src.core.types import BOOK_SPECS
 
     end = _START + pd.Timedelta(hours=n_hours)
     symbols = _SYMBOLS

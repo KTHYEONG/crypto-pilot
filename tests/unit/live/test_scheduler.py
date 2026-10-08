@@ -610,7 +610,7 @@ def test_default_data_refresh_splits_crypto_and_seeds_long_window(monkeypatch, t
 
     import src.live.scheduler as sched
     from src.live.data_refresh import RefreshReport
-    from src.mhs.params import LIVE_FROZEN_WARMUP_DAYS
+    from src.core.params import LIVE_FROZEN_WARMUP_DAYS
 
     payload = {
         "symbols": [

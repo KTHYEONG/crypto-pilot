@@ -7,16 +7,25 @@ from typing import Any, Literal
 import numpy as np
 import pandas as pd
 
+from src.core.params import (
+    COMMITTEE_MEMBERS,
+    COMMITTEE_OOS_START,
+    COMMITTEE_PURGE_HOURS,
+    MEASURED_EXECUTION_COST_TIERS_BPS,
+    WALK_FORWARD_MIN_TRAIN_BARS,
+)
+from src.core.resources import _assert_stage_rss_budget, _StageRecorder
+from src.engine.execution import mhs_ledger_pnl_multi_tier
 from src.mhs import statistics as _statistics
-from src.mhs.books import phase_tranche_book, scale_book_to_target_gross
 from src.mhs.committee import (
     committee_block_edges_from,
     decompose_cost,
     purged_walk_forward,
     train_evidence_weights,
 )
-from src.mhs.execution import mhs_ledger_pnl_multi_tier
-from src.mhs.features import (
+from src.mhs.regime import beta_neutralize_weights
+from src.strategy.books import phase_tranche_book, scale_book_to_target_gross
+from src.strategy.features import (
     FEATURE_REGISTRY,
     FeatureAdmission,
     FeatureSpec,
@@ -26,15 +35,6 @@ from src.mhs.features import (
     feature_admission_by_boundary,
     feature_registry_panel_columns,
 )
-from src.mhs.params import (
-    COMMITTEE_MEMBERS,
-    COMMITTEE_OOS_START,
-    COMMITTEE_PURGE_HOURS,
-    MEASURED_EXECUTION_COST_TIERS_BPS,
-    WALK_FORWARD_MIN_TRAIN_BARS,
-)
-from src.mhs.regime import beta_neutralize_weights
-from src.mhs.resources import _assert_stage_rss_budget, _StageRecorder
 
 from . import diagnostics
 from .committee_reports import (

@@ -10,12 +10,12 @@ import pandas as pd
 import pytest
 import src.mhs.evaluation.concurrency as concurrency_mod
 from src.mhs.diagnostic_run import run_mhs_horizon_diagnostic
-import src.mhs.marks as marks
+import src.core.marks as marks
 import src.mhs.pipeline.stages.book as book_stage
 import src.mhs.statistics as statistics
 from src.common.errors import DataIntegrityError
 from src.mhs.discovery import DiscoveryQualificationResult
-from src.mhs.marks import _load_funding_series, clear_mhs_market_data_caches
+from src.core.marks import _load_funding_series, clear_mhs_market_data_caches
 from src.quant.universe.pit_universe import symbol_partition
 from tests.unit.mhs.test_evaluation_appresearch import (  # noqa: F401
     _FOLD,

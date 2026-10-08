@@ -167,7 +167,7 @@ class TestExanteVolTargetScaleCap:
         assert (post_burn == 1.0).all()
 
     def test_cap_two_sided(self) -> None:
-        from src.mhs.types import PNL_VOL_TARGET_MAX_SCALE
+        from src.core.types import PNL_VOL_TARGET_MAX_SCALE
 
         rng = np.random.default_rng(42)
         idx = pd.date_range("2021-01-01", periods=400, freq="1D", tz="UTC")
@@ -178,7 +178,7 @@ class TestExanteVolTargetScaleCap:
         assert scale_capped.max() <= PNL_VOL_TARGET_MAX_SCALE + 1e-12
 
     def test_high_vol_both_identical(self) -> None:
-        from src.mhs.types import PNL_VOL_TARGET_MAX_SCALE
+        from src.core.types import PNL_VOL_TARGET_MAX_SCALE
 
         rng = np.random.default_rng(99)
         idx = pd.date_range("2021-01-01", periods=400, freq="1D", tz="UTC")

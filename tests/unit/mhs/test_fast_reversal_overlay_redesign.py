@@ -13,12 +13,12 @@ from src.mhs.diagnostic_run import run_mhs_horizon_diagnostic
 import src.mhs.evaluation.books as books_mod
 import src.mhs.evaluation.fold_weights as fold_weights
 import src.mhs.evaluation.specs as specs_mod
-import src.mhs.marks as marks
+import src.core.marks as marks
 from src.mhs.contracts import MhsDiagnosticRequest
-from src.mhs.books import phase_tranche_book, rank_weight_book
-from src.mhs.types import BOOK_BLEND_WEIGHTS, BOOK_SPECS
+from src.strategy.books import phase_tranche_book, rank_weight_book
+from src.core.types import BOOK_BLEND_WEIGHTS, BOOK_SPECS
 from src.mhs.evidence import AnchoredPurgedFold
-from src.mhs.horizons import horizon_log_return
+from src.strategy.horizons import horizon_log_return
 from src.quant.universe.pit_universe import symbol_partition
 
 _START = pd.Timestamp("2021-01-01", tz="UTC")

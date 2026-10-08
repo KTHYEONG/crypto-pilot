@@ -24,7 +24,7 @@ from src.backtests.registry import initialize_registry, register_run
 from src.common.errors import DataIntegrityError
 from src.common.paths import BACKTESTS_DIR, BASE_DIR
 from src.mhs.backtest.journal import initialize_research_journal
-from src.mhs.params import MHS_FINAL_OOS_CUTOFF_2026H1
+from src.core.params import MHS_FINAL_OOS_CUTOFF_2026H1
 from src.mhs.preregistration import (
     EVENT_EVALUATION,
     LEGACY_PROCEDURE_REGISTRY_PATH,

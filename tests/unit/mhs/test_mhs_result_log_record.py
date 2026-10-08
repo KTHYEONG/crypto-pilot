@@ -286,7 +286,7 @@ def test_mhs_kelly_z0_history_record_carries_live_policy_snapshot() -> None:
     import json
     from pathlib import Path
     from src.mhs.contracts import MhsOutputTier
-    from src.mhs.params import COMMITTEE_KELLY_LCB_Z
+    from src.core.params import COMMITTEE_KELLY_LCB_Z
     from src.mhs.report.persist import build_mhs_run_history_record
 
     report = _representative_report()

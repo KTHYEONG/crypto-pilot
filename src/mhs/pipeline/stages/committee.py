@@ -26,20 +26,7 @@ import src.mhs.evaluation.books as books
 import src.mhs.evaluation.committee as committee
 import src.mhs.evaluation.diagnostics as diagnostics
 import src.mhs.evaluation.folds as folds
-from src.mhs import research_go as _research_go
-from src.mhs import scaling as _scaling
-from src.mhs import statistics as _statistics
-from src.mhs.discovery import select_horizon_by_discovery_qualification, yearly_net_t_diagnostic
-from src.mhs.evidence import (  # noqa: F401 -- legacy monkeypatch seam
-    effective_breadth,
-    resolved_anchored_folds,
-    year_restricted_correlation,
-)
-from src.mhs.execution import mhs_ledger_pnl
-from src.mhs.features import FeatureAdmission
-from src.mhs.funding import funding_carry_execution_book
-from src.mhs.horizons import efficiency_ratio, horizon_log_return, realized_vol
-from src.mhs.params import (
+from src.core.params import (
     BOOK_BLEND_WEIGHTS,
     CAUSAL_BETA_LOOKBACK_BARS,
     CAUSAL_BETA_MIN_PERIODS,
@@ -53,11 +40,24 @@ from src.mhs.params import (
     FUNDING_CARRY_SLEEVE_LOOKBACK_HOURS,
     MEASURED_EXECUTION_COST_TIERS_BPS,
 )
-from src.mhs.params import PERIODS_PER_YEAR_1H as _PERIODS_PER_YEAR_1H
+from src.core.params import PERIODS_PER_YEAR_1H as _PERIODS_PER_YEAR_1H
+from src.engine.execution import mhs_ledger_pnl
+from src.mhs import research_go as _research_go
+from src.mhs import scaling as _scaling
+from src.mhs import statistics as _statistics
+from src.mhs.discovery import select_horizon_by_discovery_qualification, yearly_net_t_diagnostic
+from src.mhs.evidence import (  # noqa: F401 -- legacy monkeypatch seam
+    effective_breadth,
+    resolved_anchored_folds,
+    year_restricted_correlation,
+)
+from src.mhs.funding import funding_carry_execution_book
 from src.mhs.pipeline.context import PipelineContext
 from src.mhs.regime import causal_market_beta
 from src.mhs.telemetry import StageTelemetry
 from src.quant.evaluation.policy import DISCOVERY_END, HOLDOUT_CUTOFF
+from src.strategy.features import FeatureAdmission
+from src.strategy.horizons import efficiency_ratio, horizon_log_return, realized_vol
 
 
 def _fold_weights_from_boundaries(

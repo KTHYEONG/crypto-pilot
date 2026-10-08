@@ -17,7 +17,7 @@ from src.market_data.services.source_gap_audit import (
     measure_source_gaps,
     write_audited_registry,
 )
-from src.mhs.source_gaps import SourceGapInterval, load_source_gap_registry
+from src.core.source_gaps import SourceGapInterval, load_source_gap_registry
 
 _VERIFIED = "2022-02-01T00:00:00Z"
 
@@ -416,7 +416,7 @@ def test_write_commit_validation_failure_preserves_original(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import src.market_data.services.source_gap_audit as audit_mod
-    import src.mhs.source_gaps as gaps_mod
+    import src.core.source_gaps as gaps_mod
 
     registry = _write_registry(tmp_path / "reg.jsonl", [_row()])
     before = registry.read_bytes()
@@ -529,7 +529,7 @@ def test_cli_verify_source_gaps_read_only_keeps_registry_bytes() -> None:
     from argparse import Namespace
 
     from src.cli.commands.data import _verify_source_gaps
-    from src.mhs.source_gaps import _default_registry_path
+    from src.core.source_gaps import _default_registry_path
 
     target = _default_registry_path()
     before = target.read_bytes()

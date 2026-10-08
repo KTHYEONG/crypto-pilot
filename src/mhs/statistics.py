@@ -15,12 +15,14 @@ import numpy as np
 import pandas as pd
 
 from src.common.errors import DataIntegrityError
-from src.mhs.books import phase_tranche_book, rank_weight_book
-from src.mhs.bootstrap import (
+from src.core.bootstrap import (
     iter_stationary_bootstrap_index_chunks,
     stationary_bootstrap_max_blocks,
     stationary_bootstrap_scalar_indices,
 )
+from src.core.params import PERIODS_PER_YEAR_1H as _PERIODS_PER_YEAR_1H
+from src.core.types import BookSpec
+from src.engine.execution import SimulatedInventoryLedgerResult
 from src.mhs.contracts import MhsBookReport, MhsFoldReport
 from src.mhs.evidence import (
     TRIAL_SHARPE_DEDUP_DECIMALS,
@@ -31,9 +33,7 @@ from src.mhs.evidence import (
     distinct_trial_sr_variance,
     effective_observation_count,
 )
-from src.mhs.execution import SimulatedInventoryLedgerResult
-from src.mhs.params import PERIODS_PER_YEAR_1H as _PERIODS_PER_YEAR_1H
-from src.mhs.types import BookSpec
+from src.strategy.books import phase_tranche_book, rank_weight_book
 
 _logger = logging.getLogger(__name__)
 
@@ -161,7 +161,7 @@ def _bootstrap_ci(net: pd.Series, n_replicates: int, mean_block: int, seed: int)
     """Percentile (2.5, 97.5) CI of the mean net return under a stationary block bootstrap.
 
     Seeded and bit-reproducible: the draw protocol is the shared
-    ``src.mhs.bootstrap`` kernel with a fixed 128-replicate chunk, which is part of
+    ``src.core.bootstrap`` kernel with a fixed 128-replicate chunk, which is part of
     the seeded stream and must not change. ``mean_block <= 0`` uses the scalar
     full-length-block law for every replicate.
 

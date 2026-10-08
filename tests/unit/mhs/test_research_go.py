@@ -20,8 +20,8 @@ from src.mhs.research_go import (
     _resolved_committee_members,
     _resolved_growth_envelope,
 )
-from src.mhs.params import COMMITTEE_MEMBER_SETS, GROWTH_RISK_ENVELOPES
-from src.mhs.types import REGISTERED_POLICY_THRESHOLDS
+from src.core.params import COMMITTEE_MEMBER_SETS, GROWTH_RISK_ENVELOPES
+from src.core.types import REGISTERED_POLICY_THRESHOLDS
 
 
 def test_resolved_committee_members_risk_premia() -> None:

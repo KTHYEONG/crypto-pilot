@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any, Final
 if TYPE_CHECKING:
     from src.mhs.contracts import MhsDiagnosticRequest
 
-from src.mhs.params import (
+from src.core.params import (
     COMMITTEE_MEMBER_SET_INERT,
     COMMITTEE_TRANCHE_COUNT,
     COMMITTEE_TRANCHE_COUNT_MAX,
@@ -289,7 +289,7 @@ def _validate_forward_registration(request: MhsDiagnosticRequest) -> None:
     digest = request.forward_registration_digest
     if digest is None:
         return
-    from src.mhs.params import DISCOVERY_START
+    from src.core.params import DISCOVERY_START
     from src.mhs.preregistration import _utc, is_quarter_end_date
 
     if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{32}", digest) is None:

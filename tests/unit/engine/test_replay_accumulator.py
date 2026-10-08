@@ -1,0 +1,1237 @@
+"""Execution replay engine contract tests (split by behavioral domain)."""
+
+from __future__ import annotations
+import dataclasses
+import math
+import tracemalloc
+import numpy as np
+import pandas as pd
+import pytest
+from src.common.errors import DataIntegrityError
+from src.engine.execution import (
+    ExecutionDataGap,
+    ExecutionReplayWindow,
+    ExecutionSpec,
+    _BoundExecutionReplayAccumulator,
+    replay_execution_window_batch,
+    replay_execution_window_pair,
+    replay_execution_windows,
+    simulated_inventory_ledger,
+    strategy_aware_execution_replay,
+)
+
+from tests.unit.engine.test_execution import (  # noqa: F401
+    _assert_full_equivalence,
+    _assert_pair_equivalent,
+    _assert_replay_equivalent,
+    _partition_windows,
+)
+
+class TestStreamedLedgerEquivalence:
+    """MHS-30-STREAMED-LEDGER-EQUIVALENCE: the default streaming mode avoids the
+    dense ledger unit matrix and matches the opt-in dense diagnostic mode."""
+
+    def test_streaming_matches_dense_mode_within_1e12(self) -> None:
+        idx = pd.date_range("2021-01-01", periods=40, freq="5min", tz="UTC")
+        rng = np.random.default_rng(7)
+        marks = pd.DataFrame(
+            {
+                sym: 100.0 * np.exp(np.cumsum(rng.normal(0.0, 0.005, len(idx))))
+                for sym in ("AAAUSDT", "BBBUSDT", "CCCUSDT")
+            },
+            index=idx,
+        )
+        marks.iloc[15:18, 1] = np.nan
+        funding = pd.DataFrame(2.0e-5, index=idx, columns=list(marks.columns))
+        fills = pd.DataFrame(
+            [
+                {"timestamp": idx[3], "symbol": "AAAUSDT", "quantity_delta": 0.02,
+                 "fill_price": float(marks.loc[idx[3], "AAAUSDT"]), "fee_bps": 2.0,
+                 "reason": "passive_fill"},
+                {"timestamp": idx[3], "symbol": "BBBUSDT", "quantity_delta": -0.01,
+                 "fill_price": float(marks.loc[idx[3], "BBBUSDT"]), "fee_bps": 2.0,
+                 "reason": "passive_fill"},
+                {"timestamp": idx[20], "symbol": "CCCUSDT", "quantity_delta": 0.03,
+                 "fill_price": float(marks.loc[idx[20], "CCCUSDT"]), "fee_bps": 8.0,
+                 "reason": "timeout_taker"},
+            ],
+        )
+        streamed = simulated_inventory_ledger(
+            fills, marks, funding, 1.0, "OHLCV_STRICT_PROXY", "MARK_PRICE",
+        )
+        dense = simulated_inventory_ledger(
+            fills, marks, funding, 1.0, "OHLCV_STRICT_PROXY", "MARK_PRICE",
+            retain_simulated_units=True,
+        )
+        assert streamed.simulated_units is None
+        assert dense.simulated_units is not None
+        assert list(dense.simulated_units.columns) == list(marks.columns)
+        assert list(dense.simulated_units.index) == list(idx)
+        for field in (
+            "equity", "net_returns", "mark_to_market_pnl",
+            "funding_charge", "fee_charge", "fill_turnover",
+        ):
+            np.testing.assert_allclose(
+                getattr(streamed, field).to_numpy(),
+                getattr(dense, field).to_numpy(),
+                rtol=1e-12, atol=1e-12,
+            )
+        assert streamed.primary_valid is dense.primary_valid
+        assert streamed.invalid_reasons == dense.invalid_reasons
+        np.testing.assert_allclose(
+            dense.simulated_units.loc[idx[3]].to_numpy(), [0.02, -0.01, 0.0], atol=1e-12,
+        )
+        np.testing.assert_allclose(
+            dense.simulated_units.loc[idx[20]].to_numpy(), [0.02, -0.01, 0.03], atol=1e-12,
+        )
+
+class TestWindowedReplayEquivalence:
+    """MHS-30-STREAMED-LEDGER-EQUIVALENCE /
+    SCENARIO_MHS_PERF_P2_04_WINDOWED_REPLAY_EQUIVALENCE: windowed strict and
+    stress replays match the single-panel replay in fills, termination
+    counts, ledger series, and validity at 1e-12 tolerance -- the P2 engine
+    micro-optimizations (column-order reduction, NaN-only equity zeroing)
+    must not disturb this equivalence."""
+
+    def _workload(self, days: int = 40, n_symbols: int = 8) -> dict[str, object]:
+        grid = pd.date_range("2021-01-01", periods=days * 24 * 12, freq="5min", tz="UTC")
+        symbols = [f"SYM{i:03d}USDT" for i in range(n_symbols)]
+        rng = np.random.default_rng(7)
+        closes = pd.DataFrame(
+            {s: 100.0 * np.exp(np.cumsum(rng.normal(0.0, 0.002, len(grid)))) for s in symbols},
+            index=grid,
+        )
+        marks = closes.copy()
+        marks.iloc[100:105, 3] = np.nan
+        decision_grid = pd.date_range("2021-01-01", periods=days * 4, freq="6h", tz="UTC")
+        weights = pd.DataFrame(0.0, index=decision_grid, columns=symbols)
+        rng_w = np.random.default_rng(8)
+        for ts in decision_grid:
+            active = rng_w.choice(symbols, size=4, replace=False)
+            weights.loc[ts, active] = rng_w.uniform(0.01, 0.06, 4)
+        return {
+            "grid": grid,
+            "symbols": symbols,
+            "highs": closes * 1.001,
+            "lows": closes * 0.999,
+            "closes": closes,
+            "marks": marks,
+            "funding": pd.DataFrame(1.0e-5, index=grid, columns=symbols),
+            "weights": weights,
+            "signals": decision_grid + pd.Timedelta(hours=1),
+        }
+
+    @pytest.mark.parametrize("bound", ["OHLCV_STRICT_PROXY", "OHLCV_IMMEDIATE_TAKER"])
+    def test_windowed_matches_single_panel(self, bound: str) -> None:
+        wl = self._workload()
+        grid = wl["grid"]
+        weights = wl["weights"]
+        signals = wl["signals"]
+        oracle = strategy_aware_execution_replay(
+            weights, signals, wl["highs"], wl["lows"], wl["closes"], wl["marks"],
+            wl["funding"], 1.0, bound, ExecutionSpec(),
+        )
+        windows = _partition_windows(
+            grid, weights, signals, wl["highs"], wl["lows"], wl["closes"],
+            wl["marks"], wl["funding"], ExecutionSpec(), n_windows=3,
+        )
+        windowed = replay_execution_windows(
+            windows, 1.0, bound, ExecutionSpec(), retain_event_snapshots=True,
+        )
+        _assert_replay_equivalent(oracle, windowed)
+
+    def test_three_windows_follow_strict_timeout_overlap(self) -> None:
+        wl = self._workload(days=45)
+        windows = _partition_windows(
+            wl["grid"], wl["weights"], wl["signals"], wl["highs"], wl["lows"],
+            wl["closes"], wl["marks"], wl["funding"], ExecutionSpec(), n_windows=3,
+        )
+        assert len(windows) == 3
+        for w in windows[1:]:
+            assert w.minute_grid[0] == w.window_start
+            assert w.window_start < w.target_weights.index[0]
+        assert windows[-1].minute_grid[-1] == wl["grid"][-1]
+
+    def test_data_gap_provenance_codes(self) -> None:
+        wl = self._workload()
+        windowed = replay_execution_windows(
+            _partition_windows(
+                wl["grid"], wl["weights"], wl["signals"], wl["highs"], wl["lows"],
+                wl["closes"], wl["marks"], wl["funding"], ExecutionSpec(), n_windows=2,
+            ),
+            1.0, "OHLCV_STRICT_PROXY", ExecutionSpec(),
+        )
+        codes = {g.code for g in windowed.data_gaps}
+        # The synthetic mark gap at bars 100-105 is held through by a fill,
+        # so the real held-mark/held-funding provenance must be attributed.
+        assert codes >= {"MISSING_HELD_MARK", "MISSING_HELD_FUNDING"}
+        for gap in windowed.data_gaps:
+            assert gap.symbol
+            assert gap.timestamp is not None
+            assert gap.execution_bound == "OHLCV_STRICT_PROXY"
+
+    def test_mark_gap_over_held_inventory_books_no_funding(self) -> None:
+        wl = self._workload()
+        wl["funding"].loc[:, :] = 0.0
+        wl["funding"].iloc[100:105, 3] = 1.0e-5
+        windowed = replay_execution_windows(
+            _partition_windows(
+                wl["grid"], wl["weights"], wl["signals"], wl["highs"], wl["lows"],
+                wl["closes"], wl["marks"], wl["funding"], ExecutionSpec(), n_windows=2,
+            ),
+            1.0, "OHLCV_STRICT_PROXY", ExecutionSpec(),
+        )
+        assert not windowed.ledger.primary_valid
+        codes = {g.code for g in windowed.data_gaps}
+        assert codes >= {"MISSING_HELD_MARK", "MISSING_HELD_FUNDING"}
+        oracle = simulated_inventory_ledger(
+            windowed.simulated_fills, wl["marks"], wl["funding"],
+            1.0, "OHLCV_STRICT_PROXY", "OHLCV_CLOSE_FALLBACK",
+        )
+        disputed = wl["grid"][100:105]
+        mine = windowed.ledger.funding_charge.loc[disputed]
+        ref = oracle.funding_charge.loc[disputed]
+        assert list(mine.index) == list(ref.index)
+        np.testing.assert_array_equal(mine.to_numpy(), ref.to_numpy())
+        assert (mine == 0.0).all()
+        held = windowed.simulated_fills.loc[
+            (windowed.simulated_fills["symbol"] == "SYM003USDT")
+            & (windowed.simulated_fills["timestamp"] < disputed[0]), "quantity_delta",
+        ].sum()
+        assert abs(held) >= 1.0e-12
+
+    def test_unknown_funding_over_held_inventory_flags_funding_only(self) -> None:
+        import dataclasses
+
+        wl = self._workload()
+        disputed = wl["grid"][100:105]
+        patched = []
+        for w in _partition_windows(
+            wl["grid"], wl["weights"], wl["signals"], wl["highs"], wl["lows"],
+            wl["closes"], wl["closes"], wl["funding"], ExecutionSpec(), n_windows=2,
+        ):
+            known = pd.DataFrame(True, index=w.minute_grid, columns=list(w.symbols))
+            hit = known.index.intersection(disputed)
+            known.loc[hit, "SYM003USDT"] = False
+            patched.append(dataclasses.replace(w, funding_known=known))
+        windowed = replay_execution_windows(patched, 1.0, "OHLCV_STRICT_PROXY", ExecutionSpec())
+        assert not windowed.ledger.primary_valid
+        codes = {g.code for g in windowed.data_gaps}
+        assert "MISSING_HELD_FUNDING" in codes
+        assert "MISSING_HELD_MARK" not in codes
+
+    def test_oracle_and_windowed_agree_on_gap_codes(self) -> None:
+        wl = self._workload()
+        windowed = replay_execution_windows(
+            _partition_windows(
+                wl["grid"], wl["weights"], wl["signals"], wl["highs"], wl["lows"],
+                wl["closes"], wl["marks"], wl["funding"], ExecutionSpec(), n_windows=2,
+            ),
+            1.0, "OHLCV_STRICT_PROXY", ExecutionSpec(),
+        )
+        oracle = simulated_inventory_ledger(
+            windowed.simulated_fills, wl["marks"], wl["funding"],
+            1.0, "OHLCV_STRICT_PROXY", "OHLCV_CLOSE_FALLBACK",
+        )
+        assert {g.code for g in windowed.data_gaps} == {g.code for g in oracle.data_gaps}
+        single_panel = strategy_aware_execution_replay(
+            wl["weights"], wl["signals"], wl["highs"], wl["lows"], wl["closes"],
+            wl["marks"], wl["funding"], 1.0, "OHLCV_STRICT_PROXY", ExecutionSpec(),
+        )
+        assert {g.code for g in windowed.data_gaps} == {g.code for g in single_panel.data_gaps}
+
+    def test_paired_fanout_matches_independent_bounds(self) -> None:
+        """MHS-MEM-PAIR-01: a single window stream fanned out into the
+        strict/stress pair equals the two legacy independent single-bound
+        calls, and each window is consumed exactly once."""
+        wl = self._workload()
+        windows = _partition_windows(
+            wl["grid"], wl["weights"], wl["signals"], wl["highs"], wl["lows"],
+            wl["closes"], wl["marks"], wl["funding"], ExecutionSpec(), n_windows=3,
+        )
+        strict_single = replay_execution_windows(
+            windows, 1.0, "OHLCV_STRICT_PROXY", ExecutionSpec(), retain_event_snapshots=True,
+        )
+        stress_single = replay_execution_windows(
+            windows, 1.0, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec(), retain_event_snapshots=True,
+        )
+        consumed = {"n": 0}
+
+        def _gen():
+            for w in windows:
+                consumed["n"] += 1
+                yield w
+
+        strict_pair, stress_pair = replay_execution_window_pair(
+            _gen(), 1.0, ExecutionSpec(), retain_event_snapshots=True,
+        )
+        assert consumed["n"] == len(windows)
+        _assert_pair_equivalent(strict_single, strict_pair, "strict")
+        _assert_pair_equivalent(stress_single, stress_pair, "stress")
+
+    def test_batch_fanout_matches_independent_bounds(self) -> None:
+        """SCENARIO_MHS_STREAM_BATCH_EQUIVALENCE: an N-bound interleaved batch
+        over a single window iterator equals N independent single-bound calls
+        and consumes each window exactly once."""
+        wl = self._workload()
+        windows = _partition_windows(
+            wl["grid"], wl["weights"], wl["signals"], wl["highs"], wl["lows"],
+            wl["closes"], wl["marks"], wl["funding"], ExecutionSpec(), n_windows=3,
+        )
+        spec = ExecutionSpec()
+        bounds = [
+            ("OHLCV_IMMEDIATE_TAKER", spec),
+            ("OHLCV_IMMEDIATE_TAKER", spec),
+            ("OHLCV_STRICT_PROXY", spec),
+        ]
+        independent = [
+            replay_execution_windows(windows, 1.0, b, s, retain_event_snapshots=True)
+            for (b, s) in bounds
+        ]
+        consumed = {"n": 0}
+
+        def _gen():
+            for w in windows:
+                consumed["n"] += 1
+                yield w
+
+        batch = replay_execution_window_batch(
+            _gen(), 1.0, bounds, retain_event_snapshots=True,
+        )
+        assert consumed["n"] == len(windows)
+        assert len(batch) == len(bounds)
+        for i, (indep, bres) in enumerate(zip(independent, batch, strict=True)):
+            _assert_pair_equivalent(indep, bres, f"batch[{i}]")
+
+    def test_batch_empty_bounds_fails_closed(self) -> None:
+        """SCENARIO_MHS_STREAM_BATCH_EMPTY_BOUNDS: an empty bounds iterable
+        raises ValueError before any window is consumed."""
+        wl = self._workload()
+        windows = _partition_windows(
+            wl["grid"], wl["weights"], wl["signals"], wl["highs"], wl["lows"],
+            wl["closes"], wl["marks"], wl["funding"], ExecutionSpec(), n_windows=2,
+        )
+        with pytest.raises(ValueError, match="bounds"):
+            replay_execution_window_batch(windows, 1.0, [])
+
+    def test_pair_strict_data_integrity_error_propagates(self) -> None:
+        """MHS-MEM-PAIR-01: a fatal strict DataIntegrityError propagates
+        unchanged; no stress result is fabricated."""
+        wl = self._workload()
+        windows = _partition_windows(
+            wl["grid"], wl["weights"], wl["signals"], wl["highs"], wl["lows"],
+            wl["closes"], wl["marks"], wl["funding"], ExecutionSpec(), n_windows=2,
+        )
+        windows[1] = dataclasses.replace(windows[1], bar_funding=windows[1].bar_funding * float("nan"))
+        with pytest.raises(DataIntegrityError, match="bar_funding must be finite"):
+            replay_execution_window_pair(windows, 1.0, ExecutionSpec())
+
+class TestColumnarFillAccumulator:
+    """Columnar fill refactor: ``_BoundExecutionReplayAccumulator`` stores fills field-wise.
+    The ``simulated_fills`` output must remain byte-for-byte identical to the legacy dict path.
+    """
+
+    FILL_COLUMNS = (
+        "timestamp", "symbol", "quantity_delta", "fill_price", "fee_bps",
+        "reason", "pre_trade_equity",
+    )
+
+    def _workload(self, days: int = 40, n_symbols: int = 8) -> dict[str, object]:
+        grid = pd.date_range("2021-01-01", periods=days * 24 * 12, freq="5min", tz="UTC")
+        symbols = [f"SYM{i:03d}USDT" for i in range(n_symbols)]
+        rng = np.random.default_rng(7)
+        closes = pd.DataFrame(
+            {s: 100.0 * np.exp(np.cumsum(rng.normal(0.0, 0.002, len(grid)))) for s in symbols},
+            index=grid,
+        )
+        decision_grid = pd.date_range("2021-01-01", periods=days * 4, freq="6h", tz="UTC")
+        weights = pd.DataFrame(0.0, index=decision_grid, columns=symbols)
+        rng_w = np.random.default_rng(8)
+        for ts in decision_grid:
+            active = rng_w.choice(symbols, size=4, replace=False)
+            weights.loc[ts, active] = rng_w.uniform(0.01, 0.06, 4)
+        return {
+            "grid": grid,
+            "symbols": symbols,
+            "highs": closes * 1.001,
+            "lows": closes * 0.999,
+            "closes": closes,
+            "marks": closes,
+            "funding": pd.DataFrame(1.0e-5, index=grid, columns=symbols),
+            "weights": weights,
+            "signals": decision_grid + pd.Timedelta(hours=1),
+        }
+
+    def _windowed(
+        self, wl: dict[str, object], bound: str = "OHLCV_STRICT_PROXY",
+    ):
+        return replay_execution_windows(
+            _partition_windows(
+                wl["grid"], wl["weights"], wl["signals"], wl["highs"], wl["lows"],
+                wl["closes"], wl["marks"], wl["funding"], ExecutionSpec(), n_windows=3,
+            ),
+            1.0, bound, ExecutionSpec(),
+        )
+
+    def test_bound_execution_replay_accumulator_columnar_fills_match_legacy_dict_output(self) -> None:
+        """R2 output-equivalence contract: the columnar ``simulated_fills`` must
+        be byte-for-byte identical (column order, dtypes, row values) to the
+        legacy dict-list DataFrame built from the same underlying fill data.
+        Driving ``_BoundExecutionReplayAccumulator`` directly exposes the raw
+        field lists so the legacy reference is reconstructed exactly as the
+        pre-refactor ``finalize`` did, including forced-exit fills."""
+        wl = self._workload()
+        windows = _partition_windows(
+            wl["grid"], wl["weights"], wl["signals"], wl["highs"], wl["lows"],
+            wl["closes"], wl["marks"], wl["funding"], ExecutionSpec(), n_windows=3,
+        )
+        acc = _BoundExecutionReplayAccumulator(
+            windows[0], 1.0, "OHLCV_STRICT_PROXY", ExecutionSpec(), False,
+        )
+        for w in windows:
+            acc.consume(w)
+        columnar_df = acc.finalize().simulated_fills
+        assert len(columnar_df) > 0
+        # Rebuild the legacy one-dict-per-fill DataFrame from the same lists.
+        legacy_records = [
+            {
+                "timestamp": acc.fill_ts[i],
+                "symbol": acc.fill_symbol[i],
+                "quantity_delta": acc.fill_qty[i],
+                "fill_price": acc.fill_price[i],
+                "fee_bps": acc.fill_fee_bps[i],
+                "reason": acc.fill_reason[i],
+                "pre_trade_equity": acc.fill_pre_trade_equity[i],
+            }
+            for i in range(len(acc.fill_ts))
+        ]
+        legacy_df = pd.DataFrame(legacy_records, columns=self.FILL_COLUMNS)
+        if legacy_df.empty:
+            legacy_df = legacy_df.astype(
+                {"quantity_delta": "float64", "fill_price": "float64", "fee_bps": "float64"}
+            )
+        pd.testing.assert_frame_equal(
+            columnar_df, legacy_df, check_dtype=True, check_exact=True,
+        )
+
+    def test_bound_execution_replay_accumulator_columnar_fills_dtype_and_column_order(self) -> None:
+        wl = self._workload()
+        fills = self._windowed(wl).simulated_fills
+        assert not fills.empty
+        assert list(fills.columns) == list(self.FILL_COLUMNS)
+        assert fills.dtypes["timestamp"] == pd.DatetimeTZDtype(tz="UTC", unit="ns")
+        for col in ("quantity_delta", "fill_price", "fee_bps", "pre_trade_equity"):
+            assert fills.dtypes[col] == np.dtype("float64"), col
+        for col in ("symbol", "reason"):
+            assert fills.dtypes[col] == pd.StringDtype(na_value=np.nan), col
+        # The empty case keeps the same column order and the numeric float64
+        # dtypes, so an empty table cannot be mistaken for missing output.
+        empty = replay_execution_windows(
+            _partition_windows(
+                wl["grid"], wl["weights"].mul(0.0), wl["signals"], wl["highs"],
+                wl["lows"], wl["closes"], wl["marks"], wl["funding"],
+                ExecutionSpec(), n_windows=2,
+            ),
+            1.0, "OHLCV_STRICT_PROXY", ExecutionSpec(),
+        ).simulated_fills
+        assert empty.empty
+        assert list(empty.columns) == list(self.FILL_COLUMNS)
+        assert empty.dtypes["quantity_delta"] == np.dtype("float64")
+        assert empty.dtypes["fill_price"] == np.dtype("float64")
+        assert empty.dtypes["fee_bps"] == np.dtype("float64")
+
+    def test_columnar_fill_accumulation_reduces_peak_rss_vs_dict_baseline(self) -> None:
+        """R2 memory claim: holding 10k+ fills as one dict per fill (legacy)
+        allocates more peak memory than the field-wise parallel lists (columnar).
+        ``tracemalloc`` measures the tracked allocation peak, the deterministic
+        structural driver of the RSS the spec targets; a synthetic replay is not
+        needed because the diff is purely the container representation."""
+        n = 10_000
+        rng = np.random.default_rng(11)
+        symbols = [f"SYM{i:04d}USDT" for i in range(64)]
+        times = pd.date_range("2021-01-01", periods=n, freq="1min", tz="UTC")
+        ts_list = [times[i] for i in range(n)]
+        syms = [symbols[i % len(symbols)] for i in range(n)]
+        qty = rng.uniform(0.001, 0.1, n).tolist()
+        price = rng.uniform(50.0, 150.0, n).tolist()
+        fee = rng.uniform(0.0, 10.0, n).tolist()
+        reasons = ["passive_fill" if i % 2 else "timeout_taker" for i in range(n)]
+        equity = rng.uniform(0.5, 1.5, n).tolist()
+
+        tracemalloc.start()
+        legacy_fills: list[dict[str, object]] = [
+            {
+                "timestamp": ts_list[i], "symbol": syms[i],
+                "quantity_delta": qty[i], "fill_price": price[i],
+                "fee_bps": fee[i], "reason": reasons[i],
+                "pre_trade_equity": equity[i],
+            }
+            for i in range(n)
+        ]
+        legacy_df = pd.DataFrame(legacy_fills)
+        legacy_peak = tracemalloc.get_traced_memory()[1]
+        tracemalloc.stop()
+
+        tracemalloc.start()
+        col_ts: list[pd.Timestamp] = []
+        col_sym: list[str] = []
+        col_qty: list[float] = []
+        col_price: list[float] = []
+        col_fee: list[float] = []
+        col_reason: list[str] = []
+        col_equity: list[float] = []
+        for i in range(n):
+            col_ts.append(ts_list[i])
+            col_sym.append(syms[i])
+            col_qty.append(qty[i])
+            col_price.append(price[i])
+            col_fee.append(fee[i])
+            col_reason.append(reasons[i])
+            col_equity.append(equity[i])
+        columnar_df = pd.DataFrame(
+            {
+                "timestamp": col_ts, "symbol": col_sym, "quantity_delta": col_qty,
+                "fill_price": col_price, "fee_bps": col_fee, "reason": col_reason,
+                "pre_trade_equity": col_equity,
+            }
+        )
+        columnar_peak = tracemalloc.get_traced_memory()[1]
+        tracemalloc.stop()
+
+        assert len(legacy_fills) >= 10_000
+        assert len(columnar_df) == len(legacy_df)
+        # The gap is structural (dict container + hash table per fill), not noise.
+        assert legacy_peak - columnar_peak > 256 * 1024
+        assert columnar_peak < legacy_peak
+
+class TestEventSnapshotOptIn:
+    """MHS-MEM-01/02: dense event snapshots are opt-in and bounded-memory by default."""
+
+    def _workload(self, days: int = 40, n_symbols: int = 8) -> dict[str, object]:
+        grid = pd.date_range("2021-01-01", periods=days * 24 * 12, freq="5min", tz="UTC")
+        symbols = [f"SYM{i:03d}USDT" for i in range(n_symbols)]
+        rng = np.random.default_rng(7)
+        closes = pd.DataFrame(
+            {s: 100.0 * np.exp(np.cumsum(rng.normal(0.0, 0.002, len(grid)))) for s in symbols},
+            index=grid,
+        )
+        marks = closes.copy()
+        marks.iloc[100:105, 3] = np.nan
+        decision_grid = pd.date_range("2021-01-01", periods=days * 4, freq="6h", tz="UTC")
+        weights = pd.DataFrame(0.0, index=decision_grid, columns=symbols)
+        rng_w = np.random.default_rng(8)
+        for ts in decision_grid:
+            active = rng_w.choice(symbols, size=4, replace=False)
+            weights.loc[ts, active] = rng_w.uniform(0.01, 0.06, 4)
+        return {
+            "grid": grid,
+            "symbols": symbols,
+            "highs": closes * 1.001,
+            "lows": closes * 0.999,
+            "closes": closes,
+            "marks": marks,
+            "funding": pd.DataFrame(1.0e-5, index=grid, columns=symbols),
+            "weights": weights,
+            "signals": decision_grid + pd.Timedelta(hours=1),
+        }
+
+    @pytest.mark.parametrize("bound", ["OHLCV_STRICT_PROXY", "OHLCV_IMMEDIATE_TAKER"])
+    def test_snapshot_disabled_equals_enabled(self, bound: str) -> None:
+        wl = self._workload()
+        windows = _partition_windows(
+            wl["grid"], wl["weights"], wl["signals"], wl["highs"], wl["lows"],
+            wl["closes"], wl["marks"], wl["funding"], ExecutionSpec(), n_windows=3,
+        )
+        enabled = replay_execution_windows(
+            windows, 1.0, bound, ExecutionSpec(), retain_event_snapshots=True,
+        )
+        disabled = replay_execution_windows(
+            windows, 1.0, bound, ExecutionSpec(),
+        )
+        assert disabled.event_snapshots_retained is False
+        assert enabled.event_snapshots_retained is True
+        assert len(disabled.simulated_units) == 0
+        assert len(disabled.simulated_notional_weights) == 0
+        assert len(enabled.simulated_units) > 0
+        _assert_full_equivalence(enabled, disabled)
+
+    def test_wide_fill_disabled_retains_zero_dense_rows(self) -> None:
+        wl = self._workload(days=60, n_symbols=32)
+        windows = _partition_windows(
+            wl["grid"], wl["weights"], wl["signals"], wl["highs"], wl["lows"],
+            wl["closes"], wl["marks"], wl["funding"], ExecutionSpec(), n_windows=4,
+        )
+        disabled = replay_execution_windows(
+            windows, 1.0, "OHLCV_STRICT_PROXY", ExecutionSpec(),
+        )
+        assert disabled.fill_count > 0
+        assert len(disabled.simulated_fills) > 0
+        assert disabled.event_snapshots_retained is False
+        assert disabled.simulated_units.empty
+        assert disabled.simulated_notional_weights.empty
+        assert list(disabled.simulated_units.columns) == list(wl["symbols"])
+
+class TestPegChaseAnchorMode:
+    """SCENARIO_MHS_PEG_CHASE_05_ANCHOR_MODE_SWITCH_IS_CAUSAL: decision_anchor
+    switches the sizing/peg anchor from the decision-bar mark to the causally
+    observable submit-bar close (bar spos-1), leaving the default mode
+    byte-identical."""
+
+    def _replay(self, spec: ExecutionSpec):
+        grid = pd.date_range("2021-01-01 12:00", periods=40, freq="5min", tz="UTC")
+        closes = pd.DataFrame({"A": [101.0] * len(grid)}, index=grid)
+        closes.iloc[0, 0] = 100.0  # decision-bar mark at dpos=0 (12:00)
+        # bar spos-1 == grid[12] (13:00) carries the submit-bar anchor close 101.0
+        marks = closes.copy()
+        highs = closes + 0.05
+        lows = closes - 0.05
+        funding = pd.DataFrame(0.0, index=grid, columns=["A"])
+        target = pd.DataFrame(
+            {"A": [0.01]}, index=pd.DatetimeIndex([pd.Timestamp("2021-01-01 12:00", tz="UTC")])
+        )
+        signal_at = pd.DatetimeIndex([pd.Timestamp("2021-01-01 13:00", tz="UTC")])
+        windows = _partition_windows(
+            grid, target, signal_at, highs, lows, closes, marks, funding, ExecutionSpec(), n_windows=1,
+        )
+        return replay_execution_windows(windows, 1.0, "OHLCV_IMMEDIATE_TAKER", spec)
+
+    def test_SCENARIO_MHS_PEG_CHASE_05_ANCHOR_MODE_SWITCH_IS_CAUSAL(self) -> None:
+        """SCENARIO_MHS_PEG_CHASE_05_ANCHOR_MODE_SWITCH_IS_CAUSAL."""
+        decision_mode = self._replay(ExecutionSpec())
+        submit_mode = self._replay(ExecutionSpec(decision_anchor="submit_bar"))
+        qty_decision = float(decision_mode.simulated_fills["quantity_delta"].iloc[0])
+        qty_submit = float(submit_mode.simulated_fills["quantity_delta"].iloc[0])
+        assert qty_decision == pytest.approx(0.01 * 1.0 / 100.0, rel=1e-12)
+        assert qty_submit == pytest.approx(0.01 * 1.0 / 101.0, rel=1e-12)
+        assert submit_mode.residual_count == 0
+
+
+class TestFairnessInstrumentation:
+    """SCENARIO_MHS_FAIR_04..06: causal spread EWMA, cost decomposition
+    identity, and ledger-neutral min-notional probe."""
+
+    def _workload(self, days: int = 10, n_symbols: int = 4) -> dict[str, object]:
+        grid = pd.date_range("2021-01-01", periods=days * 24 * 12, freq="5min", tz="UTC")
+        symbols = [f"SYM{i:03d}USDT" for i in range(n_symbols)]
+        rng = np.random.default_rng(7)
+        closes = pd.DataFrame(
+            {s: 100.0 * np.exp(np.cumsum(rng.normal(0.0, 0.002, len(grid)))) for s in symbols},
+            index=grid,
+        )
+        decision_grid = pd.date_range("2021-01-01", periods=days * 4, freq="6h", tz="UTC")
+        weights = pd.DataFrame(0.0, index=decision_grid, columns=symbols)
+        rng_w = np.random.default_rng(8)
+        for ts in decision_grid:
+            active = rng_w.choice(symbols, size=2, replace=False)
+            weights.loc[ts, active] = rng_w.uniform(0.02, 0.06, 2)
+        return {
+            "grid": grid,
+            "symbols": symbols,
+            # Wide high-low bands give the CS estimator a strongly non-flat input.
+            "highs": closes * 1.005,
+            "lows": closes * 0.995,
+            "closes": closes,
+            "marks": closes,
+            "funding": pd.DataFrame(0.0, index=grid, columns=symbols),
+            "weights": weights,
+            "signals": decision_grid + pd.Timedelta(hours=1),
+        }
+
+    def test_SCENARIO_MHS_FAIR_04_SPREAD_EWMA_IS_CAUSAL(self) -> None:
+        """SCENARIO_MHS_FAIR_04_SPREAD_EWMA_IS_CAUSAL: the first window prices
+        its taker fills at the frozen slippage (EWMA still nan), later windows
+        price at the EWMA built from strictly prior windows, and the ordering
+        is load-bearing -- window 1's own wide bars would have changed its own
+        fees had the update run ahead of the fills."""
+        wl = self._workload()
+        windows = _partition_windows(
+            wl["grid"], wl["weights"], wl["signals"], wl["highs"], wl["lows"],
+            wl["closes"], wl["marks"], wl["funding"], ExecutionSpec(), n_windows=2,
+        )
+        spec = dataclasses.replace(ExecutionSpec(), liquidity_cost_model="corwin_schultz")
+        acc = _BoundExecutionReplayAccumulator(windows[0], 1.0, "OHLCV_IMMEDIATE_TAKER", spec, False)
+        assert np.isnan(acc.half_spread_bps).all()
+        acc.consume(windows[0])
+        first_fees = list(acc.fill_fee_bps)
+        assert first_fees
+        assert all(f == spec.taker_fee_bps + spec.taker_slippage_bps for f in first_fees)
+        est_after_first = acc.half_spread_bps.copy()
+        assert np.isfinite(est_after_first).all()
+        # Load-bearing ordering: window 1's own estimate differs from the flat
+        # slippage it was actually charged.
+        assert np.all(est_after_first != spec.taker_slippage_bps)
+        est_snapshot = est_after_first.copy()
+        acc.consume(windows[1])
+        gcol_of = {s: i for i, s in enumerate(acc.columns)}
+        later_fees = acc.fill_fee_bps[len(first_fees):]
+        later_syms = acc.fill_symbol[len(first_fees):]
+        assert later_fees
+        for fee, sym in zip(later_fees, later_syms, strict=True):
+            assert fee == pytest.approx(spec.taker_fee_bps + est_snapshot[gcol_of[sym]])
+
+    def test_SCENARIO_MHS_FAIR_05_COST_DECOMPOSITION_SUMS(self) -> None:
+        """SCENARIO_MHS_FAIR_05_COST_DECOMPOSITION_SUMS: fee+spread+delay
+        reconstructs the notional-weighted shortfall within 1e-9 under both
+        cost models; 'flat' books zero spread."""
+        wl = self._workload()
+        for spec in (
+            ExecutionSpec(),
+            dataclasses.replace(ExecutionSpec(), liquidity_cost_model="corwin_schultz"),
+        ):
+            report = replay_execution_windows(
+                _partition_windows(
+                    wl["grid"], wl["weights"], wl["signals"], wl["highs"], wl["lows"],
+                    wl["closes"], wl["marks"], wl["funding"], ExecutionSpec(), n_windows=3,
+                ),
+                1.0, "OHLCV_IMMEDIATE_TAKER", spec,
+            )
+            assert len(report.simulated_fills) > 0
+            total = (
+                report.notional_weighted_fee_bps
+                + report.notional_weighted_spread_bps
+                + report.notional_weighted_delay_bps
+            )
+            assert abs(total - report.notional_weighted_shortfall_bps) < 1e-9
+
+        flat = replay_execution_windows(
+            _partition_windows(
+                wl["grid"], wl["weights"], wl["signals"], wl["highs"], wl["lows"],
+                wl["closes"], wl["marks"], wl["funding"], ExecutionSpec(), n_windows=3,
+            ),
+            1.0, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec(),
+        )
+        assert flat.notional_weighted_spread_bps == 0.0
+
+    def test_SCENARIO_MHS_FAIR_06_MIN_NOTIONAL_PROBE_IS_LEDGER_NEUTRAL(self) -> None:
+        """SCENARIO_MHS_FAIR_06_MIN_NOTIONAL_PROBE_IS_LEDGER_NEUTRAL: enabling
+        the probe leaves equity, fills, and cash bit-identical and only
+        populates min_notional_dropped_fraction."""
+        wl = self._workload()
+
+        def _run(spec: ExecutionSpec) -> object:
+            return replay_execution_windows(
+                _partition_windows(
+                    wl["grid"], wl["weights"], wl["signals"], wl["highs"], wl["lows"],
+                    wl["closes"], wl["marks"], wl["funding"], ExecutionSpec(), n_windows=2,
+                ),
+                1.0, "OHLCV_IMMEDIATE_TAKER", spec,
+            )
+
+        disabled = _run(ExecutionSpec())
+        enabled = _run(dataclasses.replace(ExecutionSpec(), min_notional_probe_usdt=5.0))
+        np.testing.assert_array_equal(
+            enabled.ledger.equity.to_numpy(), disabled.ledger.equity.to_numpy(),
+        )
+        np.testing.assert_array_equal(
+            enabled.ledger.fee_charge.to_numpy(), disabled.ledger.fee_charge.to_numpy(),
+        )
+        pd.testing.assert_frame_equal(enabled.simulated_fills, disabled.simulated_fills)
+        assert math.isnan(disabled.min_notional_dropped_fraction)
+        assert 0.0 <= enabled.min_notional_dropped_fraction <= 1.0
+
+
+class TestStrictProxyCostModelSharing:
+    """S8: the OHLCV_STRICT_PROXY timeout backstop shares the liquidity-aware
+    taker cost model with IMMEDIATE/PEG bounds instead of a legacy flat path."""
+
+    def _timeout_workload(self, days: int = 12, n_symbols: int = 4) -> dict[str, object]:
+        """Flat OHLCV exactly at the mark: strict trade-through requires a
+        strict inequality, so NO intent -- buy or rebalance-sell -- ever
+        crosses and every single one completes via the timeout backstop."""
+        grid = pd.date_range("2021-01-01", periods=days * 24 * 12, freq="5min", tz="UTC")
+        symbols = [f"SYM{i:03d}USDT" for i in range(n_symbols)]
+        frame = pd.DataFrame(100.0, index=grid, columns=symbols)
+        decision_grid = pd.date_range("2021-01-01", periods=days * 4, freq="6h", tz="UTC")
+        # 교대 가중치: 매 결정마다 절반은 신규 매수, 절반은 전량 청산 매도가
+        # 되어 순량이 항상 1e-12 스킵 문턱 위로 유지된다(전부 타임아웃).
+        data = np.zeros((len(decision_grid), n_symbols))
+        data[::2, : n_symbols // 2] = 0.01
+        data[1::2, n_symbols // 2 :] = 0.01
+        weights = pd.DataFrame(data, index=decision_grid, columns=symbols)
+        return {
+            "grid": grid,
+            "symbols": symbols,
+            "highs": frame.copy(),
+            "lows": frame.copy(),
+            "closes": frame.copy(),
+            "marks": frame.copy(),
+            "funding": pd.DataFrame(0.0, index=grid, columns=symbols),
+            "weights": weights,
+            "signals": decision_grid + pd.Timedelta(hours=1),
+        }
+
+    def _windows(self, wl: dict[str, object], n_windows: int = 3):
+        return _partition_windows(
+            wl["grid"], wl["weights"], wl["signals"], wl["highs"], wl["lows"],
+            wl["closes"], wl["marks"], wl["funding"], ExecutionSpec(), n_windows=n_windows,
+        )
+
+    def test_SCENARIO_MHS_EVID_05_STRICT_PROXY_SHARES_ONE_COST_MODEL(self) -> None:
+        """SCENARIO_MHS_EVID_05_STRICT_PROXY_SHARES_ONE_COST_MODEL: with
+        liquidity_cost_model='corwin_schultz', an all-timeout STRICT_PROXY run
+        prices its backstop at taker_fee + the column's EWMA half-spread (never
+        taker_fee + flat slippage), and the notional-weighted shortfall departs
+        from the 'flat' run by more than 1e-9.
+
+        SCENARIO_MHS_FORCED_EXIT_COST_MODEL_STRICT_PROXY_SHARING_STILL_PASSES:
+        this timeout_taker branch is untouched by the finalize() forced_exit
+        alignment and must keep passing completely unchanged."""
+        wl = self._timeout_workload()
+        windows = self._windows(wl)
+        cs_spec = dataclasses.replace(ExecutionSpec(), liquidity_cost_model="corwin_schultz")
+
+        acc = _BoundExecutionReplayAccumulator(windows[0], 1.0, "OHLCV_STRICT_PROXY", cs_spec, False)
+        assert np.isnan(acc.half_spread_bps).all()
+        acc.consume(windows[0])
+        n_first = len(acc.fill_reason)
+        first_fees = [
+            fee
+            for fee, reason in zip(acc.fill_fee_bps, acc.fill_reason, strict=True)
+            if reason == "timeout_taker"
+        ]
+        assert first_fees
+        # 첫 윈도우는 EWMA가 아직 nan이라 flat slippage로 폴백한다.
+        assert all(f == cs_spec.taker_fee_bps + cs_spec.taker_slippage_bps for f in first_fees)
+        est_snapshot = acc.half_spread_bps.copy()
+        assert np.isfinite(est_snapshot).all()
+        gcol_of = {s: i for i, s in enumerate(acc.columns)}
+        for window in windows[1:]:
+            acc.consume(window)
+        later = [
+            (fee, sym)
+            for fee, sym, reason in zip(
+                acc.fill_fee_bps[n_first:],
+                acc.fill_symbol[n_first:],
+                acc.fill_reason[n_first:],
+                strict=True,
+            )
+            if reason == "timeout_taker"
+        ]
+        assert later
+        for fee, sym in later:
+            # EWMA half-spread가 slippage를 대체한다(flat 고정비 아님).
+            assert fee == pytest.approx(cs_spec.taker_fee_bps + est_snapshot[gcol_of[sym]])
+            assert fee != cs_spec.taker_fee_bps + cs_spec.taker_slippage_bps
+
+        flat_report = replay_execution_windows(
+            self._windows(wl), 1.0, "OHLCV_STRICT_PROXY", ExecutionSpec(),
+        )
+        cs_report = replay_execution_windows(
+            self._windows(wl), 1.0, "OHLCV_STRICT_PROXY", cs_spec,
+        )
+        reasons = set(flat_report.simulated_fills["reason"])
+        assert "passive_fill" not in reasons  # 전부 타임아웃 백스톱으로 완결
+        assert len(flat_report.simulated_fills) > 0
+        assert abs(
+            cs_report.notional_weighted_shortfall_bps
+            - flat_report.notional_weighted_shortfall_bps
+        ) > 1e-9
+
+
+class TestForcedExitCostModelSharing:
+    """S8 연장: finalize()의 forced_exit 백스톱도 timeout_taker와 동일한
+    liquidity-aware taker cost model을 공유한다 -- flat 상수 하드코딩 금지."""
+
+    def _stale_position_workload(self) -> dict[str, object]:
+        """심볼 A의 OHLC가 그리드 중간에 영구 종료하고 포지션이 남는 워크로드.
+
+        데이터 종료 지점 전 high/low 밴드에 교대 폭 변동을 주어 CS 추정치가
+        유한하고 flat slippage와 명확히 달라지게 만든다."""
+        grid = pd.date_range("2021-01-01", periods=180, freq="5min", tz="UTC")
+        closes = pd.DataFrame(100.0, index=grid, columns=["A"])
+        closes.iloc[120:, 0] = np.nan
+        band = np.where(np.arange(len(grid)) % 2 == 0, 1.006, 1.004)
+        highs = closes.mul(band, axis=0)
+        lows = closes.div(band, axis=0)
+        weights = pd.DataFrame({"A": [1.0]}, index=[grid[0]])
+        return {
+            "grid": grid,
+            "highs": highs,
+            "lows": lows,
+            "closes": closes,
+            "marks": closes.copy(),
+            "funding": pd.DataFrame(0.0, index=grid, columns=["A"]),
+            "weights": weights,
+            "signals": pd.DatetimeIndex([grid[0]]),
+        }
+
+    def test_SCENARIO_MHS_FORCED_EXIT_COST_MODEL_CORWIN_SCHULTZ_CONSISTENCY(self) -> None:
+        """SCENARIO_MHS_FORCED_EXIT_COST_MODEL_CORWIN_SCHULTZ_CONSISTENCY:
+        corwin_schultz에서 half-spread 추정치는 taker crossing cost에
+        반영되고, 데이터 종료 시점의 보유 포지션은 강제 청산 없이
+        unresolved 터미널 증거로 공시된다
+        (INV-NO-FABRICATED-TERMINAL-FILL)."""
+        wl = self._stale_position_workload()
+        cs_spec = dataclasses.replace(ExecutionSpec(), liquidity_cost_model="corwin_schultz")
+        windows = _partition_windows(
+            wl["grid"], wl["weights"], wl["signals"], wl["highs"], wl["lows"],
+            wl["closes"], wl["marks"], wl["funding"], ExecutionSpec(), n_windows=1,
+        )
+        acc = _BoundExecutionReplayAccumulator(windows[0], 1.0, "OHLCV_STRICT_PROXY", cs_spec, False)
+        assert np.isnan(acc.half_spread_bps).all()
+        acc.consume(windows[0])
+        # 진입은 trade-through로 즉시 체결되고 포지션은 데이터 종료까지 생존한다.
+        assert "passive_fill" in acc.fill_reason
+        gcol = {s: i for i, s in enumerate(acc.columns)}["A"]
+        est = float(acc.half_spread_bps[gcol])
+        assert np.isfinite(est)
+        assert abs(est - cs_spec.taker_slippage_bps) > 1e-9
+
+        result = acc.finalize()
+        assert result.termination_counts["UNKNOWN_TERMINATION"] == 0
+        assert result.forced_exit_count == 0
+        assert result.forced_exit_notional == 0.0
+        assert "forced_exit" not in result.simulated_fills["reason"].tolist()
+        assert not result.ledger.primary_valid
+        assert any(g.code == "MISSING_HELD_MARK" for g in result.ledger.data_gaps)
+        assert [p.status for p in result.terminal_positions] == ["unresolved"]
+
+
+class TestFrozenMhsWindowContinuity:
+    """Frozen 3m close-fallback continuity across physical window boundaries."""
+
+    SYM = "AAAUSDT"
+
+    def _frames(self, grid: pd.DatetimeIndex, closes: pd.DataFrame) -> dict[str, object]:
+        px = closes.copy()
+        return {
+            "highs": px.copy(),
+            "lows": px.copy(),
+            "funding": pd.DataFrame(0.0, index=grid, columns=[self.SYM]),
+            "quote_volumes": pd.DataFrame(1000.0, index=grid, columns=[self.SYM]),
+            "funding_known": pd.DataFrame(True, index=grid, columns=[self.SYM]),
+            "bar_available_at": grid + pd.Timedelta(minutes=3),
+        }
+
+    def _window(
+        self,
+        grid: pd.DatetimeIndex,
+        closes: pd.DataFrame,
+        weights: pd.DataFrame,
+        signals: pd.DatetimeIndex,
+        *,
+        funding_known: pd.DataFrame | None = None,
+        funding: pd.DataFrame | None = None,
+    ) -> object:
+        fr = self._frames(grid, closes)
+        return ExecutionReplayWindow(
+            window_start=grid[0],
+            window_end=grid[-1] + pd.Timedelta(minutes=3),
+            columns=(self.SYM,),
+            symbols=(self.SYM,),
+            minute_grid=grid,
+            highs=fr["highs"],  # type: ignore[arg-type]
+            lows=fr["lows"],  # type: ignore[arg-type]
+            closes=closes,
+            marks=None,
+            bar_funding=funding if funding is not None else fr["funding"],  # type: ignore[arg-type]
+            target_weights=weights,
+            signal_available_at=signals,
+            quote_volumes=fr["quote_volumes"],  # type: ignore[arg-type]
+            funding_known=funding_known if funding_known is not None else fr["funding_known"],  # type: ignore[arg-type]
+            bar_available_at=fr["bar_available_at"],  # type: ignore[arg-type]
+        )
+
+    def _split_workload(self) -> dict[str, object]:
+        grid = pd.date_range("2021-01-01", periods=12, freq="3min", tz="UTC")
+        vals = 100.0 + 0.5 * np.arange(len(grid))
+        closes = pd.DataFrame({self.SYM: vals}, index=grid)
+        weights = pd.DataFrame({self.SYM: [0.5]}, index=pd.DatetimeIndex([grid[0]]))
+        signals = pd.DatetimeIndex([grid[0]])
+        g1, g2 = grid[:6], grid[6:]
+        w1 = self._window(g1, closes.loc[g1], weights, signals)
+        empty_w = pd.DataFrame({self.SYM: []}, index=pd.DatetimeIndex([], tz="UTC"), dtype="float64")
+        w2 = self._window(g2, closes.loc[g2], empty_w, pd.DatetimeIndex([], tz="UTC"))
+        full = self._window(grid, closes, weights, signals)
+        return {"grid": grid, "closes": closes, "w1": w1, "w2": w2, "full": full, "g2": g2}
+
+    def test_held_close_continuity_matches_unsplit_replay(self) -> None:
+        wl = self._split_workload()
+        spec = ExecutionSpec()
+        split = replay_execution_windows([wl["w1"], wl["w2"]], 1000.0, "OHLCV_IMMEDIATE_TAKER", spec)
+        single = replay_execution_windows([wl["full"]], 1000.0, "OHLCV_IMMEDIATE_TAKER", spec)
+        assert split.mark_source == "OHLCV_CLOSE_FALLBACK"
+        assert split.ledger.primary_valid
+        assert single.ledger.primary_valid
+        for field in ("equity", "mark_to_market_pnl", "funding_charge", "fee_charge", "fill_turnover"):
+            np.testing.assert_allclose(
+                getattr(split.ledger, field).to_numpy(),
+                getattr(single.ledger, field).to_numpy(),
+                rtol=1e-12, atol=1e-12,
+            )
+        assert len(split.simulated_fills) == len(single.simulated_fills)
+        assert [p.status for p in split.terminal_positions] == [p.status for p in single.terminal_positions]
+
+    def test_boundary_mtm_applies_single_carried_transition(self) -> None:
+        wl = self._split_workload()
+        result = replay_execution_windows(
+            [wl["w1"], wl["w2"]], 1000.0, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec()
+        )
+        units = float(result.simulated_fills["quantity_delta"].sum())
+        assert abs(units) > 0
+        grid = wl["grid"]
+        closes = wl["closes"]
+        expected = units * (float(closes.loc[grid[6], self.SYM]) - float(closes.loc[grid[5], self.SYM]))
+        mtm = result.ledger.mark_to_market_pnl
+        assert float(mtm.loc[grid[6]]) == expected
+        single = replay_execution_windows(
+            [wl["full"]], 1000.0, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec()
+        )
+        np.testing.assert_allclose(
+            result.ledger.mark_to_market_pnl.to_numpy(),
+            single.ledger.mark_to_market_pnl.to_numpy(),
+            rtol=1e-12, atol=1e-12,
+        )
+
+    def test_boundary_does_not_emit_missing_held_mark(self) -> None:
+        wl = self._split_workload()
+        result = replay_execution_windows(
+            [wl["w1"], wl["w2"]], 1000.0, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec()
+        )
+        held_gaps = [g for g in result.ledger.data_gaps if g.code == "MISSING_HELD_MARK"]
+        assert held_gaps == []
+        assert result.ledger.primary_valid
+
+    def test_missing_current_close_fails_closed(self) -> None:
+        wl = self._split_workload()
+        g2 = wl["g2"]
+        bad = wl["closes"].loc[g2].copy()
+        bad.iloc[0, 0] = np.nan
+        empty_w = pd.DataFrame({self.SYM: []}, index=pd.DatetimeIndex([], tz="UTC"), dtype="float64")
+        w2 = self._window(g2, bad, empty_w, pd.DatetimeIndex([], tz="UTC"))
+        result = replay_execution_windows(
+            [wl["w1"], w2], 1000.0, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec()
+        )
+        assert not result.ledger.primary_valid
+        held_gaps = [g for g in result.ledger.data_gaps if g.code == "MISSING_HELD_MARK"]
+        assert len(held_gaps) == 1
+        assert held_gaps[0].symbol == self.SYM
+        assert held_gaps[0].timestamp == g2[0]
+
+    def test_missing_carried_mark_fails_closed(self) -> None:
+        grid = pd.date_range("2021-01-01", periods=12, freq="3min", tz="UTC")
+        g1, g2 = grid[:6], grid[6:]
+        nan_closes = pd.DataFrame({self.SYM: np.nan}, index=g1)
+        empty_w = pd.DataFrame({self.SYM: []}, index=pd.DatetimeIndex([], tz="UTC"), dtype="float64")
+        w1 = self._window(g1, nan_closes, empty_w, pd.DatetimeIndex([], tz="UTC"))
+        vals = 100.0 + 0.5 * np.arange(len(grid))
+        closes2 = pd.DataFrame({self.SYM: vals[6:]}, index=g2)
+        w2 = self._window(g2, closes2, empty_w, pd.DatetimeIndex([], tz="UTC"))
+        acc = _BoundExecutionReplayAccumulator(w1, 1000.0, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec(), False)
+        acc.consume(w1)
+        acc.units_arr[0] = 0.1
+        acc.ledger_units[0] = 0.1
+        acc.accounting_state.units[0] = 0.1
+        acc.consume(w2)
+        result = acc.finalize()
+        assert not result.ledger.primary_valid
+        held_gaps = [g for g in result.ledger.data_gaps if g.code == "MISSING_HELD_MARK"]
+        assert len(held_gaps) == 1
+        assert held_gaps[0].timestamp == g2[0]
+
+    def test_flat_symbol_tolerates_unavailable_boundary_mark(self) -> None:
+        grid = pd.date_range("2021-01-01", periods=12, freq="3min", tz="UTC")
+        g1, g2 = grid[:6], grid[6:]
+        vals = 100.0 + 0.5 * np.arange(len(grid))
+        closes = pd.DataFrame({self.SYM: vals}, index=grid)
+        empty_w = pd.DataFrame({self.SYM: []}, index=pd.DatetimeIndex([], tz="UTC"), dtype="float64")
+        w1 = self._window(g1, closes.loc[g1], empty_w, pd.DatetimeIndex([], tz="UTC"))
+        bad = closes.loc[g2].copy()
+        bad.iloc[0, 0] = np.nan
+        bad.iloc[-1, 0] = np.nan
+        w2 = self._window(g2, bad, empty_w, pd.DatetimeIndex([], tz="UTC"))
+        result = replay_execution_windows([w1, w2], 1000.0, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec())
+        assert result.ledger.primary_valid
+        assert [g for g in result.ledger.data_gaps if g.code == "MISSING_HELD_MARK"] == []
+
+    def test_funding_gap_independent_of_mark_continuity(self) -> None:
+        wl = self._split_workload()
+        g2 = wl["g2"]
+        grid = wl["grid"]
+        funding_full = pd.DataFrame(1.0e-5, index=grid, columns=[self.SYM])
+        known_full = pd.DataFrame(True, index=grid, columns=[self.SYM])
+        known_full.loc[g2[0], self.SYM] = False
+        g1 = grid[:6]
+        w1 = self._window(
+            g1, wl["closes"].loc[g1], pd.DataFrame({self.SYM: [0.5]}, index=pd.DatetimeIndex([grid[0]])),
+            pd.DatetimeIndex([grid[0]]),
+            funding_known=known_full.loc[g1], funding=funding_full.loc[g1],
+        )
+        empty_w = pd.DataFrame({self.SYM: []}, index=pd.DatetimeIndex([], tz="UTC"), dtype="float64")
+        w2 = self._window(
+            g2, wl["closes"].loc[g2], empty_w, pd.DatetimeIndex([], tz="UTC"),
+            funding_known=known_full.loc[g2], funding=funding_full.loc[g2],
+        )
+        result = replay_execution_windows([w1, w2], 1000.0, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec())
+        assert not result.ledger.primary_valid
+        funding_gaps = [g for g in result.ledger.data_gaps if g.code == "MISSING_HELD_FUNDING"]
+        assert funding_gaps
+        assert funding_gaps[0].timestamp == g2[0]
+        assert [g for g in result.ledger.data_gaps if g.code == "MISSING_HELD_MARK"] == []
+
+    def test_paired_bounds_share_gap_provenance(self) -> None:
+        grid = pd.date_range("2021-01-01", periods=12, freq="3min", tz="UTC")
+        vals = np.array([100.0, 99.0, 100.0, 101.0, 102.0, 103.0, 104.0, 105.0, 106.0, 107.0, 108.0, 109.0])
+        closes = pd.DataFrame({self.SYM: vals}, index=grid)
+        g1, g2 = grid[:6], grid[6:]
+        weights = pd.DataFrame({self.SYM: [0.5]}, index=pd.DatetimeIndex([grid[0]]))
+        signals = pd.DatetimeIndex([grid[0]])
+        w1 = self._window(g1, closes.loc[g1], weights, signals)
+        bad = closes.loc[g2].copy()
+        bad.iloc[0, 0] = np.nan
+        empty_w = pd.DataFrame({self.SYM: []}, index=pd.DatetimeIndex([], tz="UTC"), dtype="float64")
+        w2 = self._window(g2, bad, empty_w, pd.DatetimeIndex([], tz="UTC"))
+        spec = ExecutionSpec()
+        pair = replay_execution_window_batch(
+            [w1, w2], 1000.0,
+            [("OHLCV_STRICT_PROXY", spec), ("OHLCV_IMMEDIATE_TAKER", spec)],
+        )
+        base, stress = pair
+        assert base is not None
+        assert stress is not None
+        assert not base.ledger.primary_valid
+        assert not stress.ledger.primary_valid
+        base_marks = [(g.timestamp, g.symbol) for g in base.ledger.data_gaps if g.code == "MISSING_HELD_MARK"]
+        stress_marks = [(g.timestamp, g.symbol) for g in stress.ledger.data_gaps if g.code == "MISSING_HELD_MARK"]
+        assert base_marks == stress_marks == [(g2[0], self.SYM)]
+        assert base.fill_source != stress.fill_source
+
+
+def _blocked_gap(code: str) -> ExecutionDataGap:
+    ts = pd.Timestamp("2025-01-01T00:03:00Z")
+    return ExecutionDataGap(
+        code=code, symbol="BTCUSDT", timestamp=ts,
+        decision_time=ts, signal_time=ts, execution_bound="OHLCV_IMMEDIATE_TAKER",
+    )
+
+
+def _blocked_acc() -> _BoundExecutionReplayAccumulator:
+    grid = pd.date_range("2025-01-01", periods=4, freq="3min", tz="UTC")
+    px = pd.DataFrame({"BTCUSDT": 100.0}, index=grid)
+    w = ExecutionReplayWindow(
+        grid[0], grid[-1], ("BTCUSDT",), ("BTCUSDT",), grid, px, px, px, px, px * 0.0,
+        pd.DataFrame({"BTCUSDT": [1.0]}, index=[grid[0]]), pd.DatetimeIndex([grid[0]]),
+        quote_volumes=px * 0.0 + 1.0, funding_known=px.notna(),
+        bar_available_at=grid + pd.Timedelta(minutes=3),
+    )
+    return _BoundExecutionReplayAccumulator(w, 1000.0, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec(), False)
+
+
+class TestBlockedExitFunding:
+    """펀딩 unknown 차단의 진입/청산 비대칭: 진입은 재시도, 청산은 갭 기록과 원장 무효."""
+
+    def test_block_fill_entry_blocked_by_unknown_funding_stays_valid(self) -> None:
+        acc = _blocked_acc()
+        assert acc._block_fill(_blocked_gap("MISSING_ACTIVE_FUNDING"), prior_units=0.0, net_units=10.0) is True
+        assert acc.data_gaps == []
+        assert acc.ledger_valid
+        assert acc.unfilled_count == 1
+        assert acc.termination_counts["NO_FUNDING_UNFILLED"] == 1
+        assert acc.termination_counts.get("BLOCKED_EXIT_UNKNOWN_FUNDING", 0) == 0
+
+    def test_block_fill_exit_blocked_by_unknown_funding_records_gap(self) -> None:
+        acc = _blocked_acc()
+        gap = _blocked_gap("MISSING_ACTIVE_FUNDING")
+        assert acc._block_fill(gap, prior_units=100.0, net_units=-100.0) is True
+        assert len(acc.data_gaps) == 1
+        recorded = acc.data_gaps[0]
+        assert recorded.code == "BLOCKED_EXIT_UNKNOWN_FUNDING"
+        assert recorded.symbol == gap.symbol
+        assert recorded.timestamp == gap.timestamp
+        assert not acc.ledger_valid
+        assert "MISSING_DATA" in acc.invalid_reasons
+        assert acc.unfilled_count == 1
+        assert acc.termination_counts["BLOCKED_EXIT_UNKNOWN_FUNDING"] == 1
+        assert acc.termination_counts.get("NO_FUNDING_UNFILLED", 0) == 0
+
+    def test_block_fill_reduction_counts_as_exit(self) -> None:
+        acc = _blocked_acc()
+        acc._block_fill(_blocked_gap("MISSING_ACTIVE_FUNDING"), prior_units=100.0, net_units=-40.0)
+        assert [g.code for g in acc.data_gaps] == ["BLOCKED_EXIT_UNKNOWN_FUNDING"]
+        assert not acc.ledger_valid
+
+    def test_block_fill_expansion_counts_as_entry(self) -> None:
+        acc = _blocked_acc()
+        acc._block_fill(_blocked_gap("MISSING_ACTIVE_FUNDING"), prior_units=100.0, net_units=40.0)
+        assert acc.data_gaps == []
+        assert acc.ledger_valid
+        assert acc.termination_counts["NO_FUNDING_UNFILLED"] == 1
+
+    def test_block_fill_sign_flip_reduction_counts_as_exit(self) -> None:
+        acc = _blocked_acc()
+        acc._block_fill(_blocked_gap("MISSING_ACTIVE_FUNDING"), prior_units=100.0, net_units=-130.0)
+        assert [g.code for g in acc.data_gaps] == ["BLOCKED_EXIT_UNKNOWN_FUNDING"]
+        assert not acc.ledger_valid
+
+    def test_block_fill_dust_holding_counts_as_entry(self) -> None:
+        acc = _blocked_acc()
+        acc._block_fill(_blocked_gap("MISSING_ACTIVE_FUNDING"), prior_units=1e-13, net_units=-50.0)
+        assert acc.data_gaps == []
+        assert acc.ledger_valid
+        assert acc.termination_counts["NO_FUNDING_UNFILLED"] == 1
+
+    def test_block_fill_exit_blocked_by_zero_volume_keeps_volume_code(self) -> None:
+        acc = _blocked_acc()
+        acc._block_fill(_blocked_gap("KNOWN_ZERO_VOLUME"), prior_units=50.0, net_units=-50.0)
+        assert [g.code for g in acc.data_gaps] == ["KNOWN_ZERO_VOLUME"]
+        assert not acc.ledger_valid
+        assert acc.unfilled_count == 1
+        assert acc.termination_counts["NO_VOLUME_UNFILLED"] == 1
+
+    def test_block_fill_other_gap_codes_keep_legacy_path(self) -> None:
+        acc = _blocked_acc()
+        acc._block_fill(_blocked_gap("ZERO_OR_UNKNOWN_VOLUME"), prior_units=50.0, net_units=-50.0)
+        assert [g.code for g in acc.data_gaps] == ["ZERO_OR_UNKNOWN_VOLUME"]
+        assert not acc.ledger_valid
+        assert acc.unfilled_count == 1
+
+    def test_block_fill_counter_separates_entry_and_exit_blocks(self) -> None:
+        acc = _blocked_acc()
+        for _ in range(2):
+            acc._block_fill(_blocked_gap("MISSING_ACTIVE_FUNDING"), prior_units=0.0, net_units=10.0)
+        for _ in range(3):
+            acc._block_fill(_blocked_gap("MISSING_ACTIVE_FUNDING"), prior_units=100.0, net_units=-100.0)
+        assert acc.termination_counts["NO_FUNDING_UNFILLED"] == 2
+        assert acc.termination_counts["BLOCKED_EXIT_UNKNOWN_FUNDING"] == 3
+        assert acc.unfilled_count == 5
+
+    def test_blocked_exit_end_to_end_via_consume(self) -> None:
+        grid = pd.date_range("2025-01-01", periods=6, freq="3min", tz="UTC")
+        px = pd.DataFrame({"BTCUSDT": 100.0}, index=grid)
+        known = px.notna()
+        known.iloc[4, 0] = False
+        w = ExecutionReplayWindow(
+            grid[0], grid[-1], ("BTCUSDT",), ("BTCUSDT",), grid, px, px, px, px, px * 0.0,
+            pd.DataFrame({"BTCUSDT": [1.0, 0.0]}, index=[grid[0], grid[3]]),
+            pd.DatetimeIndex([grid[0], grid[3]]),
+            quote_volumes=px * 0.0 + 1.0, funding_known=known,
+            bar_available_at=grid + pd.Timedelta(minutes=3),
+        )
+        result = replay_execution_windows((w,), 1000.0, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec())
+        assert "BLOCKED_EXIT_UNKNOWN_FUNDING" in [g.code for g in result.ledger.data_gaps]
+        assert not result.ledger.primary_valid
+        assert result.termination_counts["BLOCKED_EXIT_UNKNOWN_FUNDING"] == 1
+        assert result.termination_counts.get("NO_FUNDING_UNFILLED", 0) == 0
+
+    def test_known_funding_replay_has_no_blocked_exit_gaps(self) -> None:
+        grid = pd.date_range("2021-01-01", periods=200, freq="5min", tz="UTC")
+        symbols = ["AAAUSDT", "BBBUSDT"]
+        rng = np.random.default_rng(7)
+        closes = pd.DataFrame(
+            {s: 100.0 * np.exp(np.cumsum(rng.normal(0.0, 0.002, len(grid)))) for s in symbols},
+            index=grid,
+        )
+        decision_grid = pd.date_range("2021-01-01", periods=8, freq="6h", tz="UTC")
+        weights = pd.DataFrame(0.0, index=decision_grid, columns=symbols)
+        weights.iloc[0, 0] = 0.05
+        weights.iloc[4, 0] = -0.02
+        result = strategy_aware_execution_replay(
+            weights, decision_grid + pd.Timedelta(hours=1),
+            closes * 1.001, closes * 0.999, closes, closes,
+            pd.DataFrame(1.0e-5, index=grid, columns=symbols),
+            1.0, "OHLCV_STRICT_PROXY", ExecutionSpec(),
+        )
+        assert result.ledger.primary_valid
+        assert tuple(result.ledger.data_gaps) == ()
+        assert not result.simulated_fills.empty
+        assert result.termination_counts.get("BLOCKED_EXIT_UNKNOWN_FUNDING", 0) == 0

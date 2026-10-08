@@ -31,17 +31,17 @@ PARAMS_SNAPSHOT_KEYS: tuple[str, ...] = (
 
 
 def capture_params_snapshot() -> dict[str, Any]:
-    from src.mhs import params as mhs_params
+    from src.core import params as mhs_params
 
     snap: dict[str, Any] = {}
     for key in PARAMS_SNAPSHOT_KEYS:
         if key == "INSTRUMENT_SETTLEMENT_REGISTRY_DIGEST":
-            from src.mhs.instrument_settlements import load_instrument_settlement_registry
+            from src.core.instrument_settlements import load_instrument_settlement_registry
 
             snap[key] = load_instrument_settlement_registry().digest
             continue
         if key == "VENUE_HALT_REGISTRY_DIGEST":
-            from src.mhs.venue_halts import load_venue_halt_registry
+            from src.core.venue_halts import load_venue_halt_registry
 
             snap[key] = load_venue_halt_registry().digest
             continue

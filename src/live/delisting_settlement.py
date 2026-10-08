@@ -15,12 +15,12 @@ from typing import Any
 import pandas as pd
 
 from src.common.errors import DataIntegrityError
+from src.core.settlement_evidence import SettlementEvidence
 from src.live.account import settled_delisting_symbols
 from src.live.filters import is_delisted, parse_delivery_schedule
 from src.live.ledger import LedgerState, append_position_snapshot
 from src.live.settings import ExecutionMode
 from src.live.tax_schema import TaxRecord
-from src.live.venue_listing import SettlementEvidence
 
 
 @dataclass(frozen=True, slots=True)

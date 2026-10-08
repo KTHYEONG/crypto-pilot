@@ -6,7 +6,7 @@ import pandas as pd
 import pytest
 
 from src.common.errors import DataIntegrityError
-from src.mhs.execution.contracts import FundingAlignment, align_funding_with_knowledge, funding_coverage_gaps
+from src.engine.execution.contracts import FundingAlignment, align_funding_with_knowledge, funding_coverage_gaps
 
 
 def _grid(periods: int = 8) -> pd.DatetimeIndex:

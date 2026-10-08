@@ -135,7 +135,7 @@ def test_profile_change_is_new_key(tmp_path: Path, monkeypatch: pytest.MonkeyPat
 
 
 def test_module_globals_patched_only_during_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    import src.mhs.marks as marks
+    import src.core.marks as marks
     import src.mhs.pipeline.stages.fold as fold_stage
     import src.mhs.statistics as statistics
     from src.mhs.pipeline import orchestrator
@@ -173,7 +173,7 @@ def test_module_globals_patched_only_during_run(tmp_path: Path, monkeypatch: pyt
 
 
 def test_patches_restored_when_run_raises_and_failure_memoised(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    import src.mhs.marks as marks
+    import src.core.marks as marks
     import src.mhs.statistics as statistics
     from src.mhs.pipeline import orchestrator
 
@@ -440,7 +440,7 @@ def test_deep_state_is_not_silently_truncated():
 
 
 def test_missing_patch_target_leaves_globals_untouched(tmp_path, monkeypatch):
-    import src.mhs.marks as marks
+    import src.core.marks as marks
     import src.mhs.pipeline.stages.fold as fold_stage
     import src.mhs.statistics as statistics
 

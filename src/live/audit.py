@@ -12,14 +12,14 @@ from typing import Any, TextIO
 import pandas as pd
 
 from src.common.logging import LOG_DIR
+from src.core.params import AUDIT_LOG_RETENTION_DAYS as AUDIT_LOG_RETENTION_DAYS
 
 _logger = logging.getLogger(__name__)
 
 #: 감사 로그가 허용되는 유일한 프로젝트 하위 루트(외부 /tmp 금지).
 AUDIT_LOG_ROOT = LOG_DIR
 
-#: 3개월 섬도우 검증 기간을 커버하는 감사로그 보존 일수.
-AUDIT_LOG_RETENTION_DAYS: int = 90
+#: 3개월 섬도우 검증 기간을 커버하는 감사로그 보존 일수(단일 정의는 ``src.core.params``).
 
 _DATE_PARTITION_RE = re.compile(r"^\d{4}-\d{2}-\d{2}\.jsonl$")
 
