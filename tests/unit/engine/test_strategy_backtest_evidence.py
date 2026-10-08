@@ -26,7 +26,7 @@ _BASE_LIMITATIONS = (
     "CANDLE_FILLS_NO_ORDER_BOOK_DEPTH",
     "CANDLE_FILLS_NO_QUEUE_POSITION",
     "CANDLE_FILLS_NO_PARTICIPATION_CAPACITY",
-    "DISCOVERY_YEARS_RESEARCH_ONLY_NO_FORWARD_CLAIM",
+    "IN_SAMPLE_THROUGH_2026-07-01",
     "NO_DEPLOYMENT_VERDICT",
 )
 
@@ -170,6 +170,7 @@ def test_evaluate_pairs_same_stream_costs_only() -> None:
     assert evidence.limitations == _BASE_LIMITATIONS
     assert {f.name for f in dataclasses.fields(evidence)} == {
         "base", "stress", "base_daily", "stress_daily", "period_metrics", "limitations",
+        "funding_by_symbol",
     }
     assert list(evidence.period_metrics.columns)[:4] == ["base_cagr", "stress_cagr", "base_max_drawdown", "stress_max_drawdown"]
     row2022 = evidence.period_metrics.loc["2022"]

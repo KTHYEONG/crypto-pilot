@@ -226,10 +226,12 @@ def test_account_payload_golden_schema(tmp_path: Path, monkeypatch: pytest.Monke
     unit_cagr = (105000.0 / 100000.0) ** (365.0 / 3.0) - 1.0
     _write_same_book_reference(tmp_path, index, run_dir="runs/old", base_cagr=unit_cagr, base_mdd=0.05)
     report = run_account_replay(_account_request(tmp_path))
-    assert len(seen["replays"]) == 2
+    assert len(seen["replays"]) == 3
     (run_dir,) = _run_dirs(tmp_path)
     payload = json.loads((run_dir / "account.json").read_text(encoding="utf-8"))
-    assert set(payload) == {"strategy_id", "capital", "execution", "policy", "venue_captured_at", "venue_path", "evaluation_start", "evaluation_end", "cagr", "mdd", "daily_mdd", "final_equity", "liquidated_at", "mean_exposure", "min_exposure", "last_exposure", "skipped_orders", "untraded_fraction", "initial_margin_breaches", "fee_paid", "impact_paid", "funding_paid", "fallback_ladder_symbols", "missing_filter_symbols", "moment_source", "entry_anchor", "unit_reference", "venue_rules_applied_retroactively", "reconciliation", "created_at"}
+    assert payload.pop("statistics_limitations") == ["ACCOUNT_FUNDING_ATTRIBUTION_UNAVAILABLE"]
+    assert payload.pop("stress_execution")["taker_fee_bps"] == 18.0
+    assert set(payload) == {"strategy_id", "capital", "execution", "policy", "venue_captured_at", "venue_path", "evaluation_start", "evaluation_end", "cagr", "mdd", "daily_mdd", "final_equity", "liquidated_at", "mean_exposure", "min_exposure", "last_exposure", "skipped_orders", "untraded_fraction", "initial_margin_breaches", "fee_paid", "impact_paid", "funding_paid", "fallback_ladder_symbols", "missing_filter_symbols", "moment_source", "entry_anchor", "unit_reference", "venue_rules_applied_retroactively", "reconciliation", "created_at", "statistics", "design_data_cutoff"}
     assert set(payload["execution"]) == {"mode", "maker_fee_bps", "taker_fee_bps", "passive_window_bars", "maker_fill_fraction"}
     assert set(payload["policy"]) == {"kind", "exposure_max", "exposure_step", "mean_haircut", "prior_days", "min_moment_days", "shock_per_unit", "margin_reserve", "initial_margin_cap", "impact_y"}
     assert set(payload["unit_reference"]) == {"capital", "cagr", "mdd", "daily_mdd", "maker_fill_fraction"}
@@ -255,8 +257,11 @@ def test_account_unit_reference_replays_before_account(tmp_path: Path, monkeypat
 
     seen = _install_strategy_account_fakes(monkeypatch, tmp_path)
     run_account_replay(_account_request(tmp_path))
-    assert len(seen["replays"]) == 2
-    unit_replay, main = seen["replays"]
+    assert len(seen["replays"]) == 3
+    unit_replay, main, stress = seen["replays"]
+    assert stress["fee"] == 18.0
+    assert stress["policy"] == main["policy"]
+    pd.testing.assert_series_equal(stress["unit_equity"], main["unit_equity"])
     assert unit_replay["policy"].kind == "fixed"
     assert unit_replay["policy"].exposure_max == 1.0
     assert unit_replay["policy"].impact_y == 0.0
@@ -291,7 +296,7 @@ def test_account_maker_threads_identical_controls(tmp_path: Path, monkeypatch: p
 
     seen = _install_strategy_account_fakes(monkeypatch, tmp_path)
     run_account_replay(_account_request(tmp_path, execution="maker"))
-    assert len(seen["replays"]) == 2
+    assert len(seen["replays"]) == 3
     for replay in seen["replays"]:
         assert replay["execution"] == "maker"
         assert replay["maker_fee_bps"] == ACCOUNT_MAKER_FEE_BPS
@@ -907,7 +912,15 @@ def test_account_payload_matches_pre_refactor_capture(case: str, tmp_path: Path,
     report = run_account_replay(_account_request(tmp_path, **overrides))
     text = (report.run_dir / "account.json").read_text(encoding="utf-8")
     text = text.replace(f'\n  "created_at": "{_PINNED_NOW.isoformat()}",', "").replace(str(tmp_path), "<TMP>")
-    assert text == _PRE_REFACTOR["account"][case]
+    data = json.loads(text)
+    statistics = data.pop("statistics")
+    assert data.pop("design_data_cutoff") == "2026-07-01T00:00:00+00:00"
+    assert set(statistics) == {"base", "stress", "unit_reference"}
+    assert statistics["base"]["in_sample_days"] >= 0
+    assert statistics["stress"]["in_sample_days"] == statistics["base"]["in_sample_days"]
+    assert data.pop("statistics_limitations") == ["ACCOUNT_FUNDING_ATTRIBUTION_UNAVAILABLE"]
+    assert data.pop("stress_execution")["taker_fee_bps"] == 18.0
+    assert json.dumps(data, indent=2, sort_keys=True) == _PRE_REFACTOR["account"][case]
     assert "error_type" not in text
 
 
@@ -1034,3 +1047,185 @@ def test_derive_unexpected_solver_error_propagates(tmp_path: Path, monkeypatch: 
     volume = pd.DataFrame({"AAA": 1e6}, index=idx, dtype="float64")
     with pytest.raises(RuntimeError, match=r"solver bug"):
         derive_growth_exposure(artifacts, run_name="r", daily_close=close, daily_quote_volume=volume, census=("AAA",), excluded_symbols=frozenset())
+
+
+def test_account_statistics_rejects_degenerate_ledger(tmp_path: Path) -> None:
+    """A single-row ledger has no finite daily return for statistics."""
+    import types
+
+    import src.application.strategy_account as app_mod
+    from src.strategy.targets import FLOW_MOM_TOP20_ACCOUNT_UNIT
+
+    dates = pd.DatetimeIndex([], tz="UTC")
+    ledger = types.SimpleNamespace(daily_equity=pd.Series([], index=dates, dtype="float64"))
+    request = _account_request(tmp_path)
+    with pytest.raises(app_mod.AccountReplayError, match="no finite daily returns"):
+        app_mod._account_path_statistics(
+            unit=ledger, result=ledger, stress=ledger, request=request, strategy=FLOW_MOM_TOP20_ACCOUNT_UNIT,
+        )
+
+
+@pytest.mark.parametrize("values", [[2100, float("nan")], [0, 2100]])
+def test_account_statistics_rejects_corrupt_equity(tmp_path: Path, values) -> None:
+    import src.application.strategy_account as app_mod
+    from src.strategy.targets import FLOW_MOM_TOP20_ACCOUNT_UNIT
+
+    ledger = types.SimpleNamespace(daily_equity=pd.Series(values, index=pd.date_range("2025-01-01", periods=2, tz="UTC")))
+    with pytest.raises(app_mod.AccountReplayError):
+        app_mod._account_path_statistics(unit=ledger, result=ledger, stress=ledger, request=_account_request(tmp_path), strategy=FLOW_MOM_TOP20_ACCOUNT_UNIT)
+
+
+def test_account_statistics_preserves_initial_cost_and_liquidation(tmp_path: Path) -> None:
+    import src.application.strategy_account as app_mod
+    from src.strategy.targets import FLOW_MOM_TOP20_ACCOUNT_UNIT
+
+    dates = pd.date_range("2025-01-01", periods=3, tz="UTC")
+    unit = types.SimpleNamespace(daily_equity=pd.Series([100000, 100000, 100000], index=dates))
+    account = types.SimpleNamespace(daily_equity=pd.Series([1890, 0, 0], index=dates))
+    payload = app_mod._account_path_statistics(unit=unit, result=account, stress=account, request=_account_request(tmp_path), strategy=FLOW_MOM_TOP20_ACCOUNT_UNIT)
+    assert payload["base"]["cagr"] == -1
+    assert payload["base"]["max_drawdown"] == 1
+    assert payload["base"]["in_sample_days"] == 3
+    assert payload["base"]["funding"] is None
+    assert payload["stress"]["max_drawdown"] == 1
+
+
+def test_account_statistics_uses_observed_funding(tmp_path: Path) -> None:
+    import src.application.strategy_account as app_mod
+    from src.strategy.targets import FLOW_MOM_TOP20_ACCOUNT_UNIT
+
+    dates = pd.date_range("2025-01-01", periods=3, tz="UTC")
+    funding = pd.DataFrame({"AAA": [0, -10, -5]}, index=dates)
+    ledger = types.SimpleNamespace(daily_equity=pd.Series([2100, 2110, 2115], index=dates), funding_by_symbol_daily=funding)
+    payload = app_mod._account_path_statistics(unit=ledger, result=ledger, stress=ledger, request=_account_request(tmp_path), strategy=FLOW_MOM_TOP20_ACCOUNT_UNIT)
+    assert payload["base"]["funding"]["total_contribution"] == pytest.approx(-15 / 2100)
+    assert payload["base"]["years"][0]["funding_share"] == pytest.approx(15 / 2100)
+    ledger.funding_by_symbol_daily = funding.iloc[1:]
+    with pytest.raises(app_mod.AccountReplayError, match="index mismatch"):
+        app_mod._account_path_statistics(unit=ledger, result=ledger, stress=ledger, request=_account_request(tmp_path), strategy=FLOW_MOM_TOP20_ACCOUNT_UNIT)
+
+
+def test_account_statistics_wraps_integrity_failure(tmp_path: Path) -> None:
+    """A non-datetime equity index fails statistics inside the account wrapper."""
+    import types
+
+    import src.application.strategy_account as app_mod
+    from src.strategy.targets import FLOW_MOM_TOP20_ACCOUNT_UNIT
+
+    ledger = types.SimpleNamespace(
+        daily_equity=pd.Series([2100.0, 2200.0, 2150.0], dtype="float64"),
+    )
+    request = _account_request(tmp_path)
+    with pytest.raises(app_mod.AccountReplayError, match="statistics"):
+        app_mod._account_path_statistics(
+            unit=ledger, result=ledger, stress=ledger, request=request, strategy=FLOW_MOM_TOP20_ACCOUNT_UNIT,
+        )
+
+
+def test_persist_wraps_statistics_failures(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Statistics rejections propagate through persistence as AccountReplayError."""
+    import types
+
+    import src.application.strategy_account as app_mod
+    from src.common.errors import DataIntegrityError
+
+    dates = pd.date_range("2025-01-01", periods=3, freq="D", tz="UTC")
+    ledger = types.SimpleNamespace(daily_equity=pd.Series([2100.0, 2200.0, 2150.0], index=dates))
+    request = _account_request(tmp_path)
+    monkeypatch.setattr(app_mod, "_account_headlines", lambda equity, capital: (0.0, 0.0, 0.0))
+    monkeypatch.setattr(
+        app_mod, "_account_path_statistics",
+        lambda **kwargs: (_ for _ in ()).throw(app_mod.AccountReplayError("statistics boom")),
+    )
+    with pytest.raises(app_mod.AccountReplayError, match="statistics boom"):
+        app_mod._persist_account_run(
+            request=request, strategy=object(), policy=object(), unit=ledger,
+            result=ledger, stress=ledger, reconciliation={},
+            rules_captured_at="t", venue_path="v",
+        )
+    monkeypatch.setattr(
+        app_mod, "_account_path_statistics",
+        lambda **kwargs: (_ for _ in ()).throw(DataIntegrityError("statistics broken")),
+    )
+    with pytest.raises(app_mod.AccountReplayError, match="statistics broken"):
+        app_mod._persist_account_run(
+            request=request, strategy=object(), policy=object(), unit=ledger,
+            result=ledger, stress=ledger, reconciliation={},
+            rules_captured_at="t", venue_path="v",
+        )
+
+
+@pytest.mark.parametrize(("execution", "passive"), [("taker", False), ("maker", False), ("maker", True)])
+def test_real_account_stress_replay_compares_same_account(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, execution: str, passive: bool) -> None:
+    import src.engine.account_ledger as ledger_mod
+    import src.engine.account_sources as sources_mod
+    import src.market_data.binance.venue_rules as venue_mod
+    from src.market_data.binance.venue_rules import VenueBracket, VenueRuleSnapshot, VenueSymbolRules
+
+    replay = ledger_mod.replay_account
+    _install_strategy_account_fakes(monkeypatch, tmp_path)
+    rules = VenueRuleSnapshot(
+        captured_at=pd.Timestamp("2025-01-01", tz="UTC"),
+        symbols={"AAA": VenueSymbolRules(symbol="AAA", brackets=(VenueBracket(0.0, 1e12, 0.01, 0.0, 10),), step_size=0.001, min_notional=5.0)},
+    )
+    monkeypatch.setattr(venue_mod, "load_venue_rule_snapshot", lambda path: rules)
+    monkeypatch.setattr(ledger_mod, "replay_account", replay)
+    assemble = sources_mod.assemble_account_inputs
+
+    def _parts(candidate, context):
+        parts = list(assemble(candidate, context))
+        if passive:
+            marks = parts[1]
+            parts[1] = ledger_mod.AccountMarkPanels(close=marks.close, low=marks.close * 0.99, high=marks.close * 1.01)
+        return tuple(parts)
+
+    monkeypatch.setattr(sources_mod, "assemble_account_inputs", _parts)
+    report = run_account_replay(_account_request(tmp_path, policy="fixed", fixed_exposure=1.0, execution=execution, impact_y=0.0, apply_order_filters=False))
+    base = report.payload["statistics"]["base"]
+    stress = report.payload["statistics"]["stress"]
+    assert base["in_sample_days"] == stress["in_sample_days"] == 3
+    assert report.payload["statistics_limitations"] == []
+    assert report.payload["stress_execution"]["taker_fee_bps"] == 18.0
+    assert report.stress_result.capital == report.result.capital == 2100.0
+    assert (report.run_dir / "account_stress_daily.parquet").exists()
+    persisted = json.loads((report.run_dir / "account.json").read_text())
+    assert persisted["statistics"]["stress"] == stress
+    if passive:
+        pd.testing.assert_series_equal(report.result.daily_equity, report.stress_result.daily_equity)
+        assert base["cagr"] == stress["cagr"]
+    else:
+        assert stress["cagr"] < base["cagr"]
+        assert report.stress_result.fee_paid > report.result.fee_paid
+
+
+def test_stress_replay_failure_leaves_no_completed_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import src.application.strategy_account as app_mod
+    import src.engine.account_ledger as ledger_mod
+    from src.common.errors import DataIntegrityError
+
+    _install_strategy_account_fakes(monkeypatch, tmp_path)
+    replay = ledger_mod.replay_account
+
+    def _fail_stress(*args, **kwargs):
+        if kwargs["taker_fee_bps"] == 18.0:
+            raise DataIntegrityError("stress source broken")
+        return replay(*args, **kwargs)
+
+    monkeypatch.setattr(ledger_mod, "replay_account", _fail_stress)
+    with pytest.raises(app_mod.AccountReplayError, match="stress source broken"):
+        run_account_replay(_account_request(tmp_path))
+    assert _run_dirs(tmp_path) == []
+
+
+def test_account_statistics_rejects_misaligned_stress_and_unknown_funding(tmp_path: Path) -> None:
+    import src.application.strategy_account as app_mod
+    from src.strategy.targets import FLOW_MOM_TOP20_ACCOUNT_UNIT
+
+    dates = pd.date_range("2025-01-01", periods=2, tz="UTC")
+    base = types.SimpleNamespace(daily_equity=pd.Series([2100, 2110], index=dates))
+    stress = types.SimpleNamespace(daily_equity=pd.Series([2100, 2110], index=dates + pd.Timedelta(days=1)))
+    with pytest.raises(app_mod.AccountReplayError, match="indexes differ"):
+        app_mod._account_path_statistics(unit=base, result=base, stress=stress, request=_account_request(tmp_path), strategy=FLOW_MOM_TOP20_ACCOUNT_UNIT)
+    base.funding_by_symbol_daily = pd.DataFrame({"AAA": [0, float("nan")]}, index=dates)
+    with pytest.raises(app_mod.AccountReplayError, match="non-finite funding"):
+        app_mod._account_path_statistics(unit=base, result=base, stress=base, request=_account_request(tmp_path), strategy=FLOW_MOM_TOP20_ACCOUNT_UNIT)

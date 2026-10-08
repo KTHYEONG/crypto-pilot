@@ -110,6 +110,19 @@ def test_replay_account_skips_below_min_notional() -> None:
     assert result.fee_paid == pytest.approx(0.0)
 
 
+def test_account_funding_attribution_preserves_charge_sign() -> None:
+    dates = pd.date_range("2026-01-01", periods=3, freq="D", tz="UTC")
+    unit, funding, adv, sigma = _frames(dates, ["BTCUSDT"], [[0.5], [0.5], [0.0]], funding=[[0], [-0.01], [-0.02]])
+    result = replay_account(unit, _panels(list(dates), ["BTCUSDT"], [[100], [100], [100]]), funding, adv, sigma, _rules(), _fixed_policy(), capital=1000, taker_fee_bps=0, apply_order_filters=False)
+    daily = result.funding_by_symbol_daily
+    assert daily is not None
+    assert daily.index.equals(dates)
+    assert daily.iloc[0, 0] == 0
+    assert daily.iloc[1, 0] == pytest.approx(-5)
+    assert daily.iloc[2, 0] == pytest.approx(-5.025)
+    assert daily.to_numpy().sum() == pytest.approx(result.funding_paid)
+
+
 def test_replay_account_always_sends_full_close() -> None:
     """Full close always sent."""
     dates = pd.date_range("2026-01-01", periods=2, freq="D", tz="UTC")
