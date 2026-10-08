@@ -14,6 +14,42 @@ import pandas as pd
 
 from src.common.errors import DataIntegrityError
 from src.common.paths import FUTURES_DATA_DIR
+from src.core.data_policy import SOURCE_GAP_EXCLUDED_SYMBOLS
+from src.core.instrument_settlements import settlement_registry_for_root
+from src.core.marks import _load_funding_series
+from src.core.params import (
+    CLI_GROWTH_ENVELOPE_DEFAULT,
+    DISCOVERY_START,
+    GROWTH_RISK_ENVELOPES,
+    PROCESS_EVALUATION_CEILING,
+)
+from src.core.resources import (
+    MhsMemoryBudget,
+    MhsResourceAdmissionError,
+    _assert_execution_rss_budget,
+    _assert_stage_rss_budget,
+    _current_tree_swap_bytes,
+    _StageRecorder,
+    _TreeMemorySampler,
+    resolve_mhs_memory_budget,
+)
+from src.core.settlement_evidence import assert_settlement_registry_complete
+from src.core.types import ExecutionSpec
+from src.engine.execution import _ExecutionBound
+from src.engine.execution.batch import (
+    _LiveAccumulatorSets,
+    live_required_symbols,
+    replay_execution_window_batch,
+    replay_execution_windows,
+)
+from src.engine.execution.contracts import (
+    ExecutionDataGap,
+    ExecutionReplayWindow,
+    FundingCoverageGap,
+    StrategyExecutionReplayResult,
+)
+from src.engine.execution.specs import _stress_cost_execution_spec
+from src.engine.execution.window_stream import _iter_mhs_execution_windows
 from src.mhs.backtest.certification import (
     REQUIRED_CHECK_NAMES,
     EvaluationContext,
@@ -29,44 +65,8 @@ from src.mhs.backtest.contracts import (
 )
 from src.mhs.backtest.market_data import _admit_process_stage, _estimate_panel_bytes
 from src.mhs.backtest.paths import evaluate_process_backtest, quarter_fold_returns
-from src.mhs.data_policy import SOURCE_GAP_EXCLUDED_SYMBOLS
 from src.mhs.deploy_gate import DeployGateResult, evaluate_deploy_gate
-from src.mhs.execution import _ExecutionBound
-from src.mhs.execution.batch import (
-    _LiveAccumulatorSets,
-    live_required_symbols,
-    replay_execution_window_batch,
-    replay_execution_windows,
-)
-from src.mhs.execution.contracts import (
-    ExecutionDataGap,
-    ExecutionReplayWindow,
-    FundingCoverageGap,
-    StrategyExecutionReplayResult,
-)
-from src.mhs.execution.specs import _stress_cost_execution_spec
-from src.mhs.execution.window_stream import _iter_mhs_execution_windows
-from src.mhs.instrument_settlements import settlement_registry_for_root
-from src.mhs.marks import _load_funding_series
-from src.mhs.params import (
-    CLI_GROWTH_ENVELOPE_DEFAULT,
-    DISCOVERY_START,
-    GROWTH_RISK_ENVELOPES,
-    PROCESS_EVALUATION_CEILING,
-)
 from src.mhs.process import ProcessExecutionPolicy, ProcessRiskSizingSpec
-from src.mhs.resources import (
-    MhsMemoryBudget,
-    MhsResourceAdmissionError,
-    _assert_execution_rss_budget,
-    _assert_stage_rss_budget,
-    _current_tree_swap_bytes,
-    _StageRecorder,
-    _TreeMemorySampler,
-    resolve_mhs_memory_budget,
-)
-from src.mhs.settlement_evidence import assert_settlement_registry_complete
-from src.mhs.types import ExecutionSpec
 
 if TYPE_CHECKING:
     from src.mhs.backtest.journal import ProcessProcedureDefinition

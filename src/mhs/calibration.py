@@ -15,7 +15,7 @@ from statistics import NormalDist
 import numpy as np
 
 from src.common.errors import DataIntegrityError
-from src.mhs.params import (
+from src.core.params import (
     EVIDENCE_GATE_ALPHA,
     NULL_BOOTSTRAP_MEAN_BLOCK_DAYS,
     NULL_BOOTSTRAP_MIN_ROWS,

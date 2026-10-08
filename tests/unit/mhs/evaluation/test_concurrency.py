@@ -13,7 +13,7 @@ import src.mhs.evaluation.concurrency as concurrency
 from src.common.errors import DataIntegrityError
 from src.mhs import statistics
 from src.mhs.evaluation.windows import _book_outcome
-from src.mhs.horizons import horizon_log_return
+from src.strategy.horizons import horizon_log_return
 from tests.fixtures.mhs_requests import research_baseline
 from tests.unit.mhs.test_evaluation_appresearch import _build_book_outcome_args
 
@@ -79,7 +79,7 @@ class _SynchronousFuture:
 
 
 def _micro_books_args(**overrides: object) -> dict[str, object]:
-    from src.mhs.types import BOOK_SPECS
+    from src.core.types import BOOK_SPECS
 
     grid_1h = pd.date_range("2021-01-01", periods=48, freq="1h", tz="UTC")
     frame = pd.DataFrame(0.01, index=grid_1h, columns=["AAA", "BBB"])
@@ -118,7 +118,7 @@ def test_run_books_concurrent_gates_reference_books(monkeypatch: pytest.MonkeyPa
 
     import src.mhs.evaluation.concurrency as concurrency_mod
     from src.mhs.contracts import MhsResourceMeasurement
-    from src.mhs.resources import _StageRecorder
+    from src.core.resources import _StageRecorder
 
     submitted: list[str] = []
 

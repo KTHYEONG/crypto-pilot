@@ -16,10 +16,10 @@ from src.live.frozen_book import (
     extend_unit_history,
     unit_proxy_returns,
 )
-from src.mhs.books import clip_names_preserving_gross
-from src.mhs.frozen_research_candidate import FROZEN_MHS_TOP20_V2, build_frozen_mhs_candidate
-from src.mhs.panel import load_base_panel
-from src.mhs.params import FROZEN_GROWTH_NAME_CLIP, LIVE_FROZEN_WARMUP_DAYS
+from src.strategy.books import clip_names_preserving_gross
+from src.strategy.targets import FROZEN_MHS_TOP20_V2, build_frozen_mhs_candidate
+from src.core.panel import load_base_panel
+from src.core.params import FROZEN_GROWTH_NAME_CLIP, LIVE_FROZEN_WARMUP_DAYS
 
 _START = pd.Timestamp("2021-01-01", tz="UTC")
 _SYMBOLS = tuple(f"SYM{i:02d}USDT" for i in range(10))
@@ -371,11 +371,11 @@ def test_proxy_ignores_zero_weight_nans_and_empty_books() -> None:
 
 
 def test_assemble_account_inputs_shares_causal_adv_sigma(tmp_path: Path) -> None:
-    from src.mhs.account_liquidity import causal_adv_sigma
-    from src.mhs.account_sources import assemble_account_inputs
-    from src.mhs.frozen_research_candidate import FrozenMhsCandidate
-    from src.mhs.frozen_research_run import FrozenSourceContext
-    from src.mhs.resources import resolve_mhs_memory_budget
+    from src.strategy.liquidity import causal_adv_sigma
+    from src.engine.account_sources import assemble_account_inputs
+    from src.strategy.targets import FrozenMhsCandidate
+    from src.engine.strategy_backtest import FrozenSourceContext
+    from src.core.resources import resolve_mhs_memory_budget
 
     sym = "AAAUSDT"
     entries = pd.DatetimeIndex(["2021-02-01", "2021-02-02"], tz="UTC")
@@ -440,10 +440,10 @@ def test_history_validation_rejects_bad_inputs() -> None:
 
 
 def _assemble_context(tmp_path: Path, sym: str, entries: pd.DatetimeIndex, releases: pd.DatetimeIndex, grid: pd.DatetimeIndex, funding_by_symbol: dict | None = None):
-    from src.mhs.account_sources import assemble_account_inputs
-    from src.mhs.frozen_research_candidate import FrozenMhsCandidate
-    from src.mhs.frozen_research_run import FrozenSourceContext
-    from src.mhs.resources import resolve_mhs_memory_budget
+    from src.engine.account_sources import assemble_account_inputs
+    from src.strategy.targets import FrozenMhsCandidate
+    from src.engine.strategy_backtest import FrozenSourceContext
+    from src.core.resources import resolve_mhs_memory_budget
     import numpy as np
 
     weights = pd.DataFrame([[0.5]] * len(entries), index=entries, columns=[sym], dtype="float64")
@@ -495,10 +495,10 @@ def test_assembled_funding_sampled_at_anchors(tmp_path: Path) -> None:
 def test_assembled_shared_anchor_fails_closed(tmp_path: Path) -> None:
     import numpy as np
 
-    from src.mhs.account_sources import assemble_account_inputs
-    from src.mhs.frozen_research_candidate import FrozenMhsCandidate
-    from src.mhs.frozen_research_run import FrozenSourceContext
-    from src.mhs.resources import resolve_mhs_memory_budget
+    from src.engine.account_sources import assemble_account_inputs
+    from src.strategy.targets import FrozenMhsCandidate
+    from src.engine.strategy_backtest import FrozenSourceContext
+    from src.core.resources import resolve_mhs_memory_budget
 
     sym = "AAAUSDT"
     entries = pd.DatetimeIndex(["2021-02-01", "2021-02-02"], tz="UTC")
@@ -528,10 +528,10 @@ def test_assembled_shared_anchor_fails_closed(tmp_path: Path) -> None:
 def test_assembled_release_before_first_grid_bar_fails_closed(tmp_path: Path) -> None:
     import numpy as np
 
-    from src.mhs.account_sources import assemble_account_inputs
-    from src.mhs.frozen_research_candidate import FrozenMhsCandidate
-    from src.mhs.frozen_research_run import FrozenSourceContext
-    from src.mhs.resources import resolve_mhs_memory_budget
+    from src.engine.account_sources import assemble_account_inputs
+    from src.strategy.targets import FrozenMhsCandidate
+    from src.engine.strategy_backtest import FrozenSourceContext
+    from src.core.resources import resolve_mhs_memory_budget
 
     sym = "AAAUSDT"
     entries = pd.DatetimeIndex(["2021-02-01", "2021-02-02"], tz="UTC")
@@ -563,10 +563,10 @@ def test_assembled_release_before_first_grid_bar_fails_closed(tmp_path: Path) ->
 def _assemble_with_daily(
     tmp_path: Path, name: str, daily_close: pd.DataFrame, daily_qv: pd.DataFrame,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    from src.mhs.account_sources import assemble_account_inputs
-    from src.mhs.frozen_research_candidate import FrozenMhsCandidate
-    from src.mhs.frozen_research_run import FrozenSourceContext
-    from src.mhs.resources import resolve_mhs_memory_budget
+    from src.engine.account_sources import assemble_account_inputs
+    from src.strategy.targets import FrozenMhsCandidate
+    from src.engine.strategy_backtest import FrozenSourceContext
+    from src.core.resources import resolve_mhs_memory_budget
 
     sym = str(daily_close.columns[0])
     entries = pd.DatetimeIndex(["2021-02-01", "2021-02-02"], tz="UTC")
@@ -681,8 +681,8 @@ def test_unobserved_closing_snapshot_is_skipped() -> None:
 def test_proxy_matches_replay_anchor_to_anchor() -> None:
     from src.market_data.binance.venue_rules import VenueBracket, VenueRuleSnapshot, VenueSymbolRules
 
-    from src.mhs.account_ledger import AccountMarkPanels, replay_account
-    from src.mhs.account_policy import ExposurePolicy
+    from src.engine.account_ledger import AccountMarkPanels, replay_account
+    from src.strategy.sizing import ExposurePolicy
 
     sym = "AAAUSDT"
     entries = pd.DatetimeIndex(["2021-01-03", "2021-01-04"], tz="UTC")

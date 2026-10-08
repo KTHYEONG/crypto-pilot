@@ -4,14 +4,16 @@ import numpy as np
 import pandas as pd
 
 from src.common.errors import DataIntegrityError
-from src.mhs.data_policy import SOURCE_GAP_EXCLUDED_SYMBOLS as SOURCE_GAP_EXCLUDED_SYMBOLS
-from src.mhs.execution import StrategyExecutionReplayResult, laddered_fill_schedule
-from src.mhs.execution.integrity import (
+from src.core.data_policy import SOURCE_GAP_EXCLUDED_SYMBOLS as SOURCE_GAP_EXCLUDED_SYMBOLS
+from src.core.params import PNL_VOL_TARGET_BURN_IN_DAYS
+from src.core.resources import MhsResourceAdmissionError
+from src.core.types import ExecutionSpec
+from src.engine.execution import StrategyExecutionReplayResult, laddered_fill_schedule
+from src.engine.execution.integrity import (
     _funding_gap_terminal_symbols as _funding_gap_terminal_symbols,
 )
-from src.mhs.execution.integrity import ledger_terminal_only as ledger_terminal_only
-from src.mhs.execution.integrity import replay_ledger_certified as replay_ledger_certified
-from src.mhs.params import PNL_VOL_TARGET_BURN_IN_DAYS
+from src.engine.execution.integrity import ledger_terminal_only as ledger_terminal_only
+from src.engine.execution.integrity import replay_ledger_certified as replay_ledger_certified
 from src.mhs.research_go import (
     GO_REASON_CAPITAL_BREACH,
     GO_REASON_COMMITTEE_ADMISSION_NOT_PIT,
@@ -20,8 +22,6 @@ from src.mhs.research_go import (
     GO_REASON_NONFINITE_EQUITY,
     GO_REASON_RESOURCE_BREACH,
 )
-from src.mhs.resources import MhsResourceAdmissionError
-from src.mhs.types import ExecutionSpec
 
 
 class CommitteeAdmissionIntegrityError(DataIntegrityError):

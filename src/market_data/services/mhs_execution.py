@@ -14,13 +14,13 @@ import pyarrow.parquet as pq
 
 from src.common.errors import DataIntegrityError
 from src.common.paths import FUTURES_DATA_DIR, funding_path
+from src.core.panel import liquid_half_eligibility, load_base_panel
+from src.core.params import UNIVERSE_ELIGIBILITY_LOOKBACK_BARS, UNIVERSE_ELIGIBILITY_MIN_HISTORY_BARS
+from src.core.types import BOOK_SPECS
 from src.market_data.services.futures_collection import DataCollector
 from src.market_data.services.label_arrays import decode_ms_labels_ns, sorted_unique_labels
-from src.mhs.books import phase_tranche_book, rank_weight_book
-from src.mhs.horizons import horizon_log_return
-from src.mhs.panel import liquid_half_eligibility, load_base_panel
-from src.mhs.params import UNIVERSE_ELIGIBILITY_LOOKBACK_BARS, UNIVERSE_ELIGIBILITY_MIN_HISTORY_BARS
-from src.mhs.types import BOOK_SPECS
+from src.strategy.books import phase_tranche_book, rank_weight_book
+from src.strategy.horizons import horizon_log_return
 
 # Liquidity rank (UNIVERSE_ELIGIBILITY_LOOKBACK_BARS) and momentum signals must already be
 # complete at the window start for a PIT plan, so the planner reads a warm-up prefix and

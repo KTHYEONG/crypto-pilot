@@ -13,7 +13,7 @@ from src.common.errors import DataIntegrityError
 from src.mhs.backtest.certification import EvidenceCheck, ProcessValidationResult
 from src.mhs.backtest.contracts import ProcessBacktestReport, ProcessInventoryReport, ProcessPath
 from src.mhs.deploy_gate import DeployGateResult
-from src.mhs.execution.contracts import (
+from src.engine.execution.contracts import (
     ExecutionDataGap,
     SimulatedInventoryLedgerResult,
     StrategyExecutionReplayResult,
@@ -187,7 +187,7 @@ def _report(
     gaps: tuple[ExecutionDataGap, ...] = (),
 ) -> ProcessInventoryReport:
     from src.mhs.contracts import MhsResourceMeasurement
-    from src.mhs.resources import ProcessTreeMemoryStats
+    from src.core.resources import ProcessTreeMemoryStats
 
     resolved = _validation() if validation == "default" else validation
     gate = resolved.gate if resolved is not None else DeployGateResult(go=False, reason_codes=("X",), metrics={})

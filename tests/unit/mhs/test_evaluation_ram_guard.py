@@ -6,12 +6,12 @@ from tests.fixtures.mhs_requests import research_baseline
 import numpy as np
 import pandas as pd
 import pytest
-import src.mhs.resources as resources
+import src.core.resources as resources
 from src.mhs.diagnostic_run import run_mhs_horizon_diagnostic
 from src.common.errors import DataIntegrityError as _DataIntegrityError
-from src.mhs.tree_memory import TreeMemoryObservation
+from src.core.tree_memory import TreeMemoryObservation
 from src.mhs.research_go import GO_REASON_RESOURCE_BREACH as _GO_REASON_RESOURCE_BREACH
-from src.mhs.resources import _StageRecorder, _assert_execution_rss_budget
+from src.core.resources import _StageRecorder, _assert_execution_rss_budget
 import types as _types
 
 ev = _types.SimpleNamespace(
@@ -21,8 +21,8 @@ ev = _types.SimpleNamespace(
     _resolve_ram_budget=resources._resolve_ram_budget,
 )
 from src.common.errors import DataIntegrityError
-from src.mhs.types import ExecutionSpec
-from src.mhs.execution import ExecutionReplayWindow, replay_execution_windows
+from src.core.types import ExecutionSpec
+from src.engine.execution import ExecutionReplayWindow, replay_execution_windows
 from tests.unit.mhs.test_evaluation_appresearch import (  # noqa: F401
     _FOLD,
     _START,
@@ -80,7 +80,7 @@ def test_mhs_mem_03_rss_budget_fails_closed(monkeypatch) -> None:
         research_baseline(max_rss_bytes=-1)
     assert research_baseline(max_rss_bytes=1_000_000_000).max_rss_bytes == 1_000_000_000
 
-    monkeypatch.setattr("src.mhs.resources._current_tree_pss_bytes", lambda: 5_000_000_000)
+    monkeypatch.setattr("src.core.resources._current_tree_pss_bytes", lambda: 5_000_000_000)
     with pytest.raises(DataIntegrityError, match="execution RSS budget exceeded") as excinfo:
         _assert_execution_rss_budget("execution_window", 1_000_000_000, 7)
     message = str(excinfo.value)
@@ -137,12 +137,12 @@ def test_ram_guard_resolve_budget(monkeypatch) -> None:
     # the reserve floor max(5% of total, 256 MiB, 2 GiB); an explicit
     # max_rss_bytes overrides the budget fraction under the 2.5 GiB adoption
     # ceiling; psutil failure / non-positive total fails closed.
-    from src.mhs.types import (
+    from src.core.types import (
         RAM_BUDGET_FRACTION,
         RAM_RESERVE_FLOOR_BYTES,
         RAM_RESERVE_FRACTION,
     )
-    from src.mhs.resources import MHS_AVAILABLE_FLOOR_BYTES, MHS_TREE_PSS_BUDGET_BYTES
+    from src.core.resources import MHS_AVAILABLE_FLOOR_BYTES, MHS_TREE_PSS_BUDGET_BYTES
 
     class _FakeMem:
         total: int
@@ -232,7 +232,7 @@ _GIB = 2**30
 
 def test_resolve_mhs_memory_budget_conservative_defaults(monkeypatch) -> None:
     """Measured defaults: adequate capacity keeps 6/4 GiB ceilings and 2 GiB reserve."""
-    from src.mhs.resources import (
+    from src.core.resources import (
         MHS_AVAILABLE_FLOOR_BYTES,
         MHS_REPLAY_BUDGET_BYTES,
         MHS_TREE_PSS_BUDGET_BYTES,
@@ -249,7 +249,7 @@ def test_resolve_mhs_memory_budget_conservative_defaults(monkeypatch) -> None:
 
 def test_resolve_mhs_memory_budget_preserves_explicit_desktop_ceiling(monkeypatch) -> None:
     """Explicit desktop ceiling: 4/3 GiB on 16 GiB capacity is preserved without historical clipping."""
-    from src.mhs.resources import MhsMemoryBudget, resolve_mhs_memory_budget
+    from src.core.resources import MhsMemoryBudget, resolve_mhs_memory_budget
 
     explicit = MhsMemoryBudget(
         total_tree_pss_bytes=4 * _GIB, replay_tree_pss_bytes=3 * _GIB, min_available_bytes=2 * _GIB,
@@ -264,7 +264,7 @@ def test_resolve_mhs_memory_budget_preserves_explicit_desktop_ceiling(monkeypatc
 
 def test_resolve_mhs_memory_budget_clamps_to_physical_capacity(monkeypatch) -> None:
     """Physical capacity clamp: 4 GiB effective capacity bounds both ceilings to 2 GiB."""
-    from src.mhs.resources import MhsMemoryBudget, resolve_mhs_memory_budget
+    from src.core.resources import MhsMemoryBudget, resolve_mhs_memory_budget
 
     requested = MhsMemoryBudget(
         total_tree_pss_bytes=4 * _GIB, replay_tree_pss_bytes=3 * _GIB, min_available_bytes=2 * _GIB,
@@ -279,7 +279,7 @@ def test_resolve_mhs_memory_budget_clamps_to_physical_capacity(monkeypatch) -> N
 
 def test_resolve_mhs_memory_budget_rejects_impossible_reserve(monkeypatch) -> None:
     """Impossible reserve: finite capacity at or below the requested reserve raises a typed rejection."""
-    from src.mhs.resources import MhsMemoryBudget, MhsResourceAdmissionError, resolve_mhs_memory_budget
+    from src.core.resources import MhsMemoryBudget, MhsResourceAdmissionError, resolve_mhs_memory_budget
 
     requested = MhsMemoryBudget(
         total_tree_pss_bytes=4 * _GIB, replay_tree_pss_bytes=3 * _GIB, min_available_bytes=2 * _GIB,
@@ -304,7 +304,7 @@ def test_resolve_mhs_memory_budget_rejects_impossible_reserve(monkeypatch) -> No
 
 def test_assert_mhs_allocation_budget_rejects_resident_ceiling(monkeypatch) -> None:
     """Resident allocation ceiling: PSS plus estimate above the ceiling raises typed MEMORY_BUDGET."""
-    from src.mhs.resources import MhsResourceAdmissionError, assert_mhs_allocation_budget
+    from src.core.resources import MhsResourceAdmissionError, assert_mhs_allocation_budget
 
     monkeypatch.setattr(resources, "_current_tree_pss_bytes", lambda: 3 * _GIB)
     monkeypatch.setattr(resources, "_tree_headroom_bytes", lambda: 8 * _GIB)
@@ -326,7 +326,7 @@ def test_assert_mhs_allocation_budget_rejects_resident_ceiling(monkeypatch) -> N
 
 def test_assert_mhs_allocation_budget_rejects_exhausted_cgroup(monkeypatch) -> None:
     """Cgroup exhausted: zero finite cgroup remaining rejects via MEMORY_RESERVE despite host availability."""
-    from src.mhs.resources import MhsResourceAdmissionError, assert_mhs_allocation_budget
+    from src.core.resources import MhsResourceAdmissionError, assert_mhs_allocation_budget
 
     class _FakeMem:
         total = 16 * _GIB
@@ -346,7 +346,7 @@ def test_assert_mhs_allocation_budget_rejects_exhausted_cgroup(monkeypatch) -> N
 
 def test_window_barrier_governed_by_pss_not_parent_rss(monkeypatch) -> None:
     """Shared pages: parent RSS above the ceiling with tree PSS inside admits the window."""
-    from src.mhs.resources import MhsResourceAdmissionError, _assert_execution_rss_budget
+    from src.core.resources import MhsResourceAdmissionError, _assert_execution_rss_budget
 
     monkeypatch.setattr(resources, "_current_tree_pss_bytes", lambda: _GIB)
     monkeypatch.setattr(resources, "_current_rss_bytes", lambda: 8 * _GIB)
@@ -359,7 +359,7 @@ def test_window_barrier_governed_by_pss_not_parent_rss(monkeypatch) -> None:
 
 def test_assert_mhs_allocation_budget_compares_swap_against_baseline(monkeypatch) -> None:
     """Swap baseline: unchanged swap passes, growth raises SWAP_GROWTH, missing baseline stays null."""
-    from src.mhs.resources import MhsResourceAdmissionError, assert_mhs_allocation_budget
+    from src.core.resources import MhsResourceAdmissionError, assert_mhs_allocation_budget
 
     monkeypatch.setattr(resources, "_current_tree_pss_bytes", lambda: _GIB)
     monkeypatch.setattr(resources, "_tree_headroom_bytes", lambda: 8 * _GIB)
@@ -400,7 +400,7 @@ def test_assert_mhs_allocation_budget_compares_swap_against_baseline(monkeypatch
 
 def test_assert_mhs_allocation_budget_fails_closed_on_unreadable_telemetry(monkeypatch) -> None:
     """Unreadable telemetry: missing PSS or host headroom raises RESOURCE_TELEMETRY with chained cause."""
-    from src.mhs.resources import MhsResourceAdmissionError, assert_mhs_allocation_budget
+    from src.core.resources import MhsResourceAdmissionError, assert_mhs_allocation_budget
 
     def _boom_pss() -> int:
         raise DataIntegrityError("cannot enumerate process tree")
@@ -430,7 +430,7 @@ def test_assert_mhs_allocation_budget_fails_closed_on_unreadable_telemetry(monke
 
 def test_plan_mhs_execution_bars_rejects_impossible_minimum(monkeypatch) -> None:
     """Minimum legal piece: an unfittable timeout-preserving minimum raises a typed rejection."""
-    from src.mhs.resources import MhsExecutionAllocation, MhsResourceAdmissionError, plan_mhs_execution_bars
+    from src.core.resources import MhsExecutionAllocation, MhsResourceAdmissionError, plan_mhs_execution_bars
 
     monkeypatch.setattr(resources, "_current_tree_pss_bytes", lambda: 0)
     monkeypatch.setattr(resources, "_tree_headroom_bytes", lambda: 8 * _GIB)
@@ -455,7 +455,7 @@ def test_plan_mhs_execution_bars_rejects_impossible_minimum(monkeypatch) -> None
 
 def test_assert_mhs_allocation_budget_rejects_invalid_contract() -> None:
     """Allocation validation: invalid sizes, limits or stages raise ValueError; dual-None stays a no-op."""
-    from src.mhs.resources import assert_mhs_allocation_budget
+    from src.core.resources import assert_mhs_allocation_budget
 
     assert assert_mhs_allocation_budget(estimated_bytes=-1, budget_bytes=None, reserve_bytes=None) is None
     with pytest.raises(ValueError, match="estimated_bytes"):
@@ -474,7 +474,7 @@ def test_assert_mhs_allocation_budget_rejects_invalid_contract() -> None:
 
 def test_current_mhs_headroom_bytes_reports_effective_headroom(monkeypatch) -> None:
     """Headroom observation: minimum of host available and known cgroup remainder."""
-    from src.mhs.resources import current_mhs_headroom_bytes
+    from src.core.resources import current_mhs_headroom_bytes
 
     class _FakeMem:
         total = 16 * _GIB
@@ -489,7 +489,7 @@ def test_current_mhs_headroom_bytes_reports_effective_headroom(monkeypatch) -> N
 
 def test_stage_barriers_fail_closed_on_unreadable_telemetry(monkeypatch) -> None:
     """Barrier telemetry: unreadable PSS or headroom raises typed RESOURCE_TELEMETRY."""
-    from src.mhs.resources import (
+    from src.core.resources import (
         MhsResourceAdmissionError,
         _assert_execution_rss_budget,
         _assert_stage_rss_budget,

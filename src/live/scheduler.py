@@ -39,7 +39,7 @@ from src.live.derisk import UNRESOLVED_ORDERS_REASON
 from src.live.lifecycle import ShutdownFlag, install_shutdown_handlers  # noqa: F401
 from src.live.runner import CycleReport, run_shadow_cycle
 from src.live.settings import LiveSettings
-from src.mhs.frozen_research_candidate import FROZEN_MHS_TOP20_V2
+from src.strategy.targets import FROZEN_MHS_TOP20_V2
 
 logger = logging.getLogger("LiveScheduler")
 
@@ -219,6 +219,7 @@ def _default_data_refresh(
 ) -> RefreshReport:
     import urllib.request
 
+    from src.core.params import LIVE_FROZEN_WARMUP_DAYS
     from src.live.data_refresh import (
         EXCHANGE_INFO_TIMEOUT_S,
         build_refresh_universe,
@@ -231,7 +232,6 @@ def _default_data_refresh(
         write_venue_listing_snapshot,
     )
     from src.market_data.binance.venue_rules import EXCHANGE_INFO_URL
-    from src.mhs.params import LIVE_FROZEN_WARMUP_DAYS
 
     with urllib.request.urlopen(EXCHANGE_INFO_URL, timeout=EXCHANGE_INFO_TIMEOUT_S) as resp:  # noqa: S310
         payload = json.loads(resp.read())

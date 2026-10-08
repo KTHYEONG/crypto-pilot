@@ -11,8 +11,8 @@ import src.mhs.evaluation.concurrency as concurrency_mod
 import src.mhs.evaluation.diagnostics as diagnostics_mod
 from src.mhs.committee import purged_walk_forward as _committee_purged_walk_forward
 from src.mhs.diagnostic_run import run_mhs_horizon_diagnostic
-from src.mhs.panel import DATA_POLICY_LEGACY
-from src.mhs.params import COMMITTEE_OOS_START, MEASURED_EXECUTION_COST_TIERS_BPS
+from src.core.panel import DATA_POLICY_LEGACY
+from src.core.params import COMMITTEE_OOS_START, MEASURED_EXECUTION_COST_TIERS_BPS
 
 from tests.unit.mhs.test_evaluation_appresearch import (  # noqa: F401
     _START,
@@ -390,7 +390,7 @@ def test_search_trials_attempted_raised_and_deflation_more_conservative() -> Non
     # configurations), and deflated_sharpe_ratio is strictly non-increasing in
     # the trial count, so the raised constant can only make the top-level
     # statistic more conservative, never more optimistic.
-    from src.mhs.types import SEARCH_TRIALS_ATTEMPTED
+    from src.core.types import SEARCH_TRIALS_ATTEMPTED
     from src.mhs.evidence import deflated_sharpe_ratio
 
     assert SEARCH_TRIALS_ATTEMPTED == 70
@@ -477,7 +477,7 @@ def test_evaluation_protocol_field_distinguishes_in_sample_from_oos(mhs_market_l
     # the two opt-in diagnostics carry distinct protocol tags on every call, so
     # a reader can never mistake the in-sample full-period net Sharpe for the
     # purged walk-forward OOS numbers.
-    from src.mhs.features import FEATURE_REGISTRY
+    from src.strategy.features import FEATURE_REGISTRY
 
     root, end = mhs_market_long
     monkeypatch.setattr(concurrency_mod, "_run_books_concurrent", lambda *a, **k: (None, None, None, {}, None))

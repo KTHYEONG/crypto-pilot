@@ -29,7 +29,7 @@ import sys
 from pathlib import Path
 
 
-import src.mhs.marks as marks
+import src.core.marks as marks
 import src.mhs.pipeline.stages.fold as fold_stage
 from src.mhs import statistics as _statistics
 from src.mhs.diagnostic_run import run_mhs_horizon_diagnostic

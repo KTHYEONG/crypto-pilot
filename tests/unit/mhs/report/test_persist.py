@@ -106,7 +106,7 @@ def test_persist_mhs_report_signature_unchanged_without_flag() -> None:
 # ---------------------------------------------------------------------------
 
 from src.mhs.contracts import MhsResearchGoResult
-from src.mhs.resources import _StageRecorder
+from src.core.resources import _StageRecorder
 from src.mhs.pipeline.context import PipelineContext
 from src.mhs.pipeline.stages.assemble import assemble_report
 from src.mhs.report.persist import build_mhs_run_history_record

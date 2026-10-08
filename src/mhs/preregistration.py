@@ -15,13 +15,13 @@ import pandas as pd
 
 from src.common.errors import DataIntegrityError
 from src.common.paths import BACKTESTS_DIR, BASE_DIR
+from src.core.params import DISCOVERY_START, MHS_FINAL_OOS_CUTOFF_2026H1
 from src.mhs.backtest.journal import (
     ProcessEvaluationPlan,
     consulted_process_horizon,
     persist_process_registration,
     process_procedure_digest,
 )
-from src.mhs.params import DISCOVERY_START, MHS_FINAL_OOS_CUTOFF_2026H1
 from src.mhs.run_history import (
     RESEARCH_NEUTRAL_FLAGS,
     _resolve_history_registry,

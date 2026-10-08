@@ -33,9 +33,9 @@ from src.mhs.backtest.journal import (
 from src.mhs.backtest.journal import _endpoint_schedule
 from src.mhs.backtest.labels import ProcessClockSpec
 from src.mhs.backtest.selection import NestedSelectionSpec, TrainingWindowSpec
-from src.mhs.params import MHS_FINAL_OOS_CUTOFF_2026H1, GrowthRiskEnvelope
+from src.core.params import MHS_FINAL_OOS_CUTOFF_2026H1, GrowthRiskEnvelope
 from src.mhs.process import ProcessExecutionPolicy, ProcessRiskSizingSpec
-from src.mhs.types import ExecutionSpec
+from src.core.types import ExecutionSpec
 
 INIT_NOW = pd.Timestamp("2026-08-01", tz="UTC")
 LEGACY_OLD = pd.Timestamp("2024-01-01", tz="UTC")

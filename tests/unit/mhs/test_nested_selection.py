@@ -301,7 +301,7 @@ def test_windowed_weights_short_rolling_history_stays_flat() -> None:
 def test_windowed_weights_sparse_rolling_history_fails_closed() -> None:
     """A full calendar span with fewer than the registered labels emits no allocation."""
     from src.mhs.backtest.paths import _windowed_weights
-    from src.mhs.params import PROCESS_MIN_TRAIN_DAYS
+    from src.core.params import PROCESS_MIN_TRAIN_DAYS
 
     mev = _label_evidence(800, sparse_every=3)
     window = next(p for p in POLICIES if p.policy_id == "rolling_24m")

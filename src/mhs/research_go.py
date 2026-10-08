@@ -12,19 +12,19 @@ from typing import Any
 
 import numpy as np
 
-from src.mhs.contracts import (
-    MhsDiagnosticRequest,
-    MhsFoldReport,
-    MhsResearchGoResult,
-)
-from src.mhs.params import (
+from src.core.params import (
     GO_PRIMARY_SHARPE_FLOOR,
     GROWTH_RISK_ENVELOPES,
     GrowthRiskEnvelope,
 )
-from src.mhs.types import (
+from src.core.types import (
     COMMITTEE_GROWTH_MAX_DRAWDOWN,
     REGISTERED_POLICY_THRESHOLDS,
+)
+from src.mhs.contracts import (
+    MhsDiagnosticRequest,
+    MhsFoldReport,
+    MhsResearchGoResult,
 )
 
 GO_REASON_INCOMPLETE_FOLD = "INCOMPLETE_ANCHORED_FOLD"
@@ -95,7 +95,7 @@ def _resolved_committee_members(request: MhsDiagnosticRequest) -> tuple[str, ...
     request.committee_member_set. An unregistered key raises ValueError
     naming the registered keys.
     """
-    from src.mhs.params import COMMITTEE_MEMBER_SETS
+    from src.core.params import COMMITTEE_MEMBER_SETS
 
     key = request.committee_member_set
     if key not in COMMITTEE_MEMBER_SETS:

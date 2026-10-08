@@ -29,7 +29,7 @@ from src.mhs.evidence import (
     regime_conditional_sharpe_blocks,
     selection_overlap_fraction,
 )
-from src.mhs.params import (
+from src.core.params import (
     DEFAULT_SELECTION_WINDOW,
     PERIODS_PER_YEAR_1H,
     PNL_VOL_TARGET_BURN_IN_DAYS,

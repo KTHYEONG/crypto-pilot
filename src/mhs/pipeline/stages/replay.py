@@ -23,7 +23,7 @@ import pandas as pd
 import src.mhs.evaluation.committee as committee
 import src.mhs.evaluation.concurrency as concurrency
 import src.mhs.evaluation.guards as guards
-from src.mhs.marks import _missing_execution_sources
+from src.core.marks import _missing_execution_sources
 from src.mhs.pipeline.context import PipelineContext
 from src.mhs.telemetry import StageTelemetry, Tag
 

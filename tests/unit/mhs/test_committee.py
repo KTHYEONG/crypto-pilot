@@ -21,8 +21,8 @@ from src.mhs.committee import (
     volatility_target_scale,
     wealth_metrics,
 )
-from src.mhs.types import COMMITTEE_MEMBERS, COMMITTEE_OOS_START
-from src.mhs.features import FEATURE_REGISTRY
+from src.core.types import COMMITTEE_MEMBERS, COMMITTEE_OOS_START
+from src.strategy.features import FEATURE_REGISTRY
 
 _PPY = 365.0 * 24.0
 
@@ -575,14 +575,14 @@ def test_growth_budget_annual_vol_fallback_on_empty() -> None:
     # SCENARIO_MHS_COMPOUNDING_ALPHA_AXES_03: on an empty Series, returns
     # PNL_TARGET_ANNUAL_VOL.
     from src.mhs.committee import growth_budget_annual_vol
-    from src.mhs.params import PNL_TARGET_ANNUAL_VOL
+    from src.core.params import PNL_TARGET_ANNUAL_VOL
 
     assert growth_budget_annual_vol(pd.Series(dtype=float)) == PNL_TARGET_ANNUAL_VOL
 
 
 def test_growth_budget_annual_vol_fallback_on_one_row() -> None:
     from src.mhs.committee import growth_budget_annual_vol
-    from src.mhs.params import PNL_TARGET_ANNUAL_VOL
+    from src.core.params import PNL_TARGET_ANNUAL_VOL
 
     idx = _hourly_index(1)
     assert growth_budget_annual_vol(pd.Series([0.001], index=idx)) == PNL_TARGET_ANNUAL_VOL
@@ -592,7 +592,7 @@ def test_growth_budget_annual_vol_fallback_on_zero_std() -> None:
     # SCENARIO_MHS_COMPOUNDING_ALPHA_AXES_03: an all-zero (std==0) Series
     # returns exactly PNL_TARGET_ANNUAL_VOL.
     from src.mhs.committee import growth_budget_annual_vol
-    from src.mhs.params import PNL_TARGET_ANNUAL_VOL
+    from src.core.params import PNL_TARGET_ANNUAL_VOL
 
     idx = _hourly_index(500)
     assert growth_budget_annual_vol(pd.Series(0.0, index=idx)) == PNL_TARGET_ANNUAL_VOL

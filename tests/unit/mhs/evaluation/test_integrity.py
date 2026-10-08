@@ -77,8 +77,8 @@ def test_funding_gap_terminal_symbols_accepts_gap_with_no_later_fill() -> None:
     from src.mhs.evaluation.integrity import _funding_gap_terminal_symbols
 
     import pandas as pd
-    from src.mhs.execution import ExecutionDataGap
-    from src.mhs.execution.contracts import SimulatedInventoryLedgerResult, StrategyExecutionReplayResult
+    from src.engine.execution import ExecutionDataGap
+    from src.engine.execution.contracts import SimulatedInventoryLedgerResult, StrategyExecutionReplayResult
 
     def _gap(code, symbol, ts):
         return ExecutionDataGap(code=code, symbol=symbol, timestamp=pd.Timestamp(ts, tz="UTC"))
@@ -129,8 +129,8 @@ def test_funding_gap_terminal_symbols_excludes_symbol_with_later_fill() -> None:
     from src.mhs.evaluation.integrity import _funding_gap_terminal_symbols
 
     import pandas as pd
-    from src.mhs.execution import ExecutionDataGap
-    from src.mhs.execution.contracts import SimulatedInventoryLedgerResult, StrategyExecutionReplayResult
+    from src.engine.execution import ExecutionDataGap
+    from src.engine.execution.contracts import SimulatedInventoryLedgerResult, StrategyExecutionReplayResult
 
     def _gap(code, symbol, ts):
         return ExecutionDataGap(code=code, symbol=symbol, timestamp=pd.Timestamp(ts, tz="UTC"))
@@ -185,7 +185,7 @@ def test_funding_gap_terminal_symbols_ignores_delist_settlement_as_recovery_evid
     from src.mhs.evaluation.integrity import _funding_gap_terminal_symbols
 
     import pandas as pd
-    from src.mhs.execution import ExecutionDataGap
+    from src.engine.execution import ExecutionDataGap
 
     def _gap(code, symbol, ts):
         return ExecutionDataGap(code=code, symbol=symbol, timestamp=pd.Timestamp(ts, tz="UTC"))
@@ -222,7 +222,7 @@ def test_funding_gap_terminal_symbols_empty_gaps_and_missing_columns_are_safe() 
     # Given: no MISSING_HELD_FUNDING gaps at all
     assert _funding_gap_terminal_symbols((), pd.DataFrame()) == frozenset()
     # Given: a MISSING_HELD_FUNDING gap but an empty (columnless) fills frame -- must not KeyError
-    from src.mhs.execution import ExecutionDataGap
+    from src.engine.execution import ExecutionDataGap
     gaps = (ExecutionDataGap(code="MISSING_HELD_FUNDING", symbol="X", timestamp=pd.Timestamp("2025-01-01", tz="UTC")),)
     assert _funding_gap_terminal_symbols(gaps, pd.DataFrame()) == frozenset({"X"})
 
@@ -230,8 +230,8 @@ def test_ledger_terminal_only_accepts_mixed_unknown_termination_and_terminal_fun
     from src.mhs.evaluation.integrity import ledger_terminal_only
 
     import pandas as pd
-    from src.mhs.execution import ExecutionDataGap
-    from src.mhs.execution.contracts import SimulatedInventoryLedgerResult, StrategyExecutionReplayResult
+    from src.engine.execution import ExecutionDataGap
+    from src.engine.execution.contracts import SimulatedInventoryLedgerResult, StrategyExecutionReplayResult
 
     def _gap(code, symbol, ts):
         return ExecutionDataGap(code=code, symbol=symbol, timestamp=pd.Timestamp(ts, tz="UTC"))
@@ -284,7 +284,7 @@ def test_ledger_terminal_only_accepts_non_recovering_held_mark_gap() -> None:
     from src.mhs.evaluation.integrity import ledger_terminal_only
 
     import pandas as pd
-    from src.mhs.execution import ExecutionDataGap
+    from src.engine.execution import ExecutionDataGap
 
     def _gap(code, symbol, ts):
         return ExecutionDataGap(code=code, symbol=symbol, timestamp=pd.Timestamp(ts, tz="UTC"))
@@ -310,8 +310,8 @@ def test_ledger_terminal_only_rejects_recovering_funding_gap_and_other_codes() -
     from src.mhs.evaluation.integrity import ledger_terminal_only
 
     import pandas as pd
-    from src.mhs.execution import ExecutionDataGap
-    from src.mhs.execution.contracts import SimulatedInventoryLedgerResult, StrategyExecutionReplayResult
+    from src.engine.execution import ExecutionDataGap
+    from src.engine.execution.contracts import SimulatedInventoryLedgerResult, StrategyExecutionReplayResult
 
     def _gap(code, symbol, ts):
         return ExecutionDataGap(code=code, symbol=symbol, timestamp=pd.Timestamp(ts, tz="UTC"))
@@ -360,8 +360,8 @@ def test_assert_cache_required_ledger_valid_accepts_terminal_funding_gap() -> No
     from src.mhs.evaluation.integrity import _assert_cache_required_ledger_valid
 
     import pandas as pd
-    from src.mhs.execution import ExecutionDataGap
-    from src.mhs.execution.contracts import SimulatedInventoryLedgerResult, StrategyExecutionReplayResult
+    from src.engine.execution import ExecutionDataGap
+    from src.engine.execution.contracts import SimulatedInventoryLedgerResult, StrategyExecutionReplayResult
 
     def _gap(code, symbol, ts):
         return ExecutionDataGap(code=code, symbol=symbol, timestamp=pd.Timestamp(ts, tz="UTC"))
@@ -411,8 +411,8 @@ def test_assert_cache_required_ledger_valid_rejects_recovering_funding_gap() -> 
     from src.mhs.evaluation.integrity import _assert_cache_required_ledger_valid
 
     import pandas as pd
-    from src.mhs.execution import ExecutionDataGap
-    from src.mhs.execution.contracts import SimulatedInventoryLedgerResult, StrategyExecutionReplayResult
+    from src.engine.execution import ExecutionDataGap
+    from src.engine.execution.contracts import SimulatedInventoryLedgerResult, StrategyExecutionReplayResult
 
     def _gap(code, symbol, ts):
         return ExecutionDataGap(code=code, symbol=symbol, timestamp=pd.Timestamp(ts, tz="UTC"))
@@ -496,7 +496,7 @@ def test_replay_ledger_certified_rejects_terminal_only_gaps() -> None:
     import pandas as pd
 
     from src.mhs.evaluation.integrity import replay_ledger_certified
-    from src.mhs.execution import ExecutionDataGap
+    from src.engine.execution import ExecutionDataGap
 
     gaps = (
         ExecutionDataGap(code="UNKNOWN_TERMINATION", symbol="AAAUSDT", timestamp=pd.Timestamp("2025-12-31", tz="UTC")),
@@ -518,7 +518,7 @@ def test_replay_ledger_certified_rejects_recovering_gap() -> None:
     import pandas as pd
 
     from src.mhs.evaluation.integrity import replay_ledger_certified
-    from src.mhs.execution import ExecutionDataGap
+    from src.engine.execution import ExecutionDataGap
 
     gaps = (
         ExecutionDataGap(
@@ -552,7 +552,7 @@ def test_replay_ledger_certified_fails_closed_on_missing_evidence() -> None:
     import pandas as pd
 
     from src.mhs.evaluation.integrity import replay_ledger_certified
-    from src.mhs.execution import ExecutionDataGap
+    from src.engine.execution import ExecutionDataGap
 
     no_ledger = SimpleNamespace(simulated_fills=pd.DataFrame())
     no_gaps = SimpleNamespace(
@@ -598,7 +598,7 @@ def test_train_reference_ledger_unknown_held_funding_fails_closed() -> None:
 
     from src.common.errors import DataIntegrityError
     from src.mhs.evaluation.integrity import _assert_train_reference_ledger_certified
-    from src.mhs.execution import ExecutionDataGap
+    from src.engine.execution import ExecutionDataGap
 
     gaps = (
         ExecutionDataGap(code="MISSING_HELD_MARK", symbol="AAAUSDT", timestamp=pd.Timestamp("2025-12-11 13:00", tz="UTC")),
@@ -631,7 +631,7 @@ def test_train_reference_ledger_terminal_only_never_certifies() -> None:
 
     from src.common.errors import DataIntegrityError
     from src.mhs.evaluation.integrity import _assert_train_reference_ledger_certified
-    from src.mhs.execution import ExecutionDataGap
+    from src.engine.execution import ExecutionDataGap
 
     gaps = (
         ExecutionDataGap(code="UNKNOWN_TERMINATION", symbol="AAAUSDT", timestamp=pd.Timestamp("2025-12-31", tz="UTC")),
@@ -677,7 +677,7 @@ def test_train_reference_ledger_failure_maps_to_execution_gap() -> None:
         _assert_train_reference_ledger_certified,
         _classify_execution_failure,
     )
-    from src.mhs.execution import ExecutionDataGap
+    from src.engine.execution import ExecutionDataGap
     from src.mhs.research_go import GO_REASON_EXECUTION_GAP
 
     def _replay(**kwargs):

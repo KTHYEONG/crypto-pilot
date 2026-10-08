@@ -199,7 +199,7 @@ def test_provenance_survives_report_round_trip(tmp_path) -> None:  # type: ignor
 
 def test_public_backtest_entry_forwards_risk_sizing(monkeypatch: pytest.MonkeyPatch) -> None:
     import src.mhs.backtest.paths as bt_paths
-    from src.mhs.params import DISCOVERY_START, PROCESS_EVALUATION_CEILING
+    from src.core.params import DISCOVERY_START, PROCESS_EVALUATION_CEILING
 
     data = _synthetic_data()
     monkeypatch.setattr(bt_paths, "load_process_market_data", lambda *a, **k: data)
@@ -233,7 +233,7 @@ def test_public_backtest_entry_forwards_risk_sizing(monkeypatch: pytest.MonkeyPa
 def test_inventory_entry_forwards_risk_sizing_to_proxy(monkeypatch: pytest.MonkeyPatch) -> None:
     import src.mhs.backtest.inventory as bt_inventory
     from src.mhs.backtest.contracts import ProcessInventoryBacktestError
-    from src.mhs.params import DISCOVERY_START, PROCESS_EVALUATION_CEILING
+    from src.core.params import DISCOVERY_START, PROCESS_EVALUATION_CEILING
 
     seen: dict[str, object] = {}
 
@@ -271,8 +271,8 @@ def _custom_procedure(member_ids):  # type: ignore[no-untyped-def]
     from src.mhs.backtest.journal import PROCEDURE_SCHEMA_VERSION, ProcessProcedureDefinition
     from src.mhs.backtest.labels import ProcessClockSpec
     from src.mhs.backtest.selection import NestedSelectionSpec, TrainingWindowSpec
-    from src.mhs.data_policy import MHS_DATA_POLICY_DEFAULT
-    from src.mhs.params import (
+    from src.core.data_policy import MHS_DATA_POLICY_DEFAULT
+    from src.core.params import (
         CLI_GROWTH_ENVELOPE_DEFAULT,
         EVIDENCE_GATE_ALPHA,
         GROWTH_RISK_ENVELOPES,
@@ -281,7 +281,7 @@ def _custom_procedure(member_ids):  # type: ignore[no-untyped-def]
         PROCESS_SMOOTHING_HALFLIFE_DAYS,
     )
     from src.mhs.process import ProcessExecutionPolicy
-    from src.mhs.types import ExecutionSpec
+    from src.core.types import ExecutionSpec
 
     return ProcessProcedureDefinition(
         schema_version=PROCEDURE_SCHEMA_VERSION,
@@ -382,7 +382,7 @@ def _stub_cold_control(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_procedure_driven_path_uses_fixed_control(monkeypatch: pytest.MonkeyPatch) -> None:
     import src.mhs.backtest.paths as bt_paths
-    from src.mhs.params import DISCOVERY_START, PROCESS_EVALUATION_CEILING
+    from src.core.params import DISCOVERY_START, PROCESS_EVALUATION_CEILING
 
     data = _synthetic_data()
     monkeypatch.setattr(bt_paths, "load_process_market_data", lambda *a, **k: data)
@@ -401,7 +401,7 @@ def test_procedure_driven_path_uses_fixed_control(monkeypatch: pytest.MonkeyPatc
 
 def test_procedure_driven_proxy_blocks_deployment(monkeypatch: pytest.MonkeyPatch) -> None:
     import src.mhs.backtest.paths as bt_paths
-    from src.mhs.params import DISCOVERY_START, PROCESS_EVALUATION_CEILING
+    from src.core.params import DISCOVERY_START, PROCESS_EVALUATION_CEILING
 
     data = _synthetic_data()
     monkeypatch.setattr(bt_paths, "load_process_market_data", lambda *a, **k: data)
@@ -424,7 +424,7 @@ def test_native_member_evidence_identity_mismatch_rejected() -> None:
     from src.mhs.backtest.journal import process_procedure_digest
     from src.mhs.backtest.labels import ProcessClockSpec
     from src.mhs.backtest.labels import build_proxy_member_returns as _build
-    from src.mhs.params import DISCOVERY_START, PROCESS_EVALUATION_CEILING
+    from src.core.params import DISCOVERY_START, PROCESS_EVALUATION_CEILING
 
     data = _synthetic_data()
     procedure = _custom_procedure(list(data.member_books.keys()))
@@ -502,7 +502,7 @@ def test_native_member_evidence_identity_mismatch_rejected() -> None:
 
 def test_procedure_driven_same_decision_across_cost_tiers(monkeypatch: pytest.MonkeyPatch) -> None:
     import src.mhs.backtest.paths as bt_paths
-    from src.mhs.params import DISCOVERY_START, PROCESS_EVALUATION_CEILING
+    from src.core.params import DISCOVERY_START, PROCESS_EVALUATION_CEILING
 
     data = _synthetic_data()
     monkeypatch.setattr(bt_paths, "load_process_market_data", lambda *a, **k: data)
@@ -522,7 +522,7 @@ def test_procedure_driven_same_decision_across_cost_tiers(monkeypatch: pytest.Mo
 
 def test_continuous_path_preserves_calendar_coverage(monkeypatch: pytest.MonkeyPatch) -> None:
     import src.mhs.backtest.paths as bt_paths
-    from src.mhs.params import DISCOVERY_START, PROCESS_EVALUATION_CEILING
+    from src.core.params import DISCOVERY_START, PROCESS_EVALUATION_CEILING
 
     data = _synthetic_data()
     monkeypatch.setattr(bt_paths, "load_process_market_data", lambda *a, **k: data)
@@ -759,7 +759,7 @@ def test_final_target_zero_when_newly_unavailable() -> None:
 def test_common_mature_rows_meet_minimum_without_imputation() -> None:
     """Well-formed executable labels retain the registered minimum of common mature rows."""
     from src.mhs.backtest.labels import build_proxy_member_returns, select_matured_training_returns
-    from src.mhs.params import PROCESS_MIN_TRAIN_DAYS
+    from src.core.params import PROCESS_MIN_TRAIN_DAYS
 
     data = _synthetic_data(n_days=500)
     evidence = build_proxy_member_returns(

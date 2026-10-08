@@ -104,7 +104,7 @@ def test_rule_table_parity() -> None:
 
 
 def test_canonical_inert_constant_matches_identity_baseline() -> None:
-    from src.mhs.params import COMMITTEE_MEMBER_SET_INERT, COMMITTEE_TRANCHE_COUNT
+    from src.core.params import COMMITTEE_MEMBER_SET_INERT, COMMITTEE_TRANCHE_COUNT
     from src.mhs.run_history import TRIAL_IDENTITY_BASELINE
 
     assert TRIAL_IDENTITY_BASELINE["committee_member_set"] == COMMITTEE_MEMBER_SET_INERT
@@ -119,7 +119,7 @@ def test_choice_errors_name_registered_set() -> None:
 
 
 def test_production_envelope_accepted() -> None:
-    from src.mhs.params import GROWTH_RISK_ENVELOPES
+    from src.core.params import GROWTH_RISK_ENVELOPES
 
     for g in GROWTH_RISK_ENVELOPES:
         validate_request(MhsDiagnosticRequest(growth_envelope=g))

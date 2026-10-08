@@ -739,7 +739,7 @@ def _settlement_cli_lake(root) -> None:
 
 def test_build_settlement_registry_dry_run_writes_nothing(tmp_path, monkeypatch, caplog) -> None:
     from src.common import paths as cfg
-    from src.mhs.instrument_settlements import (
+    from src.core.instrument_settlements import (
         EMPTY_SETTLEMENT_REGISTRY,
         default_instrument_settlement_registry_path,
     )
@@ -747,7 +747,7 @@ def test_build_settlement_registry_dry_run_writes_nothing(tmp_path, monkeypatch,
     _settlement_cli_lake(tmp_path)
     monkeypatch.setattr(cfg, "FUTURES_DATA_DIR", tmp_path, raising=False)
     monkeypatch.setattr(
-        "src.mhs.instrument_settlements.load_instrument_settlement_registry",
+        "src.core.instrument_settlements.load_instrument_settlement_registry",
         lambda path=None: EMPTY_SETTLEMENT_REGISTRY,
     )
     committed = default_instrument_settlement_registry_path().read_bytes()
@@ -763,7 +763,7 @@ def test_build_settlement_registry_dry_run_writes_nothing(tmp_path, monkeypatch,
 
 def test_build_settlement_registry_write_replaces_registry(tmp_path, monkeypatch) -> None:
     from src.common import paths as cfg
-    from src.mhs.instrument_settlements import (
+    from src.core.instrument_settlements import (
         EMPTY_SETTLEMENT_REGISTRY,
         parse_instrument_settlement_registry,
     )
@@ -771,12 +771,12 @@ def test_build_settlement_registry_write_replaces_registry(tmp_path, monkeypatch
     _settlement_cli_lake(tmp_path)
     monkeypatch.setattr(cfg, "FUTURES_DATA_DIR", tmp_path, raising=False)
     monkeypatch.setattr(
-        "src.mhs.instrument_settlements.load_instrument_settlement_registry",
+        "src.core.instrument_settlements.load_instrument_settlement_registry",
         lambda path=None: EMPTY_SETTLEMENT_REGISTRY,
     )
     target = tmp_path / "committed.jsonl"
     monkeypatch.setattr(
-        "src.mhs.instrument_settlements.default_instrument_settlement_registry_path",
+        "src.core.instrument_settlements.default_instrument_settlement_registry_path",
         lambda: target,
     )
     args = _mhs_parser().parse_args(
@@ -798,10 +798,10 @@ def test_build_settlement_registry_bootstraps_without_committed(tmp_path, monkey
         raise DataIntegrityError("settlement registry unreadable: gone")
 
     monkeypatch.setattr(
-        "src.mhs.instrument_settlements.load_instrument_settlement_registry", _missing,
+        "src.core.instrument_settlements.load_instrument_settlement_registry", _missing,
     )
     monkeypatch.setattr(
-        "src.mhs.instrument_settlements.default_instrument_settlement_registry_path",
+        "src.core.instrument_settlements.default_instrument_settlement_registry_path",
         lambda: tmp_path / "absent.jsonl",
     )
     with caplog.at_level("INFO", logger="src.cli.commands.data"):
@@ -824,7 +824,7 @@ def test_build_settlement_registry_refuses_corrupt_committed(tmp_path, monkeypat
     corrupt = tmp_path / "corrupt.jsonl"
     corrupt.write_bytes(b"{oops")
     monkeypatch.setattr(
-        "src.mhs.instrument_settlements.default_instrument_settlement_registry_path",
+        "src.core.instrument_settlements.default_instrument_settlement_registry_path",
         lambda: corrupt,
     )
     args = _mhs_parser().parse_args(
@@ -840,7 +840,7 @@ def test_build_settlement_registry_reports_unresolved_and_writes_output(
     import pandas as pd
 
     from src.common import paths as cfg
-    from src.mhs.instrument_settlements import (
+    from src.core.instrument_settlements import (
         EMPTY_SETTLEMENT_REGISTRY,
         parse_instrument_settlement_registry,
     )
@@ -855,7 +855,7 @@ def test_build_settlement_registry_reports_unresolved_and_writes_output(
     }).to_parquet(tmp_path / "ohlcv" / "3m" / "THINUSDT.parquet", index=False)
     monkeypatch.setattr(cfg, "FUTURES_DATA_DIR", tmp_path, raising=False)
     monkeypatch.setattr(
-        "src.mhs.instrument_settlements.load_instrument_settlement_registry",
+        "src.core.instrument_settlements.load_instrument_settlement_registry",
         lambda path=None: EMPTY_SETTLEMENT_REGISTRY,
     )
     with caplog.at_level("INFO", logger="src.cli.commands.data"):
@@ -877,12 +877,12 @@ def test_build_settlement_registry_reports_unresolved_and_writes_output(
 @pytest.mark.parametrize("horizon", ["2025-01-02", "2025-01-02T02:00:00+02:00"])
 def test_settlement_cli_rejects_non_utc_horizons(tmp_path, monkeypatch, horizon) -> None:
     from src.common.errors import DataIntegrityError
-    from src.mhs.instrument_settlements import EMPTY_SETTLEMENT_REGISTRY
+    from src.core.instrument_settlements import EMPTY_SETTLEMENT_REGISTRY
 
     _settlement_cli_lake(tmp_path)
     monkeypatch.setattr("src.common.paths.FUTURES_DATA_DIR", tmp_path)
     monkeypatch.setattr(
-        "src.mhs.instrument_settlements.load_instrument_settlement_registry",
+        "src.core.instrument_settlements.load_instrument_settlement_registry",
         lambda: EMPTY_SETTLEMENT_REGISTRY,
     )
     args = _mhs_parser().parse_args(["data", "build-settlement-registry", "--horizon", horizon])
@@ -905,13 +905,13 @@ def _halt_cli_lake(root) -> None:
 
 
 def test_build_venue_halts_writes_output(tmp_path, monkeypatch, caplog) -> None:
-    from src.mhs.instrument_settlements import EMPTY_SETTLEMENT_REGISTRY
-    from src.mhs.venue_halts import parse_venue_halt_registry
+    from src.core.instrument_settlements import EMPTY_SETTLEMENT_REGISTRY
+    from src.core.venue_halts import parse_venue_halt_registry
 
     _halt_cli_lake(tmp_path)
     monkeypatch.setattr("src.common.paths.FUTURES_DATA_DIR", tmp_path)
     monkeypatch.setattr(
-        "src.mhs.instrument_settlements.load_instrument_settlement_registry",
+        "src.core.instrument_settlements.load_instrument_settlement_registry",
         lambda path=None: EMPTY_SETTLEMENT_REGISTRY,
     )
     out = tmp_path / "halts.jsonl"
@@ -928,18 +928,18 @@ def test_build_venue_halts_writes_output(tmp_path, monkeypatch, caplog) -> None:
 
 
 def test_build_venue_halts_write_replaces_registry(tmp_path, monkeypatch) -> None:
-    from src.mhs.instrument_settlements import EMPTY_SETTLEMENT_REGISTRY
-    from src.mhs.venue_halts import parse_venue_halt_registry
+    from src.core.instrument_settlements import EMPTY_SETTLEMENT_REGISTRY
+    from src.core.venue_halts import parse_venue_halt_registry
 
     _halt_cli_lake(tmp_path)
     monkeypatch.setattr("src.common.paths.FUTURES_DATA_DIR", tmp_path)
     monkeypatch.setattr(
-        "src.mhs.instrument_settlements.load_instrument_settlement_registry",
+        "src.core.instrument_settlements.load_instrument_settlement_registry",
         lambda path=None: EMPTY_SETTLEMENT_REGISTRY,
     )
     target = tmp_path / "committed.jsonl"
     monkeypatch.setattr(
-        "src.mhs.venue_halts.default_venue_halt_registry_path", lambda: target,
+        "src.core.venue_halts.default_venue_halt_registry_path", lambda: target,
     )
     args = _mhs_parser().parse_args(
         ["data", "build-venue-halts", "--horizon", "2025-01-02T00:00:00Z", "--write"]
@@ -959,10 +959,10 @@ def test_build_venue_halts_bootstraps_without_committed(tmp_path, monkeypatch, c
         raise DataIntegrityError("settlement registry unreadable: gone")
 
     monkeypatch.setattr(
-        "src.mhs.instrument_settlements.load_instrument_settlement_registry", _missing,
+        "src.core.instrument_settlements.load_instrument_settlement_registry", _missing,
     )
     monkeypatch.setattr(
-        "src.mhs.instrument_settlements.default_instrument_settlement_registry_path",
+        "src.core.instrument_settlements.default_instrument_settlement_registry_path",
         lambda: tmp_path / "absent.jsonl",
     )
     with caplog.at_level("INFO", logger="src.cli.commands.data"):
@@ -985,7 +985,7 @@ def test_build_venue_halts_refuses_corrupt_committed(tmp_path, monkeypatch) -> N
     corrupt = tmp_path / "corrupt.jsonl"
     corrupt.write_bytes(b"{oops")
     monkeypatch.setattr(
-        "src.mhs.instrument_settlements.default_instrument_settlement_registry_path",
+        "src.core.instrument_settlements.default_instrument_settlement_registry_path",
         lambda: corrupt,
     )
     args = _mhs_parser().parse_args(
@@ -993,3 +993,29 @@ def test_build_venue_halts_refuses_corrupt_committed(tmp_path, monkeypatch) -> N
     )
     with pytest.raises(DataIntegrityError):
         args.handler(args)
+
+
+def test_report_internal_gaps_resolves_moved_panel_import(monkeypatch) -> None:
+    import pandas as pd
+
+    import src.core.panel as panel_mod
+    from src.cli.commands.data import _report_internal_gaps
+
+    frame = pd.DataFrame(
+        {"AUSDT": [1.0, 1.0, 1.0], "BUSDT": [1.0, float("nan"), 1.0]},
+        index=pd.date_range("2024-01-01", periods=3, freq="3min", tz="UTC"),
+    )
+    seen: dict = {}
+
+    def _stub_panel(root, interval, columns, start, end, partition="all"):
+        seen.update(
+            root=root, interval=interval, columns=tuple(columns),
+            start=start, end=end, partition=partition,
+        )
+        return dict.fromkeys(("open", "high", "low", "close", "quote_vol"), frame)
+
+    monkeypatch.setattr(panel_mod, "load_base_panel", _stub_panel)
+    args = argparse.Namespace(timeframe="3m", start="2024-01-01", end="2024-01-02")
+    assert _report_internal_gaps(args) is None
+    assert seen["interval"] == "3m"
+    assert seen["columns"] == ("open", "high", "low", "close", "quote_vol")

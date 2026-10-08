@@ -11,7 +11,7 @@ import pandas as pd
 import pytest
 
 from src.common.errors import DataIntegrityError
-from src.mhs.params import FORWARD_MIN_FOLDS, GrowthRiskEnvelope, MHS_FINAL_OOS_CUTOFF_2026H1
+from src.core.params import FORWARD_MIN_FOLDS, GrowthRiskEnvelope, MHS_FINAL_OOS_CUTOFF_2026H1
 
 _ENVELOPE = GrowthRiskEnvelope(
     name="unit_test_forward", max_drawdown=0.6, max_drawdown_prob=0.1,
@@ -640,7 +640,7 @@ def test_run_folds_parallel_resolves_folds_from_the_request(monkeypatch) -> None
 
 def test_integrity_skips_reliability_eligibility_only_under_forward_protocol(monkeypatch) -> None:
     import src.mhs.deploy_gate as dg
-    import src.mhs.execution.integrity as integrity_mod
+    import src.engine.execution.integrity as integrity_mod
 
     monkeypatch.setattr(integrity_mod, "replay_ledger_certified", lambda primary: True)
     fold = SimpleNamespace(strict=object(), failures=())
@@ -676,7 +676,7 @@ def test_active_payload_unchanged() -> None:
     import dataclasses
 
     from src.mhs.contracts import MhsDiagnosticRequest
-    from src.mhs.params import COMMITTEE_TARGET_GROSS
+    from src.core.params import COMMITTEE_TARGET_GROSS
     from src.mhs.preregistration import procedure_payload
     from src.mhs.validation import inert_dependent_overrides
 
@@ -717,7 +717,7 @@ def test_procedure_digest_binds_admission_procedure(monkeypatch) -> None:
     # D6: the params snapshot (including COMMITTEE_ADMISSION_PROCEDURE) is part
     # of the preregistered procedure payload, so an admission-procedure change
     # re-keys the digest and old registrations must never be reused.
-    from src.mhs import params as mhs_params
+    from src.core import params as mhs_params
     from src.mhs.preregistration import procedure_identity_digest, procedure_payload
 
     request = research_baseline()
@@ -737,7 +737,7 @@ def test_procedure_digest_binds_admission_procedure(monkeypatch) -> None:
 def test_registry_digest_rekeys_procedure_digest(monkeypatch) -> None:
     import dataclasses
 
-    from src.mhs import instrument_settlements as _mod
+    from src.core import instrument_settlements as _mod
     from src.mhs.live_strategy import capture_params_snapshot
     from src.mhs.preregistration import procedure_identity_digest
 

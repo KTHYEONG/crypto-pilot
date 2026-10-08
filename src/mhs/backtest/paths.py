@@ -13,6 +13,22 @@ import numpy as np
 import pandas as pd
 
 from src.common.errors import DataIntegrityError
+from src.core.params import (
+    CLI_GROWTH_ENVELOPE_DEFAULT,
+    DISCOVERY_START,
+    EVIDENCE_GATE_ALPHA,
+    GROWTH_RISK_ENVELOPES,
+    NULL_BOOTSTRAP_SEED,
+    PROCESS_EVALUATION_CEILING,
+    PROCESS_FEATURE_CANDIDATES,
+    PROCESS_FUNDING_CARRY_CANDIDATES_HOURS,
+    PROCESS_MIN_TRAIN_DAYS,
+    PROCESS_SMOOTHING_HALFLIFE_DAYS,
+    STRESS_COST_MULTIPLIER,
+)
+from src.core.resources import MhsMemoryBudget, _current_tree_swap_bytes
+from src.core.types import ExecutionSpec
+from src.engine.execution.pnl import mhs_ledger_pnl
 from src.mhs.backtest.contracts import (
     PROCESS_CERTIFICATION_LEVEL,
     ProcessBacktestReport,
@@ -42,22 +58,7 @@ from src.mhs.backtest.selection import (
     TrainingWindowSpec,
     choose_refit_policy,
 )
-from src.mhs.books import scale_book_to_target_gross
 from src.mhs.deploy_gate import evaluate_deploy_gate
-from src.mhs.execution.pnl import mhs_ledger_pnl
-from src.mhs.params import (
-    CLI_GROWTH_ENVELOPE_DEFAULT,
-    DISCOVERY_START,
-    EVIDENCE_GATE_ALPHA,
-    GROWTH_RISK_ENVELOPES,
-    NULL_BOOTSTRAP_SEED,
-    PROCESS_EVALUATION_CEILING,
-    PROCESS_FEATURE_CANDIDATES,
-    PROCESS_FUNDING_CARRY_CANDIDATES_HOURS,
-    PROCESS_MIN_TRAIN_DAYS,
-    PROCESS_SMOOTHING_HALFLIFE_DAYS,
-    STRESS_COST_MULTIPLIER,
-)
 from src.mhs.process import (
     ProcessExecutionPolicy,
     ProcessRiskSizingSpec,
@@ -73,8 +74,7 @@ from src.mhs.process import (
     step_proxy_net_returns,
     volatility_scaled_exposure,
 )
-from src.mhs.resources import MhsMemoryBudget, _current_tree_swap_bytes
-from src.mhs.types import ExecutionSpec
+from src.strategy.books import scale_book_to_target_gross
 
 if TYPE_CHECKING:
     from src.mhs.backtest.journal import ProcessProcedureDefinition
@@ -568,9 +568,9 @@ def baseline_process_procedure(*, code_digest: str) -> ProcessProcedureDefinitio
     Raises:
         DataIntegrityError: Existing controls cannot produce a valid typed definition.
     """
+    from src.core.data_policy import MHS_DATA_POLICY_DEFAULT
     from src.mhs.backtest.certification import REQUIRED_CHECK_NAMES, ValidationInferenceSpec
     from src.mhs.backtest.journal import PROCEDURE_SCHEMA_VERSION, ProcessProcedureDefinition
-    from src.mhs.data_policy import MHS_DATA_POLICY_DEFAULT
 
     if not isinstance(code_digest, str) or not code_digest:
         raise DataIntegrityError("code_digest must be a nonempty identity")

@@ -12,7 +12,7 @@ import src.cli.commands.backtest as backtest_mod
 from src.backtests.contracts import RetentionPolicy
 from src.cli.commands.backtest import _resolve_destinations, _resolve_fingerprint, _resolve_retention_policy, run_mhs_backtest
 from src.cli.main import build_root_parser
-from src.mhs.params import DISCOVERY_START, PROCESS_EVALUATION_CEILING
+from src.core.params import DISCOVERY_START, PROCESS_EVALUATION_CEILING
 
 
 def _parse(argv: list[str]) -> argparse.Namespace:
@@ -268,7 +268,7 @@ def test_fingerprint_includes_financial_inputs(tmp_path, monkeypatch) -> None:
     assert _resolve_fingerprint(altered_data, start, end, budget) != reference
     altered_control = _parse(["backtest", "mhs", "--rebalance-tracking-error-threshold", "0.2"])
     assert _resolve_fingerprint(altered_control, start, end, budget) != reference
-    from src.mhs.resources import MhsMemoryBudget
+    from src.core.resources import MhsMemoryBudget
 
     other_budget = MhsMemoryBudget(
         total_tree_pss_bytes=budget.total_tree_pss_bytes + 1,

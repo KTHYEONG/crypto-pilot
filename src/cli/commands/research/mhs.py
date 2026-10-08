@@ -11,11 +11,11 @@ import logging
 import time
 
 from src.cli.dataclass_args import add_dataclass_arguments
-from src.mhs.contracts import MhsDiagnosticRequest
-from src.mhs.params import (
+from src.core.params import (
     CLI_GROWTH_ENVELOPE_DEFAULT,
     LEVERAGE_FRONTIER_SCAN_MULTIPLES,
 )
+from src.mhs.contracts import MhsDiagnosticRequest
 
 # The application module imports numpy/pandas transitively; it is imported
 # lazily inside the handler so that merely registering the parser never pulls

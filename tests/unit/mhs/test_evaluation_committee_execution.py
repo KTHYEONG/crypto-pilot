@@ -11,10 +11,10 @@ import src.mhs.evaluation.concurrency as concurrency_mod
 from src.mhs.diagnostic_run import run_mhs_horizon_diagnostic
 from src.mhs.evaluation.committee import _committee_evidence_weights_by_boundary, _committee_execution_book
 from src.mhs.evaluation.fold_weights import _build_fold_target_weights
-from src.mhs.features import FEATURE_REGISTRY, FeatureAdmission, build_feature_books
+from src.strategy.features import FEATURE_REGISTRY, FeatureAdmission, build_feature_books
 from src.mhs import research_go as _research_go
-from src.mhs.marks import _load_funding_series
-from src.mhs.params import (
+from src.core.marks import _load_funding_series
+from src.core.params import (
     COMMITTEE_MEMBERS,
     COMMITTEE_REGIME_ADAPTIVE_WINDOW,
     COMMITTEE_TRANCHE_COUNT,
@@ -33,7 +33,7 @@ def test_committee_execution_book_tranche_1_is_identity() -> None:
     # tranche_count (1) returns exactly the plain mean of the committee member
     # books -- byte-identical to the pre-change implementation and to an
     # explicit tranche_count=1 call.
-    from src.mhs.features import FEATURE_REGISTRY, build_feature_books
+    from src.strategy.features import FEATURE_REGISTRY, build_feature_books
 
     close, quote_vol, taker_buy_quote, mask, decision_grid = _committee_synthetic_panels()
     panels = {"close": close, "quote_vol": quote_vol, "taker_buy_quote": taker_buy_quote}
@@ -951,7 +951,7 @@ def test_execution_book_honors_frozen_admission_despite_in_window_gap() -> None:
     # still executes the flow member; an audited call over the same window
     # drops it.
     from src.mhs.evaluation.committee import _committee_boundary_admission_and_weights
-    from src.mhs.features import build_admitted_feature_books
+    from src.strategy.features import build_admitted_feature_books
 
     members = ("flow_imb_168h", "rev_24h")
     close, quote_vol, taker_valid, mask, decision_grid = _small_committee_panels()

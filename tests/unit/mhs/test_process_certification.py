@@ -11,13 +11,15 @@ from src.mhs.backtest.certification import (
     EvidenceCheck,
     ValidationInferenceSpec,
     assess_process_validation,
+)
+from src.engine.daily_evidence import (
     inventory_daily_evidence,
 )
 from src.mhs.backtest.contracts import ProcessInventoryReport
 from src.mhs.deploy_gate import DeployGateResult
-from src.mhs.execution.contracts import SimulatedInventoryLedgerResult, StrategyExecutionReplayResult
-from src.mhs.params import GrowthRiskEnvelope
-from src.mhs.resources import MhsMemoryBudget
+from src.engine.execution.contracts import SimulatedInventoryLedgerResult, StrategyExecutionReplayResult
+from src.core.params import GrowthRiskEnvelope
+from src.core.resources import MhsMemoryBudget
 
 NAMES = (
     "input_seal",
@@ -345,7 +347,7 @@ def _proxy_report(base: StrategyExecutionReplayResult, stress: StrategyExecution
 
 
 def _memory_stats():  # type: ignore[no-untyped-def]
-    from src.mhs.resources import ProcessTreeMemoryStats
+    from src.core.resources import ProcessTreeMemoryStats
 
     return ProcessTreeMemoryStats(
         tree_pss_peak_bytes=1,
@@ -467,7 +469,8 @@ def test_provided_unverified_check_keeps_go_closed() -> None:
 
 
 def test_partial_coverage_leaves_inference_unverified() -> None:
-    from src.mhs.backtest.certification import _select_formal_returns, inventory_daily_evidence
+    from src.mhs.backtest.certification import _select_formal_returns
+    from src.engine.daily_evidence import inventory_daily_evidence
 
     base, stress = _growing_replays(4)
     ctx = _context(10, role="historical", spec=_spec())

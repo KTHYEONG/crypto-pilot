@@ -14,7 +14,7 @@ from src.mhs.leverage_scan import (
     _load_pre_oos_reference_returns,
     run_leverage_frontier_scan,
 )
-from src.mhs.params import COMMITTEE_OOS_START, GROWTH_RISK_ENVELOPES, PNL_VOL_TARGET_BURN_IN_DAYS
+from src.core.params import COMMITTEE_OOS_START, GROWTH_RISK_ENVELOPES, PNL_VOL_TARGET_BURN_IN_DAYS
 
 _REFERENCE_REPLAY_ID = "blend_pre_vol_target_reference"
 

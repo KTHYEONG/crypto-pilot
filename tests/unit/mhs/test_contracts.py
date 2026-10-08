@@ -6,7 +6,7 @@ import dataclasses
 import pandas as pd
 import pytest
 
-from src.mhs.types import (
+from src.core.types import (
     MEASURED_EXECUTION_COST_TIERS_BPS,
     FUNDING_CARRY_LOOKBACK_CANDIDATES_HOURS,
     TREND_SLEEVE_HORIZONS_HOURS,
@@ -173,7 +173,7 @@ class TestFrozenLiterals:
         # DISCOVERY_START is the domain single source and every fold derives
         # train_start from it -- a regression guard against the constant
         # re-diverging into independent literals.
-        from src.mhs.types import DISCOVERY_START
+        from src.core.types import DISCOVERY_START
         from src.mhs.evidence import phase_1_anchored_purged_folds
 
         assert pd.Timestamp("2021-01-01", tz="UTC") == DISCOVERY_START
@@ -216,7 +216,7 @@ class TestFrozenLiterals:
         # 15% target volatility and 720h purge are frozen contract values, and
         # the purge matches the longest 720h lookbacks so no overlapping-label
         # information leaks across a walk-forward boundary.
-        from src.mhs.types import (
+        from src.core.types import (
             COMMITTEE_MEMBERS,
             COMMITTEE_OOS_START,
             COMMITTEE_PURGE_HOURS,
@@ -242,7 +242,7 @@ class TestFrozenLiterals:
         # SCENARIO_COMMITTEE_GROWTH_CONTRACTS_FROZEN: the discovery-window
         # growth-optimal risk-grid multipliers and constraint anchors are frozen
         # contract values with a strictly ascending, 1.0-containing grid.
-        from src.mhs.types import (
+        from src.core.types import (
             COMMITTEE_GROWTH_BARS_PER_YEAR,
             COMMITTEE_GROWTH_HORIZON_YEARS,
             COMMITTEE_GROWTH_MAX_DRAWDOWN,
@@ -274,8 +274,8 @@ class TestFrozenLiterals:
         # future member with a longer lookback than the purge fails this static
         # test loudly instead of silently recurring the doc/value mismatch the
         # B2 fix corrected.
-        from src.mhs.types import COMMITTEE_MEMBERS, COMMITTEE_PURGE_HOURS
-        from src.mhs.features import FEATURE_REGISTRY
+        from src.core.types import COMMITTEE_MEMBERS, COMMITTEE_PURGE_HOURS
+        from src.strategy.features import FEATURE_REGISTRY
 
         registry = {spec.name: spec for spec in FEATURE_REGISTRY}
         assert COMMITTEE_PURGE_HOURS >= 720
@@ -288,7 +288,7 @@ class TestFillMarkParityGateConstants:
     """SCENARIO_MHS_FILL_MARK_PARITY_02: contract constants for parity gate."""
 
     def test_vol_target_max_scale(self) -> None:
-        from src.mhs.types import (
+        from src.core.types import (
             COMMITTEE_TARGET_GROSS,
             PNL_VOL_TARGET_MAX_SCALE,
         )
@@ -305,7 +305,7 @@ class TestFrozenLiteralsCommitteeTiming:
         # SCENARIO_MHS_RAM_GUARD_CONSTANTS: the automatic RAM-guard tuning
         # constants are frozen contract values with sane bounds (budget/reserve
         # fractions in (0,1), floor a positive power-of-two MiB count).
-        from src.mhs.types import (
+        from src.core.types import (
             RAM_BUDGET_FRACTION,
             RAM_RESERVE_FLOOR_BYTES,
             RAM_RESERVE_FRACTION,
@@ -323,7 +323,7 @@ class TestFrozenLiteralsCommitteeTiming:
         # SCENARIO_MHS_COMMITTEE_TRANCHE_COUNT_FROZEN: the committee decision
         # cadence smoothing is a frozen structural constant (24h grid x 3 =
         # effective 72h signal life) with a valid tranche count.
-        from src.mhs.types import COMMITTEE_TRANCHE_COUNT
+        from src.core.types import COMMITTEE_TRANCHE_COUNT
 
         assert isinstance(COMMITTEE_TRANCHE_COUNT, int)
         assert COMMITTEE_TRANCHE_COUNT >= 1
@@ -335,7 +335,7 @@ class TestFrozenLiteralsCommitteeTiming:
         # real 3m replay to sit inside a plateau (15-25 all pass every
         # anchored fold), not a single fitted point -- windows 10 and 90 both
         # trigger CAPITAL_INVARIANT_BREACH.
-        from src.mhs.types import COMMITTEE_REGIME_ADAPTIVE_WINDOW
+        from src.core.types import COMMITTEE_REGIME_ADAPTIVE_WINDOW
 
         assert isinstance(COMMITTEE_REGIME_ADAPTIVE_WINDOW, int)
         assert COMMITTEE_REGIME_ADAPTIVE_WINDOW >= 3
@@ -345,7 +345,7 @@ class TestFrozenLiteralsCommitteeTiming:
         """SCENARIO_MHS_REGISTERED_TARGET_GROSS_DEFAULT: the registered
         committee exposure is 0.92, the largest replay-certified gross inside
         the registered drawdown budget."""
-        from src.mhs.types import COMMITTEE_TARGET_GROSS
+        from src.core.types import COMMITTEE_TARGET_GROSS
 
         assert 0.0 < COMMITTEE_TARGET_GROSS <= 2.0
         assert COMMITTEE_TARGET_GROSS > 0.7950
@@ -373,7 +373,7 @@ class TestCompoundingGrowthContractConstants:
     """SCENARIO_CONTRACT_CONSTANTS_REGISTERED: new risk-budget constants are registered."""
 
     def test_constants_registered(self) -> None:
-        from src.mhs.types import (
+        from src.core.types import (
             FUNDING_CARRY_SLEEVE_LOOKBACK_HOURS,
             FUNDING_CARRY_SLEEVE_WEIGHT,
             PNL_TARGET_ANNUAL_VOL,
@@ -397,7 +397,7 @@ class TestCompoundingAlphaAxesContract:
     """SCENARIO_MHS_COMPOUNDING_ALPHA_AXES_01: committee member set contracts."""
 
     def test_member_sets_have_exactly_two_keys(self) -> None:
-        from src.mhs.params import COMMITTEE_MEMBER_SETS
+        from src.core.params import COMMITTEE_MEMBER_SETS
         assert set(COMMITTEE_MEMBER_SETS.keys()) == {"flow_momentum", "risk_premia"}
 
     def test_default_member_set_is_flow_momentum(self) -> None:
@@ -405,25 +405,25 @@ class TestCompoundingAlphaAxesContract:
         # breached the registered drawdown budget (MDD -31.4% vs -25% budget)
         # and turned two folds STRESS_SHARPE_NOT_POSITIVE. See
         # ADR_20260820_MHS_COMPOUNDING_ALPHA_AXES.
-        from src.mhs.params import COMMITTEE_DEFAULT_MEMBER_SET, COMMITTEE_MEMBERS, COMMITTEE_MEMBER_SETS
+        from src.core.params import COMMITTEE_DEFAULT_MEMBER_SET, COMMITTEE_MEMBERS, COMMITTEE_MEMBER_SETS
         assert COMMITTEE_DEFAULT_MEMBER_SET == "flow_momentum"
         assert COMMITTEE_MEMBER_SETS["flow_momentum"] == COMMITTEE_MEMBERS
 
     def test_risk_premia_members(self) -> None:
-        from src.mhs.params import COMMITTEE_MEMBER_SETS
+        from src.core.params import COMMITTEE_MEMBER_SETS
         assert COMMITTEE_MEMBER_SETS["risk_premia"] == (
             "flow_imb_720h", "flow_imb_168h", "mom3_skew_168h", "lowvol_168h", "rev_24h",
         )
 
     def test_flow_momentum_members(self) -> None:
-        from src.mhs.params import COMMITTEE_MEMBER_SETS
+        from src.core.params import COMMITTEE_MEMBER_SETS
         assert COMMITTEE_MEMBER_SETS["flow_momentum"] == (
             "flow_imb_720h", "flow_imb_168h", "xs_mom_336h", "xs_idio_mom_336h", "mom3_skew_168h",
         )
 
     def test_all_member_names_in_registry(self) -> None:
-        from src.mhs.params import COMMITTEE_MEMBER_SETS
-        from src.mhs.features import FEATURE_REGISTRY
+        from src.core.params import COMMITTEE_MEMBER_SETS
+        from src.strategy.features import FEATURE_REGISTRY
         registry_names = {s.name for s in FEATURE_REGISTRY}
         for members in COMMITTEE_MEMBER_SETS.values():
             for name in members:
@@ -435,7 +435,7 @@ class TestCompoundingAlphaAxesContract:
 
     def test_resolved_committee_members(self) -> None:
         from src.mhs.research_go import _resolved_committee_members
-        from src.mhs.params import COMMITTEE_MEMBER_SETS
+        from src.core.params import COMMITTEE_MEMBER_SETS
 
         req_v2 = research_baseline(committee_capital=True, committee_member_set="risk_premia")
         assert _resolved_committee_members(req_v2) == COMMITTEE_MEMBER_SETS["risk_premia"]

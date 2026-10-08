@@ -13,14 +13,14 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.mhs import marks
-from src.mhs import params
+from src.core import marks
+from src.core import params
 from src.common.errors import DataIntegrityError
 from src.mhs.contracts import MhsDiagnosticRequest
 from src.mhs.evaluation.books import _book_structure_trace
 from src.mhs.evaluation.folds import _run_anchored_fold
 from src.mhs.evidence import AnchoredPurgedFold
-from src.mhs.marks import _load_funding_series, clear_mhs_market_data_caches
+from src.core.marks import _load_funding_series, clear_mhs_market_data_caches
 from tests.fixtures.mhs_fold_market import COMPLETING_FOLD, write_completing_fold_market
 from src.mhs.report.artifacts import (
     _build_replay_artifact_reference,
@@ -35,7 +35,7 @@ from src.mhs.evaluation.regime import (
     _regime_reference_characterization,
 )
 from src.mhs.research_go import GO_REASON_INVALID_PRIMARY, GO_REASON_RESOURCE_BREACH
-from src.mhs.resources import _StageRecorder
+from src.core.resources import _StageRecorder
 from src.mhs.scaling import (
     _apply_rebalance_deadband,
     _regime_cash_scale,

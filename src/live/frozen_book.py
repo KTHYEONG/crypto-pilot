@@ -16,17 +16,17 @@ import numpy as np
 import pandas as pd
 
 from src.common.errors import DataIntegrityError
-from src.live.venue_listing import SettlementEvidence
+from src.core.panel import load_base_panel
+from src.core.params import FROZEN_GROWTH_NAME_CLIP, LIVE_FROZEN_WARMUP_DAYS
+from src.core.settlement_evidence import SettlementEvidence
 from src.market_data.services.futures_collection import (
     FUNDING_DEFAULT_INTERVAL_MS,
     FUNDING_TIME_TOLERANCE_MS,
     infer_funding_interval_ms,
 )
-from src.mhs.account_liquidity import causal_adv_sigma
-from src.mhs.books import clip_names_preserving_gross
-from src.mhs.frozen_research_candidate import FROZEN_MHS_TOP20_V2, build_frozen_mhs_candidate
-from src.mhs.panel import load_base_panel
-from src.mhs.params import FROZEN_GROWTH_NAME_CLIP, LIVE_FROZEN_WARMUP_DAYS
+from src.strategy.books import clip_names_preserving_gross
+from src.strategy.liquidity import causal_adv_sigma
+from src.strategy.targets import FROZEN_MHS_TOP20_V2, build_frozen_mhs_candidate
 
 _REQUIRED_COLUMNS = ("close", "quote_vol", "taker_buy_quote")
 

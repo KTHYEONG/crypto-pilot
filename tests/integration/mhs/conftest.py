@@ -9,7 +9,7 @@ import pandas as pd
 from collections.abc import Iterator
 from pathlib import Path
 
-import src.mhs.marks as marks
+import src.core.marks as marks
 
 from src.mhs import statistics
 from src.mhs.diagnostic_run import run_mhs_horizon_diagnostic
@@ -59,7 +59,7 @@ def _mhs_ample_virtual_memory(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.fixture(scope="module", autouse=True)
 def _mhs_module_ample_virtual_memory() -> None:
     """Keep module-scoped diagnostic fixtures independent of host RAM load."""
-    with patch("src.mhs.parallel.psutil.virtual_memory", return_value=_AMPLE_MEMORY):
+    with patch("src.core.parallel.psutil.virtual_memory", return_value=_AMPLE_MEMORY):
         yield
 
 
@@ -72,7 +72,7 @@ def _mhs_module_xdist_fork_worker_cap() -> Iterator[None]:
     if cap is None:
         yield
         return
-    with patch("src.mhs.parallel.psutil.cpu_count", return_value=cap):
+    with patch("src.core.parallel.psutil.cpu_count", return_value=cap):
         yield
 
 
@@ -128,7 +128,7 @@ def _synthetic_settlement_registry(monkeypatch: pytest.MonkeyPatch) -> None:
         settlement_registry_for_test_root,
     )
     monkeypatch.setattr(
-        "src.mhs.frozen_research_run.settlement_registry_for_root",
+        "src.engine.strategy_backtest.settlement_registry_for_root",
         settlement_registry_for_test_root,
     )
     monkeypatch.setattr(

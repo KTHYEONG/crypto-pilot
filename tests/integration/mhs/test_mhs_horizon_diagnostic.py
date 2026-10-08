@@ -209,7 +209,7 @@ from pathlib import Path
 temp_root = Path(os.environ["PYTEST_DEBUG_TEMPROOT"]).resolve()
 from tests.fixtures.mhs_requests import research_baseline
 import pandas as pd
-import src.mhs.marks as marks
+import src.core.marks as marks
 import src.mhs.statistics as statistics
 import src.common.paths as paths
 import src.common.logging as app_logging

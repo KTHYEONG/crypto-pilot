@@ -10,8 +10,8 @@ import pandas as pd
 import pytest
 import src.mhs.evaluation.concurrency as concurrency_mod
 import src.mhs.evaluation.diagnostics as diagnostics_mod
-import src.mhs.books as books_mhs
-from src.mhs.books import (
+import src.strategy.books as books_mhs
+from src.strategy.books import (
     inverse_realized_vol_tilt,
     phase_tranche_book,
     rank_weight_book,
@@ -23,10 +23,10 @@ from src.mhs.evaluation.books import _book_weights, _horizon_ensemble_execution_
 from src.mhs.evaluation.concurrency import _run_books_concurrent
 from src.mhs.evaluation.diagnostics import _phase_diagnostics
 from src.mhs.evaluation.fold_weights import _build_fold_target_weights
-from src.mhs.horizons import horizon_log_return, realized_vol, vol_normalized_horizon_signal
-from src.mhs.marks import _load_funding_series
-from src.mhs.params import SIGNAL_EMA_HORIZON_SPAN
-from src.mhs.types import BOOK_SPECS
+from src.strategy.horizons import horizon_log_return, realized_vol, vol_normalized_horizon_signal
+from src.core.marks import _load_funding_series
+from src.core.params import SIGNAL_EMA_HORIZON_SPAN
+from src.core.types import BOOK_SPECS
 from src.quant.universe.pit_universe import symbol_partition
 from tests.unit.mhs.test_evaluation_appresearch import (  # noqa: F401
     _FOLD,

@@ -8,7 +8,7 @@ import src.mhs.evaluation.concurrency as concurrency_mod
 from src.mhs.committee import long_only_equal_risk_weights, score_weighted_net
 from src.mhs.diagnostic_run import run_mhs_horizon_diagnostic
 from src.mhs.evaluation.committee import _committee_growth_headroom
-from src.mhs.params import COMMITTEE_OOS_START
+from src.core.params import COMMITTEE_OOS_START
 
 from tests.unit.mhs.test_evaluation_appresearch import (  # noqa: F401
     _START,

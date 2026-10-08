@@ -58,13 +58,13 @@ from src.backtests.contracts import (
 from src.backtests.registry import finalize_run, initialize_registry, register_run
 from src.backtests.retention import apply_retention, plan_retention
 from src.common.paths import FUTURES_DATA_DIR
-from src.mhs.process import ProcessExecutionPolicy
-from src.mhs.reporting.inventory import PROCESS_INVENTORY_CERTIFICATION_LEVEL
-from src.mhs.resources import (
+from src.core.resources import (
     MhsMemoryBudget,
     current_mhs_headroom_bytes,
     resolve_mhs_memory_budget,
 )
+from src.mhs.process import ProcessExecutionPolicy
+from src.mhs.reporting.inventory import PROCESS_INVENTORY_CERTIFICATION_LEVEL
 
 _logger = logging.getLogger(__name__)
 
@@ -317,7 +317,7 @@ def _data_identity(data_root: str | None) -> str:
     overridable, so an override identity snapshots both consumed trees while
     the default still snapshots the canonical lake directly.
     """
-    from src.mhs.data_provenance import resolve_mhs_input_layout
+    from src.core.data_provenance import resolve_mhs_input_layout
 
     if data_root is None:
         return _snapshot_data_tree(FUTURES_DATA_DIR.resolve())

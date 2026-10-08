@@ -7,13 +7,13 @@ import numpy as np
 import pandas as pd
 import pytest
 
-import src.mhs.marks as marks
+import src.core.marks as marks
 from src.mhs.evaluation import committee as committee_evaluation
 from src.mhs.evaluation import fold_weights
 from src.mhs.evaluation.committee import _committee_execution_book
-from src.mhs.types import BOOK_SPECS, COMMITTEE_MEMBERS
+from src.core.types import BOOK_SPECS, COMMITTEE_MEMBERS
 from src.mhs.evidence import AnchoredPurgedFold
-from src.mhs.features import FEATURE_REGISTRY, FeatureSpec, build_feature_books
+from src.strategy.features import FEATURE_REGISTRY, FeatureSpec, build_feature_books
 from src.quant.universe.pit_universe import symbol_partition
 from tests.unit.mhs.test_evaluation_appresearch import _write_mhs_market
 
@@ -136,7 +136,7 @@ def test_fold_path_wires_helper_byte_identical(mhs_market_with_taker_buy_quote, 
 
     monkeypatch.setattr(committee_evaluation, "_committee_execution_book", recording_helper)
     from src.mhs import research_go as _research_go
-    from src.mhs.features import FeatureAdmission
+    from src.strategy.features import FeatureAdmission
 
     target, _signal, _roster, _grid = fold_weights._build_fold_target_weights(
         str(root), _FOLD, request, funding_by_symbol,

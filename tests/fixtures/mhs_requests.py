@@ -13,7 +13,7 @@ from typing import Final
 from collections.abc import Mapping
 
 from src.mhs.contracts import MhsDiagnosticRequest
-from src.mhs.params import (
+from src.core.params import (
     COMMITTEE_MEMBER_SET_INERT,
     COMMITTEE_TARGET_GROSS,
     GROWTH_ENVELOPE_DEFAULT,

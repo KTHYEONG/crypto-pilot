@@ -12,12 +12,12 @@ from src.mhs.evaluation.books import _active_blend_book_and_grid
 from src.mhs.evaluation.concurrency import _run_books_concurrent
 from src.mhs.evidence import required_cost_tiers
 from src.mhs.evaluation.windows import _book_outcome
-from src.mhs.execution.pnl import mhs_ledger_pnl
-from src.mhs.params import (
+from src.engine.execution.pnl import mhs_ledger_pnl
+from src.core.params import (
     MEASURED_EXECUTION_COST_TIERS_BPS,
     PERIODS_PER_YEAR_1H,
 )
-from src.mhs.types import BOOK_BLEND_WEIGHTS, BOOK_SPECS
+from src.core.types import BOOK_BLEND_WEIGHTS, BOOK_SPECS
 
 from tests.unit.mhs.test_evaluation_appresearch import (  # noqa: F401
     _START,

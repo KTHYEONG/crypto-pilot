@@ -20,7 +20,7 @@ import src.mhs.pipeline.stages.committee as committee_stage
 import src.mhs.evaluation.books as books_mod
 import src.mhs.evaluation.committee as committee_mod
 import src.mhs.evaluation.diagnostics as diagnostics_mod
-from src.mhs.features import FeatureAdmission
+from src.strategy.features import FeatureAdmission
 from src.mhs.pipeline.context import PipelineContext
 from src.mhs.telemetry import StageTelemetry
 
@@ -341,7 +341,7 @@ def test_fold_committee_uses_its_own_boundary_weights(monkeypatch) -> None:
 def _numeric_context(**overrides) -> PipelineContext:
     import numpy as np
 
-    from src.mhs.types import BOOK_SPECS
+    from src.core.types import BOOK_SPECS
 
     ctx = _bare_context(**overrides)
     grid = pd.date_range("2021-01-01", periods=400, freq="1h", tz="UTC")

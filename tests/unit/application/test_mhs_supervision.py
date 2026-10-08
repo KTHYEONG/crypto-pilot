@@ -132,7 +132,7 @@ def test_classify_termination_reason_strings_are_stable() -> None:
 
 
 def test_sample_once_counts_and_rejects_in_order(monkeypatch) -> None:
-    from src.mhs.resources import MhsMemoryBudget
+    from src.core.resources import MhsMemoryBudget
 
     budget = MhsMemoryBudget()
     state = sup._SupervisionState(pid=1234, swap_baseline=0, last_heartbeat=0.0)
@@ -147,7 +147,7 @@ def test_sample_once_counts_and_rejects_in_order(monkeypatch) -> None:
 
 
 def test_sample_once_telemetry_loss_is_uncounted_rejection(monkeypatch) -> None:
-    from src.mhs.resources import MhsMemoryBudget
+    from src.core.resources import MhsMemoryBudget
 
     budget = MhsMemoryBudget()
     state = sup._SupervisionState(pid=1, swap_baseline=None, last_heartbeat=0.0)
@@ -162,7 +162,7 @@ def test_sample_once_telemetry_loss_is_uncounted_rejection(monkeypatch) -> None:
 
 
 def test_sample_once_boundary_equality_is_within_budget(monkeypatch) -> None:
-    from src.mhs.resources import MhsMemoryBudget
+    from src.core.resources import MhsMemoryBudget
 
     budget = MhsMemoryBudget()
     state = sup._SupervisionState(pid=1, swap_baseline=100, last_heartbeat=0.0)
@@ -173,7 +173,7 @@ def test_sample_once_boundary_equality_is_within_budget(monkeypatch) -> None:
 
 
 def test_sample_once_swap_growth_only_above_baseline(monkeypatch) -> None:
-    from src.mhs.resources import MhsMemoryBudget
+    from src.core.resources import MhsMemoryBudget
 
     budget = MhsMemoryBudget()
     state = sup._SupervisionState(pid=1, swap_baseline=100, last_heartbeat=0.0)
@@ -187,7 +187,7 @@ def test_sample_once_swap_growth_only_above_baseline(monkeypatch) -> None:
 
 
 def test_sample_once_unavailable_swap_keeps_run_monitored(monkeypatch) -> None:
-    from src.mhs.resources import MhsMemoryBudget
+    from src.core.resources import MhsMemoryBudget
 
     budget = MhsMemoryBudget()
     state = sup._SupervisionState(pid=1, swap_baseline=100, last_heartbeat=0.0)
@@ -488,7 +488,7 @@ class _DelayedProc(_ScriptedProc):
 def test_single_run_builder_parity(tmp_path, monkeypatch) -> None:
     import ast as _ast
 
-    from src.mhs.resources import MhsMemoryBudget
+    from src.core.resources import MhsMemoryBudget
 
     start, end = _stamps()
     fail_result = _result(tmp_path, "bld_fail")

@@ -11,7 +11,7 @@ from src.mhs.diagnostic_run import run_mhs_horizon_diagnostic
 import pyarrow.parquet as pq
 import src.mhs.evaluation.concurrency as concurrency_mod
 import src.mhs.pipeline.stages.book as book_stage
-import src.mhs.resources as resources
+import src.core.resources as resources
 import src.mhs.scaling as scaling
 import src.mhs.research_go as _research_go
 from src.mhs.contracts import MhsBookFailure
@@ -22,24 +22,24 @@ from src.mhs.evaluation.integrity import (
     _truncate_replayable_decisions,
 )
 from src.mhs.evaluation.windows import _book_outcome
-from src.mhs.execution.batch import replay_execution_window_batch_isolated
-from src.mhs.execution.window_stream import (
+from src.engine.execution.batch import replay_execution_window_batch_isolated
+from src.engine.execution.window_stream import (
     _iter_mhs_execution_windows,
     _resolve_ns_vectorized,
 )
-from src.mhs.marks import (
+from src.core.marks import (
     _build_window_frames,
     _load_funding_series,
     _load_window_minute_frames,
     _pit_execution_mask,
 )
-from src.mhs.params import (
+from src.core.params import (
     COMMITTEE_OOS_START,
     COMMITTEE_TARGET_GROSS,
     MEASURED_EXECUTION_COST_TIERS_BPS,
     PNL_VOL_TARGET_SCALE_FLOOR,
 )
-from src.mhs.types import ExecutionSpec
+from src.core.types import ExecutionSpec
 from src.quant.universe.pit_universe import symbol_partition
 from tests.unit.mhs.test_evaluation_appresearch import (  # noqa: F401
     _FOLD,
@@ -197,7 +197,7 @@ class TestGrowthBudgetTargetVol:
     def test_fallback_when_fewer_than_burn_in_rows(self) -> None:
         # A series with fewer than PNL_VOL_TARGET_BURN_IN_DAYS pre-OOS
         # rows returns PNL_TARGET_ANNUAL_VOL.
-        from src.mhs.params import PNL_TARGET_ANNUAL_VOL
+        from src.core.params import PNL_TARGET_ANNUAL_VOL
         idx = pd.date_range("2022-06-01", periods=10, freq="D", tz="UTC")
         r = pd.Series(0.001, index=idx)
         assert scaling._growth_budget_target_vol(r) == PNL_TARGET_ANNUAL_VOL
@@ -510,7 +510,7 @@ def test_p10_concurrent_books_parity(mhs_market) -> None:
 def test_p10_mark_cache_retired_no_process_cache(mhs_market) -> None:
     # The mark frame cache is retired for COW inheritance: retained loaders
     # are stateless, so there is no per-symbol process cache to warm.
-    import src.mhs.marks as marks_mod
+    import src.core.marks as marks_mod
 
     assert not hasattr(marks_mod, "_get_symbol_mark_frame")
     marks_mod.clear_mhs_market_data_caches()
@@ -723,7 +723,7 @@ def test_reference_bound_degraded_preserves_primary(mhs_market, monkeypatch) -> 
     # Pins two-pass degraded-reference semantics; disable coupled streaming.
     monkeypatch.setattr(scaling, "is_streaming_scale_mode", lambda _request: False)
     import src.mhs.evaluation.windows as windows_mod
-    from src.mhs.execution import IsolatedBoundFailure, BatchReplayOutcome
+    from src.engine.execution import IsolatedBoundFailure, BatchReplayOutcome
     args = _build_book_outcome_args(mhs_market)
     baseline, _ = _book_outcome(**args)
     # Build a mock result for the strict slot

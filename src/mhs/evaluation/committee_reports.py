@@ -12,11 +12,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from src.mhs import statistics as _statistics
-from src.mhs.committee import long_only_equal_risk_weights, score_weighted_net, wealth_metrics
-from src.mhs.contracts import MhsBookReport
-from src.mhs.features import FeatureSpec, source_coverage_audit
-from src.mhs.params import (
+from src.core.params import (
     COMMITTEE_GROWTH_BARS_PER_YEAR,
     COMMITTEE_GROWTH_HORIZON_YEARS,
     COMMITTEE_GROWTH_MAX_DRAWDOWN,
@@ -32,8 +28,12 @@ from src.mhs.params import (
     FEATURE_MIN_COVERAGE,
     WALK_FORWARD_MIN_TRAIN_BARS,
 )
-from src.mhs.params import PERIODS_PER_YEAR_1H as _PERIODS_PER_YEAR_1H
+from src.core.params import PERIODS_PER_YEAR_1H as _PERIODS_PER_YEAR_1H
+from src.mhs import statistics as _statistics
+from src.mhs.committee import long_only_equal_risk_weights, score_weighted_net, wealth_metrics
+from src.mhs.contracts import MhsBookReport
 from src.quant.risk.growth_sizing import GrowthSizingConfig, diagnose_growth_headroom, solve_growth_optimal_risk
+from src.strategy.features import FeatureSpec, source_coverage_audit
 
 _logger = logging.getLogger("MhsHorizonDiagnostic")
 
@@ -111,8 +111,8 @@ def _committee_member_books(
     ``committee_execution_book``, ``regime_scale``, any exposure scale, any
     fold report, or any Research-GO reason code.
     """
-    from src.mhs.books import scale_book_to_target_gross
-    from src.mhs.features import FEATURE_REGISTRY, build_feature_books
+    from src.strategy.books import scale_book_to_target_gross
+    from src.strategy.features import FEATURE_REGISTRY, build_feature_books
 
     member_specs = [spec for spec in FEATURE_REGISTRY if spec.name in set(members)]
     specs_by_name = {spec.name: spec for spec in member_specs}

@@ -19,11 +19,11 @@ import numpy as np
 
 import src.mhs.evaluation.books as books
 import src.mhs.evaluation.folds as folds
-from src.mhs.panel import liquid_half_eligibility
-from src.mhs.params import UNIVERSE_ELIGIBILITY_LOOKBACK_BARS, UNIVERSE_ELIGIBILITY_MIN_HISTORY_BARS
+from src.core.panel import liquid_half_eligibility
+from src.core.params import UNIVERSE_ELIGIBILITY_LOOKBACK_BARS, UNIVERSE_ELIGIBILITY_MIN_HISTORY_BARS
+from src.core.types import BOOK_SPECS
 from src.mhs.pipeline.context import PipelineContext
 from src.mhs.telemetry import StageTelemetry
-from src.mhs.types import BOOK_SPECS
 
 
 def select_horizons(ctx: PipelineContext, telemetry: StageTelemetry) -> None:

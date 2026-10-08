@@ -31,14 +31,14 @@ from src.live.venue_listing import (
     write_venue_listing_snapshot,
 )
 from src.market_data.binance.venue_rules import load_venue_rule_snapshot
-from src.mhs.account_policy import (
+from src.strategy.sizing import (
     account_growth_policy,
     bayesian_unit_moments,
     build_venue_ladders,
     choose_exposure,
 )
-from src.mhs.frozen_research_candidate import FROZEN_MHS_TOP20_V2
-from src.mhs.params import ACCOUNT_MIN_MOMENT_DAYS, ACCOUNT_PRIOR_DAYS
+from src.strategy.targets import FROZEN_MHS_TOP20_V2
+from src.core.params import ACCOUNT_MIN_MOMENT_DAYS, ACCOUNT_PRIOR_DAYS
 
 _START = pd.Timestamp("2021-01-01", tz="UTC")
 _DAYS = 150

@@ -146,7 +146,7 @@ def test_SCENARIO_MHS_EVID_03_TRIALS_NEVER_UNDERSTATED(tmp_path) -> None:
     accumulates the history's distinct admissible trial configurations on top
     of the registered constant floor; an unreadable history falls back with an
     explicit 'constant_fallback' provenance."""
-    from src.mhs.params import SEARCH_TRIALS_ATTEMPTED
+    from src.core.params import SEARCH_TRIALS_ATTEMPTED
     from src.mhs.run_history import derive_trials_attempted
 
     def _trial(run_id: str, universe_size: int) -> dict[str, object]:

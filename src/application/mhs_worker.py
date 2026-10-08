@@ -10,8 +10,8 @@ from pathlib import Path
 import pandas as pd
 
 from src.application.mhs_backtest import _PROCEDURE_DIGEST_RE, MhsBacktestRequest, execute_mhs_backtest
+from src.core.resources import MhsMemoryBudget
 from src.mhs.backtest.contracts import ProcessInventoryBacktestError
-from src.mhs.resources import MhsMemoryBudget
 
 _logger = logging.getLogger(__name__)
 

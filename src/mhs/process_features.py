@@ -8,9 +8,9 @@ import numpy as np
 import pandas as pd
 
 from src.common.errors import DataIntegrityError
-from src.mhs.features import FeatureSpec, _finite
-from src.mhs.horizons import horizon_log_return
-from src.mhs.params import PROCESS_FEATURE_CANDIDATES
+from src.core.params import PROCESS_FEATURE_CANDIDATES
+from src.strategy.features import FeatureSpec, _finite
+from src.strategy.horizons import horizon_log_return
 
 PROCESS_FEATURE_COLUMN_BLOCK_SIZE: int = 32
 

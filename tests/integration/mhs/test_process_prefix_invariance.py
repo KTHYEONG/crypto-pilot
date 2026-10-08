@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 
 from src.mhs.backtest.market_data import build_candidate_member_books
-from src.mhs.params import PROCESS_FEATURE_CANDIDATES, PROCESS_MIN_SYMBOLS
+from src.core.params import PROCESS_FEATURE_CANDIDATES, PROCESS_MIN_SYMBOLS
 
 
 def _synthetic_panels(n_bars: int = 1000, n_symbols: int = 10, seed: int = 401):
@@ -75,7 +75,7 @@ def test_process_books_ignore_future_funding_disappearance() -> None:
 def test_process_membership_ignores_static_source_gap_exclusions(monkeypatch) -> None:
     """Retrospective exclusion immunity: the static gap list cannot move history."""
     import src.mhs.backtest.market_data as bt_market
-    import src.mhs.data_policy as data_policy
+    import src.core.data_policy as data_policy
 
     panels, _ = _synthetic_panels(n_bars=800, n_symbols=6, seed=77)
     grid = panels["close"].index
@@ -213,8 +213,8 @@ def _causal_run(data, schedule):
 
 def test_process_holdings_continue_across_refit_boundary() -> None:
     """Continuous refit boundary: state continues and every post-warmup day is retained."""
-    from src.mhs.books import scale_book_to_target_gross
-    from src.mhs.params import PROCESS_SMOOTHING_HALFLIFE_DAYS
+    from src.strategy.books import scale_book_to_target_gross
+    from src.core.params import PROCESS_SMOOTHING_HALFLIFE_DAYS
     from src.mhs.process import RefitPoint, ema_smoothing_rate
 
     data = _causal_market()
@@ -268,7 +268,7 @@ def test_inventory_replay_uses_path_signal_availability(monkeypatch) -> None:
     from src.mhs.backtest.contracts import ProcessBacktestReport, ProcessPath
     from src.mhs.deploy_gate import DeployGateResult
     from src.mhs.process import ProcessExecutionPolicy
-    from src.mhs.resources import MhsMemoryBudget
+    from src.core.resources import MhsMemoryBudget
 
     targets = pd.DataFrame(
         [[0.5, -0.5], [0.5, -0.5], [0.5, -0.5]],
@@ -304,7 +304,7 @@ def test_inventory_replay_uses_path_signal_availability(monkeypatch) -> None:
     captured: dict = {}
 
     def _fake_iter(decision_targets, signal_at, *args, **kwargs):
-        from src.mhs.execution.contracts import ExecutionReplayWindow
+        from src.engine.execution.contracts import ExecutionReplayWindow
 
         captured["signal_available_at"] = pd.DatetimeIndex(signal_at)
         windows = []

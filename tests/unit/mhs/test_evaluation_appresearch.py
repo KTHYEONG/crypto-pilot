@@ -12,10 +12,10 @@ import src.mhs.evaluation.books as _ev_books
 import src.mhs.evaluation.diagnostics as _ev_diagnostics
 import src.mhs.evaluation.participation as _ev_participation
 import src.mhs.evaluation.windows as _ev_windows
-from src.mhs import books as _books
-from src.mhs import horizons as _horizons
-from src.mhs import marks as _marks
-from src.mhs import panel as _panel
+from src.strategy import books as _books
+from src.strategy import horizons as _horizons
+from src.core import marks as _marks
+from src.core import panel as _panel
 from src.mhs.contracts import MhsBookReport as _MhsBookReport
 from src.mhs.contracts import MhsFoldReport as _MhsFoldReport
 from src.mhs.contracts import MhsResearchGoResult as _MhsResearchGoResult
@@ -23,13 +23,13 @@ from src.mhs.discovery import DiscoveryQualificationResult as _DiscoveryQualific
 from src.mhs.evidence import DeploymentReadinessResult as _DeploymentReadinessResult
 from src.mhs.evidence import PhaseDiagnosticResult as _PhaseDiagnosticResult
 from src.mhs.evidence import TailSensitivityResult as _TailSensitivityResult
-from src.mhs.params import BOOK_BLEND_WEIGHTS as _BOOK_BLEND_WEIGHTS
-from src.mhs.params import COMMITTEE_OOS_START as _COMMITTEE_OOS_START
-from src.mhs.params import PERIODS_PER_YEAR_1H as _PERIODS_PER_YEAR_1H
-from src.mhs.params import UNIVERSE_ELIGIBILITY_LOOKBACK_BARS as _UNIVERSE_ELIGIBILITY_LOOKBACK_BARS
-from src.mhs.params import UNIVERSE_ELIGIBILITY_MIN_HISTORY_BARS as _UNIVERSE_ELIGIBILITY_MIN_HISTORY_BARS
+from src.core.params import BOOK_BLEND_WEIGHTS as _BOOK_BLEND_WEIGHTS
+from src.core.params import COMMITTEE_OOS_START as _COMMITTEE_OOS_START
+from src.core.params import PERIODS_PER_YEAR_1H as _PERIODS_PER_YEAR_1H
+from src.core.params import UNIVERSE_ELIGIBILITY_LOOKBACK_BARS as _UNIVERSE_ELIGIBILITY_LOOKBACK_BARS
+from src.core.params import UNIVERSE_ELIGIBILITY_MIN_HISTORY_BARS as _UNIVERSE_ELIGIBILITY_MIN_HISTORY_BARS
 from src.mhs.report.schema import MhsHorizonDiagnosticReport as _MhsHorizonDiagnosticReport
-from src.mhs.types import BOOK_SPECS as _BOOK_SPECS
+from src.core.types import BOOK_SPECS as _BOOK_SPECS
 
 ev = _types.SimpleNamespace(
     BOOK_BLEND_WEIGHTS=_BOOK_BLEND_WEIGHTS,
@@ -51,7 +51,7 @@ ev = _types.SimpleNamespace(
     _load_symbol_quote_volume=_ev_participation._load_symbol_quote_volume,
     _phase_diagnostics=_ev_diagnostics._phase_diagnostics,
     _pit_execution_mask=_marks._pit_execution_mask,
-    bar_funding_panel=__import__("src.mhs.execution", fromlist=["bar_funding_panel"]).bar_funding_panel,
+    bar_funding_panel=__import__("src.engine.execution", fromlist=["bar_funding_panel"]).bar_funding_panel,
     horizon_log_return=_horizons.horizon_log_return,
     inverse_realized_vol_tilt=_books.inverse_realized_vol_tilt,
     liquid_half_eligibility=_panel.liquid_half_eligibility,
@@ -65,9 +65,9 @@ ev = _types.SimpleNamespace(
 )
 import src.mhs.scaling as scaling
 from src.common.errors import DataIntegrityError
-from src.mhs.types import BookSpec, ExecutionSpec, HorizonBand
-from src.mhs.execution import SimulatedInventoryLedgerResult
-from src.mhs.execution import strategy_aware_execution_replay
+from src.core.types import BookSpec, ExecutionSpec, HorizonBand
+from src.engine.execution import SimulatedInventoryLedgerResult
+from src.engine.execution import strategy_aware_execution_replay
 from src.mhs.evidence import AnchoredPurgedFold
 from src.quant.universe.pit_universe import symbol_partition
 
@@ -467,8 +467,8 @@ def _reference_placebo_percentile(
     signal, eligible, opens, bar_funding, grid_1h, spec, observed_sharpe, n_placebos, seed,
 ):
     """Original pandas DataFrame-per-iteration placebo loop (baseline)."""
-    from src.mhs.books import phase_tranche_book, rank_weight_book
-    from src.mhs.execution import mhs_ledger_pnl
+    from src.strategy.books import phase_tranche_book, rank_weight_book
+    from src.engine.execution import mhs_ledger_pnl
 
     rng = np.random.default_rng(seed)
     ranks = []
@@ -1304,7 +1304,7 @@ def test_SCENARIO_MHS_DSR_PASSAGE_BUDGETED_ENVELOPE_BINDS_07() -> None:
         GO_REASON_DRAWDOWN_OVER_BUDGET,
         _drawdown_budget_reasons,
     )
-    from src.mhs.params import GROWTH_RISK_ENVELOPES, REGISTERED_POLICY_THRESHOLDS
+    from src.core.params import GROWTH_RISK_ENVELOPES, REGISTERED_POLICY_THRESHOLDS
 
     budgeted = GROWTH_RISK_ENVELOPES["growth_extreme_budgeted"]
     # The rung's budget sits inside the registered ceiling, so the risk

@@ -17,10 +17,10 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.mhs.resources import _StageRecorder
+from src.core.resources import _StageRecorder
 from src.mhs.pipeline.context import PipelineContext
 from src.mhs.pipeline.stages.assemble import assemble_report
-from src.mhs.params import COMMITTEE_OOS_START
+from src.core.params import COMMITTEE_OOS_START
 from src.mhs.telemetry import StageTelemetry
 from src.quant.evaluation.policy import HOLDOUT_CUTOFF
 
@@ -293,7 +293,7 @@ def test_assemble_report_wires_forward_provenance(tmp_path) -> None:
     import pandas as pd
 
     from src.live.execution_quality import append_execution_quality, build_execution_quality_records
-    from src.mhs.resources import _StageRecorder
+    from src.core.resources import _StageRecorder
     from src.mhs.pipeline.stages.assemble import assemble_report
 
     def _record(at: pd.Timestamp):
@@ -318,8 +318,8 @@ def test_assemble_report_reliability_blocks_terminal_only_blend_ledger() -> None
     # state stays visible as evidence but never certifies the ledger.
     import pandas as pd
 
-    from src.mhs.execution import ExecutionDataGap
-    from src.mhs.resources import _StageRecorder
+    from src.engine.execution import ExecutionDataGap
+    from src.core.resources import _StageRecorder
 
     gaps = (
         ExecutionDataGap(
@@ -350,8 +350,8 @@ def test_assemble_report_reliability_still_blocks_recovering_blend_gap() -> None
     # Given: a mid-life funding gap followed by a normal fill for the same symbol
     import pandas as pd
 
-    from src.mhs.execution import ExecutionDataGap
-    from src.mhs.resources import _StageRecorder
+    from src.engine.execution import ExecutionDataGap
+    from src.core.resources import _StageRecorder
 
     gaps = (
         ExecutionDataGap(
@@ -395,20 +395,20 @@ def test_assemble_report_validates_provenance_through_ohlcv_root_override(tmp_pa
     OHLCV-root ``data_root`` override, never ``ctx.root``."""
     import dataclasses
 
-    from src.mhs.data_provenance import (
+    from src.core.data_provenance import (
         DataEvidenceTier,
         mhs_input_layout_for_lake,
         mhs_sealable_input_paths,
         seal_mhs_input_manifest,
     )
-    from src.mhs.resources import _StageRecorder
+    from src.core.resources import _StageRecorder
 
     ohlcv_root = tmp_path / "ohlcv"
     for rel in ("ohlcv/1h/BTCUSDT.parquet", "ohlcv/3m/BTCUSDT.parquet", "funding/BTCUSDT.parquet"):
         path = tmp_path / rel
         path.parent.mkdir(parents=True, exist_ok=True)
         pd.DataFrame({"timestamp": [1735689600000]}).to_parquet(path)
-    monkeypatch.setattr("src.mhs.data_provenance.FUTURES_DATA_DIR", tmp_path)
+    monkeypatch.setattr("src.core.data_provenance.FUTURES_DATA_DIR", tmp_path)
     layout = mhs_input_layout_for_lake(tmp_path)
     manifest = tmp_path / "manifest.json"
     seal_mhs_input_manifest(

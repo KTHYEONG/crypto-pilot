@@ -20,7 +20,7 @@ from src.backtests.retention import plan_retention
 from src.common.errors import DataIntegrityError
 from src.mhs.contracts import MhsResourceMeasurement
 from src.mhs.deploy_gate import DeployGateResult
-from src.mhs.execution.contracts import (
+from src.engine.execution.contracts import (
     ExecutionDataGap,
     SimulatedInventoryLedgerResult,
     StrategyExecutionReplayResult,
@@ -36,7 +36,7 @@ from src.mhs.backtest.contracts import (
 from src.mhs.reporting.inventory import PROCESS_INVENTORY_CERTIFICATION_LEVEL
 
 from src.mhs.reporting.inventory import export_inventory_json, persist_inventory_evidence
-from src.mhs.resources import ProcessTreeMemoryStats
+from src.core.resources import ProcessTreeMemoryStats
 
 
 def _targets(n_days: int = 3, symbols: tuple[str, ...] = ("AUSDT", "BUSDT")) -> pd.DataFrame:

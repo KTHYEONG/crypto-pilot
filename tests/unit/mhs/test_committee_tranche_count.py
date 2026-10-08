@@ -8,7 +8,7 @@ import pytest
 
 from src.cli.dataclass_args import explicit_field_values
 from src.mhs.contracts import MhsDiagnosticRequest
-from src.mhs.params import COMMITTEE_TRANCHE_COUNT, COMMITTEE_TRANCHE_COUNT_MAX
+from src.core.params import COMMITTEE_TRANCHE_COUNT, COMMITTEE_TRANCHE_COUNT_MAX
 from src.mhs.pipeline.config import resolve_cli_request
 
 _CLI_BASE = ["research", "run", "portfolio", "mhs-horizon-diagnostic"]

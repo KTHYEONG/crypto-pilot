@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from src.core.resources import MhsResourceMeasurement, ProcessTreeMemoryStats
     from src.mhs.contracts import (
         MhsBookReport,
         MhsFoldReport,
@@ -23,7 +24,6 @@ if TYPE_CHECKING:
         DeploymentReadinessResult,
         DsrDecomposition,
     )
-    from src.mhs.resources import MhsResourceMeasurement, ProcessTreeMemoryStats
 
 
 @dataclass(frozen=True, slots=True)

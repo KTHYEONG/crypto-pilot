@@ -19,7 +19,7 @@ import pytest
 
 from src.backtests.migration import migrate_legacy_backtests
 from src.common.paths import BACKTESTS_DIR
-from src.mhs.params import SEARCH_TRIALS_ATTEMPTED
+from src.core.params import SEARCH_TRIALS_ATTEMPTED
 from src.mhs.run_history import (
     RESEARCH_NEUTRAL_FLAGS,
     _resolve_history_registry,
@@ -429,7 +429,7 @@ def test_denominator_and_window_pool_share_one_admission_set(tmp_path) -> None:
     assert window_trial_sharpes(_DEFAULT_WINDOW, history_dir) == (1.0, 2.0)
 
 def test_mhs_kelly_z0_run_history_policy_is_distinct_trial(tmp_path) -> None:
-    from src.mhs.params import SEARCH_TRIALS_ATTEMPTED
+    from src.core.params import SEARCH_TRIALS_ATTEMPTED
     from src.mhs.run_history import append_run_history_record, derive_trials_attempted, trial_identity_key
 
     base = {'status': 'COMPLETE', 'flags': {}, 'start': '2021-01-01T00:00:00+00:00', 'resolved_end': '2025-12-31T23:59:59+00:00', 'blend': {'primary_naive_sharpe': 2.0}, 'research_go': {'reason_codes': [], 'data_integrity_reason_codes': []}}
@@ -981,7 +981,7 @@ def test_admission_procedure_is_part_of_trial_identity() -> None:
 
 
 def test_lifecycle_procedure_is_part_of_trial_identity() -> None:
-    from src.mhs import params as _params
+    from src.core import params as _params
     from src.mhs.live_strategy import capture_params_snapshot
     from src.mhs.run_history import trial_identity_key
     snapshot = capture_params_snapshot()
@@ -998,10 +998,10 @@ def test_lifecycle_procedure_is_part_of_trial_identity() -> None:
 def test_halt_registry_digest_rekeys_trials(monkeypatch) -> None:
     import pandas as pd
 
-    import src.mhs.venue_halts as venue_halts
+    import src.core.venue_halts as venue_halts
     from src.mhs.live_strategy import capture_params_snapshot
     from src.mhs.run_history import trial_identity_key
-    from src.mhs.venue_halts import VenueHaltInterval, assemble_venue_halt_registry
+    from src.core.venue_halts import VenueHaltInterval, assemble_venue_halt_registry
 
     base_snapshot = capture_params_snapshot()
     assert "VENUE_HALT_REGISTRY_DIGEST" in base_snapshot

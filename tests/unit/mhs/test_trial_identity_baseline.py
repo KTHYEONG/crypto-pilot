@@ -17,7 +17,7 @@ import pytest
 
 import src.mhs.contracts as contracts_module
 from src.mhs.contracts import MhsDiagnosticRequest
-from src.mhs.params import SEARCH_TRIALS_ATTEMPTED
+from src.core.params import SEARCH_TRIALS_ATTEMPTED
 from src.mhs.run_history import (
     RESEARCH_NEUTRAL_FLAGS,
     TRIAL_IDENTITY_BASELINE,

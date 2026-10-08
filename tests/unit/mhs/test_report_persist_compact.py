@@ -28,8 +28,8 @@ from src.mhs.evidence import (
     PhaseDiagnosticResult,
     TailSensitivityResult,
 )
-from src.mhs.execution import StrategyExecutionReplayResult
-from src.mhs.params import ARTIFACT_CATEGORIES
+from src.engine.execution import StrategyExecutionReplayResult
+from src.core.params import ARTIFACT_CATEGORIES
 from src.mhs.report.persist import (
     _collect_replay_entries,
     _persist_mhs_report_compact,

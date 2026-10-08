@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any, Literal
 import pandas as pd
 
 from src.common.errors import DataIntegrityError
+from src.core.types import ExecutionSpec
 from src.live.audit import AuditLog
 from src.live.errors import (
     ErrorAction,
@@ -53,7 +54,6 @@ from src.live.rest import (
     RateLimits,
     ShadowResponse,
 )
-from src.mhs.types import ExecutionSpec
 
 if TYPE_CHECKING:
     from src.live.order_journal import JournalAttempt, JournalFill

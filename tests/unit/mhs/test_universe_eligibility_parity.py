@@ -12,9 +12,9 @@ import src.mhs.backtest.market_data as bt_market
 import src.mhs.evaluation.fold_weights as fold_weights_mod
 import src.mhs.pipeline.stages.selection as selection_mod
 import src.market_data.services.mhs_execution as mhs_execution
-from src.mhs.marks import _pit_execution_mask
-from src.mhs.panel import liquid_half_eligibility as real_eligibility
-from src.mhs.params import (
+from src.core.marks import _pit_execution_mask
+from src.core.panel import liquid_half_eligibility as real_eligibility
+from src.core.params import (
     FOLD_PANEL_WARMUP_HOURS,
     PANEL_MIN_HISTORY_BARS,
     UNIVERSE_ELIGIBILITY_LOOKBACK_BARS,
@@ -91,7 +91,7 @@ def test_constants_satisfy_callee_precondition() -> None:
 
 
 def test_fold_weights_site_uses_canonical_pair(mhs_market, monkeypatch) -> None:
-    from src.mhs.marks import _load_funding_series
+    from src.core.marks import _load_funding_series
     from src.quant.universe.pit_universe import symbol_partition
     from tests.fixtures.mhs_requests import research_baseline
     from tests.unit.mhs.test_evaluation_appresearch import _FOLD, _START

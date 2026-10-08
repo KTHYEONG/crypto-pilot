@@ -6,22 +6,13 @@ import numpy as np
 import pandas as pd
 
 from src.common.errors import DataIntegrityError
-from src.mhs import research_go as _research_go
-from src.mhs import scaling as _scaling
-from src.mhs.books import inverse_realized_vol_tilt, portfolio_rebalance_trigger, renormalize_within_mask
-from src.mhs.contracts import MhsDiagnosticRequest
-from src.mhs.evidence import AnchoredPurgedFold
-from src.mhs.execution import bar_funding_panel
-from src.mhs.features import FeatureAdmission
-from src.mhs.funding import funding_carry_execution_book
-from src.mhs.horizons import realized_vol
-from src.mhs.marks import (
+from src.core.marks import (
     _missing_execution_sources,
     _pit_execution_mask,
     clear_mhs_market_data_caches,
 )
-from src.mhs.panel import PanelQuarantine, liquid_half_eligibility, load_base_panel, slice_base_panel
-from src.mhs.params import (
+from src.core.panel import PanelQuarantine, liquid_half_eligibility, load_base_panel, slice_base_panel
+from src.core.params import (
     CAUSAL_BETA_LOOKBACK_BARS,
     CAUSAL_BETA_MIN_PERIODS,
     FOLD_PANEL_WARMUP_HOURS,
@@ -30,14 +21,23 @@ from src.mhs.params import (
     UNIVERSE_ELIGIBILITY_LOOKBACK_BARS,
     UNIVERSE_ELIGIBILITY_MIN_HISTORY_BARS,
 )
-from src.mhs.regime import beta_neutralize_weights, causal_market_beta, crash_regime_tilt_weights
-from src.mhs.types import (
+from src.core.types import (
     BOOK_BLEND_WEIGHTS,
     BOOK_SPECS,
     COMMITTEE_REGIME_ADAPTIVE_WINDOW,
     CRASH_REGIME_REFERENCE_SYMBOLS,
     FUNDING_CARRY_SLEEVE_LOOKBACK_HOURS,
 )
+from src.engine.execution import bar_funding_panel
+from src.mhs import research_go as _research_go
+from src.mhs import scaling as _scaling
+from src.mhs.contracts import MhsDiagnosticRequest
+from src.mhs.evidence import AnchoredPurgedFold
+from src.mhs.funding import funding_carry_execution_book
+from src.mhs.regime import beta_neutralize_weights, causal_market_beta, crash_regime_tilt_weights
+from src.strategy.books import inverse_realized_vol_tilt, portfolio_rebalance_trigger, renormalize_within_mask
+from src.strategy.features import FeatureAdmission
+from src.strategy.horizons import realized_vol
 
 from . import books, committee, folds, integrity, specs
 

@@ -10,14 +10,14 @@ import pandas as pd
 import pytest
 
 import src.mhs.discovery as discovery
-from src.mhs.books import phase_tranche_book, rank_weight_book
+from src.strategy.books import phase_tranche_book, rank_weight_book
 from src.mhs.discovery import (
     _candidate_net_t,
     fold_train_only_discovery_qualification,
     select_horizon_by_discovery_qualification,
 )
 from src.mhs.evidence import AnchoredPurgedFold
-from src.mhs.horizons import horizon_log_return, vol_normalized_horizon_signal
+from src.strategy.horizons import horizon_log_return, vol_normalized_horizon_signal
 
 DISCOVERY_START = pd.Timestamp("2021-01-01", tz="UTC")
 DISCOVERY_END = pd.Timestamp("2022-12-31 23:59:59", tz="UTC")

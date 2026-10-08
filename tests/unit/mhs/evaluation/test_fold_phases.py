@@ -8,7 +8,7 @@ from threading import Event
 import pandas as pd
 
 import src.mhs.evaluation.folds as folds_mod
-import src.mhs.parallel as parallel_mod
+import src.core.parallel as parallel_mod
 from src.common.errors import DataIntegrityError
 from src.mhs.evaluation.folds import (
     _FoldValidationPlan,
@@ -308,7 +308,7 @@ def test_funding_travels_through_fork_shared_payload(monkeypatch) -> None:
 def test_each_fold_receives_own_admission(monkeypatch) -> None:
     # I-FOLD-ADMISSION-PIT: fold i receives (fold_committee_admission or {}).get(i)
     # in phases V and E -- never another fold's admission.
-    from src.mhs.features import FeatureAdmission
+    from src.strategy.features import FeatureAdmission
 
     folds = [_fold("2021-05-20"), _fold("2021-06-10"), _fold("2021-06-20")]
     admissions = {
@@ -371,7 +371,7 @@ def test_missing_committee_admission_yields_dedicated_fold_code(monkeypatch) -> 
 def test_run_anchored_fold_threads_admission_into_shared_reference(monkeypatch) -> None:
     # I-FOLD-ADMISSION-PIT: _run_anchored_fold forwards the fold's own
     # admission into the shared-reference path (else branch).
-    from src.mhs.features import FeatureAdmission
+    from src.strategy.features import FeatureAdmission
     from tests.fixtures.mhs_requests import research_baseline
 
     admission = FeatureAdmission(

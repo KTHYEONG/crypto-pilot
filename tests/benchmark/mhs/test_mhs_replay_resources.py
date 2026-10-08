@@ -101,7 +101,7 @@ def test_mhs_phase2_o7_stress_windowed_matches_single_panel() -> None:
 
     sys.path.insert(0, str(SAMPLE_DIR))
     from _mhs_benchmark_sample import _partition_windows, build_workload
-    from src.mhs.execution import (
+    from src.engine.execution import (
         ExecutionSpec,
         replay_execution_windows,
         strategy_aware_execution_replay,

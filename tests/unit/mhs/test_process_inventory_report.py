@@ -9,15 +9,15 @@ import pandas as pd
 import pytest
 
 from src.mhs.backtest.contracts import ProcessInventoryReport
-from src.mhs.execution.contracts import (
+from src.engine.execution.contracts import (
     ExecutionReplayWindow,
     FundingAlignment,
     FundingCoverageGap,
     funding_coverage_gaps,
 )
 from src.mhs.reporting.inventory import export_inventory_json, persist_inventory_evidence
-from src.mhs.types import ExecutionSpec
-from src.mhs.execution.batch import replay_execution_windows
+from src.core.types import ExecutionSpec
+from src.engine.execution.batch import replay_execution_windows
 
 
 def _grid(periods: int = 6) -> pd.DatetimeIndex:

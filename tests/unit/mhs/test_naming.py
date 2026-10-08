@@ -24,12 +24,12 @@ PERSISTED_VERSIONED_IDENTIFIERS: Final[dict[tuple[str, str], int]] = {
     ("src/market_data/streams/heartbeat_v3.py", "heartbeat_v3"): 1,
     ("src/market_data/streams/normalizer.py", "heartbeat_v3"): 1,
     ("src/mhs/contracts.py", "zombie_mask_v1"): 3,
-    ("src/mhs/data_policy.py", "zombie_mask_v1"): 4,
-    ("src/mhs/frozen_research_candidate.py", "frozen_mhs_top20_growth_v2"): 1,
-    ("src/mhs/frozen_research_candidate.py", "frozen_mhs_top20_v2"): 2,
-    ("src/mhs/frozen_research_candidate.py", "frozen_mhs_top40_control_v2"): 1,
-    ("src/mhs/panel.py", "zombie_mask_v1"): 2,
-    ("src/mhs/params.py", "boundary_frozen_warmup_excluded_v1"): 1,
+    ("src/core/data_policy.py", "zombie_mask_v1"): 4,
+    ("src/strategy/targets.py", "frozen_mhs_top20_growth_v2"): 1,
+    ("src/strategy/targets.py", "frozen_mhs_top20_v2"): 2,
+    ("src/strategy/targets.py", "frozen_mhs_top40_control_v2"): 1,
+    ("src/core/panel.py", "zombie_mask_v1"): 2,
+    ("src/core/params.py", "boundary_frozen_warmup_excluded_v1"): 1,
     ("src/mhs/run_history.py", "zombie_mask_v1"): 1,
 }
 
@@ -129,7 +129,7 @@ def test_naming_scan_covers_real_source_tree() -> None:
     assert _SRC_ROOT.is_dir()
     scanned = _scan_python_files(_SRC_ROOT)
     assert scanned, "naming scan found no files"
-    assert (_SRC_ROOT / "mhs" / "data_policy.py") in scanned
+    assert (_SRC_ROOT / "core" / "data_policy.py") in scanned
 
 
 def test_no_version_suffix_in_identifiers() -> None:
@@ -145,9 +145,9 @@ def test_no_phase_prefix_in_identifiers() -> None:
 def test_new_versioned_identifier_fails(tmp_path: Path) -> None:
     """A new _v<N> identifier fails as NEW while absent pairs report STALE."""
     src_root = tmp_path / "src"
-    (src_root / "mhs").mkdir(parents=True)
-    real = _SRC_ROOT / "mhs" / "data_policy.py"
-    (src_root / "mhs" / "data_policy.py").write_text(real.read_text(encoding="utf-8"), encoding="utf-8")
+    (src_root / "core").mkdir(parents=True)
+    real = _SRC_ROOT / "core" / "data_policy.py"
+    (src_root / "core" / "data_policy.py").write_text(real.read_text(encoding="utf-8"), encoding="utf-8")
     (src_root / "new_mod.py").write_text("foo_v2 = 1\n", encoding="utf-8")
     with pytest.raises(AssertionError, match="foo_v2"):
         _check_versioned(src_root, PERSISTED_VERSIONED_IDENTIFIERS)
@@ -158,14 +158,14 @@ def test_new_versioned_identifier_fails(tmp_path: Path) -> None:
 def test_stale_allowlist_entry_fails(tmp_path: Path) -> None:
     """A shrunk persisted identifier fails as STALE with measured vs frozen counts."""
     src_root = tmp_path / "src"
-    (src_root / "mhs").mkdir(parents=True)
-    (src_root / "mhs" / "panel.py").write_text("zombie_mask_v1 = 1\n", encoding="utf-8")
+    (src_root / "core").mkdir(parents=True)
+    (src_root / "core" / "panel.py").write_text("zombie_mask_v1 = 1\n", encoding="utf-8")
     with pytest.raises(
         AssertionError,
-        match=r"src/mhs/panel\.py.*zombie_mask_v1.*measured 1 vs frozen 2",
+        match=r"src/core/panel\.py.*zombie_mask_v1.*measured 1 vs frozen 2",
     ):
         _check_versioned(
-            src_root, {("src/mhs/panel.py", "zombie_mask_v1"): 2}
+            src_root, {("src/core/panel.py", "zombie_mask_v1"): 2}
         )
 
 

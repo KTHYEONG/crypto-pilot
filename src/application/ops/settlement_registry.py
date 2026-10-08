@@ -19,7 +19,7 @@ import numpy as np
 import pandas as pd
 
 from src.common.errors import DataIntegrityError
-from src.mhs.instrument_settlements import (
+from src.core.instrument_settlements import (
     DataTruncationRecord,
     InstrumentSettlementRecord,
     InstrumentSettlementRegistry,
@@ -27,18 +27,18 @@ from src.mhs.instrument_settlements import (
     parse_instrument_settlement_registry,
     settlement_registry_jsonl,
 )
-from src.mhs.params import (
+from src.core.params import (
     DELIST_ANNOUNCEMENT_LEAD,
     DELIST_SETTLEMENT_FEE_BPS,
     SETTLEMENT_AUDIT_MIN_TRAILING_FLAT_BARS,
 )
-from src.mhs.settlement_evidence import (
+from src.core.settlement_evidence import (
     SettlementPriceEvidence,
     SymbolTailProfile,
     derive_settlement_price,
     measure_symbol_tail,
 )
-from src.mhs.venue_halts import VenueHaltInterval, VenueHaltRegistry
+from src.core.venue_halts import VenueHaltInterval, VenueHaltRegistry
 
 _logger = logging.getLogger(__name__)
 
@@ -423,8 +423,8 @@ def build_venue_halt_registry(
     Raises:
         DataIntegrityError: unreadable archive; horizon naive/non-UTC.
     """
-    from src.mhs.params import VENUE_HALT_MIN_PRESENT_SYMBOLS, VENUE_HALT_MIN_ZERO_FRACTION
-    from src.mhs.venue_halts import assemble_venue_halt_registry
+    from src.core.params import VENUE_HALT_MIN_PRESENT_SYMBOLS, VENUE_HALT_MIN_ZERO_FRACTION
+    from src.core.venue_halts import assemble_venue_halt_registry
 
     end = _require_utc_moment(horizon, "horizon")
     stamped = _require_utc_moment(verified_at, "verified_at")
@@ -499,7 +499,7 @@ def build_venue_halt_registry(
 
 def write_venue_halt_registry(registry: VenueHaltRegistry, path: Path) -> int:
     """Atomic canonical JSONL write; re-parses before replace."""
-    from src.mhs.venue_halts import parse_venue_halt_registry, venue_halt_registry_jsonl
+    from src.core.venue_halts import parse_venue_halt_registry, venue_halt_registry_jsonl
 
     payload = venue_halt_registry_jsonl(registry)
     parse_venue_halt_registry(payload, source=str(path))

@@ -15,14 +15,14 @@ import numpy as np
 import pandas as pd
 from scipy.stats import norm
 
-from src.mhs.bootstrap import iter_stationary_bootstrap_index_chunks, stationary_bootstrap_max_blocks
-from src.mhs.execution import mhs_ledger_pnl
-from src.mhs.params import (
+from src.core.bootstrap import iter_stationary_bootstrap_index_chunks, stationary_bootstrap_max_blocks
+from src.core.params import (
     DEFAULT_SELECTION_WINDOW,
     PERIODS_PER_YEAR_1H,
     PNL_VOL_TARGET_BURN_IN_DAYS,
 )
-from src.mhs.types import DISCOVERY_START, MEASURED_EXECUTION_COST_TIERS_BPS
+from src.core.types import DISCOVERY_START, MEASURED_EXECUTION_COST_TIERS_BPS
+from src.engine.execution import mhs_ledger_pnl
 from src.quant.evaluation.policy import HOLDOUT_CUTOFF
 
 _EULER_GAMMA = 0.577215664901532860606512090082402431
@@ -1021,7 +1021,7 @@ def _stationary_block_bootstrap_paths(
     (PERF_OPT_003 precedent): block lengths are ``geometric(p_block)`` and
     block starts are uniform, matching the scalar length law.  A 6x block-count
     safety margin makes running short effectively impossible; any shortfall
-    still falls back to the scalar replicate path in ``src.mhs.bootstrap``.
+    still falls back to the scalar replicate path in ``src.core.bootstrap``.
     """
     if n_replicates <= 0:
         raise ValueError(f"n_replicates must be > 0, got {n_replicates}")
@@ -1059,7 +1059,7 @@ def _bootstrap_mdd_paths(
     Seeded with ``seed + 1``; the degenerate ``mean_block == 0`` branch preserves
     the historical 0-d output (one path of length ``n_replicates`` reduced over
     axis 0, see F1), and shortfalls fall back to the scalar replicate path in
-    ``src.mhs.bootstrap``.
+    ``src.core.bootstrap``.
     """
     if n_replicates <= 0:
         raise ValueError(f"n_replicates must be > 0, got {n_replicates}")

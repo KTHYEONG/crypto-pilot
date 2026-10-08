@@ -88,7 +88,7 @@ def test_train_reference_rejects_validation_leakage() -> None:
 def test_train_reference_enforces_burn_in_length() -> None:
     import pandas as pd
     from src.mhs.evaluation.integrity import _assert_train_reference_returns_valid
-    from src.mhs.params import PNL_VOL_TARGET_BURN_IN_DAYS
+    from src.core.params import PNL_VOL_TARGET_BURN_IN_DAYS
     import pytest
     from src.common.errors import DataIntegrityError
 
@@ -122,8 +122,8 @@ def test_run_anchored_fold_records_sizing_reference_telemetry(mhs_market, monkey
     import pandas as pd
     import src.mhs.evaluation.folds as folds_mod
     from src.mhs.evaluation.folds import _run_anchored_fold
-    from src.mhs.marks import _load_funding_series
-    from src.mhs.resources import _StageRecorder
+    from src.core.marks import _load_funding_series
+    from src.core.resources import _StageRecorder
     from src.quant.universe.pit_universe import symbol_partition
     from tests.unit.mhs.test_evaluation_appresearch import _FOLD, _START
 
@@ -156,7 +156,7 @@ _DEV_SYMBOLS = (
 
 def _plan_args(mhs_market) -> tuple:
     """The request / funding pair every validation-plan scenario drives."""
-    from src.mhs.marks import _load_funding_series
+    from src.core.marks import _load_funding_series
     from src.quant.universe.pit_universe import symbol_partition
 
     root, end = mhs_market
@@ -341,7 +341,7 @@ def _uncertified_reference_replay(equity: pd.Series):
 
     import pandas as pd
 
-    from src.mhs.execution import ExecutionDataGap
+    from src.engine.execution import ExecutionDataGap
 
     return SimpleNamespace(
         ledger=SimpleNamespace(

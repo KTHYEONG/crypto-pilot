@@ -12,7 +12,7 @@ _FORBIDDEN = (
     "structurally_excluded_symbols",
     "instrument_settlements",
     "venue_halts",
-    "src.mhs.execution.settlement",
+    "src.engine.execution.settlement",
 )
 
 
@@ -49,9 +49,9 @@ def test_no_import_time_registry_reads() -> None:
         "import unittest.mock as mock\n"
         "def _boom(*a, **k):\n"
         "    raise AssertionError('registry read at import')\n"
-        "with mock.patch('src.mhs.instrument_settlements.load_instrument_settlement_registry', side_effect=_boom):\n"
-        "    with mock.patch('src.mhs.venue_halts.load_venue_halt_registry', side_effect=_boom):\n"
-        "        with mock.patch('src.mhs.source_gaps.load_source_gap_registry', side_effect=_boom):\n"
+        "with mock.patch('src.core.instrument_settlements.load_instrument_settlement_registry', side_effect=_boom):\n"
+        "    with mock.patch('src.core.venue_halts.load_venue_halt_registry', side_effect=_boom):\n"
+        "        with mock.patch('src.core.source_gaps.load_source_gap_registry', side_effect=_boom):\n"
         "            import src.live.frozen_signal\n"
         "print('ok')"
     )

@@ -13,8 +13,8 @@ def _procedure(member_ids: tuple[str, ...] = ("AAA", "BBB")):  # type: ignore[no
     from src.mhs.backtest.journal import PROCEDURE_SCHEMA_VERSION, ProcessProcedureDefinition
     from src.mhs.backtest.labels import ProcessClockSpec
     from src.mhs.backtest.selection import NestedSelectionSpec, TrainingWindowSpec
-    from src.mhs.data_policy import MHS_DATA_POLICY_DEFAULT
-    from src.mhs.params import (
+    from src.core.data_policy import MHS_DATA_POLICY_DEFAULT
+    from src.core.params import (
         CLI_GROWTH_ENVELOPE_DEFAULT,
         EVIDENCE_GATE_ALPHA,
         GROWTH_RISK_ENVELOPES,
@@ -23,7 +23,7 @@ def _procedure(member_ids: tuple[str, ...] = ("AAA", "BBB")):  # type: ignore[no
         PROCESS_SMOOTHING_HALFLIFE_DAYS,
     )
     from src.mhs.process import ProcessExecutionPolicy
-    from src.mhs.types import ExecutionSpec
+    from src.core.types import ExecutionSpec
 
     return ProcessProcedureDefinition(
         schema_version=PROCEDURE_SCHEMA_VERSION,
@@ -98,7 +98,7 @@ def _replay_pair():  # type: ignore[no-untyped-def]
     import numpy as np
     import pandas as pd
 
-    from src.mhs.execution.contracts import SimulatedInventoryLedgerResult, StrategyExecutionReplayResult
+    from src.engine.execution.contracts import SimulatedInventoryLedgerResult, StrategyExecutionReplayResult
 
     grid = pd.date_range("2024-01-01", periods=96, freq="30min", tz="UTC")
     levels = pd.Series(1.0 + 0.00004 * np.arange(len(grid)), index=grid, dtype="float64")
@@ -160,7 +160,7 @@ def _proxy():  # type: ignore[no-untyped-def]
 
 
 def _budget():  # type: ignore[no-untyped-def]
-    from src.mhs.resources import resolve_mhs_memory_budget
+    from src.core.resources import resolve_mhs_memory_budget
 
     return resolve_mhs_memory_budget(None)
 
@@ -169,7 +169,7 @@ def test_held_symbol_window_carries_funding_knowledge_source(monkeypatch: pytest
     import numpy as np
     import pandas as pd
 
-    import src.mhs.execution.window_stream as ws
+    import src.engine.execution.window_stream as ws
     grid = pd.date_range("2024-01-01", periods=8, freq="3min", tz="UTC")
     weights = pd.DataFrame({"AAA": [1.0, 0.0], "BBB": [0.0, 0.0]}, index=pd.DatetimeIndex([grid[0], grid[2]], tz="UTC"))
     signals = pd.DatetimeIndex([grid[0] + pd.Timedelta(minutes=3), grid[2] + pd.Timedelta(minutes=3)], tz="UTC")
@@ -268,7 +268,7 @@ def test_explicit_submission_chronology_uses_path_clock(monkeypatch: pytest.Monk
     import src.mhs.backtest.inventory as inv
     from src.mhs.backtest.contracts import ProcessBacktestReport
     from src.mhs.deploy_gate import DeployGateResult
-    from src.mhs.params import DISCOVERY_START, PROCESS_EVALUATION_CEILING
+    from src.core.params import DISCOVERY_START, PROCESS_EVALUATION_CEILING
 
     captured: dict[str, object] = {}
     targets = pd.DataFrame(
@@ -322,7 +322,7 @@ def test_journal_free_direct_evaluation_cannot_deploy(monkeypatch: pytest.Monkey
     import src.mhs.backtest.inventory as inv
     from src.mhs.backtest.contracts import ProcessBacktestReport
     from src.mhs.deploy_gate import DeployGateResult
-    from src.mhs.params import DISCOVERY_START, PROCESS_EVALUATION_CEILING
+    from src.core.params import DISCOVERY_START, PROCESS_EVALUATION_CEILING
 
     targets = __import__("pandas").DataFrame(
         {"AAA": [1.0]},
@@ -414,7 +414,7 @@ def test_evidence_producer_input_conflicts_rejected() -> None:
 
 def test_inventory_entry_validates_typed_overrides() -> None:
     import src.mhs.backtest.inventory as inv
-    from src.mhs.params import DISCOVERY_START, PROCESS_EVALUATION_CEILING
+    from src.core.params import DISCOVERY_START, PROCESS_EVALUATION_CEILING
 
     with pytest.raises(DataIntegrityError):
         inv.evaluate_process_inventory_backtest(
@@ -440,7 +440,7 @@ def test_reserved_context_is_used_for_evidence(monkeypatch: pytest.MonkeyPatch) 
     import src.mhs.backtest.inventory as inv
     from src.mhs.backtest.contracts import ProcessBacktestReport
     from src.mhs.deploy_gate import DeployGateResult
-    from src.mhs.params import DISCOVERY_START, PROCESS_EVALUATION_CEILING
+    from src.core.params import DISCOVERY_START, PROCESS_EVALUATION_CEILING
 
     targets = __import__("pandas").DataFrame(
         {"AAA": [1.0]},

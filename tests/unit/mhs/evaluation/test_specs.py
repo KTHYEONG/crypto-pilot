@@ -18,7 +18,7 @@ def test_resolved_base_execution_spec_threads_name_drift_trim() -> None:
     import dataclasses
 
     from src.mhs.evaluation.specs import _resolved_base_execution_spec, _stress_cost_execution_spec
-    from src.mhs.params import NAME_DRIFT_TRIM_INTERVAL_HOURS, NAME_DRIFT_TRIM_MAX_WEIGHT
+    from src.core.params import NAME_DRIFT_TRIM_INTERVAL_HOURS, NAME_DRIFT_TRIM_MAX_WEIGHT
 
     default_spec = _resolved_base_execution_spec(research_baseline())
     assert default_spec.name_drift_trim_max_weight is None

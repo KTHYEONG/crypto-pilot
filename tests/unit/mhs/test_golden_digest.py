@@ -32,7 +32,7 @@ from src.mhs.evidence import (
     PhaseDiagnosticResult,
     TailSensitivityResult,
 )
-from src.mhs.execution import (
+from src.engine.execution import (
     SimulatedInventoryLedgerResult,
     StrategyExecutionReplayResult,
 )

@@ -18,11 +18,11 @@ import pytest
 
 def fixture_truncation_registry(root: str | Path):
     """Build a truncation-only registry explaining a fixture lake's end."""
-    from src.mhs.instrument_settlements import (
+    from src.core.instrument_settlements import (
         DataTruncationRecord,
         assemble_instrument_settlement_registry,
     )
-    from src.mhs.settlement_evidence import measure_symbol_tail
+    from src.core.settlement_evidence import measure_symbol_tail
 
     verified = pd.Timestamp("2026-07-01T00:00:00Z")
     records = [
@@ -44,7 +44,7 @@ def patch_settlement_registry_for_fixture(monkeypatch: pytest.MonkeyPatch, root:
         "src.mhs.pipeline.stages.panel.settlement_registry_for_root", lambda _root: registry,
     )
     monkeypatch.setattr(
-        "src.mhs.frozen_research_run.settlement_registry_for_root", lambda _root: registry,
+        "src.engine.strategy_backtest.settlement_registry_for_root", lambda _root: registry,
     )
     monkeypatch.setattr(
         "src.mhs.backtest.inventory.settlement_registry_for_root", lambda _root: registry,
@@ -64,7 +64,7 @@ def settlement_registry_for_test_root(ohlcv_root: str | Path):
     """
     from src.common.errors import DataIntegrityError
     from src.common.paths import FUTURES_DATA_DIR
-    from src.mhs.instrument_settlements import (
+    from src.core.instrument_settlements import (
         EMPTY_SETTLEMENT_REGISTRY,
         load_instrument_settlement_registry,
     )

@@ -6,13 +6,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import pandas as pd
 
-from src.mhs.discovery import (
-    DiscoveryQualificationResult,
-    fold_train_only_discovery_qualification,
-)
-from src.mhs.evidence import AnchoredPurgedFold, phase_1_anchored_purged_folds
-from src.mhs.execution import mhs_ledger_pnl
-from src.mhs.parallel import (
+from src.core.parallel import (
     FORK_CONTEXT,
     assert_fork_admission,
     fork_shared_payload,
@@ -20,13 +14,19 @@ from src.mhs.parallel import (
     plan_worker_count,
     resolve_fork_shared,
 )
-from src.mhs.params import (
+from src.core.params import (
     DISCOVERY_GATE_TRANCHE_COUNT,
     FUNDING_CARRY_LOOKBACK_CANDIDATES_HOURS,
     MEASURED_EXECUTION_COST_TIERS_BPS,
 )
-from src.mhs.resources import _resolve_ram_budget, _StageRecorder, _worker_plan_observer
-from src.mhs.types import WORKER_PEAK_RSS_BYTES, BookSpec
+from src.core.resources import _resolve_ram_budget, _StageRecorder, _worker_plan_observer
+from src.core.types import WORKER_PEAK_RSS_BYTES, BookSpec
+from src.engine.execution import mhs_ledger_pnl
+from src.mhs.discovery import (
+    DiscoveryQualificationResult,
+    fold_train_only_discovery_qualification,
+)
+from src.mhs.evidence import AnchoredPurgedFold, phase_1_anchored_purged_folds
 
 from . import books
 

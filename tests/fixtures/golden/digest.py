@@ -25,7 +25,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from src.mhs.execution import SimulatedInventoryLedgerResult
+from src.engine.execution import SimulatedInventoryLedgerResult
 
 #: The only Series-valued state on a replay result that feeds every scalar
 #: metric and Research-GO decision: the six streamed-inventory ledger columns.

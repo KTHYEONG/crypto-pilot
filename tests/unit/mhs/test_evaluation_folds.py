@@ -14,10 +14,10 @@ import src.mhs.evaluation.committee as committee_mod
 import src.mhs.evaluation.concurrency as concurrency_mod
 import src.mhs.evaluation.windows as windows_mod
 from src.mhs import research_go as research_go_mod
-from src.mhs.books import inverse_realized_vol_tilt, renormalize_within_mask
+from src.strategy.books import inverse_realized_vol_tilt, renormalize_within_mask
 from src.mhs.contracts import MhsFoldReport
 from src.mhs.diagnostic_run import run_mhs_horizon_diagnostic
-import src.mhs.resources as resources
+import src.core.resources as resources
 import src.mhs.scaling as scaling
 from src.mhs.evaluation.concurrency import _run_post_book_concurrently
 from src.mhs.evaluation.evidence import _fold_blend_parity
@@ -25,10 +25,10 @@ from src.mhs.evidence import compute_deployment_readiness
 from src.mhs.evaluation.folds import _incomplete_fold_report, _run_anchored_fold
 from src.mhs.evaluation.fold_weights import _build_fold_target_weights
 from src.mhs.evaluation.windows import _book_outcome
-from src.mhs.marks import _load_funding_series
-from src.mhs.params import FOLD_PANEL_WARMUP_HOURS
-from src.mhs.resources import _StageRecorder
-from src.mhs.types import BOOK_SPECS
+from src.core.marks import _load_funding_series
+from src.core.params import FOLD_PANEL_WARMUP_HOURS
+from src.core.resources import _StageRecorder
+from src.core.types import BOOK_SPECS
 from src.quant.universe.pit_universe import symbol_partition
 from tests.unit.mhs.test_evaluation_appresearch import (  # noqa: F401
     _FOLD,
@@ -261,7 +261,7 @@ def test_fold_execution_weights_are_renormalized(mhs_market, monkeypatch) -> Non
         execution_universe_size=8,
     )
     import src.mhs.evaluation.fold_weights as fold_weights_mod
-    import src.mhs.books as books_mod
+    import src.strategy.books as books_mod
     real = renormalize_within_mask
     captured: list[tuple[pd.DataFrame, pd.DataFrame, int]] = []
 
@@ -307,7 +307,7 @@ def test_fold_weights_are_vol_tilted_before_renormalization(mhs_market, monkeypa
     )
 
     import src.mhs.evaluation.fold_weights as fold_weights_mod
-    import src.mhs.books as books_mod
+    import src.strategy.books as books_mod
 
     tilt_calls: list[tuple[pd.DataFrame, pd.DataFrame]] = []
     renorm_inputs: list[pd.DataFrame] = []
@@ -470,7 +470,7 @@ def test_committee_capital_default_off_bit_identical(mhs_market_with_taker_buy_q
         raise AssertionError("must not be called")
 
     import src.mhs.evaluation.committee as committee_mod
-    import src.mhs.features as features_mod
+    import src.strategy.features as features_mod
 
     monkeypatch.setattr(committee_mod, "build_feature_books", _must_not_be_called)
     monkeypatch.setattr(features_mod, "build_feature_books", _must_not_be_called)
@@ -505,7 +505,7 @@ def test_committee_capital_reaches_fold_targets(mhs_market_with_taker_buy_quote)
         str(root), _FOLD, request, funding_by_symbol,
     )
     request_on = dataclasses.replace(request, committee_capital=True)
-    from src.mhs.features import FeatureAdmission as _FeatureAdmission
+    from src.strategy.features import FeatureAdmission as _FeatureAdmission
 
     target_on, _signal, _roster, _grid = _build_fold_target_weights(
         str(root), _FOLD, request_on, funding_by_symbol,
@@ -535,7 +535,7 @@ def test_committee_capital_no_member_fails_closed(mhs_market_with_taker_buy_quot
         execution_timeframe="3m", log_run=False,
         committee_capital=True,
     )
-    from src.mhs.features import FeatureAdmission as _FeatureAdmissionFailClosed
+    from src.strategy.features import FeatureAdmission as _FeatureAdmissionFailClosed
 
     with pytest.raises(RuntimeError, match="committee_capital"):
         _build_fold_target_weights(
@@ -752,7 +752,7 @@ def test_post_book_concurrently_forwards_only_fold_local_policy(monkeypatch) -> 
     import src.mhs.evaluation.concurrency as concurrency_mod
     import src.mhs.evaluation.folds as folds_mod
     import src.mhs.evidence as evidence_mod
-    import src.mhs.parallel as parallel_mod
+    import src.core.parallel as parallel_mod
 
     monkeypatch.setattr(evidence_mod, "phase_1_anchored_purged_folds", lambda: (_FOLD,) * 4)
     import src.mhs.evaluation.fold_discovery as fold_discovery_mod
@@ -908,7 +908,7 @@ def test_diagnostics_run_after_folds_and_evict_caches(mhs_market_long, monkeypat
 
     # The retired mark frame cache no longer exists; retained loaders are
     # stateless and read the lake directly.
-    import src.mhs.marks as marks_mod
+    import src.core.marks as marks_mod
 
     assert not hasattr(marks_mod, "_get_symbol_mark_frame")
     marks_mod.clear_mhs_market_data_caches()
@@ -968,7 +968,7 @@ def test_fold_builder_regime_hourly_min_history_and_deadband_toggle(mhs_market, 
     import pytest
     import src.mhs.evaluation.fold_weights as fold_weights_mod
     import src.mhs.scaling as scaling
-    from src.mhs.params import PANEL_MIN_HISTORY_BARS
+    from src.core.params import PANEL_MIN_HISTORY_BARS
     from src.quant.universe.pit_universe import symbol_partition
     from tests.unit.mhs.test_evaluation_appresearch import _FOLD, _START
 
@@ -1028,9 +1028,9 @@ def test_run_anchored_fold_accepts_terminal_funding_gap_via_shared_helper(mhs_ma
     # failed just because it happens to fall inside a fold's validation window.
     import pandas as pd
     import src.mhs.evaluation.folds as folds_mod
-    from src.mhs.resources import _StageRecorder  # noqa: F401
-    from src.mhs.execution import ExecutionDataGap
-    from src.mhs.execution.contracts import SimulatedInventoryLedgerResult, StrategyExecutionReplayResult
+    from src.core.resources import _StageRecorder  # noqa: F401
+    from src.engine.execution import ExecutionDataGap
+    from src.engine.execution.contracts import SimulatedInventoryLedgerResult, StrategyExecutionReplayResult
     from src.quant.universe.pit_universe import symbol_partition
     from tests.unit.mhs.test_evaluation_appresearch import _FOLD, _START
 
@@ -1107,7 +1107,7 @@ def test_run_anchored_fold_certifies_valid_ledger_via_shared_helper(mhs_market, 
     import pandas as pd
 
     import src.mhs.evaluation.folds as folds_mod
-    from src.mhs.execution.contracts import SimulatedInventoryLedgerResult, StrategyExecutionReplayResult
+    from src.engine.execution.contracts import SimulatedInventoryLedgerResult, StrategyExecutionReplayResult
     from src.quant.universe.pit_universe import symbol_partition
     from tests.unit.mhs.test_evaluation_appresearch import _FOLD, _START
 

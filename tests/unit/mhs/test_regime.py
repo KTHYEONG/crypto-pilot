@@ -251,7 +251,7 @@ class TestNoProductionWiring:
     """Wiring guard: non-wired production layers must never import regime module."""
 
     _PRODUCTION_FILES = (
-        "src/mhs/books.py",
+        "src/strategy/books.py",
         "src/mhs/discovery.py",
     )
 

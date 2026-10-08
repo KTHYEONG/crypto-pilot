@@ -10,8 +10,21 @@ import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
 
+from src.core.panel import DATA_POLICY_LEGACY, load_base_panel
+from src.core.params import (
+    MEASURED_EXECUTION_COST_TIERS_BPS,
+    PANEL_MIN_HISTORY_BARS,
+)
+from src.core.params import (
+    PERIODS_PER_YEAR_1H as _PERIODS_PER_YEAR_1H,
+)
+from src.core.resources import _assert_stage_rss_budget, _StageRecorder
+from src.core.types import TREND_SLEEVE_HORIZONS_HOURS, BookSpec
+from src.engine.execution import (
+    mhs_ledger_pnl,
+    mhs_ledger_pnl_multi_tier,
+)
 from src.mhs import statistics as _statistics
-from src.mhs.books import rank_weight_book  # noqa: F401 - re-exported for monkeypatch seams
 from src.mhs.contracts import MhsDiagnosticRequest
 from src.mhs.discovery import yearly_net_t_diagnostic
 from src.mhs.evidence import (
@@ -20,29 +33,16 @@ from src.mhs.evidence import (
     phase_diagnostic_metrics,  # noqa: F401 - re-exported for monkeypatch seams
     year_restricted_correlation,
 )
-from src.mhs.execution import (
-    mhs_ledger_pnl,
-    mhs_ledger_pnl_multi_tier,
-)
-from src.mhs.features import (
+from src.mhs.stability import regime_split_stability
+from src.mhs.trend_sleeve import market_basket_log_price, time_series_trend_position, trend_sleeve_weights
+from src.strategy.books import rank_weight_book  # noqa: F401 - re-exported for monkeypatch seams
+from src.strategy.features import (
     FEATURE_REGISTRY,
     build_feature_books,
     feature_coverage_audit,
     feature_registry_panel_columns,
 )
-from src.mhs.horizons import horizon_log_return  # noqa: F401 - re-exported for monkeypatch seams
-from src.mhs.panel import DATA_POLICY_LEGACY, load_base_panel
-from src.mhs.params import (
-    MEASURED_EXECUTION_COST_TIERS_BPS,
-    PANEL_MIN_HISTORY_BARS,
-)
-from src.mhs.params import (
-    PERIODS_PER_YEAR_1H as _PERIODS_PER_YEAR_1H,
-)
-from src.mhs.resources import _assert_stage_rss_budget, _StageRecorder
-from src.mhs.stability import regime_split_stability
-from src.mhs.trend_sleeve import market_basket_log_price, time_series_trend_position, trend_sleeve_weights
-from src.mhs.types import TREND_SLEEVE_HORIZONS_HOURS, BookSpec
+from src.strategy.horizons import horizon_log_return  # noqa: F401 - re-exported for monkeypatch seams
 
 
 def _phase_diagnostics(
