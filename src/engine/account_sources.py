@@ -1,4 +1,4 @@
-"""Account-scale replay inputs assembled from one frozen candidate source load."""
+"""Account-scale replay inputs assembled from one strategy candidate source load."""
 
 from __future__ import annotations
 
@@ -8,11 +8,11 @@ import numpy as np
 import pandas as pd
 
 from src.common.errors import DataIntegrityError
-from src.engine.account_ledger import AccountMarkPanels
-from src.strategy.liquidity import causal_adv_sigma
-from src.strategy.targets import FrozenMhsCandidate
-from src.engine.strategy_backtest import FrozenSourceContext
 from src.core.resources import assert_mhs_stage_allocation
+from src.engine.account_ledger import AccountMarkPanels
+from src.engine.strategy_backtest import StrategySourceContext
+from src.strategy.liquidity import causal_adv_sigma
+from src.strategy.targets import StrategyTargets
 
 _MARKS_COLUMNS = ("open", "high", "low", "close")
 
@@ -48,7 +48,7 @@ def _cumulative_funding_on_grid(series: pd.Series | None, grid: pd.DatetimeIndex
 
 
 def assemble_account_inputs(
-    candidate: FrozenMhsCandidate, context: FrozenSourceContext,
+    candidate: StrategyTargets, context: StrategySourceContext,
 ) -> tuple[pd.DataFrame, AccountMarkPanels, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DatetimeIndex]:
     """Unit weights (held columns only), 3m marks, funding cumulative at each entry's anchor,
     causal ADV and daily sigma, and the per-entry submit anchors for the candidate's held symbols.
@@ -57,7 +57,7 @@ def assemble_account_inputs(
     ``signal_available_at`` -- the bar whose close is the last price observable when the order
     is submitted on the next bar. This is the canonical inventory ledger's ``submit_bar``
     anchor and the live submission time; anchoring at the entry label instead delays every
-    rebalance by the release-to-entry gap (one hour for the frozen book) and understates CAGR.
+    rebalance by the release-to-entry gap (one hour for the strategy book) and understates CAGR.
 
     The 3m grid starts at the first anchor so that every anchor is a grid bar. Funding is
     cumulated on the grid (each print settles on the first bar at or after its timestamp) and
@@ -65,7 +65,7 @@ def assemble_account_inputs(
     inventory held between their anchors. The returned funding, ADV and sigma frames stay
     indexed by the entry labels of ``candidate.target_weights``. ADV and sigma for an entry
     are taken at its decision day, so they only use daily bars completed before the 23:00
-    release (identical to the live frozen book).
+    release (identical to the live strategy book).
 
     Returns:
         ``(unit_weights, marks, funding_cum, adv, daily_sigma, anchor_times)`` where

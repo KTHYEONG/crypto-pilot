@@ -164,7 +164,7 @@ def build_committee(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
             )
     if ctx.config.committee_capital:
         # RC-4: the reported blend is the committee execution book, not the
-        # frozen momentum formula. Un-scaled copy feeds the concurrent replay
+        # fixed momentum formula. Un-scaled copy feeds the concurrent replay
         # base so regime_scale applies exactly once (matching the fold path).
         ctx.blend_1h = committee._committee_execution_book(
             ctx.close, ctx.quote_vol, ctx.taker_buy_quote, ctx.execution_mask, ctx.slow_grid, ctx.slow.min_symbols,

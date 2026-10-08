@@ -50,7 +50,7 @@ def test_forward_observation_digest_mismatch_cannot_upgrade() -> None:
     import pandas as pd
     from src.core.data_provenance import DataEvidenceTier, validate_forward_execution_observations
     records = pd.DataFrame({'decision_time': [pd.Timestamp('2025-01-01', tz='UTC')], 'observed_at': [pd.Timestamp('2025-01-01 00:01', tz='UTC')], 'strategy_digest': ['other']})
-    result = validate_forward_execution_observations(records, frozen_strategy_digest='frozen')
+    result = validate_forward_execution_observations(records, strategy_digest='frozen')
     assert not result.valid
     assert result.tier is not DataEvidenceTier.FORWARD_OBSERVED
     assert 'STRATEGY_DIGEST_MISMATCH' in result.reason_codes
@@ -96,7 +96,7 @@ def test_provenance_absent_manifest_and_seal_success(tmp_path) -> None:
     assert ok_result.tier is DataEvidenceTier.REPRODUCIBLE_ARCHIVE
     assert ok_result.manifest_digest == digest
     legacy = pd.DataFrame({'decision_time': [pd.Timestamp('2025-01-01', tz='UTC')]})
-    schema_result = validate_forward_execution_observations(legacy, frozen_strategy_digest='frozen')
+    schema_result = validate_forward_execution_observations(legacy, strategy_digest='frozen')
     assert not schema_result.valid
     assert 'FORWARD_OBSERVATION_SCHEMA_MISMATCH' in schema_result.reason_codes
     bad_time = pd.DataFrame({
@@ -104,7 +104,7 @@ def test_provenance_absent_manifest_and_seal_success(tmp_path) -> None:
         'observed_at': [pd.Timestamp('2025-01-01', tz='UTC')],
         'strategy_digest': ['frozen'],
     })
-    time_result = validate_forward_execution_observations(bad_time, frozen_strategy_digest='frozen')
+    time_result = validate_forward_execution_observations(bad_time, strategy_digest='frozen')
     assert not time_result.valid
     assert 'FORWARD_OBSERVATION_TIME_INVALID' in time_result.reason_codes
     short = pd.DataFrame({
@@ -112,7 +112,7 @@ def test_provenance_absent_manifest_and_seal_success(tmp_path) -> None:
         'observed_at': [pd.Timestamp('2025-01-01 00:01', tz='UTC')],
         'strategy_digest': ['frozen'],
     })
-    short_result = validate_forward_execution_observations(short, frozen_strategy_digest='frozen')
+    short_result = validate_forward_execution_observations(short, strategy_digest='frozen')
     assert not short_result.valid
     assert 'FORWARD_EVIDENCE_INCOMPLETE' in short_result.reason_codes
     long_enough = pd.DataFrame({
@@ -120,7 +120,7 @@ def test_provenance_absent_manifest_and_seal_success(tmp_path) -> None:
         'observed_at': [pd.Timestamp('2025-01-01 00:01', tz='UTC'), pd.Timestamp('2025-04-15 00:01', tz='UTC')],
         'strategy_digest': ['frozen', 'frozen'],
     })
-    good = validate_forward_execution_observations(long_enough, frozen_strategy_digest='frozen')
+    good = validate_forward_execution_observations(long_enough, strategy_digest='frozen')
     assert good.valid
     assert good.tier is DataEvidenceTier.FORWARD_OBSERVED
     assert good.files_checked == 2

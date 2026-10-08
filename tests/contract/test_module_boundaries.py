@@ -395,10 +395,10 @@ def test_source_module_size_budget() -> None:
         "src/mhs/deploy_gate.py": 723,
         "src/mhs/scaling.py": 892,
         "src/application/mhs_supervisor.py": 1214,
-        # Frozen account/exposure services stay co-located: two research workflows share
+        # Account replay/exposure scan services stay co-located: two research workflows share
         # the catalog seam and unit-ledger helpers; split only with a new service boundary.
-        # spec 34: stress settlement haircut on the frozen stress spec.
-        "src/application/mhs_frozen_account.py": 815,
+        # spec 34: stress settlement haircut on the strategy stress spec.
+        "src/application/strategy_account.py": 815,
         "src/mhs/reporting/inventory.py": 741,
         "src/mhs/backtest/paths.py": 849,
         "src/mhs/backtest/journal.py": 1081,
@@ -493,7 +493,7 @@ def test_no_function_exceeds_length_budget() -> None:
         "src/live/runner.py::run_shadow_cycle": 348,
         # spec 17: mainnet refuse-to-start gate (fail loud before any venue call).
         "src/live/scheduler.py::run_daemon": 354,
-        "src/live/frozen_signal.py::run_frozen_signal_step": 312,
+        "src/live/strategy_signal.py::run_strategy_signal_step": 312,
         "src/engine/account_ledger.py::replay_account": 308,
         "src/mhs/evaluation/windows.py::_book_outcome": 368,
         "src/engine/execution/accumulator.py::_consume_append_ledger": 252,

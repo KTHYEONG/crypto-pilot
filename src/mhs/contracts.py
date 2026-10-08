@@ -170,7 +170,7 @@ class MhsDiagnosticRequest:
         metadata=cli_param(
             flag="--liquidity-cost-model",
             help=(
-                "Taker crossing cost model: flat (frozen default, fixed 3bps "
+                "Taker crossing cost model: flat (fixed default, fixed 3bps "
                 "slippage, bit-identical) or corwin_schultz (per-symbol half-spread "
                 "estimated from window high/lows with an EWMA smoothing; applied "
                 "identically to every bound in the batch). Default keeps every "
@@ -254,7 +254,7 @@ class MhsDiagnosticRequest:
         metadata=cli_param(
             flag="--slow-book-mode",
             help=(
-                "Slow-book construction: single_horizon (frozen production chain) "
+                "Slow-book construction: single_horizon (fixed production chain) "
                 "or horizon_ensemble (equal-weight average of every candidate "
                 "horizon, no selection)"
             ),
@@ -266,7 +266,7 @@ class MhsDiagnosticRequest:
         metadata=cli_param(
             flag="--fast-book-mode",
             help=(
-                "Fast-book construction: single_horizon (frozen production chain) "
+                "Fast-book construction: single_horizon (fixed production chain) "
                 "or horizon_ensemble (equal-weight average of every candidate "
                 "horizon, no selection)"
             ),
@@ -301,7 +301,7 @@ class MhsDiagnosticRequest:
         metadata=cli_param(
             flag="--ensemble-signal",
             help=(
-                "Signal family for the slow book: raw horizon log return (frozen "
+                "Signal family for the slow book: raw horizon log return (fixed "
                 "production) or vol-normalized"
             ),
             choices=("raw", "vol_normalized"),
@@ -441,11 +441,11 @@ class MhsDiagnosticRequest:
             help=(
                 "Main logic default is ON: the k=5 committee members build the FOLD "
                 "decision targets and the TOP-LEVEL reported blend (equal-weight "
-                "over admitted members, no leg-risk tilt), replacing the frozen "
+                "over admitted members, no leg-risk tilt), replacing the fixed "
                 "momentum book in both places; measured to raise walk-forward blend "
                 "Sharpe and reduce blend MDD relative to the momentum default (see "
                 "the run history for magnitudes). Pass this flag to opt back out to "
-                "the frozen momentum book (also disables "
+                "the fixed momentum book (also disables "
                 "--committee-regime-adaptive-tranche, which requires committee "
                 "capital)."
             ),
@@ -542,7 +542,7 @@ class MhsDiagnosticRequest:
                 "weights per ADR_20260823_MHS_CONSTANT_RISK_DEPLOYMENT; weights are "
                 "non-negative, sum to 1, and fall back to exact equal weights "
                 "when no member has positive train evidence; fitted strictly "
-                "before each fold's train_end (top-level: before the frozen "
+                "before each fold's train_end (top-level: before the fixed "
                 "committee OOS start), never on evaluation data. Pass this flag to opt back out to equal-weighted members"
             ),
         ),
@@ -697,7 +697,7 @@ class MhsDiagnosticRequest:
     )
     forward_strategy_digest: str | None = field(
         default=None,
-        metadata=cli_param(flag='--forward-strategy-digest', help='Frozen strategy digest expected in forward observations.'),
+        metadata=cli_param(flag='--forward-strategy-digest', help='Strategy digest expected in forward observations.'),
     )
     placebo_diagnostic: bool = field(
         default=False,

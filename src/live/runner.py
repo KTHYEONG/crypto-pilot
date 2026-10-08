@@ -178,7 +178,7 @@ def check_risk_gates(
 def fetch_live_account_equity(settings: LiveSettings, now: pd.Timestamp) -> float:
     """Margin equity (wallet balance + unrealized PnL, USDT) of the LIVE account at ``now``.
 
-    Used by the frozen signal step so exposure is chosen from the same equity the runner sizes
+    Used by the strategy signal step so exposure is chosen from the same equity the runner sizes
     orders with; the call syncs server time first, exactly like the execution cycle.
 
     Raises:
@@ -772,9 +772,7 @@ def _write_execution_quality_once(
 
 def _run_manifest_path(settings: LiveSettings) -> Path | None:
     root = settings.run_root()
-    if root is None:
-        return None
-    return root / "run_manifest.json"
+    return root / "run_manifest.json" if root is not None else None
 
 
 def _unit_bootstrap_sha256(settings: LiveSettings) -> str | None:
@@ -795,13 +793,13 @@ def _unit_bootstrap_sha256(settings: LiveSettings) -> str | None:
 
 
 def _current_run_manifest(settings: LiveSettings, now: pd.Timestamp) -> dict[str, Any]:
-    from src.core.params import FROZEN_GROWTH_NAME_CLIP  # noqa: PLC0415
-    from src.strategy.targets import FROZEN_MHS_TOP20_V2  # noqa: PLC0415
+    from src.core.params import STRATEGY_NAME_CLIP  # noqa: PLC0415
+    from src.strategy.targets import FLOW_MOM_TOP20  # noqa: PLC0415
 
     return {
         "run_id": settings.record_run_id,
-        "strategy_id": FROZEN_MHS_TOP20_V2.strategy_id,
-        "name_clip": FROZEN_GROWTH_NAME_CLIP,
+        "strategy_id": FLOW_MOM_TOP20.strategy_id,
+        "name_clip": STRATEGY_NAME_CLIP,
         "execution_policy": settings.execution_policy,
         "paper_fill_model": settings.paper_fill_model,
         "mode": settings.mode.value,
@@ -822,7 +820,11 @@ def _assert_run_manifest_compatible(settings: LiveSettings) -> None:
     mismatched = [key for key in compared if raw.get(key) != current.get(key)]
     if not mismatched:
         return
+    from src.strategy.targets import strategy_id_matches  # noqa: PLC0415
+
     allowed = set()
+    if "strategy_id" in mismatched and strategy_id_matches(raw.get("strategy_id"), current.get("strategy_id")):
+        allowed.add("strategy_id")
     if "unit_bootstrap_sha256" in mismatched:
         bootstrap = Path(settings.unit_bootstrap_path)
         if bootstrap.exists():
@@ -837,9 +839,7 @@ def _assert_run_manifest_compatible(settings: LiveSettings) -> None:
         durable_write_text(path, json.dumps(raw, indent=2, sort_keys=True))
         return
     key = mismatched[0]
-    raise DataIntegrityError(
-        f"run manifest mismatch key={key} manifest={raw.get(key)!r} current={current.get(key)!r}"
-    )
+    raise DataIntegrityError(f"run manifest mismatch key={key} manifest={raw.get(key)!r} current={current.get(key)!r}")
 
 
 def _ensure_run_manifest(settings: LiveSettings, now: pd.Timestamp) -> None:
@@ -975,7 +975,7 @@ def _reconcile_pre_trade(
     open cancelled with venue confirmation before reconciliation, so a resting order
     from an earlier attempt can never be mistaken for a position breach; every fill they
     reveal is committed first. Own orders still open after a confirmed cancel attempt
-    are audited and alerted, and their symbols are frozen for this cycle only (never
+    are audited and alerted, and their symbols are withheld for this cycle only (never
     persisted as de-risk state). A journal shorter than the ledger halts
     immediately because later fills would otherwise be dropped silently. In mutating
     modes, venue-settled delistings are booked, residual breaches optionally adopted
@@ -985,7 +985,7 @@ def _reconcile_pre_trade(
     Returns:
         The committed ledger state, the orphan sweep (its foreign symbols are excluded
         from trading), the sorted de-risk reasons in force for this cycle (empty when
-        the account is trusted), and the sorted symbols frozen by unresolved own orders.
+        the account is trusted), and the sorted symbols withheld by unresolved own orders.
 
     Raises:
         DataIntegrityError: the order journal regressed behind the ledger, or a recovery
@@ -1766,7 +1766,7 @@ class TickerMarks:
 def _apply_unresolved_freeze(
     intents: Sequence[OrderIntent], frozen_symbols: Sequence[str], audit: AuditLog
 ) -> tuple[list[OrderIntent], int]:
-    """Withhold intents on frozen symbols, auditing each blocked intent; return (kept, blocked count)."""
+    """Withhold intents on symbols with unresolved orders, auditing each blocked intent; return (kept, blocked count)."""
     freeze = freeze_unresolved_symbols(intents, frozen_symbols)
     for blocked_intent, block_reason in freeze.blocked:
         audit.record(

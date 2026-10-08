@@ -53,7 +53,7 @@ def assert_storage_roots_hermetic(
 ) -> None:
     """Fail the session unless every import-time storage root is inside this run's temp root.
 
-    ``BACKTESTS_DIR`` and ``LOG_DIR`` are frozen when ``src.common.paths`` /
+    ``BACKTESTS_DIR`` and ``LOG_DIR`` are pinned when ``src.common.paths`` /
     ``src.common.logging`` are first imported. If anything imported them before
     ``tests/conftest.py`` set the redirect variables (a ``-p`` plugin, a coverage
     source that imports packages, a wrapper script), tests would write the

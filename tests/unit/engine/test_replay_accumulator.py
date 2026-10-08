@@ -639,7 +639,7 @@ class TestFairnessInstrumentation:
 
     def test_SCENARIO_MHS_FAIR_04_SPREAD_EWMA_IS_CAUSAL(self) -> None:
         """SCENARIO_MHS_FAIR_04_SPREAD_EWMA_IS_CAUSAL: the first window prices
-        its taker fills at the frozen slippage (EWMA still nan), later windows
+        its taker fills at the fixed slippage (EWMA still nan), later windows
         price at the EWMA built from strictly prior windows, and the ordering
         is load-bearing -- window 1's own wide bars would have changed its own
         fees had the update run ahead of the fills."""

@@ -91,7 +91,7 @@ def assemble_report(ctx: PipelineContext, telemetry: StageTelemetry) -> MhsHoriz
     if ctx.config.forward_execution_quality_dir is not None and ctx.config.forward_strategy_digest is not None:
         ctx.forward_provenance = validate_forward_execution_observations(
             load_execution_quality_records(ctx.config.forward_execution_quality_dir),
-            frozen_strategy_digest=ctx.config.forward_strategy_digest,
+            strategy_digest=ctx.config.forward_strategy_digest,
         )
     # 단일 인증 헬퍼의 판정을 그대로 전달한다(원시 플래그 직접 사용 금지).
     blend_primary = getattr(ctx.blend_report, "primary", None) if ctx.blend_report is not None else None

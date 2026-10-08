@@ -18,7 +18,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from src.common.paths import APP_ROOT, DATA_DIR
 from src.core.params import ACCOUNT_EXPOSURE_MAX, SIGNAL_PANEL_WINDOW_DAYS
 from src.core.types import ExecutionSpec
-from src.strategy.targets import FROZEN_MHS_TOP20_V2
+from src.strategy.targets import FLOW_MOM_TOP20
 
 #: LIVE_MAINNET 승인 문자열. 이 값과 정확히 일치해야만 실계좌 모드가 생성된다.
 MAINNET_TRADING_ACK = "I_UNDERSTAND_REAL_MONEY"
@@ -197,7 +197,7 @@ class LiveSettings(BaseSettings):
     recorder_startup_grace_s: float = 120.0
     recorder_prune_blocked_alert_after_s: float = 21600.0
     recorder_local_disk_budget_bytes: int = 8 * 1024**3
-    # Frozen strategy digest stamped onto execution-quality observations so
+    # Strategy digest stamped onto execution-quality observations so
     # forward evidence can be attributed to an immutable strategy version.
     strategy_digest: str | None = None
     data_retention_days: int = SIGNAL_PANEL_WINDOW_DAYS + 30
@@ -221,7 +221,7 @@ class LiveSettings(BaseSettings):
     venue_listing_snapshot_max_age_hours: float = 30.0
     venue_listing_retention_days: int | None = None
 
-    # 리스크 게이트(등록 상한). frozen 노출은 증거금 상한 안에서 베이지안 Kelly가 정한다.
+    # 리스크 게이트(등록 상한). 전략 노출은 증거금 상한 안에서 베이지안 Kelly가 정한다.
     # 리스크 게이트는 그 위의 안전 레일이다.
     max_gross_leverage: float = ACCOUNT_EXPOSURE_MAX
     leverage_buffer_fraction: float = 0.25
@@ -233,7 +233,7 @@ class LiveSettings(BaseSettings):
     venue_force_close_lookback_hours: float = 168.0
     ledger_resync_backup_dir: str | None = None
     reject_cluster_alert_min_symbols: int = 3
-    # Frozen live 입력: 봉인된 단위수익률 부트스트랩과 베뉴 규칙 폴백 스냅샷.
+    # Strategy live 입력: 봉인된 단위수익률 부트스트랩과 베뉴 규칙 폴백 스냅샷.
     unit_bootstrap_path: str = str(APP_ROOT / "deploy" / "mhs" / "frozen_unit_returns_maker.parquet.enc")
     venue_fallback_path: str = str(APP_ROOT / "deploy" / "mhs" / "venue_rules_20260921.json")
     # paper/실거래 기록 실행 단위. 설정하면 전략 의존 기록이 `data/state/runs/<run_id>/`에 저장된다.
@@ -472,7 +472,7 @@ class LiveSettings(BaseSettings):
     @field_validator("funding_prefetch_offset_hours")
     @classmethod
     def _bounded_prefetch_offset(cls, value: float) -> float:
-        bound = float(FROZEN_MHS_TOP20_V2.release_hour_utc) - 0.5
+        bound = float(FLOW_MOM_TOP20.release_hour_utc) - 0.5
         if not 0 < value < bound:
             raise ValueError(f"funding_prefetch_offset_hours must be in (0, {bound})")
         return value
@@ -556,7 +556,7 @@ class LiveSettings(BaseSettings):
 
     @model_validator(mode="after")
     def _default_listing_retention(self) -> LiveSettings:
-        """Listing snapshots cover the frozen panel window unless overridden."""
+        """Listing snapshots cover the strategy panel window unless overridden."""
         if self.venue_listing_retention_days is None:
             self.venue_listing_retention_days = self.data_retention_days
         return self

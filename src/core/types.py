@@ -1,4 +1,4 @@
-"""Frozen Phase 1 MHS contracts (types only).
+"""Fixed Phase 1 MHS contracts (types only).
 
 All domain tunables moved to ``src.core.params`` (I2 single source); this module
 keeps only the type definitions and the derived book/band specs that depend on
@@ -7,7 +7,7 @@ them. ``HorizonBand``/``ExecutionSpec``/``BookSpec`` are the types; ``_FAST_BAND
 candidates. The tunables are re-exported here so existing ``from src.core.types
 import X`` import paths keep working.
 
-All literals here are preregistered measurement outputs or frozen architecture
+All literals here are preregistered measurement outputs or fixed architecture
 decisions (``docs/architecture/multi-horizon-market-state.md``). A change to any of
 them is a new contract revision, never an inline edit at a call site.
 """
@@ -142,11 +142,11 @@ class HorizonBand:
 class ExecutionSpec:
     """Passive-execution cost and fill contract.
 
-    ``one_way_taker_bps`` defaults to the frozen 8.0 bp one-way
+    ``one_way_taker_bps`` defaults to the fixed 8.0 bp one-way
     assumption (5 bp fee + 3 bp slippage, identical to ``XsCompositeSpec`` defaults).
 
     ``decision_anchor`` selects the reference price of one intent: the
-    decision-bar mark (frozen default, bit-identical legacy behaviour) or the
+    decision-bar mark (fixed default, bit-identical legacy behaviour) or the
     submit-bar close (the last finite close before the order's submission bar,
     observable at submit time). The peg-chase fields shape
     ``peg_chase_fill_schedule``: ``peg_passive_fraction`` is the passive share
@@ -154,7 +154,7 @@ class ExecutionSpec:
     pegged limit price.
 
     The liquidity fields select the taker crossing-cost model: ``flat``
-    charges the fixed ``taker_slippage_bps`` (frozen default, bit-identical),
+    charges the fixed ``taker_slippage_bps`` (fixed default, bit-identical),
     while ``corwin_schultz`` charges a per-symbol half-spread estimated from
     window high/lows and smoothed by ``spread_ewma_alpha``. The min-notional
     probe is a diagnostic-only overlay: when ``min_notional_probe_usdt > 0``
@@ -229,7 +229,7 @@ class ExecutionSpec:
 
 @dataclass(frozen=True, slots=True)
 class BookSpec:
-    """One frozen Phase 1 book: band, signal horizon, decision step, min symbols.
+    """One fixed Phase 1 book: band, signal horizon, decision step, min symbols.
 
     ``tranche_count()`` is the number of overlapping phase tranches held
     simultaneously (``horizon_hours // step_hours``), the phase-ensemble

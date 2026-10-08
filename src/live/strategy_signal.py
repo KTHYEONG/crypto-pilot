@@ -1,4 +1,4 @@
-"""One decision day of the live frozen path: levered runner inputs from the frozen book."""
+"""One decision day of the live strategy path: levered runner inputs from the strategy book."""
 
 from __future__ import annotations
 
@@ -17,21 +17,21 @@ from src.common.errors import DataIntegrityError
 from src.core.params import (
     ACCOUNT_MIN_MOMENT_DAYS,
     ACCOUNT_PRIOR_DAYS,
-    LIVE_FROZEN_WARMUP_DAYS,
+    LIVE_SIGNAL_WARMUP_DAYS,
     LIVE_UNIT_PROXY_COST_BPS,
 )
 from src.core.settlement_evidence import SettlementEvidence, settlement_evidence_from_bars
 from src.live.deployed_weights import append_weight_row, decision_ohlcv_close_path, load_weights_frame
 from src.live.errors import ArtifactSealError, CausalityViolation
-from src.live.frozen_book import (
-    build_live_frozen_book,
+from src.live.ledger import load_ledger
+from src.live.strategy_book import (
+    build_live_strategy_book,
     classify_snapshot_gaps,
     crypto_census,
     extend_unit_history,
     snapshot_gap_blocked_decisions,
     unit_proxy_returns,
 )
-from src.live.ledger import load_ledger
 from src.live.venue_listing import (
     VenueListingSnapshot,
     delisting_blocked_decisions,
@@ -51,16 +51,16 @@ from src.strategy.sizing import (
     build_venue_ladders,
     choose_exposure,
 )
-from src.strategy.targets import FROZEN_MHS_TOP20_V2
+from src.strategy.targets import FLOW_MOM_TOP20
 
-FROZEN_SIGNAL_REPORT_NAME: str = "frozen_signal_report.json"
+STRATEGY_SIGNAL_REPORT_NAME: str = "frozen_signal_report.json"
 
 _logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
-class FrozenStepReport:
-    """Outcome of one frozen signal step: sizing inputs, exposure, and write status."""
+class StrategyStepReport:
+    """Outcome of one strategy signal step: sizing inputs, exposure, and write status."""
 
     decision_day: pd.Timestamp
     exposure: float
@@ -152,7 +152,7 @@ def _resolve_venue(
     return chosen.name, snapshot, age_days
 
 
-def run_frozen_signal_step(
+def run_strategy_signal_step(
     decision_day: pd.Timestamp,
     *,
     now: pd.Timestamp,
@@ -174,10 +174,10 @@ def run_frozen_signal_step(
     settlement_price_rtol: float | None = None,
     decision_bar_max_missing_fraction: float | None = None,
     venue_max_age: pd.Timedelta | None = None,
-) -> FrozenStepReport:
-    """Compute and persist one decision day's levered frozen target row for the runner.
+) -> StrategyStepReport:
+    """Compute and persist one decision day's levered strategy target row for the runner.
 
-    Rebuilds the frozen book from the trailing 1h window, extends the unit-return history
+    Rebuilds the strategy book from the trailing 1h window, extends the unit-return history
     with the live proxy (append-only), sizes exposure with the account policy's posterior
     half-Kelly inside venue margin and impact limits, and appends the levered weight row
     and its snapshot-close sizing row -- sealed (AES-256-GCM) when ``artifact_key`` is set,
@@ -217,9 +217,9 @@ def run_frozen_signal_step(
     day = day.normalize()
     at = pd.Timestamp(now)
     at = at.tz_localize("UTC") if at.tzinfo is None else at.tz_convert("UTC")
-    release = day + pd.Timedelta(hours=int(FROZEN_MHS_TOP20_V2.release_hour_utc))
+    release = day + pd.Timedelta(hours=int(FLOW_MOM_TOP20.release_hour_utc))
     if at < release:
-        raise CausalityViolation(f"frozen signal for {day.date()} not released until {release}")
+        raise CausalityViolation(f"strategy signal for {day.date()} not released until {release}")
     if account_equity_usdt is not None and (
         not math.isfinite(float(account_equity_usdt)) or float(account_equity_usdt) <= 0.0
     ):
@@ -237,8 +237,8 @@ def run_frozen_signal_step(
     first_needed = (forward.index[-1] - pd.Timedelta(days=2)) if len(forward) else (
         bootstrap.index[-1] - pd.Timedelta(days=1)
     )
-    panel_start = min(day, first_needed) - pd.Timedelta(days=int(LIVE_FROZEN_WARMUP_DAYS))
-    panel_end = day + pd.Timedelta(days=1, hours=int(FROZEN_MHS_TOP20_V2.snapshot_hour_utc) + 1)
+    panel_start = min(day, first_needed) - pd.Timedelta(days=int(LIVE_SIGNAL_WARMUP_DAYS))
+    panel_end = day + pd.Timedelta(days=1, hours=int(FLOW_MOM_TOP20.snapshot_hour_utc) + 1)
     listing_history: tuple[VenueListingSnapshot, ...] = ()
     if listing_root is not None:
         listing_history = load_venue_listing_history(Path(listing_root), through_day=day)
@@ -249,7 +249,7 @@ def run_frozen_signal_step(
         str(symbol): float(quantity)
         for symbol, quantity in ledger_state.positions.items() if quantity != 0
     }
-    snapshot_hour = int(FROZEN_MHS_TOP20_V2.snapshot_hour_utc)
+    snapshot_hour = int(FLOW_MOM_TOP20.snapshot_hour_utc)
     gap_refresh: tuple[str, ...] = ()
     gap_venue: tuple[str, ...] = ()
     if decision_bar_max_missing_fraction is not None:
@@ -303,7 +303,7 @@ def run_frozen_signal_step(
     if listing_root is not None or decision_bar_max_missing_fraction is not None:
         block_lead = delisting_block_lead if delisting_block_lead is not None else pd.Timedelta(hours=48)
         holding_end_offset = pd.Timedelta(
-            days=1, hours=int(FROZEN_MHS_TOP20_V2.snapshot_hour_utc),
+            days=1, hours=int(FLOW_MOM_TOP20.snapshot_hour_utc),
         )
         gap_active = decision_bar_max_missing_fraction is not None
 
@@ -331,7 +331,7 @@ def run_frozen_signal_step(
             return combined
 
         blocked_callable = _blocked
-    book = build_live_frozen_book(
+    book = build_live_strategy_book(
         Path(data_root), census, panel_start=panel_start, panel_end=panel_end,
         blocked_decisions=blocked_callable,
     )
@@ -421,7 +421,7 @@ def run_frozen_signal_step(
     levered = unit_row[census_list] * float(exposure)
     gross = float(np.abs(levered.to_numpy(dtype="float64")).sum())
     names = int((levered.to_numpy(dtype="float64") != 0.0).sum())
-    report = FrozenStepReport(
+    report = StrategyStepReport(
         decision_day=day, exposure=float(exposure), equity_usdt=float(equity),
         gross_weight=gross, names=names, unit_observations=len(past),
         posterior_mean=None if moments is None else float(moments.mean),
@@ -441,7 +441,7 @@ def run_frozen_signal_step(
     append_weight_row(Path(weights_path), day, levered, artifact_key=artifact_key)
     sizing = snap_row[[symbol for symbol in census_list if float(unit_row[symbol]) != 0.0 or symbol in positions]]
     append_weight_row(decision_ohlcv_close_path(Path(weights_path)), day, sizing, artifact_key=artifact_key)
-    report_path = Path(weights_path).parent / FROZEN_SIGNAL_REPORT_NAME
+    report_path = Path(weights_path).parent / STRATEGY_SIGNAL_REPORT_NAME
     payload = {
         "decision_day": report.decision_day.isoformat(),
         "exposure": report.exposure,

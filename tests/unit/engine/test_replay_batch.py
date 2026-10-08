@@ -19,10 +19,10 @@ from tests.unit.engine.test_execution import (  # noqa: F401
 
 class TestReplayEquivalencePerformance:
     """MHS-28-REPLAY-EQUIVALENCE-PERFORMANCE: optimized replay matches the
-    frozen-fixture fills, equity, fees, funding, and turnover while reporting
+    fixed-fixture fills, equity, fees, funding, and turnover while reporting
     measured elapsed seconds on a small deterministic fixture."""
 
-    def test_strict_timeout_matches_frozen_fixture(self) -> None:
+    def test_strict_timeout_matches_fixed_fixture(self) -> None:
         idx = pd.date_range("2021-01-01 12:01", periods=31, freq="1min", tz="UTC")
         target = pd.DataFrame({"A": [1.0]}, index=[pd.Timestamp("2021-01-01 11:00", tz="UTC")])
         signal_at = pd.DatetimeIndex([pd.Timestamp("2021-01-01 12:00", tz="UTC")])
@@ -50,7 +50,7 @@ class TestReplayEquivalencePerformance:
         assert report.unfilled_count == 1
         assert report.fallback_count == 1
 
-    def test_passive_fill_matches_frozen_fixture(self) -> None:
+    def test_passive_fill_matches_fixed_fixture(self) -> None:
         idx = pd.date_range("2021-01-01 12:01", periods=31, freq="1min", tz="UTC")
         px = pd.DataFrame({"A": [100.0] * 31}, index=idx)
         px.loc["2021-01-01 12:10", "A"] = 99.0

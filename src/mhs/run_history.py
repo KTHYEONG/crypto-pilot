@@ -311,7 +311,7 @@ def append_run_history_record(record: Mapping[str, Any], history_dir: Path | str
 # --- trial-set definition (single source for N and V) ------------------------
 
 
-# Frozen canonical value per registered request field for trial identity. A field whose recorded value dumps equal to its baseline is omitted from the identity key, so request defaults can change without re-keying recorded trials (I-DEFAULT-DECOUPLED). Append-only: a new field is appended with the value every record lacking the key actually ran under (its introduction default for new behavior; the prior unconditional behavior when a field makes existing behavior optional); an existing entry is never edited or removed (I-ID-STABLE). Values are JSON-native; the retired unset-gross sentinel is represented by its canonical dump string.
+# Fixed canonical value per registered request field for trial identity. A field whose recorded value dumps equal to its baseline is omitted from the identity key, so request defaults can change without re-keying recorded trials (I-DEFAULT-DECOUPLED). Append-only: a new field is appended with the value every record lacking the key actually ran under (its introduction default for new behavior; the prior unconditional behavior when a field makes existing behavior optional); an existing entry is never edited or removed (I-ID-STABLE). Values are JSON-native; the retired unset-gross sentinel is represented by its canonical dump string.
 TRIAL_IDENTITY_BASELINE: Final[Mapping[str, object]] = MappingProxyType(
     {
         "start": None,
@@ -388,7 +388,7 @@ def _identity_dump(value: Any) -> str:
 
 
 def _equals_baseline(name: str, value: Any) -> bool:
-    """True when ``value`` is the frozen identity baseline of field ``name``; never true for unregistered names."""
+    """True when ``value`` is the fixed identity baseline of field ``name``; never true for unregistered names."""
     if name not in TRIAL_IDENTITY_BASELINE:
         return False
     return _identity_dump(value) == _identity_dump(TRIAL_IDENTITY_BASELINE[name])
@@ -411,7 +411,7 @@ def _sparse_identity_key(key: str) -> str:
 def trial_identity_key(record: Mapping[str, Any]) -> str | None:
     """Canonical identity key of one recorded configuration.
 
-    Normalizes the record's ``flags`` against the frozen
+    Normalizes the record's ``flags`` against the fixed
     ``TRIAL_IDENTITY_BASELINE`` (missing key or explicit ``None`` -> baseline;
     a ``data_policy``-less record keeps the ``legacy`` policy it ran under),
     drops ``RESEARCH_NEUTRAL_FLAGS``, omits values equal to their baseline,

@@ -197,7 +197,7 @@ def test_refresh_live_universe_filters_dev_partition_and_no_metrics(tmp_path, mo
 def test_seed_cloud_fetches_listed_crypto_perpetuals_universe(monkeypatch) -> None:
     """seed-cloud must mirror the daemon's actual universe (COIN perpetuals across all
     partitions), not a Vision dev-partition listing -- otherwise cold-boot leaves out
-    symbols the live frozen step needs on its first cycle."""
+    symbols the live strategy step needs on its first cycle."""
     import argparse
     import src.cli.commands.data as data_mod
     from src.live.data_refresh import RefreshReport

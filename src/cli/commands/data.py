@@ -209,7 +209,7 @@ def _seed_cloud(args: argparse.Namespace) -> None:
     from src.live.settings import LiveSettings
     from src.market_data.services.universe_gaps import fetch_exchange_info
 
-    # 실제 데몬(frozen live step)이 쓰는 유니버스와 같은 규칙으로 시딩한다: dev 파티션이
+    # 실제 데몬(strategy live step)이 쓰는 유니버스와 같은 규칙으로 시딩한다: dev 파티션이
     # 아니라 현재 상장된 COIN USDT 무기한 선물 전체다. dev 파티션 필터로 시딩하면 daemon이
     # 첫 사이클에 필요로 하는 심볼 일부가 로컬에 없어 콜드스타트가 실패한다.
     try:

@@ -7,8 +7,8 @@ from pathlib import Path
 import pandas as pd
 
 from src.engine.account_sources import assemble_account_inputs
-from src.strategy.targets import FROZEN_MHS_TOP20_V2, FrozenMhsCandidate
-from src.engine.strategy_backtest import FrozenSourceContext
+from src.strategy.targets import FLOW_MOM_TOP20, StrategyTargets
+from src.engine.strategy_backtest import StrategySourceContext
 from src.core.resources import resolve_mhs_memory_budget
 
 
@@ -16,8 +16,8 @@ def test_account_inputs_share_entry_labels_without_using_entry_day_liquidity(tmp
     entries = pd.date_range("2021-02-01", periods=2, tz="UTC")
     releases = entries - pd.Timedelta(hours=1)
     weights = pd.DataFrame({"HELDUSDT": [0.5, -0.5], "IDLEUSDT": [0.0, 0.0]}, index=entries)
-    candidate = FrozenMhsCandidate(
-        target_weights=weights, signal_available_at=releases, strategy=FROZEN_MHS_TOP20_V2,
+    candidate = StrategyTargets(
+        target_weights=weights, signal_available_at=releases, strategy=FLOW_MOM_TOP20,
     )
     grid = pd.date_range(releases[0], entries[-1] + pd.Timedelta(days=1), freq="3min", inclusive="left")
     marks = tmp_path / "3m"
@@ -33,7 +33,7 @@ def test_account_inputs_share_entry_labels_without_using_entry_day_liquidity(tmp
     funding = pd.Series(
         [0.001, 0.002], index=pd.DatetimeIndex([releases[0] + pd.Timedelta(minutes=3), releases[1]]),
     )
-    context = FrozenSourceContext(
+    context = StrategySourceContext(
         census=tuple(weights.columns), root=str(tmp_path),
         funding_by_symbol={"HELDUSDT": funding}, funding_failures={},
         budget=resolve_mhs_memory_budget(None), daily_close=close, daily_quote_volume=quote,

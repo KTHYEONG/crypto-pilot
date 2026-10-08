@@ -256,7 +256,7 @@ def build_mhs_run_history_record(
     return cast(dict[str, Any], _round_6(_jsonable(record)))
 
 
-#: Legacy replay_id ordering is frozen by artifact partitioning and
+#: Legacy replay_id ordering is fixed by artifact partitioning and
 #: ``_verify_ledger_artifact``: each book/blend runs
 #: primary -> stress -> patient_reference -> pre_vol_target_reference, each
 #: fold runs strict -> stress. Any other replay field (touch, ladder, future

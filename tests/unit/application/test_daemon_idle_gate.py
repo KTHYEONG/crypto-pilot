@@ -90,9 +90,9 @@ def test_max_wait_still_escapes() -> None:
 
 def test_constants_mirror_strategy_and_settings() -> None:
     from src.live.settings import LiveSettings
-    from src.strategy.targets import FROZEN_MHS_TOP20_V2
+    from src.strategy.targets import FLOW_MOM_TOP20
 
-    assert FROZEN_MHS_TOP20_V2.release_hour_utc == DECISION_RELEASE_HOUR_UTC
+    assert FLOW_MOM_TOP20.release_hour_utc == DECISION_RELEASE_HOUR_UTC
     assert LiveSettings().max_signal_staleness_hours == DECISION_SIGNAL_STALENESS_HOURS
     assert DECISION_WINDOW_LEAD_MINUTES == 15  # noqa: SIM300 - spec pins the literal
 

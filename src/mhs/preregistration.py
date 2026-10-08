@@ -1,4 +1,4 @@
-"""Pre-registered forward evaluation protocol; procedures are frozen before the data that judges them exists."""
+"""Pre-registered forward evaluation protocol; procedures are sealed before the data that judges them exists."""
 
 from __future__ import annotations
 
@@ -48,7 +48,7 @@ PROCEDURE_RUN_CONTROL_FIELDS: frozenset[str] = frozenset({
 
 @dataclass(frozen=True, slots=True)
 class ProcedureRegistration:
-    """One frozen procedure; ``effective_start`` is the later of the freeze clock and the consulted data horizon."""
+    """One sealed procedure; ``effective_start`` is the later of the freeze clock and the consulted data horizon."""
 
     procedure_digest: str
     frozen_at: pd.Timestamp
@@ -294,12 +294,12 @@ def register_procedure(
 ) -> ProcedureRegistration:
     """Freeze one procedure before the data that will judge it exists.
 
-    Both stores are explicit: the registration event is written to ``registry_path`` and its frozen data horizon is
+    Both stores are explicit: the registration event is written to ``registry_path`` and its sealed data horizon is
     derived from ``history_dir``; letting either default would let an ad-hoc caller register against, or into, the
     operator's evidence.
 
     Args:
-        request: Alpha-relevant request flags whose identity is frozen.
+        request: Alpha-relevant request flags whose identity is sealed.
         now: Trusted tz-aware UTC registration clock.
         registry_path: Procedure registry receiving the registration event.
         history_dir: Run-history directory whose registry bounds the consulted data horizon.
@@ -357,7 +357,7 @@ def register_process_procedure(
     if now.tzinfo is None:
         raise ValueError("now must be tz-aware")
     if process_procedure_digest(plan.procedure) != plan.procedure_digest:
-        raise DataIntegrityError("procedure digest does not match the frozen definition")
+        raise DataIntegrityError("procedure digest does not match the sealed definition")
     now_utc = now.tz_convert("UTC")
     floor = consulted_data_horizon(legacy_history_dir, legacy_registry_path, journal_path=journal_path)
     if now_utc <= floor:

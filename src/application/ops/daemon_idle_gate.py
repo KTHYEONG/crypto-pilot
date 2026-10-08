@@ -17,7 +17,7 @@ EXIT_WAIT: int = 10
 
 # 신호 공개(23:00 UTC) 직전부터 막아 공개 직후 제출이 재시작으로 밀리지 않게 한다.
 DECISION_WINDOW_LEAD_MINUTES: int = 15
-# frozen 신호 공개 시각(UTC). FROZEN_MHS_TOP20_V2.release_hour_utc 와 같아야 한다(의존성 없는 CI 모듈이라 복제).
+# strategy 신호 공개 시각(UTC). FLOW_MOM_TOP20.release_hour_utc 와 같아야 한다(의존성 없는 CI 모듈이라 복제).
 DECISION_RELEASE_HOUR_UTC: int = 23
 # 신호 스테일 상한(시간). LiveSettings.max_signal_staleness_hours 와 같아야 한다.
 DECISION_SIGNAL_STALENESS_HOURS: float = 26.0

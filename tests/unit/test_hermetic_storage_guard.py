@@ -87,7 +87,7 @@ def test_live_session_roots_are_partitioned() -> None:
     from src.common import paths as _src_paths
 
     temp_root = Path(os.environ["PYTEST_DEBUG_TEMPROOT"]).resolve()
-    for root in (_src_paths.BACKTESTS_DIR, _src_paths.FROZEN_BACKTESTS_DIR, _src_logging.LOG_DIR):
+    for root in (_src_paths.BACKTESTS_DIR, _src_paths.STRATEGY_BACKTESTS_DIR, _src_logging.LOG_DIR):
         assert root.resolve().is_relative_to(temp_root)
 
 

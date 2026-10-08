@@ -107,7 +107,7 @@ def _classify_execution_failure(exc: BaseException) -> str:
 
 
 def _validate_ladder_schedule_contract() -> None:
-    """Runtime guard for the frozen ladder schedule contract (spec §1.4).
+    """Runtime guard for the fixed ladder schedule contract (spec §1.4).
 
     Runs once per ``--ladder-diagnostic`` book pass, before the expensive
     windowed replay: a single tranche must reproduce the strict single-fill

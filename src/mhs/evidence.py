@@ -358,7 +358,7 @@ def tail_sensitivity_curve(
 
     The winsor curve clips the PER-SYMBOL forward-return panel at each cap in
     (0.50, 0.30, 0.20, 0.10) before aggregating with weights; event clusters
-    are computed on the uncapped base net-return series with the frozen
+    are computed on the uncapped base net-return series with the fixed
     holding-horizon radius ``event_window_bars``.
     """
     if not weights.index.equals(fwd_returns.index) or list(weights.columns) != list(fwd_returns.columns):
@@ -479,12 +479,12 @@ def autocorrelation_adjusted_sharpe(
     annualization_days: int = 365,
     max_lag_days: int = 7,
 ) -> float:
-    """Daily-compounded annualized Sharpe with the frozen autocorrelation adjustment.
+    """Daily-compounded annualized Sharpe with the fixed autocorrelation adjustment.
 
     Divides the annualized sample Sharpe by
     ``sqrt(1 + 2 * sum((1 - k/(max_lag_days + 1)) * rho_k))`` over lags
     ``k = 1..max_lag_days``. Phase 1 fixes ``annualization_days=365`` and
-    ``max_lag_days=7`` (the longest frozen holding horizon is 168h).
+    ``max_lag_days=7`` (the longest fixed holding horizon is 168h).
     """
     if daily_net_returns.index.tz is None:
         raise ValueError("daily_net_returns must be tz-aware")
@@ -901,7 +901,7 @@ def resolved_anchored_folds(request: Any) -> tuple[AnchoredPurgedFold, ...]:
 def phase_1_anchored_purged_folds() -> tuple[AnchoredPurgedFold, ...]:
     """Quarterly preregistered Level 2 anchored purged folds (expanding window).
 
-    ``purge_hours`` derives from the maximum forward dependency (frozen at
+    ``purge_hours`` derives from the maximum forward dependency (fixed at
     168h for Phase 1) and is independent of block length.  Every fold trains
     on everything from ``DISCOVERY_START`` through a quarter-end boundary and
     validates on the following quarter after the 168h purge plus a 24h

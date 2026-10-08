@@ -60,7 +60,7 @@ CHECKPOINT_NAME: str = "normalizer_checkpoint.json"
 
 
 class NormalizerConfig(BaseModel):
-    """Cadences, windows and retention bounds of the raw-to-derived normalizer (frozen, validated)."""
+    """Cadences, windows and retention bounds of the raw-to-derived normalizer (fixed, validated)."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 

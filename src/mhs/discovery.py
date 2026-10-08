@@ -109,7 +109,7 @@ def _bartlett_hac_denom(demeaned: np.ndarray, max_lag: int) -> float:
 
     ``1 + 2 * sum_{k=1}^{max_lag}(1 - k/(max_lag + 1)) * rho_k`` over the
     sample lag autocorrelations ``rho_k`` of the demeaned series -- the same
-    kernel form frozen in ``autocorrelation_adjusted_sharpe``
+    kernel form fixed in ``autocorrelation_adjusted_sharpe``
     (``src/mhs/evaluation.py``), generalized to arbitrary bar frequency.
     Autocovariances use ``np.dot`` on numpy slices, never a per-row Python
     loop. ``max_lag < 1`` is treated as no adjustment (returns 1.0), and a

@@ -114,7 +114,7 @@ COMMITTEE_MEMBER_SETS: dict[str, tuple[str, ...]] = {
 
 COMMITTEE_DEFAULT_MEMBER_SET: str = "flow_momentum"
 
-# Canonical value of committee_member_set while committee capital is off; equal to the frozen trial-identity baseline so a capital-off run never carries an inert member set into its trial key or procedure digest.
+# Canonical value of committee_member_set while committee capital is off; equal to the fixed trial-identity baseline so a capital-off run never carries an inert member set into its trial key or procedure digest.
 COMMITTEE_MEMBER_SET_INERT: str = "risk_premia"
 
 # Sealed identity of the committee member-admission procedure. Bumped (never edited
@@ -416,24 +416,24 @@ SIGNAL_OVERLAP_TOLERANCE: float = 1e-9
 DEFAULT_DETAIL_RETENTION_MAX_BYTES: int | None = None
 DEFAULT_DETAIL_RETENTION_MAX_RUNS: int | None = 1
 
-# --- frozen growth policy ------------------------------------------------------
+# --- strategy growth policy ------------------------------------------------------
 # 종목별 클립: 무레버 Sharpe 2.22→2.34, 3m 마크 드로다운 증폭 1.293→1.148 (단일종목 장중 급락 경로 차단).
-FROZEN_GROWTH_NAME_CLIP: float = 0.05
+STRATEGY_NAME_CLIP: float = 0.05
 # 0.25 단위 rung 중 원장수익률 부트스트랩이 P(3y MDD > 35%) ≤ 10%를 유지하는 최대치(허용 2.51).
-# frozen 북이나 데이터가 바뀌면 동일 부트스트랩으로 반드시 재도출해야 한다.
-FROZEN_GROWTH_EXPOSURE_MULTIPLIER: float = 2.5
+# 전략 북이나 데이터가 바뀌면 동일 부트스트랩으로 반드시 재도출해야 한다.
+GROWTH_EXPOSURE_MULTIPLIER: float = 2.5
 # 이웃 설정 Sharpe 정점 대비 선택 편향으로 깎이는 평균 비율.
-FROZEN_EXPOSURE_MEAN_HAIRCUT: float = 0.25
+EXPOSURE_SCAN_MEAN_HAIRCUT: float = 0.25
 # 하루 만에 이름값의 절반 이상이 움직이면 헷지로 막을 수 없는 갭으로 본다.
-FROZEN_EXPOSURE_GAP_THRESHOLD: float = 0.50
+EXPOSURE_SCAN_GAP_THRESHOLD: float = 0.50
 # 로그성장 곡선을 재는 노출 rung 격자. 8.0에서 멈추면 실제 정점(측정상 L≈10)보다 낮은 지점에서
 # argmax가 격자 상한에 그대로 걸려버려(파산확률은 여전히 0) 진짜 위험기반 상한이 아니라 격자
 #길이가 답을 정하는 결과가 나온다. 갭 파산확률이 유의미하게 관측되는 구간(L>=12)까지 반드시 포함한다.
-FROZEN_EXPOSURE_GRID: tuple[float, ...] = tuple(round(1.0 + 0.25 * i, 2) for i in range(61))  # 1.0 ~ 16.0
+EXPOSURE_SCAN_GRID: tuple[float, ...] = tuple(round(1.0 + 0.25 * i, 2) for i in range(61))  # 1.0 ~ 16.0
 # 스트레스 곡선이 평평한 구간에서는 추정 잡음이 argmax를 정하므로 최적 근처를 고원으로 둔다.
-FROZEN_EXPOSURE_PLATEAU_TOLERANCE: float = 0.05
+EXPOSURE_SCAN_PLATEAU_TOLERANCE: float = 0.05
 # 동일 입력에 비트 동일 해를 보장하는 등록 시드.
-FROZEN_EXPOSURE_SEED: int = 20260921
+EXPOSURE_SCAN_SEED: int = 20260921
 
 # --- account-scale research ledger -------------------------------------------------
 # 선언 최소 소매 시작금 ₩3,000,000(₩1,430/USD 환산).
@@ -472,10 +472,10 @@ ACCOUNT_RECON_CAGR_TOLERANCE: float = 0.005
 # 같은 정의(3m 종가 경로 최고점 대비)의 MDD 허용 오차.
 ACCOUNT_RECON_MDD_TOLERANCE: float = 0.01
 
-# --- live frozen paper ---------------------------------------------------------
-# 120일 1h 창에서 frozen 비중이 전체 이력과 비트 동일함을 실측했다(로스터 90일 거래 요건 +
+# --- live strategy paper ---------------------------------------------------------
+# 120일 1h 창에서 전략 비중이 전체 이력과 비트 동일함을 실측했다(로스터 90일 거래 요건 +
 # 30일 중앙값 + 720h 피처). 이보다 짧으면 로스터가 비거나 달라진다.
-LIVE_FROZEN_WARMUP_DAYS: int = 120
+LIVE_SIGNAL_WARMUP_DAYS: int = 120
 # 단위 proxy 수익률의 회전 비용. 메이커 체결률 약 98% 실측에 맞춰 메이커 수수료를 쓴다.
 LIVE_UNIT_PROXY_COST_BPS: float = ACCOUNT_MAKER_FEE_BPS
 

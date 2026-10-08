@@ -79,7 +79,7 @@ def pytest_configure(config: pytest.Config) -> None:
     assert_storage_roots_hermetic(
         {
             "BACKTESTS_DIR": _src_paths.BACKTESTS_DIR,
-            "FROZEN_BACKTESTS_DIR": _src_paths.FROZEN_BACKTESTS_DIR,
+            "STRATEGY_BACKTESTS_DIR": _src_paths.STRATEGY_BACKTESTS_DIR,
             "LOG_DIR": _src_logging.LOG_DIR,
         },
         _PROC_TEMP_ROOT,

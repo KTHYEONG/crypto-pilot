@@ -17,7 +17,7 @@ def append_backtest_index(
     """Append one headline row to the single cross-pipeline backtest catalog.
 
     The catalog is the only file a human or analysis script needs to read to see every
-    backtest ever run (canonical, frozen research or frozen account) with headline metrics
+    backtest ever run (canonical, strategy backtest or account replay) with headline metrics
     inline; `registry.sqlite3` and `evidence/` stay internal plumbing for fingerprint reuse
     and content-addressed detail dedup. The catalog lives in the backtests package so that
     both CLI handlers and application services can append without an application->cli edge.

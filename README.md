@@ -43,7 +43,7 @@
 | 시각 (UTC) | 단계 | 핵심 처리 내용 |
 | :---: | :--- | :--- |
 | 🛡️ **22:45 ~ 02:00** | **결정 창 보호 & 배포 유예** | `daemon_idle_gate` 활성화로 배포 유예, 2분 주기 생존 심박 갱신으로 신호 지연 손실(-48%p) 차단 |
-| ⚡ **23:00 ~ 23:03** | **시세 동기화 & 알파 신호** | 디스크 tail 2시간 증분 패치(`~20초`) $\to$ 1h 120일 패널 기반 Frozen Top-20 직교 횡단면 신호 산출 |
+| ⚡ **23:00 ~ 23:03** | **시세 동기화 & 알파 신호** | 디스크 tail 2시간 증분 패치(`~20초`) $\to$ 1h 120일 패널 기반 Flow-Mom Top-20 직교 횡단면 신호 산출 |
 | 📈 **23:03 ~ 23:33** | **주문 집행 (Strict Passive)** | 베이지안 Kelly 동적 비중 산정 $\to$ 30분 앵커 지정가 메이커 대기 후 미체결 잔량 테이커 전환 |
 | 🌙 **00:15 / 12:30** | **장부 재대사 & 원격 백업** | 8시간 펀딩비(`FUNDING_FEE`) 건별 멱등 기록 및 현금 재대사 $\to$ 파일 잠금(`flock`) 기반 GDrive 원격 백업 |
 
@@ -74,7 +74,7 @@ flowchart TD
 
     subgraph ResearchTier ["🔬 3. MHS 퀀트 연구 및 백테스트"]
         Prune --> S1["1. PIT 유니버스 (Top-60 진입 / 120위 방출 히스테리시스)"]:::stage2
-        S1 --> S2["2. Frozen Top-20 직교 횡단면 알파 결합"]:::stage2
+        S1 --> S2["2. Flow-Mom Top-20 직교 횡단면 알파 결합"]:::stage2
         S2 --> S3["3. 3분봉 체결 원장 (SimulatedInventoryLedger)"]:::stage2
         S3 --> S4["4. 인과적 베이지안 Kelly 동적 노출"]:::stage2
         S4 --> S5["5. 거래소 브래킷 실계좌 원장 (replay_account)"]:::stage2
@@ -133,10 +133,10 @@ flowchart TD
 
 | 전략 모델 (Strategy Model) | 집행 방식 (Execution) | Geometric CAGR | Max Drawdown | 실계좌 청산 횟수 |
 | :--- | :---: | :---: | :---: | :---: |
-| **기준 포트폴리오 (단위북 1.0x, `frozen_mhs_top20_v2`)** | Immediate Taker | **+47.1%** | **-14.5%** | 0회 (기본 노출) |
-| **기준 포트폴리오 (단위북 1.0x, `frozen_mhs_top20_v2`)** | Strict Passive Maker | **+51.2%** | **-14.7%** | 0회 (메이커 우위) |
-| **레버리지 포트폴리오 (성장북 2.5x, `frozen_mhs_top20_growth_v2`)** | Immediate Taker | **+140.7%** | **-28.9%** | 0회 (레버리지 2.5배) |
-| **레버리지 포트폴리오 (성장북 2.5x, `frozen_mhs_top20_growth_v2`)** | Strict Passive Maker | **+151.5%** | **-28.8%** | **0회 (CAGR +10.8%p)** |
+| **기준 포트폴리오 (단위북 1.0x, `flow_mom_top20`)** | Immediate Taker | **+47.1%** | **-14.5%** | 0회 (기본 노출) |
+| **기준 포트폴리오 (단위북 1.0x, `flow_mom_top20`)** | Strict Passive Maker | **+51.2%** | **-14.7%** | 0회 (메이커 우위) |
+| **레버리지 포트폴리오 (성장북 2.5x, `flow_mom_top20_growth`)** | Immediate Taker | **+140.7%** | **-28.9%** | 0회 (레버리지 2.5배) |
+| **레버리지 포트폴리오 (성장북 2.5x, `flow_mom_top20_growth`)** | Strict Passive Maker | **+151.5%** | **-28.8%** | **0회 (CAGR +10.8%p)** |
 | **동적 레버리지 실계좌 (₩300만 원장 + 베이지안 Kelly)** | Strict Passive Maker | **+202.2%** | **-38.4%** | **0회 (소액 복리 극대화)** |
 
 ---
@@ -173,11 +173,11 @@ uv run pytest tests/contract/test_module_boundaries.py
 uv sync --frozen
 uv run pytest tests/contract/test_module_boundaries.py -k "test_architecture_docs_within_line_limit"
 
-# 2. Frozen 3분봉 원장 백테스트 실행
-uv run python -m src.cli.main backtest mhs-frozen
+# 2. 전략 3분봉 원장 백테스트 실행
+uv run python -m src.cli.main backtest strategy
 
 # 3. 실계좌 규모 원장(바이낸스 브래킷 + 베이지안 Kelly) 실행
-uv run python -m src.cli.main backtest mhs-frozen-account --execution maker --capital 2100
+uv run python -m src.cli.main backtest account --execution maker --capital 2100
 
 # 4. 실시간 시세 증분 갱신 (Tail 20초 패치)
 uv run python -m src.cli.main data refresh-live-universe

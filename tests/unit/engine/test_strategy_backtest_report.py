@@ -11,15 +11,15 @@ import pytest
 
 from src.common.errors import DataIntegrityError
 from src.engine.execution import ExecutionReplayWindow
-from src.strategy.targets import FROZEN_MHS_TOP20_V2, FrozenMhsCandidate
-from src.engine.backtest_evidence import FrozenMhsReportPeriod, evaluate_frozen_mhs_research
-from src.engine.strategy_backtest import FrozenMhsBacktestRequest, FrozenMhsBacktestRun
+from src.strategy.targets import FLOW_MOM_TOP20, StrategyTargets
+from src.engine.backtest_evidence import StrategyReportPeriod, evaluate_strategy_backtest
+from src.engine.strategy_backtest import StrategyBacktestRequest, StrategyBacktestRun
 from src.core.types import ExecutionSpec
 
 from src.engine.backtest_persist import (
-    frozen_mhs_backtest_payload,
-    frozen_mhs_daily_frame,
-    persist_frozen_mhs_backtest,
+    strategy_backtest_payload,
+    strategy_daily_frame,
+    persist_strategy_backtest,
 )
 
 _SYMBOLS = ("AAA", "BBB")
@@ -32,13 +32,13 @@ def _specs() -> tuple[ExecutionSpec, ExecutionSpec]:
     return base, stress
 
 
-def _candidate(labels: list[pd.Timestamp]) -> FrozenMhsCandidate:
+def _candidate(labels: list[pd.Timestamp]) -> StrategyTargets:
     weights = pd.DataFrame(
         {"AAA": [0.05] * len(labels), "BBB": [-0.05] * len(labels)},
         index=pd.DatetimeIndex(labels, tz="UTC"), dtype="float64",
     )
     avail = pd.DatetimeIndex([label - pd.Timedelta(hours=1) for label in labels], tz="UTC")
-    return FrozenMhsCandidate(target_weights=weights, signal_available_at=avail, strategy=FROZEN_MHS_TOP20_V2)
+    return StrategyTargets(target_weights=weights, signal_available_at=avail, strategy=FLOW_MOM_TOP20)
 
 
 def _frames(grid: pd.DatetimeIndex) -> dict[str, pd.DataFrame]:
@@ -54,7 +54,7 @@ def _frames(grid: pd.DatetimeIndex) -> dict[str, pd.DataFrame]:
     }
 
 
-def _window(grid: pd.DatetimeIndex, candidate: FrozenMhsCandidate, labels: list[pd.Timestamp]) -> ExecutionReplayWindow:
+def _window(grid: pd.DatetimeIndex, candidate: StrategyTargets, labels: list[pd.Timestamp]) -> ExecutionReplayWindow:
     weights = candidate.target_weights.loc[labels].copy()
     avail = pd.DatetimeIndex(
         [candidate.signal_available_at[candidate.target_weights.index.get_loc(label)] for label in labels], tz="UTC"
@@ -68,38 +68,38 @@ def _window(grid: pd.DatetimeIndex, candidate: FrozenMhsCandidate, labels: list[
     return ExecutionReplayWindow(**params)  # type: ignore[arg-type]
 
 
-def _windows(candidate: FrozenMhsCandidate, labels: list[pd.Timestamp]) -> list[ExecutionReplayWindow]:
+def _windows(candidate: StrategyTargets, labels: list[pd.Timestamp]) -> list[ExecutionReplayWindow]:
     first = _window(pd.date_range(labels[0] - pd.Timedelta(hours=1), labels[1] + pd.Timedelta(hours=1), freq="3min", tz="UTC"), candidate, labels[:1])
     second = _window(pd.date_range(labels[1] - pd.Timedelta(hours=2), labels[2] + pd.Timedelta(hours=2), freq="3min", tz="UTC"), candidate, labels[1:])
     return [first, second]
 
 
-def _run() -> FrozenMhsBacktestRun:
+def _run() -> StrategyBacktestRun:
     labels = [_DAY1 + pd.Timedelta(days=i) for i in (1, 2, 3)]
     candidate = _candidate(labels)
     base_spec, stress_spec = _specs()
     probe_periods = (
-        FrozenMhsReportPeriod(label="probe", start=pd.Timestamp("2022-01-01", tz="UTC"), end=pd.Timestamp("2022-01-02", tz="UTC")),
+        StrategyReportPeriod(label="probe", start=pd.Timestamp("2022-01-01", tz="UTC"), end=pd.Timestamp("2022-01-02", tz="UTC")),
     )
-    probe = evaluate_frozen_mhs_research(
+    probe = evaluate_strategy_backtest(
         candidate, iter(_windows(candidate, labels)), initial_equity=100000.0,
         base_spec=base_spec, stress_spec=stress_spec, report_periods=probe_periods,
     )
     covered = probe.base_daily.returns.index
     periods = (
-        FrozenMhsReportPeriod(label="P1", start=covered[0], end=covered[1]),
-        FrozenMhsReportPeriod(label="P9", start=pd.Timestamp("2022-01-01", tz="UTC"), end=pd.Timestamp("2022-01-10", tz="UTC")),
+        StrategyReportPeriod(label="P1", start=covered[0], end=covered[1]),
+        StrategyReportPeriod(label="P9", start=pd.Timestamp("2022-01-01", tz="UTC"), end=pd.Timestamp("2022-01-10", tz="UTC")),
     )
-    evidence = evaluate_frozen_mhs_research(
+    evidence = evaluate_strategy_backtest(
         candidate, iter(_windows(candidate, labels)), initial_equity=100000.0,
         base_spec=base_spec, stress_spec=stress_spec, report_periods=periods,
     )
-    request = FrozenMhsBacktestRequest(
+    request = StrategyBacktestRequest(
         source_start=_DAY1, evaluation_start=labels[0], evaluation_end=labels[-1] + pd.Timedelta(days=1),
-        strategy=FROZEN_MHS_TOP20_V2, initial_equity=100000.0,
+        strategy=FLOW_MOM_TOP20, initial_equity=100000.0,
         base_spec=base_spec, stress_spec=stress_spec, report_periods=periods,
     )
-    return FrozenMhsBacktestRun(
+    return StrategyBacktestRun(
         request=request, candidate=candidate, evidence=evidence,
         execution_start=labels[0], execution_end=labels[-1] + pd.Timedelta(days=1),
         source_symbols=_SYMBOLS,
@@ -109,8 +109,8 @@ def _run() -> FrozenMhsBacktestRun:
 def test_payload_preserves_strategy_provenance() -> None:
     """Completed Top-20 evidence serializes strategy, costs, validity, and research-only limits."""
     run = _run()
-    payload = frozen_mhs_backtest_payload(run)
-    assert payload["strategy_id"] == "frozen_mhs_top20_v2"
+    payload = strategy_backtest_payload(run)
+    assert payload["strategy_id"] == "flow_mom_top20"
     assert payload["breadth"] == 20
     assert [member["name"] for member in payload["members"]] == [  # type: ignore[index]
         "flow_imb_168h", "flow_imb_720h", "xs_mom_336h", "xs_idio_mom_336h", "mom3_skew_168h"
@@ -132,7 +132,7 @@ def test_payload_preserves_strategy_provenance() -> None:
 def test_partial_period_unavailable_rather_than_zero() -> None:
     """Incomplete daily coverage serializes as null metrics with explicit coverage."""
     run = _run()
-    payload = frozen_mhs_backtest_payload(run)
+    payload = strategy_backtest_payload(run)
     partial = payload["report_periods"]["P9"]  # type: ignore[index]
     assert partial["status"] == "unavailable"
     assert partial["base_coverage"] == 0.0
@@ -142,7 +142,7 @@ def test_partial_period_unavailable_rather_than_zero() -> None:
 def test_payload_has_no_deployment_verdict() -> None:
     """No go, live, or deploy decision field appears at any payload level."""
     run = _run()
-    payload = frozen_mhs_backtest_payload(run)
+    payload = strategy_backtest_payload(run)
     assert "go" not in payload
     assert not any("deploy" in key or "live" in key for key in payload)
     assert not any("signal" in key or "fills" in key for key in payload)
@@ -154,16 +154,16 @@ def test_fresh_atomic_output_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
 
     run = _run()
     output = tmp_path / "result.json"
-    assert persist_frozen_mhs_backtest(run, output) == output
-    assert json.loads(output.read_text(encoding="utf-8"))["strategy_id"] == "frozen_mhs_top20_v2"
+    assert persist_strategy_backtest(run, output) == output
+    assert json.loads(output.read_text(encoding="utf-8"))["strategy_id"] == "flow_mom_top20"
     with pytest.raises(DataIntegrityError, match=r"fresh"):
-        persist_frozen_mhs_backtest(run, output)
+        persist_strategy_backtest(run, output)
     second_dir = tmp_path / "second_run"
     second_dir.mkdir()
     second = second_dir / "second.json"
     monkeypatch.setattr(report_mod.os, "replace", lambda *a, **k: (_ for _ in ()).throw(OSError("disk")))
     with pytest.raises(OSError, match="disk"):
-        persist_frozen_mhs_backtest(run, second)
+        persist_strategy_backtest(run, second)
     assert not second.exists()
     assert not (second_dir / "second.json.tmp").exists()
     assert not (second_dir / "daily.parquet").exists()
@@ -177,12 +177,12 @@ def test_payload_rejects_incomplete_evidence() -> None:
     bad_evidence = dataclasses.replace(run.evidence, base=bad_base)
     bad_run = dataclasses.replace(run, evidence=bad_evidence)
     with pytest.raises(DataIntegrityError, match=r"completed valid"):
-        frozen_mhs_backtest_payload(bad_run)
+        strategy_backtest_payload(bad_run)
     narrow = dataclasses.replace(
         run, candidate=dataclasses.replace(run.candidate, target_weights=run.candidate.target_weights[["AAA"]])
     )
     with pytest.raises(DataIntegrityError, match=r"census"):
-        frozen_mhs_backtest_payload(narrow)
+        strategy_backtest_payload(narrow)
 
 
 def test_jsonable_scalars_and_rejection() -> None:
@@ -205,34 +205,34 @@ def test_jsonable_scalars_and_rejection() -> None:
 
 def test_payload_rejects_strategy_mismatch_and_missing_period() -> None:
     """A foreign strategy or a metrics row outside the request cannot be published."""
-    from src.strategy.targets import FROZEN_MHS_TOP40_CONTROL_V2
+    from src.strategy.targets import FLOW_MOM_TOP40_CONTROL
 
     run = _run()
-    foreign = dataclasses.replace(run, request=dataclasses.replace(run.request, strategy=FROZEN_MHS_TOP40_CONTROL_V2))
+    foreign = dataclasses.replace(run, request=dataclasses.replace(run.request, strategy=FLOW_MOM_TOP40_CONTROL))
     with pytest.raises(DataIntegrityError, match=r"must match the request strategy"):
-        frozen_mhs_backtest_payload(foreign)
+        strategy_backtest_payload(foreign)
     ghost_periods = (
         *run.request.report_periods,
-        FrozenMhsReportPeriod(label="ghost", start=pd.Timestamp("2023-01-01", tz="UTC"), end=pd.Timestamp("2023-01-02", tz="UTC")),
+        StrategyReportPeriod(label="ghost", start=pd.Timestamp("2023-01-01", tz="UTC"), end=pd.Timestamp("2023-01-02", tz="UTC")),
     )
     ghost = dataclasses.replace(run, request=dataclasses.replace(run.request, report_periods=ghost_periods))
     with pytest.raises(DataIntegrityError, match=r"no metrics row"):
-        frozen_mhs_backtest_payload(ghost)
+        strategy_backtest_payload(ghost)
 
 
 def test_persist_rejects_unsafe_output(tmp_path: Path) -> None:
     """A non-Path or non-JSON destination is refused before any serialization."""
     run = _run()
     with pytest.raises(DataIntegrityError, match=r"must be a Path"):
-        persist_frozen_mhs_backtest(run, "result.json")  # type: ignore[arg-type]
+        persist_strategy_backtest(run, "result.json")  # type: ignore[arg-type]
     with pytest.raises(DataIntegrityError, match=r"must be a JSON path"):
-        persist_frozen_mhs_backtest(run, tmp_path / "result.parquet")
+        persist_strategy_backtest(run, tmp_path / "result.parquet")
 
 
 def test_payload_records_integrity_exclusions() -> None:
     run = _run()
     tagged = dataclasses.replace(run, source_gap_excluded_symbols=("LUNAUSDT", "PUMPUSDT"))
-    payload = frozen_mhs_backtest_payload(tagged)
+    payload = strategy_backtest_payload(tagged)
     assert payload["source_gap_excluded_symbols"] == ["LUNAUSDT", "PUMPUSDT"]
     assert payload["source_gap_excluded_count"] == 2
     assert payload["canonical_symbols"] == 2
@@ -264,26 +264,26 @@ def test_registry_is_single_source_gap_view() -> None:
     assert "exclud" not in parser.format_help().lower()
 
 
-def _growth_run() -> FrozenMhsBacktestRun:
-    from src.strategy.targets import FROZEN_MHS_TOP20_GROWTH_V2
+def _growth_run() -> StrategyBacktestRun:
+    from src.strategy.targets import FLOW_MOM_TOP20_GROWTH
 
     run = _run()
     return dataclasses.replace(
         run,
-        request=dataclasses.replace(run.request, strategy=FROZEN_MHS_TOP20_GROWTH_V2),
-        candidate=dataclasses.replace(run.candidate, strategy=FROZEN_MHS_TOP20_GROWTH_V2),
+        request=dataclasses.replace(run.request, strategy=FLOW_MOM_TOP20_GROWTH),
+        candidate=dataclasses.replace(run.candidate, strategy=FLOW_MOM_TOP20_GROWTH),
     )
 
 
 def test_payload_states_policy() -> None:
     """Growth and primary payloads state their registered exposure policy explicitly."""
-    from src.core.params import FROZEN_GROWTH_EXPOSURE_MULTIPLIER, FROZEN_GROWTH_NAME_CLIP
+    from src.core.params import GROWTH_EXPOSURE_MULTIPLIER, STRATEGY_NAME_CLIP
 
-    growth = frozen_mhs_backtest_payload(_growth_run())
-    assert growth["exposure_multiplier"] == FROZEN_GROWTH_EXPOSURE_MULTIPLIER
-    assert growth["name_clip"] == FROZEN_GROWTH_NAME_CLIP
+    growth = strategy_backtest_payload(_growth_run())
+    assert growth["exposure_multiplier"] == GROWTH_EXPOSURE_MULTIPLIER
+    assert growth["name_clip"] == STRATEGY_NAME_CLIP
     assert growth["daily_artifact"] == "daily.parquet"
-    primary = frozen_mhs_backtest_payload(_run())
+    primary = strategy_backtest_payload(_run())
     assert primary["exposure_multiplier"] == 1.0
     assert primary["name_clip"] is None
     assert primary["daily_artifact"] == "daily.parquet"
@@ -295,7 +295,7 @@ def test_daily_frame_matches_ledger_aggregates() -> None:
     import numpy as np
 
     run = _run()
-    frame = frozen_mhs_daily_frame(run)
+    frame = strategy_daily_frame(run)
     assert list(frame.columns) == [
         "base_return", "stress_return",
         "base_equity_close", "stress_equity_close",
@@ -326,20 +326,20 @@ def test_daily_frame_rejects_mismatched_and_nonfinite() -> None:
     bad_daily = dataclasses.replace(run.evidence.stress_daily, returns=shifted)
     bad_evidence = dataclasses.replace(run.evidence, stress_daily=bad_daily)
     with pytest.raises(DataIntegrityError, match="indexes disagree"):
-        frozen_mhs_daily_frame(dataclasses.replace(run, evidence=bad_evidence))
+        strategy_daily_frame(dataclasses.replace(run, evidence=bad_evidence))
     bad_equity = run.evidence.base.ledger.equity.copy()
     bad_equity.iloc[-1] = float("inf")
     bad_ledger = dataclasses.replace(run.evidence.base.ledger, equity=bad_equity)
     bad_base = dataclasses.replace(run.evidence.base, ledger=bad_ledger)
     with pytest.raises(DataIntegrityError, match="finite"):
-        frozen_mhs_daily_frame(dataclasses.replace(run, evidence=dataclasses.replace(run.evidence, base=bad_base)))
+        strategy_daily_frame(dataclasses.replace(run, evidence=dataclasses.replace(run.evidence, base=bad_base)))
 
 
 def test_persist_writes_daily_artifact_with_envelope(tmp_path: Path) -> None:
     """A fresh output persists daily.parquet beside result.json with the payload reference."""
     run = _run()
     output = tmp_path / "result.json"
-    assert persist_frozen_mhs_backtest(run, output) == output
+    assert persist_strategy_backtest(run, output) == output
     daily = pd.read_parquet(tmp_path / "daily.parquet")
     assert list(daily.columns) == [
         "base_return", "stress_return",
@@ -359,7 +359,7 @@ def test_persist_failure_leaves_no_partial_artifacts(tmp_path: Path, monkeypatch
     output = tmp_path / "result.json"
     monkeypatch.setattr(report_mod.json, "dump", lambda *a, **k: (_ for _ in ()).throw(OSError("disk")))
     with pytest.raises(OSError, match="disk"):
-        persist_frozen_mhs_backtest(run, output)
+        persist_strategy_backtest(run, output)
     assert not output.exists()
     assert not (tmp_path / "daily.parquet").exists()
     assert list(tmp_path.glob("*.tmp")) == []
@@ -370,7 +370,7 @@ def test_persist_rejects_occupied_daily_artifact(tmp_path: Path) -> None:
     run = _run()
     (tmp_path / "daily.parquet").write_text("occupied", encoding="utf-8")
     with pytest.raises(DataIntegrityError, match="daily artifact"):
-        persist_frozen_mhs_backtest(run, tmp_path / "result.json")
+        persist_strategy_backtest(run, tmp_path / "result.json")
 
 
 def test_payload_states_execution_provenance() -> None:
@@ -381,7 +381,7 @@ def test_payload_states_execution_provenance() -> None:
     maker_run = dataclasses.replace(
         run, request=dataclasses.replace(run.request, execution_bound="OHLCV_STRICT_PROXY"),
     )
-    payload = frozen_mhs_backtest_payload(maker_run)
+    payload = strategy_backtest_payload(maker_run)
     assert payload["execution_bound"] == "OHLCV_STRICT_PROXY"
     assert payload["decision_anchor"] == "submit_bar"
     assert payload["maker_fee_bps"] == maker_run.request.base_spec.maker_fee_bps
@@ -393,7 +393,7 @@ def test_daily_frame_reports_max_name_weight() -> None:
     import numpy as np
 
     run = _run()
-    frame = frozen_mhs_daily_frame(run)
+    frame = strategy_daily_frame(run)
     assert frame["max_name_weight"].max() == pytest.approx(0.05)
     assert bool((frame["max_name_weight"] <= frame["target_gross"]).all())
     assert bool(np.allclose(frame["target_gross"].to_numpy(), 0.1))

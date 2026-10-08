@@ -188,7 +188,7 @@ EVENT_INFO: dict[str, dict[str, str]] = {
         "severity_label": "WARNING",
         "header_color": "#d97706",
         "bg_color": "#fffbeb",
-        "impact": "원장·배포 가중치가 의존하는 필수 심볼이 디스크 검증에서 current가 아니어서 frozen 단계가 fail-closed로 중단될 수 있습니다.",
+        "impact": "원장·배포 가중치가 의존하는 필수 심볼이 디스크 검증에서 current가 아니어서 strategy 단계가 fail-closed로 중단될 수 있습니다.",
         "action": "docker logs --tail 200 mhs-live-daemon",
     },
     "venue_capture_failed": {

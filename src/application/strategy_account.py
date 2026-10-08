@@ -1,4 +1,4 @@
-"""Frozen-book account replay and growth-exposure derivation services (research only, no live artifact)."""
+"""Strategy-book account replay and growth-exposure derivation services (research only, no live artifact)."""
 
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ import numpy as np
 import pandas as pd
 
 from src.backtests.catalog import append_backtest_index
+from src.common.errors import DataIntegrityError
 from src.common.paths import FUTURES_DATA_DIR
 from src.core.params import (
     ACCOUNT_DEFAULT_CAPITAL_USDT,
@@ -27,26 +28,26 @@ from src.core.params import (
     ACCOUNT_UNIT_REFERENCE_CAPITAL,
     COMMITTEE_GROWTH_HORIZON_YEARS,
     COMMITTEE_GROWTH_N_PATHS,
-    FROZEN_EXPOSURE_GAP_THRESHOLD,
-    FROZEN_EXPOSURE_GRID,
-    FROZEN_EXPOSURE_MEAN_HAIRCUT,
-    FROZEN_EXPOSURE_PLATEAU_TOLERANCE,
-    FROZEN_EXPOSURE_SEED,
+    EXPOSURE_SCAN_GAP_THRESHOLD,
+    EXPOSURE_SCAN_GRID,
+    EXPOSURE_SCAN_MEAN_HAIRCUT,
+    EXPOSURE_SCAN_PLATEAU_TOLERANCE,
+    EXPOSURE_SCAN_SEED,
     NULL_BOOTSTRAP_MEAN_BLOCK_DAYS,
     SETTLEMENT_PRICE_STRESS_HAIRCUT_BPS,
 )
 from src.core.resources import MhsMemoryBudget
+from src.strategy.targets import FLOW_MOM_TOP20_ACCOUNT_UNIT, StrategySpec, resolve_strategy_id, strategy_id_matches
 
 if TYPE_CHECKING:
     from src.core.types import ExecutionSpec
     from src.engine.account_ledger import AccountLedgerResult
-    from src.strategy.targets import FrozenMhsStrategySpec
 
 _logger = logging.getLogger(__name__)
 
 
-class FrozenAccountError(Exception):
-    """Operator-facing failure of a frozen account or exposure run.
+class AccountReplayError(Exception):
+    """Operator-facing failure of an account replay or exposure scan.
 
     `str(exc)` is the complete operator message (the CLI re-raises it verbatim as
     `SystemExit`). The originating exception is chained as `__cause__`. Distinct from
@@ -55,12 +56,12 @@ class FrozenAccountError(Exception):
     """
 
 
-def frozen_execution_specs() -> tuple[ExecutionSpec, ExecutionSpec]:
+def strategy_execution_specs() -> tuple[ExecutionSpec, ExecutionSpec]:
     """Registered six/eighteen-basis-point base/stress cost pair with the submit-bar anchor.
 
     Every order is sized and priced from the last mark published before it is sent, so both
-    cases use `decision_anchor="submit_bar"`. Shared by the frozen research command and the
-    frozen account replay so both price the same book identically.
+    cases use `decision_anchor="submit_bar"`. Shared by the strategy backtest command and the
+    account replay so both price the same book identically.
 
     Returns:
         `(base, stress)` where base is 5 bps taker fee + 1 bp slippage and stress widens
@@ -76,8 +77,8 @@ def frozen_execution_specs() -> tuple[ExecutionSpec, ExecutionSpec]:
 
 
 @dataclass(frozen=True, slots=True)
-class FrozenAccountRequest:
-    """Typed controls for one frozen-book account replay.
+class AccountReplayRequest:
+    """Typed controls for one strategy-book account replay.
 
     `runs_root` and `venue_rules_root` are explicit so the caller (CLI) owns the process-wide
     path constants and tests can redirect them; the catalog read for reconciliation and the
@@ -102,7 +103,7 @@ class FrozenAccountRequest:
 
 
 @dataclass(frozen=True, slots=True)
-class FrozenAccountReport:
+class AccountReplayReport:
     """Persisted outcome of one account replay.
 
     `payload` is the exact mapping serialized to `account.json`; `result` is the account
@@ -114,7 +115,7 @@ class FrozenAccountReport:
     result: AccountLedgerResult
 
 
-def validate_frozen_account_request(request: FrozenAccountRequest) -> None:
+def validate_account_replay_request(request: AccountReplayRequest) -> None:
     """Validate account controls before any I/O.
 
     Args:
@@ -127,8 +128,8 @@ def validate_frozen_account_request(request: FrozenAccountRequest) -> None:
             execution, `policy == "fixed"` without `fixed_exposure`, non-finite or non-positive
             `fixed_exposure` or `capital`, or a non-Path `runs_root` / `venue_rules_root`.
     """
-    if not isinstance(request, FrozenAccountRequest):
-        raise ValueError(f"request must be FrozenAccountRequest, got {request!r}")
+    if not isinstance(request, AccountReplayRequest):
+        raise ValueError(f"request must be AccountReplayRequest, got {request!r}")
     for label in ("source_start", "evaluation_start", "evaluation_end"):
         value = getattr(request, label)
         if not isinstance(value, pd.Timestamp) or value.tzinfo is None:
@@ -166,7 +167,7 @@ def reconcile_unit_reference(
     """Compare the unit-exposure reference ledger against the latest same-book canonical row.
 
     The unit ledger (exposure 1, no order filters, no impact, reference capital) replays the
-    same book as the canonical 3m frozen run, so its CAGR and 3m-close drawdown must agree
+    same book as the canonical 3m strategy run, so its CAGR and 3m-close drawdown must agree
     within the registered tolerances. Disagreement is disclosed, never fatal: the account run
     is research evidence and the reference may legitimately be absent.
 
@@ -238,16 +239,17 @@ def _latest_same_book_reference(
     index_path: Path,
     *,
     execution: str,
-    strategy: FrozenMhsStrategySpec,
+    strategy: StrategySpec,
     evaluation_start: pd.Timestamp,
     evaluation_end: pd.Timestamp,
 ) -> dict[str, Any] | None:
-    """Latest canonical ``mhs_frozen`` run of the exact book the account ledger replays.
+    """Latest canonical strategy backtest run (``mhs_frozen``) of the exact book the account ledger replays.
 
     A reference must share the strategy id, execution mode, evaluation window, name clip and
     exposure multiplier; the last two live only in the run's ``result.json`` (resolved against
-    the catalog directory), so rows whose result is missing or unreadable are skipped. Returns
-    the catalog row, or None when no run of the same book exists.
+    the catalog directory), so rows whose result is missing or unreadable are skipped
+    (persisted ids resolve through ``resolve_strategy_id``). Returns the catalog row,
+    or None when no run of the same book exists.
     """
     if not index_path.is_file():
         return None
@@ -260,7 +262,7 @@ def _latest_same_book_reference(
             raise ValueError("catalog row is not a JSON object")
         if record.get("kind") != "mhs_frozen":
             continue
-        if record.get("strategy_id") != strategy.strategy_id:
+        if not strategy_id_matches(record.get("strategy_id"), strategy.strategy_id):
             continue
         if record.get("execution", "taker") != execution:
             continue
@@ -343,7 +345,7 @@ def _account_execution_kwargs(execution: str) -> dict[str, Any]:
 
 
 def _build_account_payload(
-    *, request: FrozenAccountRequest, strategy_id: str, policy: Any, result: AccountLedgerResult,
+    *, request: AccountReplayRequest, strategy_id: str, policy: Any, result: AccountLedgerResult,
     unit: AccountLedgerResult, unit_headlines: tuple[float, float, float],
     account_headlines: tuple[float, float, float],
     rules_captured_at: str, venue_path: str, reconciliation: dict[str, Any],
@@ -411,35 +413,31 @@ def _build_account_payload(
     }
 
 
-def _resolve_account_venue(request: FrozenAccountRequest) -> tuple[Any, Path]:
+def _resolve_account_venue(request: AccountReplayRequest) -> tuple[Any, Path]:
     """Resolve the venue snapshot for one account replay."""
-    from src.common.errors import DataIntegrityError
     from src.market_data.binance.venue_rules import latest_venue_rule_snapshot, load_venue_rule_snapshot
 
     try:
         venue_path = Path(request.venue_rules) if request.venue_rules is not None else latest_venue_rule_snapshot(request.venue_rules_root)
         rules = load_venue_rule_snapshot(venue_path)
     except (DataIntegrityError, FileNotFoundError, NotADirectoryError, OSError, ValueError) as exc:
-        raise FrozenAccountError(f"missing venue snapshot ({exc}); run data collect venue-rules first") from exc
+        raise AccountReplayError(f"missing venue snapshot ({exc}); run data collect venue-rules first") from exc
     return rules, venue_path
 
 
-def _build_account_candidate(request: FrozenAccountRequest) -> tuple[Any, Any, Any]:
+def _build_account_candidate(request: AccountReplayRequest) -> tuple[Any, Any, Any]:
     """Build the unlevered account-unit candidate and its assembled replay inputs."""
-    from src.common.errors import DataIntegrityError
     from src.engine.account_sources import assemble_account_inputs
-    from src.engine.backtest_evidence import FrozenMhsReportPeriod
-    from src.engine.strategy_backtest import FrozenMhsBacktestRequest, build_frozen_request_candidate
-    from src.strategy.targets import FROZEN_MHS_TOP20_ACCOUNT_UNIT_V2
-
-    base_spec, stress_spec = frozen_execution_specs()
+    from src.engine.backtest_evidence import StrategyReportPeriod
+    from src.engine.strategy_backtest import StrategyBacktestRequest, build_request_targets
+    base_spec, stress_spec = strategy_execution_specs()
     try:
-        frozen_request = FrozenMhsBacktestRequest(
+        strategy_request = StrategyBacktestRequest(
             source_start=request.source_start, evaluation_start=request.evaluation_start,
-            evaluation_end=request.evaluation_end, strategy=FROZEN_MHS_TOP20_ACCOUNT_UNIT_V2,
+            evaluation_end=request.evaluation_end, strategy=FLOW_MOM_TOP20_ACCOUNT_UNIT,
             initial_equity=request.capital, base_spec=base_spec, stress_spec=stress_spec,
             report_periods=(
-                FrozenMhsReportPeriod(
+                StrategyReportPeriod(
                     label="evaluation",
                     start=request.evaluation_start.normalize(),
                     end=(request.evaluation_end - pd.Timedelta(days=1)).normalize(),
@@ -449,18 +447,17 @@ def _build_account_candidate(request: FrozenAccountRequest) -> tuple[Any, Any, A
             execution_bound="OHLCV_IMMEDIATE_TAKER",
         )
     except (DataIntegrityError, ValueError) as exc:
-        raise FrozenAccountError(f"invalid frozen account request: {exc}") from exc
+        raise AccountReplayError(f"invalid account replay request: {exc}") from exc
     try:
-        candidate, context = build_frozen_request_candidate(frozen_request)
+        candidate, context = build_request_targets(strategy_request)
         parts = assemble_account_inputs(candidate, context)
     except (DataIntegrityError, ValueError, OSError) as exc:
-        raise FrozenAccountError(f"frozen account failed: {exc}") from exc
-    return frozen_request.strategy, parts, frozen_request
+        raise AccountReplayError(f"account replay failed: {exc}") from exc
+    return strategy_request.strategy, parts, strategy_request
 
 
-def _replay_account_ledgers(request: FrozenAccountRequest, parts: Any, rules: Any, policy: Any) -> tuple[Any, Any]:
+def _replay_account_ledgers(request: AccountReplayRequest, parts: Any, rules: Any, policy: Any) -> tuple[Any, Any]:
     """Replay the unit reference ledger then the account ledger."""
-    from src.common.errors import DataIntegrityError
     from src.engine.account_ledger import replay_account
 
     unit_weights, marks, funding_cum, adv, daily_sigma, anchor_times = parts
@@ -473,9 +470,9 @@ def _replay_account_ledgers(request: FrozenAccountRequest, parts: Any, rules: An
             taker_fee_bps=ACCOUNT_TAKER_FEE_BPS, apply_order_filters=False, **execution_kwargs,
         )
     except (DataIntegrityError, ValueError) as exc:
-        raise FrozenAccountError(f"frozen account failed: unit reference {exc}") from exc
+        raise AccountReplayError(f"account replay failed: unit reference {exc}") from exc
     if unit.liquidated_at is not None:
-        raise FrozenAccountError(f"frozen account failed: unit reference liquidated at {unit.liquidated_at}")
+        raise AccountReplayError(f"account replay failed: unit reference liquidated at {unit.liquidated_at}")
     try:
         result = replay_account(
             unit_weights, marks, funding_cum, adv, daily_sigma, rules, policy,
@@ -484,11 +481,11 @@ def _replay_account_ledgers(request: FrozenAccountRequest, parts: Any, rules: An
             unit_equity=unit.daily_equity, **execution_kwargs,
         )
     except (DataIntegrityError, ValueError) as exc:
-        raise FrozenAccountError(f"frozen account failed: {exc}") from exc
+        raise AccountReplayError(f"account replay failed: {exc}") from exc
     return unit, result
 
 
-def _reconcile_account_unit(request: FrozenAccountRequest, strategy: Any, unit: Any) -> dict[str, Any]:
+def _reconcile_account_unit(request: AccountReplayRequest, strategy: Any, unit: Any) -> dict[str, Any]:
     """Reconcile the unit ledger against the latest same-book canonical row."""
     unit_cagr, _, _ = _account_headlines(unit.daily_equity, ACCOUNT_UNIT_REFERENCE_CAPITAL)
     unit_mdd = unit.intraday_max_drawdown
@@ -501,14 +498,14 @@ def _reconcile_account_unit(request: FrozenAccountRequest, strategy: Any, unit: 
         reconciliation = reconcile_unit_reference(reference, unit_cagr=unit_cagr, unit_mdd=unit_mdd)
         if reconciliation["status"] == "missing_reference":
             _logger.warning(
-                "[EVAL] mhs-frozen-account reconciliation status=%s cagr_gap=%s mdd_gap=%s",
+                "[EVAL] account-replay reconciliation status=%s cagr_gap=%s mdd_gap=%s",
                 "missing_reference", None, None,
             )
         elif reconciliation["status"] == "mismatch":
             cagr_gap = reconciliation["cagr_gap"]
             mdd_gap = reconciliation["mdd_gap"]
             _logger.warning(
-                "[EVAL] mhs-frozen-account reconciliation status=%s cagr_gap=%.4f mdd_gap=%.4f",
+                "[EVAL] account-replay reconciliation status=%s cagr_gap=%.4f mdd_gap=%.4f",
                 "mismatch",
                 float(cagr_gap) if cagr_gap is not None else float("nan"),
                 float(mdd_gap) if mdd_gap is not None else float("nan"),
@@ -516,13 +513,13 @@ def _reconcile_account_unit(request: FrozenAccountRequest, strategy: Any, unit: 
         return reconciliation
     except (OSError, ValueError, TypeError, OverflowError) as exc:
         _logger.warning(
-            "[EVAL] mhs-frozen-account reconciliation status=failed error_type=%s error=%s",
+            "[EVAL] account-replay reconciliation status=failed error_type=%s error=%s",
             type(exc).__name__, exc,
         )
         return {"status": "failed", "error": str(exc), "error_type": type(exc).__name__}
 
 
-def _persist_account_run(request: FrozenAccountRequest, strategy: Any, policy: Any, unit: Any, result: Any, reconciliation: dict[str, Any], *, rules_captured_at: str, venue_path: str) -> FrozenAccountReport:
+def _persist_account_run(request: AccountReplayRequest, strategy: Any, policy: Any, unit: Any, result: Any, reconciliation: dict[str, Any], *, rules_captured_at: str, venue_path: str) -> AccountReplayReport:
     """Persist account.json, daily parquet, export and catalog row for one replay."""
     # Headlines are derived before the run directory exists so a degenerate ledger leaves no empty run dir.
     unit_headlines = _account_headlines(unit.daily_equity, ACCOUNT_UNIT_REFERENCE_CAPITAL)
@@ -558,14 +555,14 @@ def _persist_account_run(request: FrozenAccountRequest, strategy: Any, policy: A
                 base_max_drawdown=result.intraday_max_drawdown, execution=request.execution,
             )
     except OSError as exc:
-        raise FrozenAccountError(f"frozen account failed: {exc}") from exc
-    return FrozenAccountReport(run_dir=run_dir, payload=payload, result=result)
+        raise AccountReplayError(f"account replay failed: {exc}") from exc
+    return AccountReplayReport(run_dir=run_dir, payload=payload, result=result)
 
 
-def run_frozen_account(request: FrozenAccountRequest) -> FrozenAccountReport:
-    """Replay the frozen account-unit book as one real account and persist account-scale evidence.
+def run_account_replay(request: AccountReplayRequest) -> AccountReplayReport:
+    """Replay the strategy account-unit book as one real account and persist account-scale evidence.
 
-    Builds the unlevered clip-0.05 `FROZEN_MHS_TOP20_ACCOUNT_UNIT_V2` candidate and first
+    Builds the unlevered clip-0.05 `FLOW_MOM_TOP20_ACCOUNT_UNIT` candidate and first
     replays it as the unit-exposure reference ledger. That ledger supplies the causal posterior
     moments the growth policy sizes from and anchors reconciliation against the canonical 3m
     ledger, so its failure or liquidation invalidates the account run. The account is then
@@ -580,13 +577,13 @@ def run_frozen_account(request: FrozenAccountRequest) -> FrozenAccountReport:
         Report naming the fresh run directory, the persisted `account.json` mapping and the
         account ledger result.
     Raises:
-        ValueError: `validate_frozen_account_request` rejects the request (before any I/O).
-        FrozenAccountError: Missing/invalid venue snapshot, invalid frozen request, source
+        ValueError: `validate_account_replay_request` rejects the request (before any I/O).
+        AccountReplayError: Missing/invalid venue snapshot, invalid strategy request, source
             assembly failure, unit reference replay failure or liquidation, account replay
             failure, or artifact persistence failure (`OSError`). No run directory exists after
             any failure raised before persistence.
     """
-    validate_frozen_account_request(request)
+    validate_account_replay_request(request)
     rules, venue_path = _resolve_account_venue(request)
     strategy, parts, _ = _build_account_candidate(request)
     from src.strategy.sizing import account_growth_policy
@@ -606,8 +603,8 @@ def run_frozen_account(request: FrozenAccountRequest) -> FrozenAccountReport:
 
 
 @dataclass(frozen=True, slots=True)
-class FrozenExposureRequest:
-    """Inputs for re-deriving the growth exposure rung of one finished frozen run."""
+class ExposureScanRequest:
+    """Inputs for re-deriving the growth exposure rung of one finished strategy run."""
 
     run_dir: Path
     data_root: Path | None = None
@@ -615,8 +612,8 @@ class FrozenExposureRequest:
 
 
 @dataclass(frozen=True, slots=True)
-class FrozenRunArtifacts:
-    """Ledger evidence of one finished frozen run, unlevered to exposure 1.0.
+class StrategyRunArtifacts:
+    """Ledger evidence of one finished strategy run, unlevered to exposure 1.0.
 
     Identity fields are carried verbatim from `result.json` (no coercion) so the derived
     `exposure.json` stays byte-identical to the evidence it was derived from.
@@ -634,15 +631,15 @@ class FrozenRunArtifacts:
 
 
 @dataclass(frozen=True, slots=True)
-class FrozenExposureReport:
+class ExposureScanReport:
     """Persisted exposure derivation: final `exposure.json` path and its exact mapping."""
 
     path: Path
     payload: dict[str, Any]
 
 
-def load_frozen_run_artifacts(run_dir: Path) -> FrozenRunArtifacts:
-    """Read and unlever a frozen run's `result.json` and `daily.parquet`.
+def load_strategy_run_artifacts(run_dir: Path) -> StrategyRunArtifacts:
+    """Read and unlever a strategy run's `result.json` and `daily.parquet`.
 
     Unit returns are `daily["base_return"] / exposure_multiplier` and the unit max name weight
     is `mean(daily["max_name_weight"]) / exposure_multiplier`; both are linear rescalings of
@@ -650,17 +647,17 @@ def load_frozen_run_artifacts(run_dir: Path) -> FrozenRunArtifacts:
     `exposure.json`).
 
     Args:
-        run_dir: Existing frozen run directory.
+        run_dir: Existing strategy run directory.
     Returns:
-        Parsed identity and unlevered evidence.
+        Parsed identity and unlevered evidence (persisted ids resolve to canonical).
     Raises:
         OSError, ValueError, KeyError, TypeError: Missing, unreadable or malformed artifacts.
     """
     payload = json.loads((run_dir / "result.json").read_text(encoding="utf-8"))
     daily = pd.read_parquet(run_dir / "daily.parquet")
     exposure_multiplier = float(payload["exposure_multiplier"])
-    return FrozenRunArtifacts(
-        strategy_id=payload["strategy_id"],
+    return StrategyRunArtifacts(
+        strategy_id=resolve_strategy_id(payload["strategy_id"]),
         execution_bound=payload["execution_bound"],
         breadth=payload["breadth"],
         exposure_multiplier=exposure_multiplier,
@@ -672,8 +669,8 @@ def load_frozen_run_artifacts(run_dir: Path) -> FrozenRunArtifacts:
     )
 
 
-def derive_frozen_exposure(
-    artifacts: FrozenRunArtifacts,
+def derive_growth_exposure(
+    artifacts: StrategyRunArtifacts,
     *,
     run_name: str,
     daily_close: pd.DataFrame,
@@ -681,7 +678,7 @@ def derive_frozen_exposure(
     census: tuple[str, ...],
     excluded_symbols: frozenset[str],
 ) -> dict[str, Any]:
-    """Solve the stressed log-growth exposure curve for one frozen run's unit evidence.
+    """Solve the stressed log-growth exposure curve for one strategy run's unit evidence.
 
     The PIT roster is built from source start (preserving 30-day liquidity and 90-day
     seasoning warm-up) with no trading-exclusion filter, then cut to the evaluation window.
@@ -704,9 +701,9 @@ def derive_frozen_exposure(
             (including `DataIntegrityError`).
     """
     from src.evaluation.exposure import GapSample, roster_gap_sample, solve_log_growth_exposure
-    from src.strategy.universe import build_frozen_pit_roster
+    from src.strategy.universe import build_pit_roster
 
-    roster = build_frozen_pit_roster(
+    roster = build_pit_roster(
         daily_close, daily_quote_volume, census, breadth=artifacts.breadth, blocked_decisions=None,
     )
     in_window = (daily_close.index >= artifacts.evaluation_start) & (daily_close.index < artifacts.evaluation_end)
@@ -714,7 +711,7 @@ def derive_frozen_exposure(
     gaps = (
         roster_gap_sample(
             daily_close.loc[in_window, gap_symbols], roster.loc[in_window, gap_symbols],
-            threshold=FROZEN_EXPOSURE_GAP_THRESHOLD,
+            threshold=EXPOSURE_SCAN_GAP_THRESHOLD,
         )
         if gap_symbols
         else GapSample(magnitudes=np.empty(0, dtype="float64"), events_per_year=0.0)
@@ -723,13 +720,13 @@ def derive_frozen_exposure(
         artifacts.unit_returns,
         max_name_weight=artifacts.unit_max_weight,
         gaps=gaps,
-        mean_haircut=FROZEN_EXPOSURE_MEAN_HAIRCUT,
-        grid=FROZEN_EXPOSURE_GRID,
-        plateau_tolerance=FROZEN_EXPOSURE_PLATEAU_TOLERANCE,
+        mean_haircut=EXPOSURE_SCAN_MEAN_HAIRCUT,
+        grid=EXPOSURE_SCAN_GRID,
+        plateau_tolerance=EXPOSURE_SCAN_PLATEAU_TOLERANCE,
         n_paths=COMMITTEE_GROWTH_N_PATHS,
         horizon_years=COMMITTEE_GROWTH_HORIZON_YEARS,
         mean_block_days=NULL_BOOTSTRAP_MEAN_BLOCK_DAYS,
-        seed=FROZEN_EXPOSURE_SEED,
+        seed=EXPOSURE_SCAN_SEED,
     )
     return {
         "run_dir": run_name,
@@ -744,40 +741,39 @@ def derive_frozen_exposure(
         "gap_events_per_year": solution.gap_events_per_year,
         "gap_sample_size": solution.gap_sample_size,
         "gap_symbols": sorted(gap_symbols),
-        "mean_haircut": FROZEN_EXPOSURE_MEAN_HAIRCUT,
-        "plateau_tolerance": FROZEN_EXPOSURE_PLATEAU_TOLERANCE,
-        "seed": FROZEN_EXPOSURE_SEED,
+        "mean_haircut": EXPOSURE_SCAN_MEAN_HAIRCUT,
+        "plateau_tolerance": EXPOSURE_SCAN_PLATEAU_TOLERANCE,
+        "seed": EXPOSURE_SCAN_SEED,
         "unlever_assumption": "unit returns and max name weight are linear rescalings of the levered ledger; residual drift/cost nonlinearity is accepted",
     }
 
 
-def run_frozen_exposure(request: FrozenExposureRequest) -> FrozenExposureReport:
-    """Re-derive and atomically persist the growth exposure rung beside one finished frozen run.
+def run_exposure_scan(request: ExposureScanRequest) -> ExposureScanReport:
+    """Re-derive and atomically persist the growth exposure rung beside one finished strategy run.
 
     Args:
         request: Run directory, optional OHLCV root override and memory budget.
     Returns:
         Final `exposure.json` path and the persisted mapping.
     Raises:
-        FrozenAccountError: Missing run directory, occupied `exposure.json` (checked before any
+        AccountReplayError: Missing run directory, occupied `exposure.json` (checked before any
             read or panel load), invalid run artifacts, resource rejection, data-integrity or
             solver failure, or write failure. `exposure.json` never exists after a failure.
     """
-    from src.common.errors import DataIntegrityError
     from src.core.panel import load_base_panel
     from src.core.resources import _current_tree_swap_bytes, assert_mhs_stage_allocation, resolve_mhs_memory_budget
     from src.evaluation.exposure import structurally_excluded_symbols
 
     run_dir = request.run_dir
     if not run_dir.is_dir():
-        raise FrozenAccountError(f"run-dir must be an existing frozen run directory, got {str(run_dir)!r}")
+        raise AccountReplayError(f"run-dir must be an existing strategy run directory, got {str(run_dir)!r}")
     exposure_path = run_dir / "exposure.json"
     if os.path.lexists(exposure_path):
-        raise FrozenAccountError(f"exposure output must be fresh: {exposure_path} already exists")
+        raise AccountReplayError(f"exposure output must be fresh: {exposure_path} already exists")
     try:
-        artifacts = load_frozen_run_artifacts(run_dir)
+        artifacts = load_strategy_run_artifacts(run_dir)
     except (OSError, ValueError, KeyError, TypeError) as exc:
-        raise FrozenAccountError(f"invalid frozen run artifacts: {exc}") from exc
+        raise AccountReplayError(f"invalid strategy run artifacts: {exc}") from exc
     root = str(request.data_root) if request.data_root is not None else str(FUTURES_DATA_DIR / "ohlcv")
     try:
         resolved = resolve_mhs_memory_budget(request.memory_budget)
@@ -785,12 +781,12 @@ def run_frozen_exposure(request: FrozenExposureRequest) -> FrozenExposureReport:
 
         def _admit_panel(estimated_bytes: int) -> None:
             assert_mhs_stage_allocation(
-                stage="frozen_source_panel", estimated_bytes=int(estimated_bytes),
+                stage="strategy_source_panel", estimated_bytes=int(estimated_bytes),
                 budget=resolved, replay=False, initial_swap_bytes=initial_swap_bytes,
             )
 
         assert_mhs_stage_allocation(
-            stage="frozen_source_panel", estimated_bytes=0,
+            stage="strategy_source_panel", estimated_bytes=0,
             budget=resolved, replay=False, initial_swap_bytes=initial_swap_bytes,
         )
         panel = load_base_panel(
@@ -801,7 +797,7 @@ def run_frozen_exposure(request: FrozenExposureRequest) -> FrozenExposureReport:
         daily_quote_volume = panel["quote_vol"].resample("1D").sum(min_count=1).astype("float64")
         census = tuple(panel["close"].columns)
         excluded = structurally_excluded_symbols() if len(census) else frozenset()
-        exposure = derive_frozen_exposure(
+        exposure = derive_growth_exposure(
             artifacts, run_name=run_dir.name, daily_close=daily_close,
             daily_quote_volume=daily_quote_volume, census=census, excluded_symbols=excluded,
         )
@@ -811,5 +807,5 @@ def run_frozen_exposure(request: FrozenExposureRequest) -> FrozenExposureReport:
             json.dump(exposure, handle, sort_keys=True)
         os.replace(tmp_path, exposure_path)
     except (DataIntegrityError, ValueError, OSError) as exc:
-        raise FrozenAccountError(f"frozen exposure failed: {exc}") from exc
-    return FrozenExposureReport(path=exposure_path, payload=exposure)
+        raise AccountReplayError(f"exposure scan failed: {exc}") from exc
+    return ExposureScanReport(path=exposure_path, payload=exposure)

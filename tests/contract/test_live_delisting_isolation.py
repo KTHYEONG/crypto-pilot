@@ -6,7 +6,7 @@ import ast
 from pathlib import Path
 
 _FORBIDDEN = (
-    "frozen_blocked_decisions",
+    "strategy_blocked_decisions",
     "source_gap_excluded_symbols",
     "SOURCE_GAP_EXCLUDED_SYMBOLS",
     "structurally_excluded_symbols",
@@ -52,7 +52,7 @@ def test_no_import_time_registry_reads() -> None:
         "with mock.patch('src.core.instrument_settlements.load_instrument_settlement_registry', side_effect=_boom):\n"
         "    with mock.patch('src.core.venue_halts.load_venue_halt_registry', side_effect=_boom):\n"
         "        with mock.patch('src.core.source_gaps.load_source_gap_registry', side_effect=_boom):\n"
-        "            import src.live.frozen_signal\n"
+        "            import src.live.strategy_signal\n"
         "print('ok')"
     )
     completed = subprocess.run(  # noqa: S603 - fixed sys.executable argv in contract probe

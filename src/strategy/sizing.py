@@ -10,7 +10,6 @@ from typing import Literal
 import numpy as np
 
 from src.common.errors import DataIntegrityError
-from src.market_data.binance.venue_rules import VenueRuleSnapshot
 from src.core.params import (
     ACCOUNT_EXPOSURE_MAX,
     ACCOUNT_EXPOSURE_STEP,
@@ -22,6 +21,7 @@ from src.core.params import (
     ACCOUNT_PRIOR_DAYS,
     ACCOUNT_SHOCK_PER_UNIT,
 )
+from src.market_data.binance.venue_rules import VenueRuleSnapshot
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,7 +64,7 @@ class UnitMoments:
 
 
 def account_growth_policy(*, impact_y: float = ACCOUNT_IMPACT_Y) -> ExposurePolicy:
-    """Registered growth exposure policy shared by the account backtest and the live frozen step."""
+    """Registered growth exposure policy shared by the account backtest and the live strategy step."""
     return ExposurePolicy(
         kind="growth",
         exposure_max=ACCOUNT_EXPOSURE_MAX,

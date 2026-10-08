@@ -17,8 +17,6 @@ _SRC_ROOT: Final[Path] = _REPO_ROOT / "src"
 
 # persisted contract identifiers; renaming requires data migration
 PERSISTED_VERSIONED_IDENTIFIERS: Final[dict[tuple[str, str], int]] = {
-    ("src/cli/commands/backtest.py", "_control_v2"): 1,
-    ("src/live/frozen_book.py", "frozen_mhs_top20_v2"): 1,
     ("src/live/recorder_watch.py", "heartbeat_v3"): 1,
     ("src/market_data/services/spot_collection.py", "log1p_geometric_bridge_v1"): 1,
     ("src/market_data/streams/heartbeat_v3.py", "heartbeat_v3"): 1,
@@ -26,7 +24,7 @@ PERSISTED_VERSIONED_IDENTIFIERS: Final[dict[tuple[str, str], int]] = {
     ("src/mhs/contracts.py", "zombie_mask_v1"): 3,
     ("src/core/data_policy.py", "zombie_mask_v1"): 4,
     ("src/strategy/targets.py", "frozen_mhs_top20_growth_v2"): 1,
-    ("src/strategy/targets.py", "frozen_mhs_top20_v2"): 2,
+    ("src/strategy/targets.py", "frozen_mhs_top20_v2"): 1,
     ("src/strategy/targets.py", "frozen_mhs_top40_control_v2"): 1,
     ("src/core/panel.py", "zombie_mask_v1"): 2,
     ("src/core/params.py", "boundary_frozen_warmup_excluded_v1"): 1,

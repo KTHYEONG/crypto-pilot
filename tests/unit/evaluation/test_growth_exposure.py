@@ -19,11 +19,11 @@ from src.evaluation.exposure import (
 )
 from src.core.instrument_settlements import EMPTY_SETTLEMENT_REGISTRY
 from src.core.params import (
-    FROZEN_EXPOSURE_GAP_THRESHOLD,
-    FROZEN_EXPOSURE_GRID,
-    FROZEN_EXPOSURE_MEAN_HAIRCUT,
-    FROZEN_EXPOSURE_PLATEAU_TOLERANCE,
-    FROZEN_EXPOSURE_SEED,
+    EXPOSURE_SCAN_GAP_THRESHOLD,
+    EXPOSURE_SCAN_GRID,
+    EXPOSURE_SCAN_MEAN_HAIRCUT,
+    EXPOSURE_SCAN_PLATEAU_TOLERANCE,
+    EXPOSURE_SCAN_SEED,
 )
 
 _GRID: tuple[float, ...] = (1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0)
@@ -63,11 +63,11 @@ def _solve(
 
 def test_registered_exposure_constants() -> None:
     """The solver's only registered inputs hold their probed values."""
-    assert FROZEN_EXPOSURE_MEAN_HAIRCUT == 0.25
-    assert FROZEN_EXPOSURE_GAP_THRESHOLD == 0.50
-    assert tuple(round(1.0 + 0.25 * i, 2) for i in range(61)) == FROZEN_EXPOSURE_GRID
-    assert FROZEN_EXPOSURE_PLATEAU_TOLERANCE == 0.05
-    assert FROZEN_EXPOSURE_SEED == 20260921
+    assert EXPOSURE_SCAN_MEAN_HAIRCUT == 0.25
+    assert EXPOSURE_SCAN_GAP_THRESHOLD == 0.50
+    assert tuple(round(1.0 + 0.25 * i, 2) for i in range(61)) == EXPOSURE_SCAN_GRID
+    assert EXPOSURE_SCAN_PLATEAU_TOLERANCE == 0.05
+    assert EXPOSURE_SCAN_SEED == 20260921
 
 
 def test_solve_is_deterministic_under_seed() -> None:
