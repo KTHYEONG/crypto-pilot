@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import dataclasses
 import itertools
-from collections.abc import Iterable
-from dataclasses import dataclass
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass, field
 from typing import Literal
 
 import numpy as np
@@ -41,9 +41,27 @@ _LIMITATIONS: tuple[str, ...] = (
     "CANDLE_FILLS_NO_ORDER_BOOK_DEPTH",
     "CANDLE_FILLS_NO_QUEUE_POSITION",
     "CANDLE_FILLS_NO_PARTICIPATION_CAPACITY",
-    "DISCOVERY_YEARS_RESEARCH_ONLY_NO_FORWARD_CLAIM",
     "NO_DEPLOYMENT_VERDICT",
 )
+
+
+def in_sample_limitation(cutoff: pd.Timestamp) -> str:
+    """In-sample disclosure code for one strategy design cutoff."""
+    return f"IN_SAMPLE_THROUGH_{pd.Timestamp(cutoff).tz_convert('UTC').date().isoformat()}"
+
+
+def _funding_by_symbol_for_period(
+    ledger: object, start: pd.Timestamp, end: pd.Timestamp,
+) -> dict[str, float]:
+    """Per-symbol funding charge totals over one inclusive daily period."""
+    daily = getattr(ledger, "funding_by_symbol_daily", None)
+    if daily is None or not isinstance(daily, pd.DataFrame) or daily.empty:
+        return {}
+    frame = daily
+    mask = (frame.index >= start.normalize()) & (frame.index <= end.normalize())
+    if not bool(mask.any()):
+        return {str(col): 0.0 for col in frame.columns}
+    return {str(col): float(frame.loc[mask, col].sum()) for col in frame.columns}
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,6 +97,8 @@ class StrategyBacktestEvidence:
         period_metrics: Explicit historical-window economics and validity
             diagnostics, with unavailable intervals left unavailable.
         limitations: Source and model limitations requiring separate review.
+        funding_by_symbol: Per-period per-symbol funding charge totals
+            (negative = income), ``{period: {"base": {sym: float}, "stress": ...}}``.
     """
 
     base: StrategyExecutionReplayResult
@@ -87,6 +107,7 @@ class StrategyBacktestEvidence:
     stress_daily: DailyPortfolioEvidence
     period_metrics: pd.DataFrame
     limitations: tuple[str, ...]
+    funding_by_symbol: Mapping[str, Mapping[str, Mapping[str, float]]] = field(default_factory=dict)
 
 
 def evaluate_strategy_backtest(
@@ -164,9 +185,17 @@ def evaluate_strategy_backtest(
         raise DataIntegrityError("paired daily intervals must match by label and availability")
     metrics = _period_metrics(candidate, base, stress, base_daily, stress_daily, initial_equity, report_periods)
     gap_note = ("FUNDING_COVERAGE_GAPS_RECORDED",) if (base.funding_coverage_gaps or stress.funding_coverage_gaps) else ()
+    per_period_funding: dict[str, dict[str, dict[str, float]]] = {}
+    for period in report_periods:
+        per_period_funding[period.label] = {
+            "base": _funding_by_symbol_for_period(base.ledger, period.start, period.end),
+            "stress": _funding_by_symbol_for_period(stress.ledger, period.start, period.end),
+        }
     return StrategyBacktestEvidence(
         base=base, stress=stress, base_daily=base_daily, stress_daily=stress_daily,
-        period_metrics=metrics, limitations=_LIMITATIONS + gap_note,
+        period_metrics=metrics,
+        limitations=(*_LIMITATIONS[:3], in_sample_limitation(candidate.strategy.design_data_cutoff), _LIMITATIONS[3], *gap_note),
+        funding_by_symbol=per_period_funding,
     )
 
 

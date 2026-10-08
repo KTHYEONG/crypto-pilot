@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
@@ -44,6 +45,9 @@ from src.strategy.targets import (
     build_strategy_targets,
 )
 from src.strategy.universe import build_pit_roster
+
+if TYPE_CHECKING:
+    from src.core.source_gaps import SourceGapInterval
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,6 +140,13 @@ class StrategyBacktestRun:
     source_gap_excluded_symbols: tuple[str, ...] = ()
     source_gap_blocked_decisions: int = 0
     delisting_blocked_decisions: int = 0
+    data_availability_withdrawals: tuple[Mapping[str, object], ...] = ()
+
+
+class LakeCoverageError(DataIntegrityError):
+    """The local 3m lake lacks bars for an instrument the strategy would have traded. Dropping
+    it would select the universe on the researcher's data completeness, which live trading
+    does not have; the run fails until the lake is repaired."""
 
 
 def _strategy_delisting_block(
@@ -162,6 +173,135 @@ def _strategy_delisting_block(
     return values
 
 
+def _withdrawable_gap_intervals(
+    settlement_registry: InstrumentSettlementRegistry,
+) -> list[SourceGapInterval]:
+    """Unresolved 3m gaps that withdraw a roster seat: INTERIOR and LISTING_EDGE only."""
+    return [
+        iv
+        for iv in active_intervals(plane="ohlcv_3m")
+        if iv.extent in ("INTERIOR", "LISTING_EDGE")
+        and not source_gap_superseded_by_settlement(iv, settlement_registry)
+    ]
+
+
+def _unresolved_lake_gap_intervals(
+    settlement_registry: InstrumentSettlementRegistry,
+) -> list[SourceGapInterval]:
+    """Unresolved 3m gaps that fail the run when a roster seat would cross them."""
+    return [
+        iv
+        for iv in active_intervals(plane="ohlcv_3m")
+        if iv.extent in ("OPEN_EDGE", "UNSCOPED")
+        and not source_gap_superseded_by_settlement(iv, settlement_registry)
+    ]
+
+
+def _holding_window(
+    decision_index: pd.DatetimeIndex, *, entry_hour: int, holding: pd.Timedelta,
+) -> tuple[pd.DatetimeIndex, pd.DatetimeIndex]:
+    starts = decision_index + pd.Timedelta(days=1, hours=int(entry_hour))
+    return starts, starts + holding
+
+
+def assert_lake_coverage(
+    decision_index: pd.DatetimeIndex,
+    roster: pd.DataFrame,
+    *,
+    strategy: StrategySpec,
+    base_spec: ExecutionSpec,
+    settlement_registry: InstrumentSettlementRegistry,
+    evaluation_start: pd.Timestamp,
+    evaluation_end: pd.Timestamp,
+) -> None:
+    """Fail closed when a roster seat would cross an unrepaired 3m lake gap.
+
+    The roster here carries no source-gap withdrawal, so every selected
+    (symbol, decision day) is what the strategy would have traded on its own
+    data completeness. A decision day counts when its entry instant lies in
+    ``[evaluation_start, evaluation_end)`` and its execution/holding window
+    overlaps an unresolved ``OPEN_EDGE`` or ``UNSCOPED`` 3m gap.
+    """
+    intervals = _unresolved_lake_gap_intervals(settlement_registry)
+    if not intervals or roster.empty:
+        return
+    holding = pd.Timedelta(days=1) + pd.Timedelta(minutes=int(base_spec.passive_timeout_minutes))
+    starts, ends = _holding_window(decision_index, entry_hour=int(strategy.entry_hour_utc), holding=holding)
+    in_scope = (starts >= evaluation_start) & (starts < evaluation_end)
+    if not bool(in_scope.any()):
+        return
+    by_symbol: dict[str, list[SourceGapInterval]] = {}
+    for iv in intervals:
+        by_symbol.setdefault(iv.symbol, []).append(iv)
+    offending: dict[str, pd.Timestamp] = {}
+    scope_positions = np.flatnonzero(np.asarray(in_scope, dtype=bool))
+    for symbol, gaps in by_symbol.items():
+        if symbol not in roster.columns:
+            continue
+        selected = roster[symbol].to_numpy(dtype=bool)
+        for pos in scope_positions:
+            if not bool(selected[int(pos)]):
+                continue
+            window_start = pd.Timestamp(starts[int(pos)])
+            window_end = pd.Timestamp(ends[int(pos)])
+            for iv in gaps:
+                gap_start = pd.Timestamp(iv.start)
+                gap_end = None if iv.end is None else pd.Timestamp(iv.end)
+                overlaps = gap_start < window_end and (gap_end is None or window_start < gap_end)
+                if overlaps:
+                    day = pd.Timestamp(decision_index[int(pos)])
+                    if symbol not in offending or day < offending[symbol]:
+                        offending[symbol] = day
+                    break
+            else:
+                continue
+            break
+    if offending:
+        details = "; ".join(
+            f"{sym} (first_day={day.date().isoformat()})" for sym, day in sorted(offending.items())
+        )
+        raise LakeCoverageError(
+            f"strategy universe crosses unrepaired 3m lake gaps for {len(offending)} symbol(s): "
+            f"{details}; run `data collect` (3m) + `data verify-source-gaps` to repair the lake"
+        )
+
+
+def strategy_interior_withdrawals(
+    decision_index: pd.DatetimeIndex,
+    census_symbols: tuple[str, ...],
+    *,
+    strategy: StrategySpec,
+    base_spec: ExecutionSpec,
+    settlement_registry: InstrumentSettlementRegistry,
+) -> tuple[dict[str, int], pd.DataFrame]:
+    """Count INTERIOR-gap withdrawals per symbol over the full decision grid."""
+    census = list(census_symbols)
+    frame = pd.DataFrame(False, index=decision_index, columns=census, dtype=bool)
+    if not census:
+        return {}, frame
+    column_of = {sym: pos for pos, sym in enumerate(census)}
+    values = np.zeros((len(decision_index), len(census)), dtype=bool)
+    holding = pd.Timedelta(days=1) + pd.Timedelta(minutes=int(base_spec.passive_timeout_minutes))
+    starts, ends = _holding_window(
+        decision_index, entry_hour=int(strategy.entry_hour_utc), holding=holding,
+    )
+    for iv in active_intervals(plane="ohlcv_3m"):
+        if iv.extent != "INTERIOR":
+            continue
+        if source_gap_superseded_by_settlement(iv, settlement_registry):
+            continue
+        column = column_of.get(iv.symbol)
+        if column is None:
+            continue
+        overlap = np.asarray(pd.Timestamp(iv.start) < ends, dtype=bool)
+        if iv.end is not None:
+            overlap &= np.asarray(pd.Timestamp(iv.end) > starts, dtype=bool)
+        values[:, column] |= overlap
+    frame = pd.DataFrame(values, index=decision_index, columns=census, dtype=bool)
+    counts = {sym: int(frame[sym].sum()) for sym in census if bool(frame[sym].any())}
+    return counts, frame
+
+
 def strategy_blocked_decisions(
     decision_index: pd.DatetimeIndex,
     census_symbols: tuple[str, ...],
@@ -175,9 +315,10 @@ def strategy_blocked_decisions(
     Two causes block a decision. (1) An announced delisting: once a record's ``announced_at`` is at
     or before the day's snapshot instant and the holding horizon plus the registered lead reaches
     delivery, the symbol leaves the roster exactly as the live roster withdrawal does. (2) An
-    evidenced source gap the execution and holding window would cross, restricted to intervals not
-    explained by a settlement; an absence that only exists because the symbol delisted is never used
-    to anticipate the delisting.
+    evidenced ``INTERIOR`` or ``LISTING_EDGE`` source gap the execution and holding window would
+    cross, restricted to intervals not explained by a settlement; ``OPEN_EDGE`` and ``UNSCOPED``
+    gaps never withdraw (they fail the run via ``LakeCoverageError`` instead), and an absence
+    that only exists because the symbol delisted is never used to anticipate the delisting.
 
     Args:
         decision_index: Daily UTC decision grid shared with the roster inputs.
@@ -200,11 +341,7 @@ def strategy_blocked_decisions(
         decision_index, census, column_of,
         snapshot_hour=snapshot_hour, settlement_registry=settlement_registry,
     )
-    intervals = [
-        iv
-        for iv in active_intervals(plane="ohlcv_3m")
-        if not source_gap_superseded_by_settlement(iv, settlement_registry)
-    ]
+    intervals = _withdrawable_gap_intervals(settlement_registry)
     if intervals:
         starts = decision_index + pd.Timedelta(days=1, hours=entry_hour)
         ends = starts + holding
@@ -394,6 +531,24 @@ def build_request_targets(
         daily_close, daily_quote_volume, census,
         breadth=request.strategy.breadth, blocked_decisions=blocked_decisions,
     )
+    registry = settlement_registry_for_root(root)
+    delisting_values = _strategy_delisting_block(
+        pd.DatetimeIndex(daily_close.index), list(census),
+        {sym: pos for pos, sym in enumerate(census)},
+        snapshot_hour=int(request.strategy.snapshot_hour_utc),
+        settlement_registry=registry,
+    )
+    delisting_frame = pd.DataFrame(delisting_values, index=pd.DatetimeIndex(daily_close.index), columns=list(census), dtype=bool)
+    roster_no_gap = build_pit_roster(
+        daily_close, daily_quote_volume, census,
+        breadth=request.strategy.breadth, blocked_decisions=delisting_frame,
+    )
+    assert_lake_coverage(
+        pd.DatetimeIndex(daily_close.index), roster_no_gap,
+        strategy=request.strategy, base_spec=request.base_spec,
+        settlement_registry=registry,
+        evaluation_start=request.evaluation_start, evaluation_end=request.evaluation_end,
+    )
     ever_selected = [sym for sym in census if bool(roster[sym].any())]
     assert_strategy_execution_coverage(
         roster,
@@ -487,10 +642,28 @@ def run_strategy_backtest(request: StrategyBacktestRequest) -> StrategyBacktestR
         row = evidence.period_metrics.loc[period.label]
         if float(row["base_coverage"]) != 1.0 or float(row["stress_coverage"]) != 1.0:
             raise DataIntegrityError(f"report period {period.label!r} is not fully covered by daily evidence")
+    _, interior_frame = strategy_interior_withdrawals(
+        pd.DatetimeIndex(context.daily_close.index), census, strategy=request.strategy,
+        base_spec=request.base_spec, settlement_registry=settlement_registry,
+    )
+    decision_index = pd.DatetimeIndex(context.daily_close.index)
+    no_gap_roster = build_pit_roster(
+        context.daily_close, context.daily_quote_volume, census, breadth=request.strategy.breadth,
+        blocked_decisions=pd.DataFrame(delisting_only, index=decision_index, columns=list(census)),
+    )
+    entries = decision_index + pd.Timedelta(days=1, hours=int(request.strategy.entry_hour_utc))
+    scored = (entries >= request.evaluation_start) & (entries < request.evaluation_end)
+    affected = (interior_frame & no_gap_roster).loc[scored].sum()
+    interior_counts = {str(sym): int(days) for sym, days in affected.items() if days > 0}
+    withdrawals: tuple[Mapping[str, object], ...] = tuple(
+        {"symbol": sym, "extent": "INTERIOR", "days": int(days)}
+        for sym, days in sorted(interior_counts.items())
+    )
     return StrategyBacktestRun(
         request=request, candidate=candidate, evidence=evidence,
         execution_start=execution_start, execution_end=execution_end, source_symbols=census,
         source_gap_excluded_symbols=tuple(sorted(sym for sym in census if bool(blocked_decisions[sym].any()))),
         source_gap_blocked_decisions=int(blocked_decisions.to_numpy(dtype=bool).sum()),
         delisting_blocked_decisions=int(delisting_only.sum()),
+        data_availability_withdrawals=withdrawals,
     )

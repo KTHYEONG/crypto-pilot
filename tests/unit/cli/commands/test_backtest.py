@@ -43,12 +43,14 @@ def _install_strategy(monkeypatch: pytest.MonkeyPatch) -> dict:
         seen["request"] = request
         return types.SimpleNamespace(request=request)
 
-    def _fake_persist(run: object, output: Path) -> Path:
+    def _fake_persist(run: object, output: Path, **kwargs: object) -> Path:
         seen["output"] = output
+        seen["statistics"] = kwargs.get("statistics")
         Path(output).write_text("{}", encoding="utf-8")
         return output
 
     monkeypatch.setattr(run_mod, "run_strategy_backtest", _fake_run)
+    monkeypatch.setattr(backtest_mod, "_strategy_run_statistics", lambda run: {})
     import src.engine.backtest_persist as report_mod
 
     monkeypatch.setattr(report_mod, "persist_strategy_backtest", _fake_persist)
@@ -528,8 +530,10 @@ def test_account_command_defaults_to_growth_at_retail_capital(tmp_path: Path, mo
 
     seen = _install_account(monkeypatch, tmp_path)
     backtest_mod.run_account_replay_command(_parse(_account_argv()))
-    assert len(seen["replays"]) == 2
-    unit_replay, main = seen["replays"]
+    assert len(seen["replays"]) == 3
+    unit_replay, main, stress = seen["replays"]
+    assert stress["fee"] == 18.0
+    assert stress["policy"] == main["policy"]
     unit_policy = unit_replay["policy"]
     assert unit_policy.kind == "fixed"
     assert unit_policy.exposure_max == 1.0
@@ -962,3 +966,89 @@ def test_exposure_cli_prints_path_on_success(tmp_path: Path, monkeypatch: pytest
     backtest_mod.run_exposure_scan_command(_parse(["backtest", "exposure", "--run-dir", str(run_dir)]))
     out = capsys.readouterr().out.strip()
     assert out == str(run_dir / "exposure.json")
+
+
+def test_strategy_run_statistics_reports_base_and_stress() -> None:
+    """The CLI statistics step maps both ledgers to JSON-safe decision-grade payloads."""
+    import dataclasses
+
+    from src.engine.backtest_evidence import StrategyReportPeriod, evaluate_strategy_backtest
+    from src.engine.strategy_backtest import StrategyBacktestRequest
+    from src.strategy.targets import FLOW_MOM_TOP20, StrategyTargets
+    from src.core.types import ExecutionSpec
+
+    base = dataclasses.replace(
+        ExecutionSpec(), taker_fee_bps=5.0, taker_slippage_bps=1.0, decision_anchor="submit_bar",
+    )
+    stress = dataclasses.replace(
+        ExecutionSpec(), taker_fee_bps=5.0, taker_slippage_bps=13.0, decision_anchor="submit_bar",
+    )
+    symbols = ("AAA", "BBB")
+    labels = [pd.Timestamp("2021-06-02", tz="UTC") + pd.Timedelta(days=i) for i in range(3)]
+    weights = pd.DataFrame(
+        {"AAA": [0.05] * 3, "BBB": [-0.05] * 3}, index=pd.DatetimeIndex(labels, tz="UTC"), dtype="float64",
+    )
+    avail = pd.DatetimeIndex([label - pd.Timedelta(hours=1) for label in labels], tz="UTC")
+    candidate = StrategyTargets(target_weights=weights, signal_available_at=avail, strategy=FLOW_MOM_TOP20)
+
+    def _window(grid: pd.DatetimeIndex, chosen: list) -> object:
+        from src.engine.execution import ExecutionReplayWindow
+
+        params: dict = {
+            "window_start": grid[0], "window_end": grid[-1], "columns": symbols, "symbols": symbols,
+            "minute_grid": grid, "target_weights": weights.loc[chosen].copy(),
+            "signal_available_at": pd.DatetimeIndex(
+                [avail[weights.index.get_loc(label)] for label in chosen], tz="UTC"
+            ),
+            "bar_available_at": grid + pd.Timedelta(minutes=3),
+            "highs": pd.DataFrame(101.0, index=grid, columns=list(symbols), dtype="float64"),
+            "lows": pd.DataFrame(99.0, index=grid, columns=list(symbols), dtype="float64"),
+            "closes": pd.DataFrame(100.0, index=grid, columns=list(symbols), dtype="float64"),
+            "marks": pd.DataFrame(100.0, index=grid, columns=list(symbols), dtype="float64"),
+            "bar_funding": pd.DataFrame(0.0, index=grid, columns=list(symbols), dtype="float64"),
+            "quote_volumes": pd.DataFrame(1000.0, index=grid, columns=list(symbols), dtype="float64"),
+            "funding_known": pd.DataFrame(True, index=grid, columns=list(symbols)),
+        }
+        return ExecutionReplayWindow(**params)  # type: ignore[arg-type]
+
+    first = pd.date_range(labels[0] - pd.Timedelta(hours=1), labels[1] + pd.Timedelta(hours=1), freq="3min", tz="UTC")
+    second = pd.date_range(labels[1] - pd.Timedelta(hours=2), labels[2] + pd.Timedelta(hours=2), freq="3min", tz="UTC")
+    periods = (StrategyReportPeriod(label="P1", start=labels[0], end=labels[1]),)
+    evidence = evaluate_strategy_backtest(
+        candidate, iter([_window(first, labels[:1]), _window(second, labels[1:])]),
+        initial_equity=100000.0, base_spec=base, stress_spec=stress, report_periods=periods,
+    )
+    request = StrategyBacktestRequest(
+        source_start=pd.Timestamp("2021-01-01", tz="UTC"), evaluation_start=labels[0],
+        evaluation_end=labels[-1] + pd.Timedelta(days=1), strategy=FLOW_MOM_TOP20,
+        initial_equity=100000.0, base_spec=base, stress_spec=stress, report_periods=periods,
+    )
+    import types as _types
+
+    run = _types.SimpleNamespace(request=request, candidate=candidate, evidence=evidence)
+    first_stats = backtest_mod._strategy_run_statistics(run)
+    second_stats = backtest_mod._strategy_run_statistics(run)
+    assert set(first_stats) == {"base", "stress"}
+    assert first_stats == second_stats
+    assert first_stats["base"]["in_sample_days"] == 3
+    assert first_stats["base"]["bootstrap"]["seed"] == 20261008
+
+    legacy_evidence = dataclasses.replace(
+        evidence,
+        base=dataclasses.replace(
+            evidence.base,
+            ledger=dataclasses.replace(
+                evidence.base.ledger, funding_by_symbol_daily=None, funding_by_symbol={"AAA": -10.0},
+            ),
+        ),
+        stress=dataclasses.replace(
+            evidence.stress,
+            ledger=dataclasses.replace(
+                evidence.stress.ledger, funding_by_symbol_daily=None, funding_by_symbol={"AAA": -5.0},
+            ),
+        ),
+    )
+    legacy_run = _types.SimpleNamespace(request=request, candidate=candidate, evidence=legacy_evidence)
+    legacy_stats = backtest_mod._strategy_run_statistics(legacy_run)
+    assert set(legacy_stats) == {"base", "stress"}
+    assert legacy_stats["base"]["funding"]["total_contribution"] == pytest.approx(-10.0 / 100000.0)

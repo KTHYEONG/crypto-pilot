@@ -403,6 +403,11 @@ VENUE_HALT_MIN_PRESENT_SYMBOLS: int = 10
 # Measured gap between the longest temporary freeze (96 min) and the shortest dead market (39 days).
 EXIT_DEFERRAL_MAX_AGE: pd.Timedelta = pd.Timedelta(hours=24)
 
+# --- spec 38 part 5: decision-grade strategy report --------------------------------
+# Stationary block-bootstrap budget for one same-length future path (report only).
+REPORT_BOOTSTRAP_PATHS: int = 2000
+REPORT_BOOTSTRAP_SEED: int = 20261008
+
 # 2026-07-01 이후 미사용 전진 구간을 보존하는 평가 상한.
 # MHS-local one-time final-OOS ceiling (2026-08-25 user-authorized decision):
 # strictly narrower than any unseal of the shared HOLDOUT_CUTOFF gate.

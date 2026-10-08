@@ -320,6 +320,8 @@ class _BoundExecutionReplayAccumulator:
         self.funding_chunks: list[np.ndarray] = []
         self.fee_chunks: list[np.ndarray] = []
         self.turnover_chunks: list[np.ndarray] = []
+        self._funding_by_symbol: dict[str, float] = dict.fromkeys(self.columns, 0.0)
+        self._funding_daily_chunks: list[pd.DataFrame] = []
         self.ledger_valid = True
         self.invalid_reasons: set[str] = set()
         self.first_held_mark: tuple[str, pd.Timestamp] | None = None
@@ -1659,6 +1661,8 @@ class _BoundExecutionReplayAccumulator:
             funding_arr = np.zeros(n_grid, dtype="float64")
             notional_arr = np.zeros(n_grid, dtype="float64")
             notional_before_arr = np.zeros(n_grid, dtype="float64")
+            chunk_days, day_positions = np.unique(grid[p0:].normalize(), return_inverse=True)
+            funding_sym = np.zeros((len(chunk_days), n_local), dtype="float64")
             start_units = np.asarray(self.ledger_units[gpos], dtype="float64")
             start_valid = np.asarray(self.last_valid_mark[gpos], dtype="float64")
             end_units = np.empty(n_local, dtype="float64")
@@ -1744,6 +1748,7 @@ class _BoundExecutionReplayAccumulator:
                 usable = finite & fknown_col
                 charged_col = np.where(usable, funding_col * before * marks_col, 0.0)
                 funding_arr += charged_col
+                np.add.at(funding_sym[:, j], day_positions, charged_col[p0:])
                 unpriceable = ~finite & (funding_col != 0.0)
                 funding_gap = (held & (~fknown_col | unpriceable)) & kept
                 if bool(funding_gap.any()):
@@ -1806,6 +1811,12 @@ class _BoundExecutionReplayAccumulator:
             self.funding_chunks.append(funding_arr[p0:])
             self.fee_chunks.append(fee_by_ts[p0:])
             self.turnover_chunks.append(turnover_arr)
+            for j in range(n_local):
+                self._funding_by_symbol[local_cols[j]] = float(
+                    self._funding_by_symbol[local_cols[j]] + float(funding_sym[:, j].sum())
+                )
+            chunk_frame = pd.DataFrame(funding_sym, index=pd.DatetimeIndex(chunk_days), columns=list(local_cols))
+            self._funding_daily_chunks.append(chunk_frame)
             self.ledger_cash = float(cash_after[-1])
             if self._w_avail_explicit:
                 self._ledger_avail_chunks.append(np.asarray(self._w_avail_ns[p0:], dtype="int64"))
@@ -2119,6 +2130,10 @@ class _BoundExecutionReplayAccumulator:
         equity = pd.Series(equity_values_arr, index=full_index, dtype="float64")
         if not np.isfinite(equity_values_arr).all() or (equity_values_arr <= 0).any():
             raise DataIntegrityError("simulated inventory equity must be finite and strictly positive")
+        funding_daily = pd.concat(self._funding_daily_chunks)
+        funding_daily = funding_daily.groupby(funding_daily.index).sum()
+        funding_daily = funding_daily.reindex(columns=list(columns), fill_value=0.0).astype("float64")
+        funding_daily.index = pd.DatetimeIndex(funding_daily.index, tz="UTC")
         ledger = SimulatedInventoryLedgerResult(
             equity=equity,
             net_returns=equity.pct_change().dropna(),
@@ -2132,6 +2147,8 @@ class _BoundExecutionReplayAccumulator:
             primary_valid=self.ledger_valid,
             invalid_reasons=tuple(sorted(self.invalid_reasons)),
             equity_floor_breached_at=tuple(self.equity_floor_breaches),
+            funding_by_symbol=dict(self._funding_by_symbol),
+            funding_by_symbol_daily=funding_daily,
         )
         if self.first_held_mark is not None:
             self.data_gaps.append(
@@ -2151,6 +2168,8 @@ class _BoundExecutionReplayAccumulator:
             primary_valid=self.ledger_valid,
             invalid_reasons=tuple(sorted(self.invalid_reasons)),
             data_gaps=tuple(self.data_gaps),
+            funding_by_symbol=dict(self._funding_by_symbol),
+            funding_by_symbol_daily=ledger.funding_by_symbol_daily,
         )
 
         if self.units_after_events:
