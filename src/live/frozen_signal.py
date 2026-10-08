@@ -14,6 +14,13 @@ from pydantic import SecretStr
 
 from src.common.durable_io import durable_replace, durable_write_text
 from src.common.errors import DataIntegrityError
+from src.core.params import (
+    ACCOUNT_MIN_MOMENT_DAYS,
+    ACCOUNT_PRIOR_DAYS,
+    LIVE_FROZEN_WARMUP_DAYS,
+    LIVE_UNIT_PROXY_COST_BPS,
+)
+from src.core.settlement_evidence import SettlementEvidence, settlement_evidence_from_bars
 from src.live.deployed_weights import append_weight_row, decision_ohlcv_close_path, load_weights_frame
 from src.live.errors import ArtifactSealError, CausalityViolation
 from src.live.frozen_book import (
@@ -26,12 +33,10 @@ from src.live.frozen_book import (
 )
 from src.live.ledger import load_ledger
 from src.live.venue_listing import (
-    SettlementEvidence,
     VenueListingSnapshot,
     delisting_blocked_decisions,
     latest_venue_listing,
     load_venue_listing_history,
-    settlement_evidence_from_bars,
 )
 from src.market_data.binance.venue_rules import (
     VenueRuleSnapshot,
@@ -40,19 +45,13 @@ from src.market_data.binance.venue_rules import (
 )
 from src.market_data.storage.loaders import load_funding_rates
 from src.market_data.storage.ohlcv import is_temp_artifact
-from src.mhs.account_policy import (
+from src.strategy.sizing import (
     account_growth_policy,
     bayesian_unit_moments,
     build_venue_ladders,
     choose_exposure,
 )
-from src.mhs.frozen_research_candidate import FROZEN_MHS_TOP20_V2
-from src.mhs.params import (
-    ACCOUNT_MIN_MOMENT_DAYS,
-    ACCOUNT_PRIOR_DAYS,
-    LIVE_FROZEN_WARMUP_DAYS,
-    LIVE_UNIT_PROXY_COST_BPS,
-)
+from src.strategy.targets import FROZEN_MHS_TOP20_V2
 
 FROZEN_SIGNAL_REPORT_NAME: str = "frozen_signal_report.json"
 

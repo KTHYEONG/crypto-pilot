@@ -16,7 +16,7 @@ import pandas as pd
 
 from src.backtests.catalog import append_backtest_index
 from src.common.paths import FUTURES_DATA_DIR
-from src.mhs.params import (
+from src.core.params import (
     ACCOUNT_DEFAULT_CAPITAL_USDT,
     ACCOUNT_IMPACT_Y,
     ACCOUNT_MAKER_FEE_BPS,
@@ -35,12 +35,12 @@ from src.mhs.params import (
     NULL_BOOTSTRAP_MEAN_BLOCK_DAYS,
     SETTLEMENT_PRICE_STRESS_HAIRCUT_BPS,
 )
-from src.mhs.resources import MhsMemoryBudget
+from src.core.resources import MhsMemoryBudget
 
 if TYPE_CHECKING:
-    from src.mhs.account_ledger import AccountLedgerResult
-    from src.mhs.frozen_research_candidate import FrozenMhsStrategySpec
-    from src.mhs.types import ExecutionSpec
+    from src.core.types import ExecutionSpec
+    from src.engine.account_ledger import AccountLedgerResult
+    from src.strategy.targets import FrozenMhsStrategySpec
 
 _logger = logging.getLogger(__name__)
 
@@ -66,7 +66,7 @@ def frozen_execution_specs() -> tuple[ExecutionSpec, ExecutionSpec]:
         `(base, stress)` where base is 5 bps taker fee + 1 bp slippage and stress widens
         slippage to 13 bps.
     """
-    from src.mhs.types import ExecutionSpec
+    from src.core.types import ExecutionSpec
 
     base = dataclasses.replace(ExecutionSpec(), taker_fee_bps=5.0, taker_slippage_bps=1.0, decision_anchor="submit_bar")
     stress = dataclasses.replace(
@@ -427,10 +427,10 @@ def _resolve_account_venue(request: FrozenAccountRequest) -> tuple[Any, Path]:
 def _build_account_candidate(request: FrozenAccountRequest) -> tuple[Any, Any, Any]:
     """Build the unlevered account-unit candidate and its assembled replay inputs."""
     from src.common.errors import DataIntegrityError
-    from src.mhs.account_sources import assemble_account_inputs
-    from src.mhs.frozen_research_candidate import FROZEN_MHS_TOP20_ACCOUNT_UNIT_V2
-    from src.mhs.frozen_research_evidence import FrozenMhsReportPeriod
-    from src.mhs.frozen_research_run import FrozenMhsBacktestRequest, build_frozen_request_candidate
+    from src.engine.account_sources import assemble_account_inputs
+    from src.engine.backtest_evidence import FrozenMhsReportPeriod
+    from src.engine.strategy_backtest import FrozenMhsBacktestRequest, build_frozen_request_candidate
+    from src.strategy.targets import FROZEN_MHS_TOP20_ACCOUNT_UNIT_V2
 
     base_spec, stress_spec = frozen_execution_specs()
     try:
@@ -461,7 +461,7 @@ def _build_account_candidate(request: FrozenAccountRequest) -> tuple[Any, Any, A
 def _replay_account_ledgers(request: FrozenAccountRequest, parts: Any, rules: Any, policy: Any) -> tuple[Any, Any]:
     """Replay the unit reference ledger then the account ledger."""
     from src.common.errors import DataIntegrityError
-    from src.mhs.account_ledger import replay_account
+    from src.engine.account_ledger import replay_account
 
     unit_weights, marks, funding_cum, adv, daily_sigma, anchor_times = parts
     execution_kwargs = _account_execution_kwargs(request.execution)
@@ -589,7 +589,7 @@ def run_frozen_account(request: FrozenAccountRequest) -> FrozenAccountReport:
     validate_frozen_account_request(request)
     rules, venue_path = _resolve_account_venue(request)
     strategy, parts, _ = _build_account_candidate(request)
-    from src.mhs.account_policy import account_growth_policy
+    from src.strategy.sizing import account_growth_policy
 
     growth_base = account_growth_policy(impact_y=request.impact_y)
     if request.policy == "growth":
@@ -703,8 +703,8 @@ def derive_frozen_exposure(
         ValueError: Roster construction or the solver rejects the inputs
             (including `DataIntegrityError`).
     """
-    from src.mhs.frozen_research_universe import build_frozen_pit_roster
-    from src.mhs.growth_exposure import GapSample, roster_gap_sample, solve_log_growth_exposure
+    from src.evaluation.exposure import GapSample, roster_gap_sample, solve_log_growth_exposure
+    from src.strategy.universe import build_frozen_pit_roster
 
     roster = build_frozen_pit_roster(
         daily_close, daily_quote_volume, census, breadth=artifacts.breadth, blocked_decisions=None,
@@ -764,9 +764,9 @@ def run_frozen_exposure(request: FrozenExposureRequest) -> FrozenExposureReport:
             solver failure, or write failure. `exposure.json` never exists after a failure.
     """
     from src.common.errors import DataIntegrityError
-    from src.mhs.growth_exposure import structurally_excluded_symbols
-    from src.mhs.panel import load_base_panel
-    from src.mhs.resources import _current_tree_swap_bytes, assert_mhs_stage_allocation, resolve_mhs_memory_budget
+    from src.core.panel import load_base_panel
+    from src.core.resources import _current_tree_swap_bytes, assert_mhs_stage_allocation, resolve_mhs_memory_budget
+    from src.evaluation.exposure import structurally_excluded_symbols
 
     run_dir = request.run_dir
     if not run_dir.is_dir():

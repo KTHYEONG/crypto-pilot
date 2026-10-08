@@ -27,19 +27,19 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from src.common.errors import DataIntegrityError
+from src.engine.execution.contracts import TerminalPositionEvidence
+from src.engine.execution.integrity import replay_ledger_certified
 from src.mhs.backtest.inventory import (
     _UNPRICED_TERMINAL_CODES,
     _inventory_daily_returns,
     _inventory_ledger_summary,
 )
-from src.mhs.execution.contracts import TerminalPositionEvidence
-from src.mhs.execution.integrity import replay_ledger_certified
 from src.mhs.reporting.process import _tier_payload
 
 if TYPE_CHECKING:
+    from src.engine.execution.contracts import ExecutionDataGap, FundingCoverageGap, StrategyExecutionReplayResult
     from src.mhs.backtest.certification import ProcessValidationResult
     from src.mhs.backtest.contracts import ProcessInventoryFailureReport, ProcessInventoryReport
-    from src.mhs.execution.contracts import ExecutionDataGap, FundingCoverageGap, StrategyExecutionReplayResult
 
 _VALIDATION_SCHEMA = "process_validation/1"
 _LEGACY_VALIDATION_ABSENT = "LEGACY_VALIDATION_ABSENT"

@@ -64,7 +64,7 @@ def test_cap_applies_only_inside_xdist_workers() -> None:
 
 
 def test_fork_plan_follows_execution_mode() -> None:
-    from src.mhs.parallel import plan_worker_count
+    from src.core.parallel import plan_worker_count
 
     expected = 1 if "PYTEST_XDIST_WORKER" in os.environ else min(3, os.cpu_count() or 1)
     assert plan_worker_count(3, 1, ram_guard=False) == expected
@@ -72,7 +72,7 @@ def test_fork_plan_follows_execution_mode() -> None:
 
 @pytest.mark.mhs_parallel_parity
 def test_parity_marker_lifts_the_cap() -> None:
-    from src.mhs.parallel import plan_worker_count
+    from src.core.parallel import plan_worker_count
 
     assert plan_worker_count(3, 1, ram_guard=False) == min(3, os.cpu_count() or 1)
 

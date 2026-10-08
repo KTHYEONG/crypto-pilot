@@ -4,7 +4,7 @@
 fills, per-unit-turnover fee + slippage, funding on the held book) and
 :func:`run_xs_composite_ledger` / :func:`run_xs_composite_ledger_multi_tier`
 compound a supplied weight panel into an equity ledger under it. Weight
-construction lives with the callers; ``src.mhs.execution.pnl`` is the only
+construction lives with the callers; ``src.engine.execution.pnl`` is the only
 production consumer. This module is imported by the live daemon chain, so its
 import-time contract check must reference only symbols defined here.
 """

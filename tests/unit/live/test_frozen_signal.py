@@ -16,7 +16,7 @@ from src.common.errors import DataIntegrityError
 from src.live.errors import CausalityViolation
 from src.live.frozen_book import build_live_frozen_book
 from src.live.frozen_signal import FROZEN_SIGNAL_REPORT_NAME, run_frozen_signal_step
-from src.mhs.params import ACCOUNT_EXPOSURE_STEP
+from src.core.params import ACCOUNT_EXPOSURE_STEP
 
 _START = pd.Timestamp("2021-01-01", tz="UTC")
 _SYMS = (*tuple(f"SYM{i:02d}USDT" for i in range(8)), "BTCUSDT")
@@ -245,8 +245,8 @@ def test_held_symbol_without_snapshot_close_fails_closed(
 
 
 def test_posterior_uses_only_returns_up_to_decision_day(layout: dict[str, Path]) -> None:
-    from src.mhs.account_policy import bayesian_unit_moments
-    from src.mhs.params import ACCOUNT_MIN_MOMENT_DAYS, ACCOUNT_PRIOR_DAYS
+    from src.strategy.sizing import bayesian_unit_moments
+    from src.core.params import ACCOUNT_MIN_MOMENT_DAYS, ACCOUNT_PRIOR_DAYS
 
     fwd_idx = pd.date_range(_BOOT_END + pd.Timedelta(days=1), _DAY + pd.Timedelta(days=1), freq="1D", tz="UTC")
     _write_unit(layout["forward"], fwd_idx, 0.5)
@@ -332,7 +332,7 @@ def test_no_venue_snapshot_fails_closed(layout: dict[str, Path], tmp_path: Path)
 
 
 def test_exposure_respects_margin_cap(layout: dict[str, Path], tmp_path: Path) -> None:
-    from src.mhs.account_policy import build_venue_ladders, margin_exposure_cap, account_growth_policy
+    from src.strategy.sizing import build_venue_ladders, margin_exposure_cap, account_growth_policy
     from src.market_data.binance.venue_rules import load_venue_rule_snapshot
 
     boot_idx = pd.date_range(_START, _BOOT_END, freq="1D", tz="UTC")

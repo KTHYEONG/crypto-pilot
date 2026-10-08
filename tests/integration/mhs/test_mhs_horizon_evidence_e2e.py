@@ -9,17 +9,17 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
-import src.mhs.marks as marks
-import src.mhs.marks as mhs_marks
+import src.core.marks as marks
+import src.core.marks as mhs_marks
 import src.mhs.statistics as statistics
 from src.mhs.diagnostic_run import run_mhs_horizon_diagnostic
 from src.mhs.evaluation.folds import _run_anchored_fold
 from src.mhs.evaluation.fold_weights import _build_fold_target_weights
 from src.mhs.evaluation.integrity import _truncate_replayable_decisions
-from src.mhs.marks import _load_funding_series, _load_window_minute_frames
-from src.mhs.params import PERIODS_PER_YEAR_1H as _PERIODS_PER_YEAR_1H
+from src.core.marks import _load_funding_series, _load_window_minute_frames
+from src.core.params import PERIODS_PER_YEAR_1H as _PERIODS_PER_YEAR_1H
 from src.mhs.report.schema import MhsHorizonDiagnosticReport
-from src.mhs.resources import _StageRecorder
+from src.core.resources import _StageRecorder
 
 from tests.integration.mhs._report_cache import MHS_SYNTHETIC_DEFAULT_GROUP
 from tests.integration.mhs.test_mhs_horizon_diagnostic import (  # noqa: F401
@@ -106,7 +106,7 @@ class TestTypedArtifactRoundtrip:
             _build_replay_category_tables,
             _write_unified_artifact_tables,
         )
-        from src.mhs.execution import ExecutionSpec, strategy_aware_execution_replay
+        from src.engine.execution import ExecutionSpec, strategy_aware_execution_replay
 
         idx = pd.date_range("2021-01-01 12:01", periods=31, freq="1min", tz="UTC")
         px = pd.DataFrame({"A": [100.0] * 31}, index=idx)
@@ -136,7 +136,7 @@ class TestTypedArtifactRoundtrip:
         from src.mhs.report.artifacts import load_mhs_replay_artifact
         from src.mhs.report.persist import persist_mhs_horizon_diagnostic_report
         from src.mhs.research_go import GO_REASON_UNSPECIFIED_POLICY
-        from src.mhs.execution import ExecutionSpec, strategy_aware_execution_replay
+        from src.engine.execution import ExecutionSpec, strategy_aware_execution_replay
 
         idx = pd.date_range("2021-01-01 12:01", periods=31, freq="1min", tz="UTC")
         target = pd.DataFrame({"A": [1.0]}, index=[pd.Timestamp("2021-01-01 11:00", tz="UTC")])
@@ -259,12 +259,12 @@ class TestFoldWindowTelemetryOracle:
         window through the same causal window engine (with the fold's
         quote-volume, funding-knowledge, and bar-availability overlays) over
         the whole validation window."""
-        from src.mhs.execution import (
+        from src.engine.execution import (
             ExecutionReplayWindow,
             align_funding_with_knowledge,
             replay_execution_windows,
         )
-        from src.mhs.types import ExecutionSpec
+        from src.core.types import ExecutionSpec
 
         fold = FOLD_WINDOW_FOLD
         vs, ve = fold.validation_start, fold.validation_end

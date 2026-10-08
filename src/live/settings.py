@@ -16,9 +16,9 @@ from pydantic import AliasChoices, Field, SecretStr, ValidationInfo, field_valid
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from src.common.paths import APP_ROOT, DATA_DIR
-from src.mhs.frozen_research_candidate import FROZEN_MHS_TOP20_V2
-from src.mhs.params import ACCOUNT_EXPOSURE_MAX, SIGNAL_PANEL_WINDOW_DAYS
-from src.mhs.types import ExecutionSpec
+from src.core.params import ACCOUNT_EXPOSURE_MAX, SIGNAL_PANEL_WINDOW_DAYS
+from src.core.types import ExecutionSpec
+from src.strategy.targets import FROZEN_MHS_TOP20_V2
 
 #: LIVE_MAINNET 승인 문자열. 이 값과 정확히 일치해야만 실계좌 모드가 생성된다.
 MAINNET_TRADING_ACK = "I_UNDERSTAND_REAL_MONEY"

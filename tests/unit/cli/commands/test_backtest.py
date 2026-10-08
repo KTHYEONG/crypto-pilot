@@ -16,8 +16,8 @@ import pytest
 import src.cli.commands.backtest as backtest_mod
 from src.cli.commands.backtest import add_backtest_commands, run_mhs_backtest
 from src.cli.main import build_root_parser
-from src.mhs.params import DISCOVERY_START, PROCESS_EVALUATION_CEILING
-from src.mhs.resources import MhsMemoryBudget
+from src.core.params import DISCOVERY_START, PROCESS_EVALUATION_CEILING
+from src.core.resources import MhsMemoryBudget
 from tests.unit.application.test_mhs_frozen_account import (
     _fake_run_dir,
     _install_exposure_fakes as _install_exposure,
@@ -242,7 +242,7 @@ def _frozen_argv(tmp_path: Path, *extra: str) -> list[str]:
 
 
 def _install_frozen(monkeypatch: pytest.MonkeyPatch) -> dict:
-    import src.mhs.frozen_research_run as run_mod
+    import src.engine.strategy_backtest as run_mod
 
     seen: dict = {}
 
@@ -256,7 +256,7 @@ def _install_frozen(monkeypatch: pytest.MonkeyPatch) -> dict:
         return output
 
     monkeypatch.setattr(run_mod, "run_frozen_mhs_backtest", _fake_run)
-    import src.mhs.frozen_research_report as report_mod
+    import src.engine.backtest_persist as report_mod
 
     monkeypatch.setattr(report_mod, "persist_frozen_mhs_backtest", _fake_persist)
     return seen
@@ -293,7 +293,7 @@ def test_backtest_mhs_frozen_breadth_identity(tmp_path: Path, monkeypatch: pytes
 
 def test_backtest_mhs_frozen_growth_variant_selects_registered_policy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """--variant growth selects the registered clip + exposure policy at Top-20 breadth."""
-    from src.mhs.params import FROZEN_GROWTH_EXPOSURE_MULTIPLIER, FROZEN_GROWTH_NAME_CLIP
+    from src.core.params import FROZEN_GROWTH_EXPOSURE_MULTIPLIER, FROZEN_GROWTH_NAME_CLIP
 
     seen = _install_frozen(monkeypatch)
     backtest_mod.run_frozen_mhs_backtest_command(_parse([*_frozen_argv(tmp_path)[:8], "--variant", "growth", "--output", str(tmp_path / "growth.json")]))
@@ -389,7 +389,7 @@ def test_backtest_mhs_frozen_variant_breadth_and_failures(tmp_path: Path, monkey
         backtest_mod.run_frozen_mhs_backtest_command(
             _parse(["backtest", "mhs-frozen", "--source-start", "2024-01-01", "--start", "2025-01-01T00:00:00+00:00", "--end", "2025-01-01T12:00:00+00:00", "--output", str(tmp_path / "f.json")])
         )
-    import src.mhs.frozen_research_run as run_mod
+    import src.engine.strategy_backtest as run_mod
 
     monkeypatch.setattr(run_mod, "run_frozen_mhs_backtest", lambda request: (_ for _ in ()).throw(ValueError("boom")))
     failed = tmp_path / "failed.json"
@@ -606,7 +606,7 @@ def test_frozen_index_records_execution(tmp_path: Path, monkeypatch: pytest.Monk
 
 def test_frozen_exposure_artifact_fresh_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """An existing exposure.json exits before any panel load."""
-    import src.mhs.panel as panel_mod
+    import src.core.panel as panel_mod
 
     run_dir = _fake_run_dir(tmp_path)
     (run_dir / "exposure.json").write_text("{}", encoding="utf-8")
@@ -640,7 +640,7 @@ def test_frozen_exposure_rejects_invalid_artifacts(tmp_path: Path, monkeypatch: 
 
 def test_frozen_exposure_solver_rejection_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A solver rejection exits instead of persisting an exposure artifact."""
-    import src.mhs.growth_exposure as growth_mod
+    import src.evaluation.exposure as growth_mod
 
     run_dir = _fake_run_dir(tmp_path)
     _install_exposure(monkeypatch)
@@ -684,7 +684,7 @@ def _run_dirs(tmp_path: Path) -> list[Path]:
 
 def test_account_command_defaults_to_growth_at_retail_capital(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """No policy/capital flags select growth at the declared minimum retail start."""
-    from src.mhs.params import (
+    from src.core.params import (
         ACCOUNT_DEFAULT_CAPITAL_USDT,
         ACCOUNT_EXPOSURE_MAX,
         ACCOUNT_EXPOSURE_STEP,
@@ -751,7 +751,7 @@ def test_account_missing_venue_snapshot_fails_closed(tmp_path: Path, monkeypatch
 
 def test_account_artifacts_and_disclosures(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
     """account.json carries mandated disclosures and the daily parquet exists."""
-    from src.mhs.params import (
+    from src.core.params import (
         ACCOUNT_MIN_MOMENT_DAYS,
         ACCOUNT_PRIOR_DAYS,
         ACCOUNT_RECON_CAGR_TOLERANCE,
@@ -843,7 +843,7 @@ def test_account_growth_policy_constructed_via_shared_factory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The growth replay policy equals the shared account growth factory output."""
-    from src.mhs.account_policy import account_growth_policy
+    from src.strategy.sizing import account_growth_policy
 
     seen = _install_account(monkeypatch, tmp_path)
     backtest_mod.run_frozen_account_command(_parse(_account_argv("--impact-y", "0.7")))
@@ -877,9 +877,9 @@ def _write_held_parquet(root: Path, symbol: str, start: pd.Timestamp, bars: int,
 
 
 def _assemble_fixture(tmp_path: Path) -> tuple:
-    from src.mhs.frozen_research_candidate import FROZEN_MHS_TOP20_V2, FrozenMhsCandidate
-    from src.mhs.frozen_research_run import FrozenSourceContext
-    from src.mhs.resources import MhsMemoryBudget
+    from src.strategy.targets import FROZEN_MHS_TOP20_V2, FrozenMhsCandidate
+    from src.engine.strategy_backtest import FrozenSourceContext
+    from src.core.resources import MhsMemoryBudget
 
     entries = pd.date_range("2021-04-01", periods=2, freq="D", tz="UTC")
     weights = pd.DataFrame({"AAA": [0.05, -0.05], "BBB": [0.0, 0.0]}, index=entries, dtype="float64")
@@ -906,7 +906,7 @@ def _assemble_fixture(tmp_path: Path) -> tuple:
 
 def test_assemble_account_inputs_held_symbols_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Only held symbols are read; funding is cumulated on 3m bars and sampled at each entry."""
-    import src.mhs.account_sources as sources_mod
+    import src.engine.account_sources as sources_mod
 
     candidate, context, entries, grid = _assemble_fixture(tmp_path)
     seen: dict = {}
@@ -937,7 +937,7 @@ def test_assemble_account_inputs_held_symbols_only(tmp_path: Path, monkeypatch: 
 
 def test_assemble_account_inputs_missing_held_source_fails(tmp_path: Path) -> None:
     """A held symbol without 3m source fails closed."""
-    import src.mhs.account_sources as sources_mod
+    import src.engine.account_sources as sources_mod
 
     from src.common.errors import DataIntegrityError
 
@@ -975,7 +975,7 @@ def test_account_rejects_invalid_arguments(tmp_path: Path, monkeypatch: pytest.M
 
 def test_assemble_account_inputs_malformed_source_fails(tmp_path: Path) -> None:
     """A 3m archive without OHLC columns fails closed."""
-    import src.mhs.account_sources as sources_mod
+    import src.engine.account_sources as sources_mod
 
     from src.common.errors import DataIntegrityError
 
@@ -990,7 +990,7 @@ def test_assemble_account_inputs_malformed_source_fails(tmp_path: Path) -> None:
 
 def test_account_source_failure_fails_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A data-integrity failure during source assembly exits instead of replaying garbage."""
-    import src.mhs.frozen_research_run as run_mod
+    import src.engine.strategy_backtest as run_mod
 
     from src.common.errors import DataIntegrityError
 
@@ -1007,7 +1007,7 @@ def test_account_source_failure_fails_closed(tmp_path: Path, monkeypatch: pytest
 
 def test_account_replay_failure_fails_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A replay failure exits without persisting an account artifact."""
-    import src.mhs.account_ledger as ledger_mod
+    import src.engine.account_ledger as ledger_mod
 
     from src.common.errors import DataIntegrityError
 
@@ -1026,7 +1026,7 @@ def test_assemble_account_inputs_source_outside_window_fails(tmp_path: Path) -> 
     """A 3m archive with no bars inside the replay grid fails closed."""
     import numpy as np
 
-    import src.mhs.account_sources as sources_mod
+    import src.engine.account_sources as sources_mod
 
     from src.common.errors import DataIntegrityError
 
@@ -1044,7 +1044,7 @@ def test_backtest_mhs_frozen_account_unit_variant_only_at_breadth_20(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """account_unit selects the registered clip unit book at Top-20 and names its run directory."""
-    from src.mhs.frozen_research_candidate import FROZEN_MHS_TOP20_ACCOUNT_UNIT_V2
+    from src.strategy.targets import FROZEN_MHS_TOP20_ACCOUNT_UNIT_V2
 
     assert backtest_mod._frozen_strategy(20, "account_unit") is FROZEN_MHS_TOP20_ACCOUNT_UNIT_V2
     with pytest.raises(SystemExit):

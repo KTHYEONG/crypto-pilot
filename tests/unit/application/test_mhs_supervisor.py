@@ -803,7 +803,7 @@ def test_data_snapshot_absent_for_missing_root(tmp_path) -> None:
 def test_sealed_manifest_upgrades_data_identity(tmp_path) -> None:
     import pandas as pd
 
-    from src.mhs.data_provenance import mhs_input_layout_for_lake, seal_mhs_input_manifest
+    from src.core.data_provenance import mhs_input_layout_for_lake, seal_mhs_input_manifest
 
     root = tmp_path / "data"
     frame = pd.DataFrame(
@@ -1395,7 +1395,7 @@ def test_default_data_identity_unchanged(tmp_path, monkeypatch) -> None:
 
 def test_override_identity_covers_funding_and_ohlcv(tmp_path, monkeypatch) -> None:
     import src.application.mhs_supervisor as supervisor_mod
-    import src.mhs.data_provenance as provenance
+    import src.core.data_provenance as provenance
 
     lake = tmp_path / "futures"
     ohlcv_file = lake / "ohlcv" / "3m" / "AUSDT.parquet"

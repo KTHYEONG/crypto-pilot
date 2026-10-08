@@ -8,7 +8,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-import src.mhs.marks as marks
+import src.core.marks as marks
 from src.common.errors import DataIntegrityError
 from src.mhs.evaluation import folds as folds_mod
 from src.mhs.evaluation.folds import (
@@ -18,8 +18,8 @@ from src.mhs.evaluation.folds import (
     _run_anchored_fold,
 )
 from src.mhs.evidence import AnchoredPurgedFold
-from src.mhs.marks import _load_funding_series
-from src.mhs.params import TRAIN_REFERENCE_PREFIX_RETURN_ATOL
+from src.core.marks import _load_funding_series
+from src.core.params import TRAIN_REFERENCE_PREFIX_RETURN_ATOL
 from src.quant.universe.pit_universe import symbol_partition
 from tests.fixtures.mhs_requests import research_baseline
 from tests.unit.mhs.test_evaluation_appresearch import (
@@ -57,7 +57,7 @@ def prefix_market(tmp_path_factory):
     root = tmp_path_factory.mktemp("prefix_market")
     _write_mhs_market(root, n_hours=4400)
     _write_3m_cache(root)
-    from src.mhs.marks import clear_mhs_market_data_caches
+    from src.core.marks import clear_mhs_market_data_caches
 
     with pytest.MonkeyPatch.context() as patch:
         _point_marks_at(root, patch)
@@ -103,7 +103,7 @@ def _copy_market(root: Path, tmp_path_factory, tag: str) -> Path:
 
 def _point_marks_at(root: Path, monkeypatch) -> None:
     monkeypatch.setattr(marks, "funding_path", lambda sym: root / "funding" / f"{sym}.parquet")
-    from src.mhs.marks import clear_mhs_market_data_caches
+    from src.core.marks import clear_mhs_market_data_caches
 
     clear_mhs_market_data_caches()
 
@@ -355,7 +355,7 @@ def test_orchestrated_folds_match_independent_reports(prefix_market, monkeypatch
     from concurrent.futures import Future
 
     import src.mhs.evidence as evidence_mod
-    import src.mhs.parallel as parallel_mod
+    import src.core.parallel as parallel_mod
 
     root, request, funding = prefix_market
     folds = _folds()
@@ -425,7 +425,7 @@ def test_corwin_schultz_keeps_bound(prefix_market, independent_refs, monkeypatch
 @pytest.mark.slow
 def test_committee_capital_keeps_bound_or_falls_back(tmp_path_factory, monkeypatch) -> None:
     from src.mhs import research_go as _research_go
-    from src.mhs.features import FeatureAdmission
+    from src.strategy.features import FeatureAdmission
 
     root = tmp_path_factory.mktemp("prefix_tbq")
     _write_mhs_market(root, n_hours=4400, include_taker_buy_quote=True)

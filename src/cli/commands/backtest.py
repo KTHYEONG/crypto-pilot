@@ -15,19 +15,19 @@ from src.application.mhs_frozen_account import frozen_execution_specs
 from src.backtests.catalog import append_backtest_index
 from src.backtests.contracts import RetentionPolicy
 from src.common.paths import BACKTESTS_DIR, FROZEN_BACKTESTS_DIR, VENUE_RULES_DIR
-from src.mhs.params import (
+from src.core.params import (
     ACCOUNT_DEFAULT_CAPITAL_USDT,
     ACCOUNT_IMPACT_Y,
     DEFAULT_DETAIL_RETENTION_MAX_RUNS,
     DISCOVERY_START,
     PROCESS_EVALUATION_CEILING,
 )
-from src.mhs.resources import MhsMemoryBudget
+from src.core.resources import MhsMemoryBudget
 
 if TYPE_CHECKING:
-    from src.mhs.frozen_research_candidate import FrozenMhsStrategySpec
-    from src.mhs.frozen_research_evidence import FrozenExecutionBound
-    from src.mhs.frozen_research_run import FrozenMhsBacktestRequest
+    from src.engine.backtest_evidence import FrozenExecutionBound
+    from src.engine.strategy_backtest import FrozenMhsBacktestRequest
+    from src.strategy.targets import FrozenMhsStrategySpec
 
 _logger = logging.getLogger("MhsBacktestCli")
 
@@ -202,7 +202,7 @@ def add_backtest_commands(backtest_parser: argparse.ArgumentParser) -> None:
 
 def _resolve_retention_policy(args: argparse.Namespace) -> RetentionPolicy | None:
     """Build explicit destructive detail budgets, failing before any workload launch."""
-    from src.mhs.params import DEFAULT_DETAIL_RETENTION_MAX_BYTES, DEFAULT_DETAIL_RETENTION_MAX_RUNS
+    from src.core.params import DEFAULT_DETAIL_RETENTION_MAX_BYTES, DEFAULT_DETAIL_RETENTION_MAX_RUNS
 
     max_bytes = getattr(args, "max_detail_bytes", None)
     max_runs = getattr(args, "max_detail_runs", None)
@@ -324,7 +324,7 @@ def _frozen_strategy(breadth: int, variant: str = "primary") -> FrozenMhsStrateg
         SystemExit: ``growth`` or ``account_unit`` is requested with a breadth other than 20,
             or ``variant`` is unknown.
     """
-    from src.mhs.frozen_research_candidate import (
+    from src.strategy.targets import (
         FROZEN_MHS_TOP20_ACCOUNT_UNIT_V2,
         FROZEN_MHS_TOP20_GROWTH_V2,
         FROZEN_MHS_TOP20_V2,
@@ -470,9 +470,9 @@ def run_frozen_mhs_backtest_command(args: argparse.Namespace) -> None:
         SystemExit: Arguments are invalid or the research replay fails.
     """
     from src.common.errors import DataIntegrityError
-    from src.mhs.frozen_research_evidence import FrozenMhsReportPeriod
-    from src.mhs.frozen_research_report import persist_frozen_mhs_backtest
-    from src.mhs.frozen_research_run import FrozenMhsBacktestRequest, run_frozen_mhs_backtest
+    from src.engine.backtest_evidence import FrozenMhsReportPeriod
+    from src.engine.backtest_persist import persist_frozen_mhs_backtest
+    from src.engine.strategy_backtest import FrozenMhsBacktestRequest, run_frozen_mhs_backtest
 
     breadth = getattr(args, "breadth", 20)
     if isinstance(breadth, bool) or not isinstance(breadth, int) or breadth <= 0:

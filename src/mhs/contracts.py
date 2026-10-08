@@ -13,8 +13,8 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Literal, cast
 
-from src.mhs.data_policy import MHS_DATA_POLICY_DEFAULT
-from src.mhs.params import (
+from src.core.data_policy import MHS_DATA_POLICY_DEFAULT
+from src.core.params import (
     CLI_EXECUTION_UNIVERSE_SIZE_DEFAULT,
     CLI_GROWTH_ENVELOPE_DEFAULT,
     COMMITTEE_DEFAULT_MEMBER_SET,
@@ -24,17 +24,17 @@ from src.mhs.params import (
     FUNDING_CARRY_SLEEVE_WEIGHT,
     GROWTH_RISK_ENVELOPES,
 )
-from src.mhs.resources import MhsResourceMeasurement as MhsResourceMeasurement
+from src.core.resources import MhsResourceMeasurement as MhsResourceMeasurement
 
 if TYPE_CHECKING:
     import pandas as pd
 
+    from src.engine.execution import StrategyExecutionReplayResult
     from src.mhs.evidence import (
         CostResponsePoint,
         PhaseDiagnosticResult,
         TailSensitivityResult,
     )
-    from src.mhs.execution import StrategyExecutionReplayResult
 
 
 def cli_param(

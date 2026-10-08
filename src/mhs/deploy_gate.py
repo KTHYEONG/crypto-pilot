@@ -26,9 +26,9 @@ import pandas as pd
 from scipy.stats import binom
 
 from src.common.errors import DataIntegrityError
+from src.core.params import FORWARD_MIN_FOLDS, GrowthRiskEnvelope
+from src.core.resources import MhsMemoryBudget, assert_mhs_stage_allocation
 from src.mhs.deployment_policy import live_parity_blockers
-from src.mhs.params import FORWARD_MIN_FOLDS, GrowthRiskEnvelope
-from src.mhs.resources import MhsMemoryBudget, assert_mhs_stage_allocation
 from src.quant.evaluation.reliability import derive_block_size
 
 CONTINUOUS_BARS_PER_YEAR: float = 365.0
@@ -327,7 +327,7 @@ def integrity_reasons_from_report(report: Any, request: Any) -> tuple[str, ...]:
     """
     # 지연 임포트: mhs.evaluation 패키지 초기화가 report.persist -> deploy_gate로
     # 되돌아 들어오는 순환을 모듈 최상단에서 피한다(INV-SINGLE-CERTIFICATION).
-    from src.mhs.execution.integrity import replay_ledger_certified
+    from src.engine.execution.integrity import replay_ledger_certified
 
     codes: list[str] = []
     if getattr(report, "status", None) != "COMPLETE":

@@ -14,7 +14,7 @@ from src.application.mhs_backtest import (
     execute_mhs_backtest,
     validate_mhs_backtest_request,
 )
-from src.mhs.params import PROCESS_EVALUATION_CEILING
+from src.core.params import PROCESS_EVALUATION_CEILING
 import src.mhs.backtest.contracts as bt_contracts
 import src.mhs.backtest.inventory as bt_inventory
 from src.mhs.backtest.contracts import ProcessInventoryBacktestError
@@ -43,7 +43,7 @@ def _request(tmp_path: Path, **overrides):
 
 
 def _completed_report():
-    from src.mhs.resources import ProcessTreeMemoryStats
+    from src.core.resources import ProcessTreeMemoryStats
 
     targets = _inventory_test_targets()
     proxy = _inventory_test_proxy(targets)
@@ -163,7 +163,7 @@ def test_validate_mhs_backtest_request_rejects_occupied_destinations(tmp_path, m
 def test_execute_mhs_backtest_persists_primary_inventory_evidence(tmp_path, monkeypatch) -> None:
     """Primary inventory evidence: the existing 3m schema is persisted with comparative proxy."""
     import src.application.mhs_backtest as svc
-    from src.mhs.resources import MhsMemoryBudget, resolve_mhs_memory_budget
+    from src.core.resources import MhsMemoryBudget, resolve_mhs_memory_budget
 
     report = _completed_report()
     seen: dict = {}

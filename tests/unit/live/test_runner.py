@@ -208,7 +208,7 @@ def test_run_manifest_written_once_on_first_cycle(tmp_path, monkeypatch) -> None
     import json
 
     import src.live.runner as runner_mod
-    from src.mhs.frozen_research_candidate import FROZEN_MHS_TOP20_V2
+    from src.strategy.targets import FROZEN_MHS_TOP20_V2
 
     record_run_id = "frozen_top20_v2_bayes_maker_20260922"
     settings, weights_path, decision_time, now = _seed_run_cycle_artifact(tmp_path, monkeypatch, record_run_id)
@@ -225,7 +225,7 @@ def test_run_manifest_written_once_on_first_cycle(tmp_path, monkeypatch) -> None
     first = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert first["run_id"] == record_run_id
     assert first["strategy_id"] == FROZEN_MHS_TOP20_V2.strategy_id
-    from src.mhs.params import FROZEN_GROWTH_NAME_CLIP
+    from src.core.params import FROZEN_GROWTH_NAME_CLIP
 
     assert first["name_clip"] == FROZEN_GROWTH_NAME_CLIP
     assert first["execution_policy"] == settings.execution_policy
@@ -347,7 +347,7 @@ def test_manifest_records_applied_clip(tmp_path) -> None:
     import pandas as pd
     import src.live.runner as runner_mod
     from src.live.settings import LiveSettings
-    from src.mhs.params import FROZEN_GROWTH_NAME_CLIP
+    from src.core.params import FROZEN_GROWTH_NAME_CLIP
 
     now = pd.Timestamp("2026-09-22 00:00Z")
     settings = LiveSettings(unit_bootstrap_path=str(tmp_path / "nope.parquet"))

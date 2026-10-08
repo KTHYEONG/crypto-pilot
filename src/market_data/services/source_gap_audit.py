@@ -15,7 +15,7 @@ import pandas as pd
 
 from src.common.errors import DataIntegrityError
 from src.common.paths import FUTURES_DATA_DIR
-from src.mhs.source_gaps import (
+from src.core.source_gaps import (
     SourceGapInterval,
     SourceGapPlane,
     load_source_gap_registry,
@@ -519,7 +519,7 @@ def write_audited_registry(
     if verified_at.utcoffset() != timedelta(0):
         raise DataIntegrityError("verified_at must be UTC")
     verified_dt = verified_at.to_pydatetime()
-    from src.mhs.source_gaps import _default_registry_path
+    from src.core.source_gaps import _default_registry_path
 
     target = _default_registry_path() if registry_path is None else Path(registry_path)
     try:
@@ -610,7 +610,7 @@ def write_audited_registry(
     rebuilt.extend(_stamped(iv) for iv in (*narrowed_new, *discovered_new))
     rebuilt.sort(key=lambda iv: (iv.symbol, iv.plane, iv.start))
     payload = "".join(json.dumps(_record_to_row(iv), sort_keys=True) + "\n" for iv in rebuilt)
-    from src.mhs.source_gaps import _parse_registry_bytes
+    from src.core.source_gaps import _parse_registry_bytes
 
     _parse_registry_bytes(payload.encode("utf-8"), target)
     tmp_name: str | None = None
@@ -631,7 +631,7 @@ def write_audited_registry(
                 Path(tmp_name).unlink(missing_ok=True)
         raise DataIntegrityError(f"source-gap registry unwritable: {target}") from exc
     with contextlib.suppress(Exception):
-        from src.mhs.source_gaps import clear_source_gap_registry_cache
+        from src.core.source_gaps import clear_source_gap_registry_cache
 
         clear_source_gap_registry_cache()
     return len(rebuilt)

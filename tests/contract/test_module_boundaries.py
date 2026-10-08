@@ -56,10 +56,10 @@ def test_schema_imports_jsonable_from_artifacts_not_evaluation() -> None:
 
 
 def test_execution_public_import_surface_stable() -> None:
-    """Every public name historically importable from src.mhs.execution still is."""
+    """Every public name historically importable from src.engine.execution still is."""
     import importlib
 
-    module = importlib.import_module("src.mhs.execution")
+    module = importlib.import_module("src.engine.execution")
     expected_public = (
         "ExecutionDataGap",
         "ExecutionReplayWindow",
@@ -253,7 +253,7 @@ def test_execution_public_surface_preserved() -> None:
     import ast
     from pathlib import Path
 
-    import src.mhs.execution as execution
+    import src.engine.execution as execution
 
     wanted: set[str] = set()
     for root in ("src", "tests", "tools"):
@@ -262,7 +262,7 @@ def test_execution_public_surface_preserved() -> None:
             for node in ast.walk(tree):
                 if (
                     isinstance(node, ast.ImportFrom)
-                    and node.module == "src.mhs.execution"
+                    and node.module == "src.engine.execution"
                 ):
                     wanted.update(a.name for a in node.names)
 
@@ -280,7 +280,7 @@ def test_inventory_oracle_stays_out_of_production() -> None:
     import ast
     from pathlib import Path
 
-    facade = Path("src/mhs/execution/__init__.py")
+    facade = Path("src/engine/execution/__init__.py")
     oracle = "simulated_inventory_ledger"
     offenders: list[tuple[str, int]] = []
     for path in Path("src").rglob("*.py"):
@@ -295,16 +295,16 @@ def test_inventory_oracle_stays_out_of_production() -> None:
                 modules = [node.module or ""]
                 imported = [alias.name for alias in node.names]
                 if node.level:
-                    base = "src.mhs.execution" if path.parent.name == "execution" else ""
+                    base = "src.engine.execution" if path.parent.name == "execution" else ""
                     modules = [f"{base}{'.' * node.level}{modules[0]}"]
             reaches_ledger = any(
-                module == "src.mhs.execution.ledger"
+                module == "src.engine.execution.ledger"
                 or (path.parent == facade.parent and module == "ledger")
                 for module in modules
             )
-            # `from src.mhs.execution import ledger` / `from . import ledger` bind the oracle module itself.
+            # `from src.engine.execution import ledger` / `from . import ledger` bind the oracle module itself.
             imports_package = isinstance(node, ast.ImportFrom) and (
-                node.module == "src.mhs.execution"
+                node.module == "src.engine.execution"
                 or (node.level == 1 and node.module is None and path.parent == facade.parent)
             )
             reaches_ledger = reaches_ledger or (imports_package and "ledger" in imported)
@@ -326,7 +326,7 @@ def test_no_method_exceeds_length_budget() -> None:
     from pathlib import Path
 
     budget = 260
-    path = Path("src/mhs/execution/accumulator.py")
+    path = Path("src/engine/execution/accumulator.py")
     tree = ast.parse(path.read_text(encoding="utf-8"))
     offenders: dict[str, int] = {}
     for node in ast.walk(tree):
@@ -350,20 +350,20 @@ def test_execution_module_size_budget_with_allowlist() -> None:
     # frozen at measured size; growth fails, shrink requires deleting/lowering the entry.
     # spec 34: causal settlement interleaving and delivery cutoff.
     # spec 34 part 3: announcement intent policy and venue-halt deferral.
-    allowlist = {"src/mhs/execution/accumulator.py": 2232,
-                 # spec 34 part 3: venue-halt registry binding on the window stream.
-                 "src/mhs/execution/window_stream.py": 704}
+    allowlist = {"src/engine/execution/accumulator.py": 2232,
+                  # spec 34 part 3: venue-halt registry binding on the window stream.
+                  "src/engine/execution/window_stream.py": 704}
 
     measured = {
         str(path): len(path.read_text(encoding="utf-8").splitlines())
-        for path in Path("src/mhs/execution").rglob("*.py")
+        for path in Path("src/engine/execution").rglob("*.py")
     }
     offenders: dict[str, int] = {
         key: lines for key, lines in measured.items() if lines > allowlist.get(key, default_budget)
     }
 
     assert offenders == {}, f"modules over budget: {offenders}"
-    assert not Path("src/mhs/execution.py").exists(), "monolith must be gone"
+    assert not Path("src/mhs/execution").exists(), "moved package must be gone"
     _assert_frozen_entries_live(allowlist, measured, default_budget, "execution module size budget")
 
 
@@ -376,9 +376,9 @@ def test_source_module_size_budget() -> None:
     allowlist = {
         # spec 34: causal settlement interleaving and delivery cutoff.
         # spec 34 part 3: announcement intent policy and venue-halt deferral.
-        "src/mhs/execution/accumulator.py": 2232,
+        "src/engine/execution/accumulator.py": 2232,
         # spec 34 part 3: venue-halt registry binding on the window stream.
-        "src/mhs/execution/window_stream.py": 704,
+        "src/engine/execution/window_stream.py": 704,
         # Cycle phases stay co-located to preserve runtime module-global test seams;
         # explicit phase contracts add lines while reducing orchestration complexity.
         # spec 17: venue snapshot passthrough, disabled-collection audit, genesis alert.
@@ -390,7 +390,7 @@ def test_source_module_size_budget() -> None:
         "src/live/tax_ledger.py": 1209,
         "src/live/rest.py": 815,
         # spec 38 part 1: MhsResourceMeasurement canonical home (moved from contracts).
-        "src/mhs/resources.py": 937,
+        "src/core/resources.py": 937,
         "src/mhs/evidence.py": 1267,
         "src/mhs/deploy_gate.py": 723,
         "src/mhs/scaling.py": 892,
@@ -494,10 +494,10 @@ def test_no_function_exceeds_length_budget() -> None:
         # spec 17: mainnet refuse-to-start gate (fail loud before any venue call).
         "src/live/scheduler.py::run_daemon": 354,
         "src/live/frozen_signal.py::run_frozen_signal_step": 312,
-        "src/mhs/account_ledger.py::replay_account": 308,
+        "src/engine/account_ledger.py::replay_account": 308,
         "src/mhs/evaluation/windows.py::_book_outcome": 368,
-        "src/mhs/execution/accumulator.py::_consume_append_ledger": 252,
-        "src/mhs/execution/window_stream.py::_iter_mhs_execution_windows": 382,
+        "src/engine/execution/accumulator.py::_consume_append_ledger": 252,
+        "src/engine/execution/window_stream.py::_iter_mhs_execution_windows": 382,
         "src/mhs/backtest/paths.py::run_process_paths": 261,
         # spec 34 part 1: I6 settlement-registry audit gate before the replay stream.
         "src/mhs/backtest/inventory.py::evaluate_process_inventory_backtest": 293,
@@ -546,18 +546,20 @@ def test_architecture_docs_within_line_limit() -> None:
 
 
 def test_deleted_trees_stay_deleted() -> None:
-    """P1/P4 removed legacy/, src/core/; nothing may reintroduce them.
+    """P1/P4 removed legacy/; nothing may reintroduce them.
 
     Standing guard consolidated from the retired throwaway
     tests/contract/test_refactor_p1.py and test_refactor_p4.py.
+    (spec 38 part 2 recreates src/core, src/strategy, src/engine and
+    src/evaluation as the deployable layers, so they are no longer guarded.)
     """
     import ast
     from pathlib import Path
 
-    for name in ("legacy", "src/core"):
+    for name in ("legacy",):
         assert not Path(name).exists(), f"deleted tree reappeared: {name}"
 
-    stale_prefixes = ("legacy", "src.core")
+    stale_prefixes = ("legacy",)
     offenders: list[str] = []
     for root in ("src", "tests", "tools"):
         for path in Path(root).rglob("*.py"):

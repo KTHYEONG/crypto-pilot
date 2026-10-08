@@ -25,6 +25,7 @@ import pandas as pd
 from src.common.durable_io import durable_write_text
 from src.common.errors import DataIntegrityError
 from src.common.paths import FUTURES_DATA_DIR, LIVE_CAPTURE_DIR
+from src.core.settlement_evidence import SettlementEvidence, settlement_evidence_from_bars
 from src.live.account import (
     RECONCILE_QTY_TOLERANCE_FRACTION,
     AccountSnapshot,
@@ -123,7 +124,6 @@ from src.live.tax_ledger import (
     resolve_tax_ledger_dir,
     simulated_tax_records,
 )
-from src.live.venue_listing import SettlementEvidence, settlement_evidence_from_bars
 
 logger = logging.getLogger("LiveRunner")
 
@@ -795,8 +795,8 @@ def _unit_bootstrap_sha256(settings: LiveSettings) -> str | None:
 
 
 def _current_run_manifest(settings: LiveSettings, now: pd.Timestamp) -> dict[str, Any]:
-    from src.mhs.frozen_research_candidate import FROZEN_MHS_TOP20_V2  # noqa: PLC0415
-    from src.mhs.params import FROZEN_GROWTH_NAME_CLIP  # noqa: PLC0415
+    from src.core.params import FROZEN_GROWTH_NAME_CLIP  # noqa: PLC0415
+    from src.strategy.targets import FROZEN_MHS_TOP20_V2  # noqa: PLC0415
 
     return {
         "run_id": settings.record_run_id,

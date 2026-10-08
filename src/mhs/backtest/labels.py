@@ -10,9 +10,9 @@ import numpy as np
 import pandas as pd
 
 from src.common.errors import DataIntegrityError
+from src.core.params import PROCESS_SMOOTHING_HALFLIFE_DAYS
 from src.mhs.backtest.contracts import ProcessMarketData
 from src.mhs.backtest.market_data import apply_process_execution_availability
-from src.mhs.params import PROCESS_SMOOTHING_HALFLIFE_DAYS
 from src.mhs.process import RefitPoint, ema_smoothing_rate, smoothed_book_path
 
 _logger = logging.getLogger(__name__)

@@ -29,7 +29,7 @@ from typing import Any, Final, cast
 import pandas as pd
 
 from src.common.errors import DataIntegrityError
-from src.mhs.params import MHS_FINAL_OOS_CUTOFF_2026H1, SEARCH_TRIALS_ATTEMPTED
+from src.core.params import MHS_FINAL_OOS_CUTOFF_2026H1, SEARCH_TRIALS_ATTEMPTED
 from src.quant.evaluation.policy import HOLDOUT_CUTOFF
 
 logger = logging.getLogger("MhsRunHistory")

@@ -13,7 +13,7 @@ from typing import Literal
 import numpy as np
 import pandas as pd
 
-from src.mhs.params import (
+from src.core.params import (
     COMMITTEE_GROWTH_BARS_PER_YEAR,
     COMMITTEE_GROWTH_HORIZON_YEARS,
     COMMITTEE_GROWTH_MAX_DRAWDOWN,
@@ -25,10 +25,10 @@ from src.mhs.params import (
     PNL_TARGET_ANNUAL_VOL,
     GrowthRiskEnvelope,
 )
-from src.mhs.params import (
+from src.core.params import (
     PERIODS_PER_YEAR_1H as _PERIODS_PER_YEAR_1H,
 )
-from src.mhs.types import COMMITTEE_TARGET_VOL
+from src.core.types import COMMITTEE_TARGET_VOL
 
 
 def decompose_cost(
@@ -379,7 +379,7 @@ def growth_budget_annual_vol(
     point reports ``mdd_breach_prob=0.000`` and the solver selects a risk the live
     path cannot honour.
     """
-    from src.mhs.params import GrowthRiskEnvelope
+    from src.core.params import GrowthRiskEnvelope
     from src.quant.risk.growth_sizing import GrowthSizingConfig, solve_growth_optimal_risk
 
     if envelope is None:

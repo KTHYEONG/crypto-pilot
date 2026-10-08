@@ -8,7 +8,7 @@ from tests.fixtures.mhs_requests import research_baseline
 import numpy as np
 import pandas as pd
 import pytest
-import src.mhs.marks as marks
+import src.core.marks as marks
 import src.mhs.statistics as statistics
 from src.mhs.diagnostic_run import run_mhs_horizon_diagnostic
 from src.mhs.contracts import (
@@ -16,10 +16,10 @@ from src.mhs.contracts import (
     MhsHorizonDiagnosticReport,
 )
 from src.mhs.evidence import phase_1_anchored_purged_folds
-from src.mhs.horizons import horizon_log_return
-from src.mhs.panel import load_base_panel
-from src.mhs.params import SIGNAL_EMA_HORIZON_SPAN
-from src.mhs.types import BOOK_SPECS
+from src.strategy.horizons import horizon_log_return
+from src.core.panel import load_base_panel
+from src.core.params import SIGNAL_EMA_HORIZON_SPAN
+from src.core.types import BOOK_SPECS
 from src.cli.commands.research.mhs import add_mhs_commands
 from src.quant.evaluation.policy import HOLDOUT_CUTOFF
 
@@ -306,7 +306,7 @@ class TestFreezeBeforeFinalOos:
         assert not hasattr(args, "unseal_holdout")
 
     def test_forward_observation_is_frozen(self) -> None:
-        from src.mhs.execution import ForwardExecutionObservation
+        from src.engine.execution import ForwardExecutionObservation
 
         obs = ForwardExecutionObservation(
             symbol="BTCUSDT", signal_time=pd.Timestamp("2026-01-01", tz="UTC"),
@@ -486,7 +486,7 @@ class TestAnchoredFoldGoGate:
             MhsFoldReport,
         )
         from src.mhs.research_go import _mhs_research_go
-        from src.mhs.execution import ExecutionSpec, strategy_aware_execution_replay
+        from src.engine.execution import ExecutionSpec, strategy_aware_execution_replay
 
         idx = pd.date_range("2021-01-01 12:01", periods=31, freq="1min", tz="UTC")
         target = pd.DataFrame({"A": [1.0]}, index=[pd.Timestamp("2021-01-01 11:00", tz="UTC")])

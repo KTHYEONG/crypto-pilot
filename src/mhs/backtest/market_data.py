@@ -10,21 +10,10 @@ import pandas as pd
 
 from src.common.errors import DataIntegrityError
 from src.common.paths import FUTURES_DATA_DIR
-from src.market_data.services.mhs_execution import apply_dynamic_gap_exclusion
-from src.mhs.backtest.availability import (
-    ObservationAvailability,
-    observed_history_mask,
-    select_available_observations,
-)
-from src.mhs.backtest.contracts import ProcessMarketData
-from src.mhs.books import rank_weight_book
-from src.mhs.data_policy import MHS_DATA_POLICY_DEFAULT
-from src.mhs.execution.contracts import align_funding_with_knowledge, bar_funding_panel
-from src.mhs.features import FEATURE_REGISTRY
-from src.mhs.funding import funding_carry_signal
-from src.mhs.marks import _load_funding_series, _pit_execution_mask
-from src.mhs.panel import liquid_half_eligibility, load_base_panel
-from src.mhs.params import (
+from src.core.data_policy import MHS_DATA_POLICY_DEFAULT
+from src.core.marks import _load_funding_series, _pit_execution_mask
+from src.core.panel import liquid_half_eligibility, load_base_panel
+from src.core.params import (
     CAUSAL_BETA_LOOKBACK_BARS,
     CAUSAL_BETA_MIN_PERIODS,
     CLI_EXECUTION_UNIVERSE_SIZE_DEFAULT,
@@ -35,14 +24,25 @@ from src.mhs.params import (
     UNIVERSE_ELIGIBILITY_LOOKBACK_BARS,
     UNIVERSE_ELIGIBILITY_MIN_HISTORY_BARS,
 )
-from src.mhs.process_features import PROCESS_FEATURE_COLUMN_BLOCK_SIZE, build_process_feature_grid
-from src.mhs.regime import beta_neutralize_weights, causal_market_beta
-from src.mhs.resources import (
+from src.core.resources import (
     MhsMemoryBudget,
     _current_tree_swap_bytes,
     assert_mhs_stage_allocation,
     resolve_mhs_memory_budget,
 )
+from src.engine.execution.contracts import align_funding_with_knowledge, bar_funding_panel
+from src.market_data.services.mhs_execution import apply_dynamic_gap_exclusion
+from src.mhs.backtest.availability import (
+    ObservationAvailability,
+    observed_history_mask,
+    select_available_observations,
+)
+from src.mhs.backtest.contracts import ProcessMarketData
+from src.mhs.funding import funding_carry_signal
+from src.mhs.process_features import PROCESS_FEATURE_COLUMN_BLOCK_SIZE, build_process_feature_grid
+from src.mhs.regime import beta_neutralize_weights, causal_market_beta
+from src.strategy.books import rank_weight_book
+from src.strategy.features import FEATURE_REGISTRY
 
 _logger = logging.getLogger(__name__)
 

@@ -1,6 +1,6 @@
 """Funding-rate carry signal builders (P0 return-source breadth diagnostics).
 
-``bar_funding_panel`` (src/mhs/execution.py) is already causally aligned per
+``bar_funding_panel`` (src/engine/execution) is already causally aligned per
 bar (its own docstring: "a symbol whose funding series cannot be causally
 aligned is excluded"), so a trailing rolling mean over it is automatically
 causal. This mirrors horizons.py's ``realized_vol`` construction exactly (same
@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from src.mhs.books import phase_tranche_book, rank_weight_book
+from src.strategy.books import phase_tranche_book, rank_weight_book
 
 # Matches src/mhs/evaluation/
 # ``DISCOVERY_GATE_TRANCHE_COUNT`` (the evaluation wiring site passes that
@@ -47,7 +47,7 @@ def build_funding_carry_candidate_weights(
 
     For each lookback the chain ``funding_carry_signal`` -> ``rank_weight_book``
     -> ``phase_tranche_book`` reuses the existing book builders unchanged
-    (src/mhs/books.py) -- no new normalization or book logic. Mirrors
+    (src/strategy/books.py) -- no new normalization or book logic. Mirrors
     ``discovery.build_candidate_weights``'s shape (same sign/min_symbols/
     tranche_count parameters), so the result plugs straight into
     ``select_horizon_by_discovery_qualification``'s

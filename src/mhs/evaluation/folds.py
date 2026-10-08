@@ -9,17 +9,7 @@ import numpy as np
 import pandas as pd
 
 from src.common.errors import DataIntegrityError
-from src.mhs import scaling as _scaling
-from src.mhs import statistics as _statistics
-from src.mhs.contracts import MhsDiagnosticRequest, MhsFoldReport
-from src.mhs.evidence import AnchoredPurgedFold, resolved_anchored_folds
-from src.mhs.execution import (
-    replay_execution_window_batch,
-    replay_execution_windows,
-)
-from src.mhs.execution.window_stream import MhsExecutionWindow
-from src.mhs.features import FeatureAdmission
-from src.mhs.parallel import (
+from src.core.parallel import (
     FORK_CONTEXT,
     assert_fork_admission,
     fork_shared_payload,
@@ -27,27 +17,37 @@ from src.mhs.parallel import (
     plan_worker_count,
     resolve_fork_shared,
 )
-from src.mhs.params import (
+from src.core.params import (
     FOLD_PANEL_WARMUP_HOURS,
     TRAIN_REFERENCE_PREFIX_TARGET_ATOL,
 )
-from src.mhs.params import (
+from src.core.params import (
     PERIODS_PER_YEAR_1H as _PERIODS_PER_YEAR_1H,
 )
+from src.core.resources import (
+    _assert_execution_rss_budget,
+    _resolve_ram_budget,
+    _StageRecorder,
+    _worker_plan_observer,
+)
+from src.core.types import BOOK_SPECS, TREND_SLEEVE_HORIZONS_HOURS, WORKER_PEAK_RSS_BYTES, ExecutionSpec
+from src.engine.execution import (
+    replay_execution_window_batch,
+    replay_execution_windows,
+)
+from src.engine.execution.window_stream import MhsExecutionWindow
+from src.mhs import scaling as _scaling
+from src.mhs import statistics as _statistics
+from src.mhs.contracts import MhsDiagnosticRequest, MhsFoldReport
+from src.mhs.evidence import AnchoredPurgedFold, resolved_anchored_folds
 from src.mhs.research_go import (
     GO_REASON_EXECUTION_GAP,
     GO_REASON_INCOMPLETE_FOLD,
     GO_REASON_INVALID_PRIMARY,
     GO_REASON_NONFINITE_EQUITY,
 )
-from src.mhs.resources import (
-    _assert_execution_rss_budget,
-    _resolve_ram_budget,
-    _StageRecorder,
-    _worker_plan_observer,
-)
 from src.mhs.trend_sleeve import market_basket_log_price, time_series_trend_position, trend_sleeve_weights
-from src.mhs.types import BOOK_SPECS, TREND_SLEEVE_HORIZONS_HOURS, WORKER_PEAK_RSS_BYTES, ExecutionSpec
+from src.strategy.features import FeatureAdmission
 
 from . import books, fold_weights, integrity, regime, specs, windows
 from .fold_discovery import _fold_safe_discovery_worker as _fold_safe_discovery_worker

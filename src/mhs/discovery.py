@@ -20,12 +20,12 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
-from src.mhs.books import phase_tranche_book, rank_weight_book
+from src.core.params import PERIODS_PER_YEAR_1H as _PERIODS_PER_YEAR_1H
+from src.core.types import MEASURED_EXECUTION_COST_TIERS_BPS
+from src.engine.execution import mhs_ledger_pnl
 from src.mhs.evidence import AnchoredPurgedFold, cost_response_curve
-from src.mhs.execution import mhs_ledger_pnl
-from src.mhs.horizons import horizon_log_return, realized_vol, vol_normalized_horizon_signal
-from src.mhs.params import PERIODS_PER_YEAR_1H as _PERIODS_PER_YEAR_1H
-from src.mhs.types import MEASURED_EXECUTION_COST_TIERS_BPS
+from src.strategy.books import phase_tranche_book, rank_weight_book
+from src.strategy.horizons import horizon_log_return, realized_vol, vol_normalized_horizon_signal
 
 _ADMISSION_T = 2.0
 

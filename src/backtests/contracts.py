@@ -6,9 +6,9 @@ import math
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Literal, Union
+from typing import Literal
 
-JsonValue = Union[None, bool, int, float, str, list["JsonValue"], dict[str, "JsonValue"]]  # noqa: UP007
+from src.core.types import JsonValue as JsonValue
 
 _RUN_STATUS = ("completed", "failed", "timed_out", "signaled", "resource_rejected", "interrupted")
 

@@ -30,9 +30,9 @@ def test_fresh_process_bounded_stress(tmp_path) -> None:
     """Matched synthetic fixtures keep parity and bound the allocation model."""
     import numpy as np
 
-    from src.mhs.execution.batch import replay_execution_window_batch
-    from src.mhs.resources import _StageRecorder
-    from src.mhs.types import ExecutionSpec
+    from src.engine.execution.batch import replay_execution_window_batch
+    from src.core.resources import _StageRecorder
+    from src.core.types import ExecutionSpec
     from tests.unit.mhs.test_process_backtest import (
         _inventory_test_path,
         _inventory_test_targets,

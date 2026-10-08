@@ -17,7 +17,7 @@ from typing import Any
 
 import pandas as pd
 
-from src.mhs.data_provenance import DataEvidenceTier, DataProvenanceResult
+from src.core.data_provenance import DataEvidenceTier, DataProvenanceResult
 from src.mhs.evidence import DeploymentReadinessResult
 
 

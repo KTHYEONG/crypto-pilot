@@ -9,8 +9,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from src.core.params import SIGNAL_PANEL_WINDOW_DAYS
 from src.market_data.storage.ohlcv import is_temp_artifact
-from src.mhs.params import SIGNAL_PANEL_WINDOW_DAYS
 
 MARKET_DATA_MIN_RETENTION_DAYS: int = SIGNAL_PANEL_WINDOW_DAYS + 30
 MARKET_DATA_MIN_KEPT_ROWS: int = 24

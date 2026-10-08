@@ -17,8 +17,8 @@ import numpy as np
 import pandas as pd
 
 from src.common.errors import DataIntegrityError
-from src.mhs.execution import StrategyExecutionReplayResult
-from src.mhs.params import ARTIFACT_SCHEMA_VERSION
+from src.core.params import ARTIFACT_SCHEMA_VERSION
+from src.engine.execution import StrategyExecutionReplayResult
 
 
 def _jsonable(value: Any) -> Any:

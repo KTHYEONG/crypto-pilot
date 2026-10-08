@@ -93,7 +93,7 @@ def matrix_market(request, tmp_path_factory):
     Non-baseline goldens need the ``taker_buy_quote`` column, so those markets
     are written via ``test_evaluation._write_mhs_market(include_taker_buy_quote=True)``.
     """
-    import src.mhs.marks as marks
+    import src.core.marks as marks
     import src.mhs.statistics as statistics
     from tests.unit.mhs.test_evaluation_appresearch import (
         _START as _TE_START,

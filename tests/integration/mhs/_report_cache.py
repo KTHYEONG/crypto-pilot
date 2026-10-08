@@ -451,7 +451,7 @@ class DiagnosticReportCache:
 
         On a miss the run executes ``src.mhs.pipeline.orchestrator.run_mhs_diagnostic``
         (resolved at call time) with these module globals set for exactly the duration of
-        the run and restored in ``finally``: ``src.mhs.marks.funding_path`` ->
+        the run and restored in ``finally``: ``src.core.marks.funding_path`` ->
         ``<data_root>/funding/<SYM>.parquet``, the three
         ``src.mhs.statistics._BOOTSTRAP_*`` constants, the optional
         ``derive_trials_attempted`` pin, and the wiring spies when observed.
@@ -528,7 +528,7 @@ class DiagnosticReportCache:
                 raise AssertionError(f"MHS report cache: entry mutated by {consumer}")
 
     def _execute(self, spec: DiagnosticRunSpec) -> tuple[MhsHorizonDiagnosticReport, WiringObservations | None]:
-        import src.mhs.marks as marks
+        import src.core.marks as marks
         import src.mhs.statistics as statistics
 
         root_str = str(spec.request.data_root)

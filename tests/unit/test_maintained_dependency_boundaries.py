@@ -124,7 +124,7 @@ def test_maintained_research_and_deployment_smoke() -> None:
     """Supported research CLI and deployment wiring stay importable."""
     from src.cli.commands.research.mhs import _run_mhs_horizon_diagnostic, add_mhs_commands
     from src.mhs.contracts import MhsDiagnosticRequest, MhsOutputTier
-    from src.mhs.execution.window_stream import MhsExecutionWindow
+    from src.engine.execution.window_stream import MhsExecutionWindow
     from src.mhs.pipeline.orchestrator import run_mhs_diagnostic
 
     assert callable(run_mhs_diagnostic)
@@ -157,7 +157,7 @@ def test_direct_owner_patch_points() -> None:
         text = _read_text(ROOT / rel)
         assert "from src.mhs.evaluation import" not in text, rel
         assert "import src.mhs.evaluation as ev" not in text, rel
-    from src.mhs.books import inverse_realized_vol_tilt, renormalize_within_mask
+    from src.strategy.books import inverse_realized_vol_tilt, renormalize_within_mask
     from src.mhs.regime import crash_regime_tilt_weights
 
     assert callable(inverse_realized_vol_tilt)
@@ -200,7 +200,7 @@ def test_direct_owner_blend_grid_selection() -> None:
     import pandas as pd
 
     from src.mhs.evaluation.books import _active_blend_book_and_grid
-    from src.mhs.types import BOOK_SPECS
+    from src.core.types import BOOK_SPECS
 
     fast = BOOK_SPECS["fast_reversal"]
     slow = BOOK_SPECS["slow_momentum"]
@@ -233,8 +233,8 @@ def test_direct_owner_fold_tilt_and_renormalize() -> None:
     import numpy as np
     import pandas as pd
 
-    from src.mhs.books import inverse_realized_vol_tilt, renormalize_within_mask
-    from src.mhs.horizons import realized_vol
+    from src.strategy.books import inverse_realized_vol_tilt, renormalize_within_mask
+    from src.strategy.horizons import realized_vol
     from src.mhs.regime import crash_regime_tilt_weights
 
     idx = pd.date_range("2021-01-01", periods=30, freq="6h", tz="UTC")
@@ -260,7 +260,7 @@ def test_direct_owner_window_batch_call(monkeypatch: object) -> None:
     import pytest
 
     import src.mhs.evaluation.windows as windows
-    from src.mhs.types import BOOK_SPECS
+    from src.core.types import BOOK_SPECS
 
     grid = pd.date_range("2021-01-01", periods=4, freq="1h", tz="UTC")
     weights = pd.DataFrame({"AAAUSDT": [1.0, 0.0, 1.0, 0.0]}, index=grid)
@@ -311,7 +311,7 @@ def test_direct_owner_fold_target_weights() -> None:
     from src.mhs import research_go as _research_go
     from src.mhs.evaluation.fold_weights import _build_fold_target_weights
     from src.mhs.evidence import AnchoredPurgedFold
-    from src.mhs.features import FeatureAdmission
+    from src.strategy.features import FeatureAdmission
 
     n = 2000
     idx = pd.date_range("2021-01-01", periods=n, freq="1h", tz="UTC")

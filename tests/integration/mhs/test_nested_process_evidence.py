@@ -10,7 +10,7 @@ from src.common.errors import DataIntegrityError
 from src.mhs.backtest.labels import ProcessClockSpec, build_proxy_member_returns
 from src.mhs.backtest.paths import build_inner_policy_evidence, run_process_paths
 from src.mhs.backtest.selection import NestedSelectionSpec, TrainingWindowSpec, choose_refit_policy
-from src.mhs.params import PROCESS_MIN_TRAIN_DAYS
+from src.core.params import PROCESS_MIN_TRAIN_DAYS
 from src.mhs.process import RefitPoint
 
 POLICIES = (
@@ -500,7 +500,7 @@ def test_late_interval_returns_leave_prior_refit_choice_unchanged() -> None:
 
 
 def _ohlcv_pair_windows(days: int = 2):
-    from src.mhs.execution.contracts import ExecutionReplayWindow
+    from src.engine.execution.contracts import ExecutionReplayWindow
 
     cols = ["AUSDT", "BUSDT"]
     index = pd.date_range("2022-01-01", periods=days, freq="24h", tz="UTC")
@@ -559,7 +559,7 @@ def _ohlcv_pair_path(targets: pd.DataFrame):
 def test_canonical_envelope_discloses_valuation_source() -> None:
     import src.mhs.reporting.inventory as rep_inventory
     from src.mhs.backtest.inventory import replay_process_execution
-    from src.mhs.types import ExecutionSpec
+    from src.core.types import ExecutionSpec
 
     targets, windows = _ohlcv_pair_windows()
     path = _ohlcv_pair_path(targets)
@@ -586,8 +586,8 @@ def test_mark_mutation_cannot_change_ohlcv_output(tmp_path) -> None:
     import pathlib
 
     from src.mhs.backtest.inventory import replay_process_execution
-    from src.mhs.execution.window_stream import _iter_mhs_execution_windows
-    from src.mhs.types import ExecutionSpec
+    from src.engine.execution.window_stream import _iter_mhs_execution_windows
+    from src.core.types import ExecutionSpec
 
     symbols = ["AUSDT", "BUSDT"]
     start = pd.Timestamp("2022-01-01", tz="UTC")
@@ -636,8 +636,8 @@ def test_mark_mutation_cannot_change_ohlcv_output(tmp_path) -> None:
 
 def test_flat_absent_source_does_not_poison_finance() -> None:
     from src.mhs.backtest.inventory import replay_process_execution
-    from src.mhs.execution.contracts import ExecutionReplayWindow
-    from src.mhs.types import ExecutionSpec
+    from src.engine.execution.contracts import ExecutionReplayWindow
+    from src.core.types import ExecutionSpec
 
     day = pd.Timestamp("2022-01-01", tz="UTC")
     targets = pd.DataFrame([[0.5, 0.0]], index=pd.DatetimeIndex([day]), columns=["AUSDT", "BUSDT"], dtype="float64")
@@ -671,8 +671,8 @@ def test_flat_absent_source_does_not_poison_finance() -> None:
 
 def test_actual_excluded_set_truthful() -> None:
     from src.mhs.backtest.inventory import _actual_excluded_symbols, _to_canonical_ohlcv_gap
-    from src.mhs.data_policy import SOURCE_GAP_EXCLUDED_SYMBOLS
-    from src.mhs.execution.contracts import ExecutionDataGap
+    from src.core.data_policy import SOURCE_GAP_EXCLUDED_SYMBOLS
+    from src.engine.execution.contracts import ExecutionDataGap
 
     assert len(SOURCE_GAP_EXCLUDED_SYMBOLS) > 0
     held = sorted(SOURCE_GAP_EXCLUDED_SYMBOLS)[0]
@@ -701,7 +701,7 @@ def test_stress_economics_paired() -> None:
     import dataclasses
 
     from src.mhs.backtest.inventory import replay_process_execution
-    from src.mhs.types import ExecutionSpec
+    from src.core.types import ExecutionSpec
 
     targets, windows = _ohlcv_pair_windows()
     path = _ohlcv_pair_path(targets)
