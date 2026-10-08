@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 
 from src.common.errors import DataIntegrityError
+from src.mhs.venue_halts import VenueHaltInterval
 
 from . import _ExecutionBound, _ExecutionGapCode, _MarkSource
 
@@ -346,6 +347,50 @@ class ExecutionDataGap:
 
 
 @dataclass(frozen=True, slots=True)
+class VenueHaltExitBlock:
+    """Disclosure of one exit blocked by an evidenced venue halt (never a data gap).
+
+    Attributes:
+        symbol: Blocked symbol.
+        decision_time: Decision label of the intent.
+        blocked_bar: Halted bar the fill would have used.
+        halt_id: Registry identity of the halt.
+        outcome: ``deferred_fill`` (filled at ``filled_bar`` inside the order timeout) or
+            ``retry_next_decision``.
+        filled_bar: Deferred fill bar, None when retried.
+        quantity: Signed exit quantity that was blocked.
+    """
+
+    symbol: str
+    decision_time: pd.Timestamp
+    blocked_bar: pd.Timestamp
+    halt_id: str
+    outcome: str
+    filled_bar: pd.Timestamp | None
+    quantity: float
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.symbol, str) or not self.symbol:
+            raise DataIntegrityError("halt block symbol must be a nonempty string")
+        if self.outcome not in ("deferred_fill", "retry_next_decision"):
+            raise DataIntegrityError(f"unknown halt block outcome {self.outcome!r}")
+        for name in ("decision_time", "blocked_bar"):
+            value = getattr(self, name)
+            if not isinstance(value, pd.Timestamp) or pd.isna(value):
+                raise DataIntegrityError(f"halt block {name} must be a valid timestamp")
+        if self.filled_bar is not None and (
+            not isinstance(self.filled_bar, pd.Timestamp) or pd.isna(self.filled_bar)
+        ):
+            raise DataIntegrityError("halt block filled_bar must be a valid timestamp or None")
+        if self.outcome == "deferred_fill" and self.filled_bar is None:
+            raise DataIntegrityError("halt block deferred_fill requires filled_bar")
+        if self.outcome == "retry_next_decision" and self.filled_bar is not None:
+            raise DataIntegrityError("halt block retry_next_decision requires filled_bar None")
+        if not np.isfinite(float(self.quantity)):
+            raise DataIntegrityError("halt block quantity must be finite")
+
+
+@dataclass(frozen=True, slots=True)
 class ExecutionReplayWindow:
     """One chronological execution window fed to ``replay_execution_windows``.
 
@@ -383,6 +428,7 @@ class ExecutionReplayWindow:
     funding_coverage_gaps: tuple[FundingCoverageGap, ...] = ()
     funding_knowledge_source: Literal["recorded", "archive_recency_proxy", "legacy"] = "legacy"
     settlement_events: tuple[InstrumentSettlementEvent, ...] = ()
+    venue_halts: tuple[VenueHaltInterval, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -563,6 +609,7 @@ class StrategyExecutionReplayResult:
     terminal_positions: tuple[TerminalPositionEvidence, ...] = ()
     ledger_available_at: pd.DatetimeIndex | None = None
     settlement_events: tuple[InstrumentSettlementEvent, ...] = ()
+    venue_halt_exit_blocks: tuple[VenueHaltExitBlock, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
