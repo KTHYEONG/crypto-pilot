@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import datetime as _datetime
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Literal
 
 import numpy as np
@@ -588,6 +588,8 @@ class SimulatedInventoryLedgerResult:
     invalid_reasons: tuple[str, ...]
     equity_floor_breached_at: tuple[pd.Timestamp, ...] = ()
     data_gaps: tuple[ExecutionDataGap, ...] = ()
+    funding_by_symbol: Mapping[str, float] = field(default_factory=dict)
+    funding_by_symbol_daily: pd.DataFrame | None = None
 
 
 @dataclass(frozen=True, slots=True)

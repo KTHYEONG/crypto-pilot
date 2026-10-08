@@ -275,6 +275,9 @@ def simulated_inventory_ledger(
     notional_before = np.zeros(n_grid, dtype="float64")
     mtm = np.zeros(n_grid, dtype="float64")
     funding_charge = np.zeros(n_grid, dtype="float64")
+    funding_by_symbol: dict[str, float] = {}
+    funding_daily_cols: dict[str, np.ndarray] = {}
+    funding_days, funding_day_positions = np.unique(grid.normalize(), return_inverse=True)
     units_state_by_symbol: list[np.ndarray] | None = [] if retain_simulated_units else None
     grid_index = np.arange(n_grid)
     first_held_mark: tuple[str, int] | None = None
@@ -295,6 +298,8 @@ def simulated_inventory_ledger(
         funding_charge += plane.funding
         notional += plane.notional
         notional_before += plane.notional_before
+        funding_by_symbol[sym] = float(plane.funding.sum())
+        funding_daily_cols[sym] = np.bincount(funding_day_positions, weights=plane.funding, minlength=len(funding_days))
         if units_state_by_symbol is not None:
             units_state_by_symbol.append(plane.units_state)
         if plane.first_held_mark is not None and first_held_mark is None:
@@ -348,6 +353,8 @@ def simulated_inventory_ledger(
         )
     ledger_gaps.sort(key=lambda g: (g.timestamp, g.code))
     primary_valid = first_held_mark is None and first_held_funding is None
+    funding_daily = pd.DataFrame(funding_daily_cols, index=pd.DatetimeIndex(funding_days), dtype="float64")
+    funding_daily.index = pd.DatetimeIndex(funding_daily.index, tz="UTC")
     return SimulatedInventoryLedgerResult(
         equity=equity,
         net_returns=equity.pct_change().dropna(),
@@ -361,4 +368,6 @@ def simulated_inventory_ledger(
         primary_valid=primary_valid,
         invalid_reasons=() if primary_valid else ("MISSING_DATA",),
         data_gaps=tuple(ledger_gaps),
+        funding_by_symbol=funding_by_symbol,
+        funding_by_symbol_daily=funding_daily,
     )

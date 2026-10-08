@@ -35,6 +35,7 @@ from src.core.params import (
     EXPOSURE_SCAN_SEED,
     NULL_BOOTSTRAP_MEAN_BLOCK_DAYS,
     SETTLEMENT_PRICE_STRESS_HAIRCUT_BPS,
+    STRESS_COST_MULTIPLIER,
 )
 from src.core.resources import MhsMemoryBudget
 from src.strategy.targets import FLOW_MOM_TOP20_ACCOUNT_UNIT, StrategySpec, resolve_strategy_id, strategy_id_matches
@@ -113,6 +114,7 @@ class AccountReplayReport:
     run_dir: Path
     payload: dict[str, Any]
     result: AccountLedgerResult
+    stress_result: AccountLedgerResult
 
 
 def validate_account_replay_request(request: AccountReplayRequest) -> None:
@@ -456,8 +458,13 @@ def _build_account_candidate(request: AccountReplayRequest) -> tuple[Any, Any, A
     return strategy_request.strategy, parts, strategy_request
 
 
-def _replay_account_ledgers(request: AccountReplayRequest, parts: Any, rules: Any, policy: Any) -> tuple[Any, Any]:
-    """Replay the unit reference ledger then the account ledger."""
+def _replay_account_ledgers(request: AccountReplayRequest, parts: Any, rules: Any, policy: Any) -> tuple[Any, Any, Any]:
+    """Replay the unit reference, then paired accounts with base and stressed taker costs.
+
+    Both accounts consume the same causal unit history, venue rules and sizing
+    policy. Stress triples taker crossing cost, including maker fallback, while
+    maker fees and the impact model stay fixed. Account equity evolves separately.
+    """
     from src.engine.account_ledger import replay_account
 
     unit_weights, marks, funding_cum, adv, daily_sigma, anchor_times = parts
@@ -482,7 +489,17 @@ def _replay_account_ledgers(request: AccountReplayRequest, parts: Any, rules: An
         )
     except (DataIntegrityError, ValueError) as exc:
         raise AccountReplayError(f"account replay failed: {exc}") from exc
-    return unit, result
+    try:
+        stress = replay_account(
+            unit_weights, marks, funding_cum, adv, daily_sigma, rules, policy,
+            anchor_times=anchor_times, capital=request.capital,
+            taker_fee_bps=ACCOUNT_TAKER_FEE_BPS * STRESS_COST_MULTIPLIER,
+            apply_order_filters=request.apply_order_filters,
+            unit_equity=unit.daily_equity, **execution_kwargs,
+        )
+    except (DataIntegrityError, ValueError) as exc:
+        raise AccountReplayError(f"account replay failed: stress {exc}") from exc
+    return unit, result, stress
 
 
 def _reconcile_account_unit(request: AccountReplayRequest, strategy: Any, unit: Any) -> dict[str, Any]:
@@ -519,11 +536,75 @@ def _reconcile_account_unit(request: AccountReplayRequest, strategy: Any, unit: 
         return {"status": "failed", "error": str(exc), "error_type": type(exc).__name__}
 
 
-def _persist_account_run(request: AccountReplayRequest, strategy: Any, policy: Any, unit: Any, result: Any, reconciliation: dict[str, Any], *, rules_captured_at: str, venue_path: str) -> AccountReplayReport:
+def _account_path_statistics(
+    *, unit: Any, result: Any, stress: Any, request: AccountReplayRequest, strategy: Any,
+) -> dict[str, Any]:
+    """Statistics of the account and its separately labelled unit reference.
+
+    Legacy ledgers without per-symbol funding attribution expose funding
+    statistics as unavailable instead of inventing zero income.
+    """
+    from src.evaluation.report import statistics_payload, strategy_statistics
+
+    cutoff = strategy.design_data_cutoff
+    if not result.daily_equity.index.equals(stress.daily_equity.index):
+        raise AccountReplayError("account replay failed: base/stress daily equity indexes differ")
+    out: dict[str, Any] = {}
+    for case, ledger, capital in (
+        ("unit_reference", unit, ACCOUNT_UNIT_REFERENCE_CAPITAL),
+        ("base", result, request.capital),
+        ("stress", stress, request.capital),
+    ):
+        equity = ledger.daily_equity
+        if equity.empty:
+            raise AccountReplayError("account replay failed: no finite daily returns for statistics")
+        values = equity.to_numpy(dtype="float64")
+        if not np.isfinite(values).all() or (values < 0).any():
+            raise AccountReplayError("account replay failed: invalid daily equity")
+        previous = np.concatenate(([float(capital)], values[:-1]))
+        if bool(((previous == 0) & (values > 0)).any()):
+            raise AccountReplayError("account replay failed: equity resurrects after liquidation")
+        returns = pd.Series(np.divide(values, previous, out=np.ones_like(values), where=previous > 0) - 1.0, index=equity.index)
+        share = pd.Series(0.0, index=returns.index, dtype="float64")
+        funding_daily = getattr(ledger, "funding_by_symbol_daily", None)
+        per_symbol: dict[str, float] = {}
+        if funding_daily is not None:
+            if not funding_daily.index.equals(returns.index):
+                raise AccountReplayError("account replay failed: funding attribution index mismatch")
+            if not np.isfinite(funding_daily.to_numpy(dtype="float64")).all():
+                raise AccountReplayError("account replay failed: non-finite funding attribution")
+            share = funding_daily.sum(axis=1) / float(capital)
+            per_symbol = {str(sym): float(charge) for sym, charge in funding_daily.sum().items()}
+        try:
+            stats = strategy_statistics(
+                returns,
+                daily_funding_share=share,
+                funding_by_symbol=per_symbol,
+                initial_equity=float(capital),
+                design_data_cutoff=cutoff,
+            )
+        except DataIntegrityError as exc:
+            raise AccountReplayError(f"account replay failed: statistics {exc}") from exc
+        payload = statistics_payload(stats)
+        if funding_daily is None:
+            payload["funding"] = None
+            for year in payload["years"]:
+                year["funding_share"] = None
+        out[case] = payload
+    return out
+
+
+def _persist_account_run(request: AccountReplayRequest, strategy: Any, policy: Any, unit: Any, result: Any, reconciliation: dict[str, Any], *, stress: Any, rules_captured_at: str, venue_path: str) -> AccountReplayReport:
     """Persist account.json, daily parquet, export and catalog row for one replay."""
     # Headlines are derived before the run directory exists so a degenerate ledger leaves no empty run dir.
     unit_headlines = _account_headlines(unit.daily_equity, ACCOUNT_UNIT_REFERENCE_CAPITAL)
     account_headlines = _account_headlines(result.daily_equity, request.capital)
+    try:
+        statistics = _account_path_statistics(unit=unit, result=result, stress=stress, request=request, strategy=strategy)
+    except AccountReplayError:
+        raise
+    except (DataIntegrityError, ValueError) as exc:
+        raise AccountReplayError(f"account replay failed: statistics {exc}") from exc
     try:
         run_dir = _resolve_account_destination(
             runs_root=request.runs_root, start=request.evaluation_start, end=request.evaluation_end,
@@ -534,12 +615,29 @@ def _persist_account_run(request: AccountReplayRequest, strategy: Any, policy: A
             unit=unit, unit_headlines=unit_headlines, account_headlines=account_headlines,
             rules_captured_at=rules_captured_at, venue_path=venue_path, reconciliation=reconciliation,
         )
+        payload["statistics"] = statistics
+        payload["design_data_cutoff"] = strategy.design_data_cutoff.isoformat()
+        payload["stress_execution"] = {
+            "mode": request.execution,
+            "taker_fee_bps": ACCOUNT_TAKER_FEE_BPS * STRESS_COST_MULTIPLIER,
+            "maker_fee_bps": None if request.execution == "taker" else ACCOUNT_MAKER_FEE_BPS,
+            "passive_window_bars": None if request.execution == "taker" else ACCOUNT_PASSIVE_WINDOW_BARS,
+            "impact_y": request.impact_y,
+            "unit_moment_source": "shared_base_unit_reference",
+            "liquidated_at": None if stress.liquidated_at is None else stress.liquidated_at.isoformat(),
+        }
+        payload["statistics_limitations"] = []
+        if any(statistics[case]["funding"] is None for case in ("base", "stress", "unit_reference")):
+            payload["statistics_limitations"].append("ACCOUNT_FUNDING_ATTRIBUTION_UNAVAILABLE")
         (run_dir / "account.json").write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
         exposures = result.daily_exposure.to_numpy(dtype="float64")
         pd.DataFrame(
             {"equity": result.daily_equity.to_numpy(dtype="float64"), "exposure": exposures},
             index=result.daily_equity.index,
         ).to_parquet(run_dir / "account_daily.parquet")
+        pd.DataFrame(
+            {"equity": stress.daily_equity, "exposure": stress.daily_exposure},
+        ).to_parquet(run_dir / "account_stress_daily.parquet")
         if request.export_unit_returns is not None:
             _export_unit_returns(
                 equity=unit.daily_equity, strategy_id=strategy.strategy_id, execution=request.execution,
@@ -556,7 +654,7 @@ def _persist_account_run(request: AccountReplayRequest, strategy: Any, policy: A
             )
     except OSError as exc:
         raise AccountReplayError(f"account replay failed: {exc}") from exc
-    return AccountReplayReport(run_dir=run_dir, payload=payload, result=result)
+    return AccountReplayReport(run_dir=run_dir, payload=payload, result=result, stress_result=stress)
 
 
 def run_account_replay(request: AccountReplayRequest) -> AccountReplayReport:
@@ -567,7 +665,8 @@ def run_account_replay(request: AccountReplayRequest) -> AccountReplayReport:
     moments the growth policy sizes from and anchors reconciliation against the canonical 3m
     ledger, so its failure or liquidation invalidates the account run. The account is then
     replayed with the requested policy, execution model and venue snapshot (venue rules are
-    applied retroactively and disclosed as such). Under maker execution both ledgers use the
+    applied retroactively and disclosed as such). A separate stress account triples taker
+    crossing costs using the same causal unit history and policy. Under maker execution all ledgers use the
     canonical strict passive rule and reconciliation only references a same-execution canonical
     run.
 
@@ -594,11 +693,11 @@ def run_account_replay(request: AccountReplayRequest) -> AccountReplayReport:
     else:
         assert request.fixed_exposure is not None
         policy = dataclasses.replace(growth_base, kind="fixed", exposure_max=request.fixed_exposure)
-    unit, result = _replay_account_ledgers(request, parts, rules, policy)
+    unit, result, stress = _replay_account_ledgers(request, parts, rules, policy)
     reconciliation = _reconcile_account_unit(request, strategy, unit)
     return _persist_account_run(
         request, strategy, policy, unit, result, reconciliation,
-        rules_captured_at=rules.captured_at.isoformat(), venue_path=str(venue_path),
+        stress=stress, rules_captured_at=rules.captured_at.isoformat(), venue_path=str(venue_path),
     )
 
 

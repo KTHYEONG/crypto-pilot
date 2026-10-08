@@ -46,6 +46,9 @@ class StrategySpec:
     ``name_clip`` shapes per-name concentration via
     ``clip_names_preserving_gross`` before ``exposure_multiplier`` scales every row; ``1.0`` /
     ``None`` reproduce the unlevered consensus book exactly.
+    ``design_data_cutoff`` is the last instant of market data that could have influenced the
+    strategy's design (feature selection, parameters). Backtest days at or before it are
+    in-sample by construction; only later days can be evidence of out-of-sample performance.
     """
 
     strategy_id: str
@@ -55,10 +58,17 @@ class StrategySpec:
     snapshot_hour_utc: int
     release_hour_utc: int
     entry_hour_utc: int
+    design_data_cutoff: pd.Timestamp
     exposure_multiplier: float = 1.0
     name_clip: float | None = None
 
     def __post_init__(self) -> None:
+        if not isinstance(self.design_data_cutoff, pd.Timestamp) or pd.isna(self.design_data_cutoff):
+            raise ValueError("design_data_cutoff must be a valid timestamp")
+        if self.design_data_cutoff.tzinfo is None or self.design_data_cutoff.utcoffset() is None:
+            raise ValueError("design_data_cutoff must be timezone-aware UTC")
+        if self.design_data_cutoff.utcoffset().total_seconds() != 0:
+            raise ValueError("design_data_cutoff must be timezone-aware UTC")
         if not isinstance(self.strategy_id, str) or not self.strategy_id:
             raise ValueError("strategy_id must be a non-empty string")
         if isinstance(self.breadth, bool) or not isinstance(self.breadth, int) or self.breadth <= 0:
@@ -115,6 +125,7 @@ FLOW_MOM_TOP20 = StrategySpec(
     snapshot_hour_utc=22,
     release_hour_utc=23,
     entry_hour_utc=0,
+    design_data_cutoff=pd.Timestamp("2026-07-01T00:00:00Z"),
 )
 
 FLOW_MOM_TOP40_CONTROL = StrategySpec(
@@ -131,6 +142,7 @@ FLOW_MOM_TOP40_CONTROL = StrategySpec(
     snapshot_hour_utc=22,
     release_hour_utc=23,
     entry_hour_utc=0,
+    design_data_cutoff=pd.Timestamp("2026-07-01T00:00:00Z"),
 )
 
 FLOW_MOM_TOP20_GROWTH = StrategySpec(
@@ -147,6 +159,7 @@ FLOW_MOM_TOP20_GROWTH = StrategySpec(
     snapshot_hour_utc=22,
     release_hour_utc=23,
     entry_hour_utc=0,
+    design_data_cutoff=pd.Timestamp("2026-07-01T00:00:00Z"),
     exposure_multiplier=GROWTH_EXPOSURE_MULTIPLIER,
     name_clip=STRATEGY_NAME_CLIP,
 )
@@ -166,6 +179,7 @@ FLOW_MOM_TOP20_ACCOUNT_UNIT = StrategySpec(
     snapshot_hour_utc=22,
     release_hour_utc=23,
     entry_hour_utc=0,
+    design_data_cutoff=pd.Timestamp("2026-07-01T00:00:00Z"),
     exposure_multiplier=1.0,
     name_clip=STRATEGY_NAME_CLIP,
 )

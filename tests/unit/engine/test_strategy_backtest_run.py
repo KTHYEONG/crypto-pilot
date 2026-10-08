@@ -133,6 +133,20 @@ def test_top20_request_retains_full_pit_census(monkeypatch: pytest.MonkeyPatch) 
     assert "DELISTED" not in captured["hourly_columns"]
 
 
+@pytest.mark.parametrize("extent", ["OPEN_EDGE", "UNSCOPED"])
+def test_first_evaluation_entry_gap_fails_before_target_build(monkeypatch: pytest.MonkeyPatch, extent: str) -> None:
+    _install_source(monkeypatch, {})
+    gap = _gap_interval("AAA", "SOURCE_ABSENT", extent, "2021-04-01T12:00:00Z", "2021-04-01T13:00:00Z")
+    monkeypatch.setattr(run_mod, "active_intervals", lambda **kwargs: (gap,))
+
+    def _unexpected_build(*args, **kwargs):
+        raise AssertionError("lake coverage must fail before feature building or replay")
+
+    monkeypatch.setattr(run_mod, "build_strategy_targets", _unexpected_build)
+    with pytest.raises(run_mod.LakeCoverageError, match=r"AAA.*2021-03-31"):
+        run_strategy_backtest(_request())
+
+
 def test_evaluation_slice_follows_complete_warmup(monkeypatch: pytest.MonkeyPatch) -> None:
     """Targets are built across source history, then scored rows begin exactly at evaluation start."""
     seen: dict = {}
@@ -410,6 +424,7 @@ def _gap_source(monkeypatch: pytest.MonkeyPatch, captured: dict) -> None:
         return daily_close, daily_qv, panels, available, _GAP_SYMBOLS, {}, {}, "root"
 
     def _spy_roster(daily_close: object, daily_qv: object, census: object, **kwargs: object) -> object:
+        captured.setdefault("roster_blocked_calls", []).append(kwargs.get("blocked_decisions"))
         captured["roster_blocked"] = kwargs.get("blocked_decisions")
         return real_roster(daily_close, daily_qv, census, **kwargs)  # type: ignore[arg-type]
 
@@ -427,6 +442,7 @@ def _gap_source(monkeypatch: pytest.MonkeyPatch, captured: dict) -> None:
             start=pd.Timestamp("2020-01-01", tz="UTC").to_pydatetime(), end=None,
             reason="SOURCE_ABSENT", evidence="probe fixture: blocks the whole scenario window",
             verified_at=pd.Timestamp("2026-01-01", tz="UTC").to_pydatetime(), resolved_at=None,
+            extent="INTERIOR",
         ),
         SourceGapInterval(
             symbol="LUNAUSDT", plane="ohlcv_3m",
@@ -434,6 +450,7 @@ def _gap_source(monkeypatch: pytest.MonkeyPatch, captured: dict) -> None:
             end=pd.Timestamp("2023-02-01", tz="UTC").to_pydatetime(),
             reason="SOURCE_ABSENT", evidence="probe fixture: bounded interval outside the window",
             verified_at=pd.Timestamp("2026-01-01", tz="UTC").to_pydatetime(), resolved_at=None,
+            extent="INTERIOR",
         ),
     )
     monkeypatch.setattr(run_mod, "active_intervals", lambda **kwargs: injected)
@@ -449,7 +466,7 @@ def test_runner_threads_reviewed_exclusion_set(monkeypatch: pytest.MonkeyPatch) 
     run = run_strategy_backtest(_request())
     assert run.source_gap_excluded_symbols == ("PUMPUSDT",)
     assert run.source_gap_blocked_decisions == 100
-    roster_blocked = captured["roster_blocked"]
+    roster_blocked = captured["roster_blocked_calls"][0]
     candidate_blocked = captured["candidate_blocked"]
     pd.testing.assert_frame_equal(roster_blocked, candidate_blocked)
     assert bool(roster_blocked["PUMPUSDT"].all())
@@ -472,8 +489,12 @@ def test_excluded_symbol_absent_from_hourly_selection(monkeypatch: pytest.Monkey
     assert "AAA" in captured["hourly_columns"]
 
 
-def test_blocked_decisions_uses_half_open_window() -> None:
+def test_blocked_decisions_uses_half_open_window(monkeypatch: pytest.MonkeyPatch) -> None:
     base, _ = _specs()
+    interval = _gap_interval(
+        "MANAUSDT", "SOURCE_ABSENT", "INTERIOR", "2022-02-26T00:00:00Z", "2022-03-01T00:00:00Z",
+    )
+    monkeypatch.setattr(run_mod, "active_intervals", lambda **kwargs: (interval,))
     days = pd.DatetimeIndex([pd.Timestamp("2022-02-28", tz="UTC")], tz="UTC")
     frame = strategy_blocked_decisions(
         days, ("MANAUSDT",), strategy=FLOW_MOM_TOP20, base_spec=base,
@@ -482,8 +503,12 @@ def test_blocked_decisions_uses_half_open_window() -> None:
     assert not bool(frame.iloc[0, 0])
 
 
-def test_blocked_decisions_blocks_holding_window_overlap() -> None:
+def test_blocked_decisions_blocks_holding_window_overlap(monkeypatch: pytest.MonkeyPatch) -> None:
     base, _ = _specs()
+    interval = _gap_interval(
+        "MANAUSDT", "SOURCE_ABSENT", "INTERIOR", "2022-02-26T00:00:00Z", "2022-03-01T00:00:00Z",
+    )
+    monkeypatch.setattr(run_mod, "active_intervals", lambda **kwargs: (interval,))
     days = pd.DatetimeIndex([pd.Timestamp("2022-02-27", tz="UTC")], tz="UTC")
     frame = strategy_blocked_decisions(
         days, ("MANAUSDT", "AAA"), strategy=FLOW_MOM_TOP20, base_spec=base,

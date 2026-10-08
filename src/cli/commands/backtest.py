@@ -6,7 +6,7 @@ import argparse
 import json
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import pandas as pd
 
@@ -24,7 +24,7 @@ from src.core.resources import MhsMemoryBudget
 
 if TYPE_CHECKING:
     from src.engine.backtest_evidence import StrategyExecutionBound
-    from src.engine.strategy_backtest import StrategyBacktestRequest
+    from src.engine.strategy_backtest import StrategyBacktestRequest, StrategyBacktestRun
     from src.strategy.targets import StrategySpec
 
 _logger = logging.getLogger("MhsBacktestCli")
@@ -269,6 +269,48 @@ def _prune_strategy_runs(keep: int) -> None:
         shutil.rmtree(stale, ignore_errors=True)
 
 
+def _strategy_run_statistics(run: StrategyBacktestRun) -> dict[str, Any]:
+    """Decision-grade base/stress statistics for one completed strategy run.
+
+    Engine modules never import ``src.evaluation``; this CLI-owned step maps the
+    paired ledgers to the report contract (daily funding charge over initial
+    equity, per-symbol currency totals over the scored days) and returns a
+    JSON-safe ``{"base": ..., "stress": ...}`` mapping.
+    """
+    from src.evaluation.report import statistics_payload, strategy_statistics
+
+    evidence = run.evidence
+    request = run.request
+    candidate = run.candidate
+    out: dict[str, Any] = {}
+    for case in ("base", "stress"):
+        replay = getattr(evidence, case)
+        daily = getattr(evidence, f"{case}_daily").returns
+        funding_currency = replay.ledger.funding_charge.groupby(
+            replay.ledger.funding_charge.index.normalize()
+        ).sum().reindex(daily.index, fill_value=0.0)
+        share = (funding_currency / float(request.initial_equity)).astype("float64")
+        share.index = daily.index
+        per_symbol_frame = getattr(replay.ledger, "funding_by_symbol_daily", None)
+        if per_symbol_frame is not None and len(per_symbol_frame):
+            mask = (per_symbol_frame.index >= daily.index[0]) & (per_symbol_frame.index <= daily.index[-1])
+            per_symbol = {
+                str(col): float(per_symbol_frame.loc[mask, col].sum()) for col in per_symbol_frame.columns
+            }
+        else:
+            raw = getattr(replay.ledger, "funding_by_symbol", {}) or {}
+            per_symbol = {str(k): float(v) for k, v in dict(raw).items()}
+        stats = strategy_statistics(
+            daily,
+            daily_funding_share=share,
+            funding_by_symbol=per_symbol,
+            initial_equity=float(request.initial_equity),
+            design_data_cutoff=candidate.strategy.design_data_cutoff,
+        )
+        out[case] = statistics_payload(stats)
+    return out
+
+
 def run_strategy_backtest_command(args: argparse.Namespace) -> None:
     """Run a strategy Top-20/variant 3m inventory evaluation.
 
@@ -343,7 +385,8 @@ def run_strategy_backtest_command(args: argparse.Namespace) -> None:
         raise SystemExit(f"invalid strategy backtest request: {exc}") from exc
     try:
         run = run_strategy_backtest(request)
-        persist_strategy_backtest(run, output)
+        statistics = _strategy_run_statistics(run)
+        persist_strategy_backtest(run, output, statistics=statistics)
         _write_strategy_manifest(output, request=request, breadth=breadth)
         _logger.info(
             "[EVAL] backtest strategy source_gap_excluded=%s",

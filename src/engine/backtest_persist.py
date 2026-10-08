@@ -6,6 +6,7 @@ import contextlib
 import json
 import logging
 import os
+from collections.abc import Mapping
 from pathlib import Path
 from typing import cast
 
@@ -39,7 +40,11 @@ def _jsonable(value: object) -> JsonValue:
     raise DataIntegrityError(f"evidence value {value!r} has no JSON representation")
 
 
-def strategy_backtest_payload(run: StrategyBacktestRun) -> dict[str, JsonValue]:
+def strategy_backtest_payload(
+    run: StrategyBacktestRun,
+    *,
+    statistics: Mapping[str, JsonValue] | None = None,
+) -> dict[str, JsonValue]:
     """Serialize research evidence without discarding provenance or limitations.
 
     The payload is a durable human- and machine-readable summary of one
@@ -86,7 +91,16 @@ def strategy_backtest_payload(run: StrategyBacktestRun) -> dict[str, JsonValue]:
         metrics["start"] = period.start.isoformat()
         metrics["end"] = period.end.isoformat()
         metrics["status"] = "complete"
+        per_symbol = evidence.funding_by_symbol.get(period.label) if isinstance(evidence.funding_by_symbol, Mapping) else None
+        if isinstance(per_symbol, Mapping):
+            metrics["funding_by_symbol"] = {
+                case: {sym: _jsonable(val) for sym, val in (vals.items() if isinstance(vals, Mapping) else {})}
+                for case, vals in per_symbol.items()
+            }
         periods[period.label] = cast(JsonValue, metrics)
+    limitations = list(evidence.limitations)
+    if getattr(run, "data_availability_withdrawals", ()) and "DATA_AVAILABILITY_SELECTION" not in limitations:
+        limitations.append("DATA_AVAILABILITY_SELECTION")
     payload: dict[str, JsonValue] = {
         "strategy_id": candidate.strategy.strategy_id,
         "breadth": candidate.strategy.breadth,
@@ -130,10 +144,17 @@ def strategy_backtest_payload(run: StrategyBacktestRun) -> dict[str, JsonValue]:
             JsonValue,
             [{"symbol": pos.symbol, "status": pos.status} for pos in evidence.stress.terminal_positions],
         ),
-        "limitations": cast(JsonValue, list(evidence.limitations)),
+        "limitations": cast(JsonValue, limitations),
+        "data_availability_withdrawals": cast(
+            JsonValue,
+            [dict(entry) for entry in getattr(run, "data_availability_withdrawals", ())],
+        ),
+        "design_data_cutoff": candidate.strategy.design_data_cutoff.isoformat(),
         "report_periods": cast(JsonValue, periods),
         "research_only": True,
     }
+    if statistics is not None:
+        payload["statistics"] = cast(JsonValue, dict(statistics))
     json.dumps(payload)
     return payload
 
@@ -199,12 +220,19 @@ def strategy_daily_frame(run: StrategyBacktestRun) -> pd.DataFrame:
     return frame
 
 
-def persist_strategy_backtest(run: StrategyBacktestRun, output: Path) -> Path:
+def persist_strategy_backtest(
+    run: StrategyBacktestRun,
+    output: Path,
+    *,
+    statistics: Mapping[str, JsonValue] | None = None,
+) -> Path:
     """Atomically persist one fresh strategy research result envelope.
 
     Args:
         run: Completed research replay to persist.
         output: A non-existing JSON destination.
+        statistics: Optional JSON-safe ``{"base": ..., "stress": ...}`` decision-grade
+            statistics computed outside the engine (the engine never imports evaluation).
     Returns:
         The finalized JSON path.
     Raises:
@@ -220,7 +248,7 @@ def persist_strategy_backtest(run: StrategyBacktestRun, output: Path) -> Path:
     daily_path = output.parent / "daily.parquet"
     if os.path.lexists(daily_path):
         raise DataIntegrityError(f"daily artifact must be fresh: {daily_path} already exists")
-    payload = strategy_backtest_payload(run)
+    payload = strategy_backtest_payload(run, statistics=statistics)
     daily = strategy_daily_frame(run)
     daily_tmp = output.parent / "daily.parquet.tmp"
     tmp = output.parent / f"{output.name}.tmp"

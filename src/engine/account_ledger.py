@@ -51,6 +51,7 @@ class AccountLedgerResult:
     missing_filter_symbols: tuple[str, ...]
     intraday_max_drawdown: float
     maker_fill_fraction: float = 0.0
+    funding_by_symbol_daily: pd.DataFrame | None = None
 
 
 def replay_account(
@@ -200,6 +201,7 @@ def replay_account(
     count = len(symbols)
     daily_equity = np.full(days, np.nan)
     daily_exposure = np.zeros(days)
+    daily_funding = np.zeros((days, count))
     cash = float(capital)
     quantities = np.zeros(count)
     skipped_orders = 0
@@ -220,7 +222,8 @@ def replay_account(
         price = np.nan_to_num(close_f32[anchor].astype(np.float64), nan=1.0)
         held = quantities * price
         marked = cash + float(held.sum())
-        charge = float((held * funding_step[day]).sum())
+        daily_funding[day] = held * funding_step[day]
+        charge = float(daily_funding[day].sum())
         cash -= charge
         funding_paid += charge
         equity = marked - charge
@@ -361,4 +364,5 @@ def replay_account(
         missing_filter_symbols=tuple(sorted(missing_filters)),
         intraday_max_drawdown=float(max_drawdown),
         maker_fill_fraction=float(maker_fill_fraction),
+        funding_by_symbol_daily=pd.DataFrame(daily_funding, index=dates, columns=symbols),
     )
