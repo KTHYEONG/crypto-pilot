@@ -121,6 +121,8 @@ def test_payload_preserves_strategy_provenance() -> None:
     assert payload["base_valid"] is True
     assert payload["research_only"] is True
     assert payload["source_gap_blocked_decisions"] == run.source_gap_blocked_decisions
+    assert "proxy_lead" in str(payload["delisting_announcement_policy"])
+    assert "not evidenced public announcement times" in str(payload["delisting_announcement_policy"])
     assert "NO_DEPLOYMENT_VERDICT" in payload["limitations"]  # type: ignore[operator]
     assert payload["report_periods"]["P1"]["status"] == "complete"  # type: ignore[index]
     assert payload["report_periods"]["P1"]["base_cagr"] is not None  # type: ignore[index]
@@ -255,7 +257,7 @@ def test_registry_is_single_source_gap_view() -> None:
     assert source_gap_excluded_symbols() is not resolved
     assert set(resolved) == set(SOURCE_GAP_EXCLUDED_SYMBOLS)
     assert "PUMPUSDT" in SOURCE_GAP_EXCLUDED_SYMBOLS
-    assert "LUNAUSDT" in SOURCE_GAP_EXCLUDED_SYMBOLS
+    assert "LUNAUSDT" not in SOURCE_GAP_EXCLUDED_SYMBOLS
     assert MHS_DATA_POLICY_DEFAULT == "zombie_mask_v1"
     parser = argparse.ArgumentParser()
     add_backtest_commands(parser)

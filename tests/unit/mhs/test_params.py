@@ -268,3 +268,12 @@ def test_forced_exit_lead_mirrors_live() -> None:
 
     live_horizon = pd.Timedelta(days=1) + pd.Timedelta(hours=LiveSettings().delisting_block_lead_hours)
     assert DELIST_FORCED_EXIT_LEAD == live_horizon  # noqa: SIM300
+
+
+def test_roster_lead_mirrors_live() -> None:
+    import pandas as pd
+
+    from src.live.settings import LiveSettings
+    from src.mhs.params import DELIST_ROSTER_BLOCK_LEAD
+
+    assert pd.Timedelta(hours=LiveSettings().delisting_block_lead_hours) == DELIST_ROSTER_BLOCK_LEAD

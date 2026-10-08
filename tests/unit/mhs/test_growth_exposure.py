@@ -17,6 +17,7 @@ from src.mhs.growth_exposure import (
     solve_log_growth_exposure,
     structurally_excluded_symbols,
 )
+from src.mhs.instrument_settlements import EMPTY_SETTLEMENT_REGISTRY
 from src.mhs.params import (
     FROZEN_EXPOSURE_GAP_THRESHOLD,
     FROZEN_EXPOSURE_GRID,
@@ -262,20 +263,63 @@ def test_structurally_excluded_symbols_selects_delisted_only(tmp_path: Path) -> 
         tmp_path,
         [_gap_registry_row("LUNAUSDT"), _gap_registry_row("PUMPUSDT", reason="SOURCE_ABSENT")],
     )
-    assert structurally_excluded_symbols(path=path) == frozenset({"LUNAUSDT"})
+    assert structurally_excluded_symbols(path=path, settlement_registry=EMPTY_SETTLEMENT_REGISTRY) == frozenset({"LUNAUSDT"})
 
 
 def test_structurally_excluded_symbols_ignores_resolved_records(tmp_path: Path) -> None:
     """A resolved (no-longer-active) DELISTED record no longer excludes its symbol."""
     path = _write_gap_registry(tmp_path, [_gap_registry_row("LUNAUSDT", resolved_at="2026-09-22T00:00:00Z")])
-    assert structurally_excluded_symbols(path=path) == frozenset()
+    assert structurally_excluded_symbols(path=path, settlement_registry=EMPTY_SETTLEMENT_REGISTRY) == frozenset()
 
 
 def test_structurally_excluded_symbols_respects_plane(tmp_path: Path) -> None:
     """A DELISTED record on a different plane does not exclude the symbol from this plane's query."""
     path = _write_gap_registry(tmp_path, [_gap_registry_row("LUNAUSDT", plane="funding")])
-    assert structurally_excluded_symbols(plane="ohlcv_3m", path=path) == frozenset()
-    assert structurally_excluded_symbols(plane="funding", path=path) == frozenset({"LUNAUSDT"})
+    assert structurally_excluded_symbols(plane="ohlcv_3m", path=path, settlement_registry=EMPTY_SETTLEMENT_REGISTRY) == frozenset()
+    assert structurally_excluded_symbols(plane="funding", path=path, settlement_registry=EMPTY_SETTLEMENT_REGISTRY) == frozenset({"LUNAUSDT"})
+
+
+def _luna_record(source: str) -> object:
+    import pandas as pd
+
+    from src.mhs.instrument_settlements import InstrumentSettlementRecord
+
+    delivery = pd.Timestamp("2022-05-12T15:33:00Z")
+    announced = (
+        pd.Timestamp("2022-05-05T15:33:00Z") if source == "proxy_lead"
+        else pd.Timestamp("2022-05-01T00:00:00Z")
+    )
+    return InstrumentSettlementRecord(
+        symbol="LUNAUSDT",
+        event_id=f"LUNAUSDT:{int(delivery.value // 1_000_000)}",
+        announced_at=announced, announcement_source=source,  # type: ignore[arg-type]
+        announcement_evidence="" if source == "proxy_lead" else "Binance notice",
+        last_trade_at=delivery, delivery_at=delivery, settlement_price=1.0,
+        price_source="flat_1h_klines", price_evidence="flat bars", fee_bps=5.0,
+        evidence_digest="sha256:" + "ab" * 32,
+        verified_at=pd.Timestamp("2026-07-01T00:00:00Z"),
+    )
+
+
+def test_unsettled_delisting_stays_in_stress_sample(tmp_path: Path) -> None:
+    path = _write_gap_registry(tmp_path, [_gap_registry_row("LUNAUSDT")])
+    assert structurally_excluded_symbols(path=path, settlement_registry=EMPTY_SETTLEMENT_REGISTRY) == frozenset({"LUNAUSDT"})
+
+
+def test_proxy_announced_settlement_stays(tmp_path: Path) -> None:
+    from src.mhs.instrument_settlements import assemble_instrument_settlement_registry
+
+    path = _write_gap_registry(tmp_path, [_gap_registry_row("LUNAUSDT")])
+    registry = assemble_instrument_settlement_registry([_luna_record("proxy_lead")], [])
+    assert structurally_excluded_symbols(path=path, settlement_registry=registry) == frozenset({"LUNAUSDT"})
+
+
+def test_curated_settlement_leaves_sample(tmp_path: Path) -> None:
+    from src.mhs.instrument_settlements import assemble_instrument_settlement_registry
+
+    path = _write_gap_registry(tmp_path, [_gap_registry_row("LUNAUSDT")])
+    registry = assemble_instrument_settlement_registry([_luna_record("curated")], [])
+    assert structurally_excluded_symbols(path=path, settlement_registry=registry) == frozenset()
 
 
 def test_bootstrap_matrix_golden_and_rng_continuity() -> None:

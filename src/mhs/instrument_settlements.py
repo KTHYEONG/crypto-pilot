@@ -17,12 +17,15 @@ from datetime import datetime, timedelta
 from itertools import pairwise
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Final, Literal
+from typing import TYPE_CHECKING, Any, Final, Literal
 
 import pandas as pd
 
 from src.common.errors import DataIntegrityError
 from src.mhs.params import DELIST_ANNOUNCEMENT_LEAD
+
+if TYPE_CHECKING:
+    from src.mhs.source_gaps import SourceGapInterval
 
 SettlementPriceSource = Literal["flat_1h_klines", "twap30_proxy", "curated"]
 AnnouncementSource = Literal["proxy_lead", "curated"]
@@ -522,3 +525,25 @@ def settlement_registry_for_root(ohlcv_root: str | Path) -> InstrumentSettlement
     if Path(ohlcv_root).resolve() == canonical:
         return load_instrument_settlement_registry()
     return EMPTY_SETTLEMENT_REGISTRY
+
+
+def source_gap_superseded_by_settlement(
+    interval: SourceGapInterval, registry: InstrumentSettlementRegistry,
+) -> bool:
+    """Whether an evidenced settlement explains this source-gap interval.
+
+    A DELISTED reason is superseded by any settlement record of the symbol: the registry now models
+    the delisting causally, so the whole-life exclusion it used to justify is no longer needed. An
+    OPEN_EDGE or UNSCOPED interval is superseded only when it starts at or after the record's
+    ``last_trade_at``; an absence that begins while the symbol still traded is unrelated to the
+    delisting and keeps its own handling.
+    """
+    records = registry.settlements_for(interval.symbol)
+    if not records:
+        return False
+    if interval.reason == "DELISTED":
+        return True
+    if interval.extent not in ("OPEN_EDGE", "UNSCOPED"):
+        return False
+    start = pd.Timestamp(interval.start)
+    return bool(any(record.last_trade_at <= start for record in records))

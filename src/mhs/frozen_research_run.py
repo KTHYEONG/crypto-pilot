@@ -27,9 +27,14 @@ from src.mhs.frozen_research_evidence import (
     evaluate_frozen_mhs_research,
 )
 from src.mhs.frozen_research_universe import build_frozen_pit_roster
-from src.mhs.instrument_settlements import settlement_registry_for_root
+from src.mhs.instrument_settlements import (
+    InstrumentSettlementRegistry,
+    settlement_registry_for_root,
+    source_gap_superseded_by_settlement,
+)
 from src.mhs.marks import _load_funding_series
 from src.mhs.panel import load_base_panel
+from src.mhs.params import DELIST_ROSTER_BLOCK_LEAD
 from src.mhs.resources import (
     MhsMemoryBudget,
     _current_tree_swap_bytes,
@@ -130,6 +135,31 @@ class FrozenMhsBacktestRun:
     source_symbols: tuple[str, ...]
     source_gap_excluded_symbols: tuple[str, ...] = ()
     source_gap_blocked_decisions: int = 0
+    delisting_blocked_decisions: int = 0
+
+
+def _frozen_delisting_block(
+    decision_index: pd.DatetimeIndex,
+    census: list[str],
+    column_of: dict[str, int],
+    *,
+    snapshot_hour: int,
+    settlement_registry: InstrumentSettlementRegistry,
+) -> np.ndarray:
+    """Cause-1 roster withdrawal mirroring the live delisting block, PIT by announcement."""
+    values = np.zeros((len(decision_index), len(census)), dtype=bool)
+    if not census or not settlement_registry.settlements:
+        return values
+    snapshot_instants = decision_index + pd.Timedelta(hours=snapshot_hour)
+    horizon_ends = decision_index + pd.Timedelta(days=1, hours=snapshot_hour) + DELIST_ROSTER_BLOCK_LEAD
+    for record in settlement_registry.settlements:
+        column = column_of.get(record.symbol)
+        if column is None:
+            continue
+        announced = np.asarray(snapshot_instants >= record.announced_at, dtype=bool)
+        reaches = np.asarray(horizon_ends >= record.delivery_at, dtype=bool)
+        values[:, column] |= announced & reaches
+    return values
 
 
 def frozen_blocked_decisions(
@@ -138,44 +168,54 @@ def frozen_blocked_decisions(
     *,
     strategy: FrozenMhsStrategySpec,
     base_spec: ExecutionSpec,
+    settlement_registry: InstrumentSettlementRegistry,
 ) -> pd.DataFrame:
-    """Map evidenced 3m source gaps onto the decision days they would have traded through.
+    """Withdraw symbols from decision days using only information available on that day.
 
-    A decision is blocked when the interval it must execute and hold through overlaps an
-    unrecoverable gap, which is the only condition under which the ledger could not have
-    been produced in live trading. Gaps that fall entirely outside a decision's execution
-    and holding window leave the decision untouched.
+    Two causes block a decision. (1) An announced delisting: once a record's ``announced_at`` is at
+    or before the day's snapshot instant and the holding horizon plus the registered lead reaches
+    delivery, the symbol leaves the roster exactly as the live roster withdrawal does. (2) An
+    evidenced source gap the execution and holding window would cross, restricted to intervals not
+    explained by a settlement; an absence that only exists because the symbol delisted is never used
+    to anticipate the delisting.
 
     Args:
         decision_index: Daily UTC decision grid shared with the roster inputs.
         census_symbols: Canonical column order for the returned frame.
-        strategy: Supplies the entry hour that anchors each decision's execution window.
+        strategy: Supplies snapshot and entry hours.
         base_spec: Supplies the passive timeout that extends each holding window.
+        settlement_registry: Registry bound to the run's OHLCV root.
     Returns:
-        Boolean frame indexed by `decision_index` with `census_symbols` as columns.
+        Boolean frame indexed by ``decision_index`` with ``census_symbols`` columns.
     """
     census = list(census_symbols)
     entry_hour = int(strategy.entry_hour_utc)
+    snapshot_hour = int(strategy.snapshot_hour_utc)
     holding = pd.Timedelta(days=1) + pd.Timedelta(minutes=int(base_spec.passive_timeout_minutes))
     frame = pd.DataFrame(False, index=decision_index, columns=census, dtype=bool)
     if not census:
         return frame
-    intervals = active_intervals(plane="ohlcv_3m")
-    if not intervals:
-        return frame
-    # 결정일 수가 수천 개라 구간마다 벡터 비교 한 번으로 겹침을 판정한다(일별 루프 금지).
     column_of = {sym: pos for pos, sym in enumerate(census)}
-    starts = decision_index + pd.Timedelta(days=1, hours=entry_hour)
-    ends = starts + holding
-    values = np.zeros((len(decision_index), len(census)), dtype=bool)
-    for iv in intervals:
-        column = column_of.get(iv.symbol)
-        if column is None:
-            continue
-        overlap = np.asarray(pd.Timestamp(iv.start) < ends, dtype=bool)
-        if iv.end is not None:
-            overlap &= np.asarray(pd.Timestamp(iv.end) > starts, dtype=bool)
-        values[:, column] |= overlap
+    values = _frozen_delisting_block(
+        decision_index, census, column_of,
+        snapshot_hour=snapshot_hour, settlement_registry=settlement_registry,
+    )
+    intervals = [
+        iv
+        for iv in active_intervals(plane="ohlcv_3m")
+        if not source_gap_superseded_by_settlement(iv, settlement_registry)
+    ]
+    if intervals:
+        starts = decision_index + pd.Timedelta(days=1, hours=entry_hour)
+        ends = starts + holding
+        for iv in intervals:
+            column = column_of.get(iv.symbol)
+            if column is None:
+                continue
+            overlap = np.asarray(pd.Timestamp(iv.start) < ends, dtype=bool)
+            if iv.end is not None:
+                overlap &= np.asarray(pd.Timestamp(iv.end) > starts, dtype=bool)
+            values[:, column] |= overlap
     return pd.DataFrame(values, index=decision_index, columns=census, dtype=bool)
 
 
@@ -348,6 +388,7 @@ def build_frozen_request_candidate(
     )
     blocked_decisions = frozen_blocked_decisions(
         pd.DatetimeIndex(daily_close.index), census, strategy=request.strategy, base_spec=request.base_spec,
+        settlement_registry=settlement_registry_for_root(root),
     )
     roster = build_frozen_pit_roster(
         daily_close, daily_quote_volume, census,
@@ -414,8 +455,16 @@ def run_frozen_mhs_backtest(request: FrozenMhsBacktestRequest) -> FrozenMhsBackt
     funding_by_symbol = context.funding_by_symbol
     funding_failures = context.funding_failures
     census = context.census
+    settlement_registry = settlement_registry_for_root(root)
     blocked_decisions = frozen_blocked_decisions(
         pd.DatetimeIndex(context.daily_close.index), census, strategy=request.strategy, base_spec=request.base_spec,
+        settlement_registry=settlement_registry,
+    )
+    delisting_only = _frozen_delisting_block(
+        pd.DatetimeIndex(context.daily_close.index), list(census),
+        {sym: pos for pos, sym in enumerate(census)},
+        snapshot_hour=int(request.strategy.snapshot_hour_utc),
+        settlement_registry=settlement_registry,
     )
     execution_start = candidate.signal_available_at[0]
     execution_end = _frozen_execution_fence(candidate)
@@ -443,4 +492,5 @@ def run_frozen_mhs_backtest(request: FrozenMhsBacktestRequest) -> FrozenMhsBackt
         execution_start=execution_start, execution_end=execution_end, source_symbols=census,
         source_gap_excluded_symbols=tuple(sorted(sym for sym in census if bool(blocked_decisions[sym].any()))),
         source_gap_blocked_decisions=int(blocked_decisions.to_numpy(dtype=bool).sum()),
+        delisting_blocked_decisions=int(delisting_only.sum()),
     )

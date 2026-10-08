@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import types
+from datetime import UTC
 
 import numpy as np
 import pandas as pd
@@ -25,6 +26,7 @@ from src.mhs.frozen_research_run import (
     frozen_blocked_decisions,
     run_frozen_mhs_backtest,
 )
+from src.mhs.instrument_settlements import EMPTY_SETTLEMENT_REGISTRY
 
 _REAL_PRECHECK = run_mod.assert_frozen_execution_coverage
 
@@ -473,14 +475,20 @@ def test_excluded_symbol_absent_from_hourly_selection(monkeypatch: pytest.Monkey
 def test_blocked_decisions_uses_half_open_window() -> None:
     base, _ = _specs()
     days = pd.DatetimeIndex([pd.Timestamp("2022-02-28", tz="UTC")], tz="UTC")
-    frame = frozen_blocked_decisions(days, ("MANAUSDT",), strategy=FROZEN_MHS_TOP20_V2, base_spec=base)
+    frame = frozen_blocked_decisions(
+        days, ("MANAUSDT",), strategy=FROZEN_MHS_TOP20_V2, base_spec=base,
+        settlement_registry=EMPTY_SETTLEMENT_REGISTRY,
+    )
     assert not bool(frame.iloc[0, 0])
 
 
 def test_blocked_decisions_blocks_holding_window_overlap() -> None:
     base, _ = _specs()
     days = pd.DatetimeIndex([pd.Timestamp("2022-02-27", tz="UTC")], tz="UTC")
-    frame = frozen_blocked_decisions(days, ("MANAUSDT", "AAA"), strategy=FROZEN_MHS_TOP20_V2, base_spec=base)
+    frame = frozen_blocked_decisions(
+        days, ("MANAUSDT", "AAA"), strategy=FROZEN_MHS_TOP20_V2, base_spec=base,
+        settlement_registry=EMPTY_SETTLEMENT_REGISTRY,
+    )
     assert bool(frame.loc[days[0], "MANAUSDT"])
     assert not bool(frame.loc[days[0], "AAA"])
 
@@ -488,7 +496,10 @@ def test_blocked_decisions_blocks_holding_window_overlap() -> None:
 def test_blocked_decisions_empty_census_returns_empty_frame() -> None:
     base, _ = _specs()
     days = pd.date_range("2021-01-01", periods=3, freq="D", tz="UTC")
-    frame = frozen_blocked_decisions(days, (), strategy=FROZEN_MHS_TOP20_V2, base_spec=base)
+    frame = frozen_blocked_decisions(
+        days, (), strategy=FROZEN_MHS_TOP20_V2, base_spec=base,
+        settlement_registry=EMPTY_SETTLEMENT_REGISTRY,
+    )
     assert frame.shape == (3, 0)
 
 
@@ -496,7 +507,10 @@ def test_blocked_decisions_empty_registry_blocks_nothing(monkeypatch: pytest.Mon
     monkeypatch.setattr(run_mod, "active_intervals", lambda **kwargs: ())
     base, _ = _specs()
     days = pd.date_range("2021-01-01", periods=3, freq="D", tz="UTC")
-    frame = frozen_blocked_decisions(days, ("AAA",), strategy=FROZEN_MHS_TOP20_V2, base_spec=base)
+    frame = frozen_blocked_decisions(
+        days, ("AAA",), strategy=FROZEN_MHS_TOP20_V2, base_spec=base,
+        settlement_registry=EMPTY_SETTLEMENT_REGISTRY,
+    )
     assert not bool(frame.to_numpy().any())
 
 
@@ -779,3 +793,268 @@ def test_coverage_check_under_override_still_fails_closed(tmp_path) -> None:
     assert "BTCUSDT" in str(exc_info.value)
     assert "MISSING" not in str(exc_info.value)
     assert "available=2022-01-09T00:00:00+00:00" in str(exc_info.value)
+
+
+def _settlement_record(
+    symbol: str, announced_at: str, last_trade_at: str, delivery_at: str,
+    source: str = "curated",
+):
+    from src.mhs.instrument_settlements import InstrumentSettlementRecord
+
+    delivery = pd.Timestamp(delivery_at, tz="UTC")
+    return InstrumentSettlementRecord(
+        symbol=symbol,
+        event_id=f"{symbol}:{int(delivery.value // 1_000_000)}",
+        announced_at=pd.Timestamp(announced_at, tz="UTC"),
+        announcement_source=source,  # type: ignore[arg-type]
+        announcement_evidence="" if source == "proxy_lead" else "Binance notice",
+        last_trade_at=pd.Timestamp(last_trade_at, tz="UTC"),
+        delivery_at=delivery,
+        settlement_price=1.0, price_source="flat_1h_klines",
+        price_evidence="flat bars", fee_bps=5.0,
+        evidence_digest="sha256:" + "ab" * 32,
+        verified_at=pd.Timestamp("2026-07-01T00:00:00Z"),
+    )
+
+
+def _settlement_registry(records: list) -> object:
+    from src.mhs.instrument_settlements import assemble_instrument_settlement_registry
+
+    return assemble_instrument_settlement_registry(records, [])
+
+
+def _gap_interval(symbol: str, reason: str, extent: str, start: str, end: str | None = None):
+
+    start_dt = pd.Timestamp(start, tz="UTC").to_pydatetime().astimezone(UTC)
+    end_dt = pd.Timestamp(end, tz="UTC").to_pydatetime().astimezone(UTC) if end else None
+    verified = pd.Timestamp("2026-01-01T00:00:00Z").to_pydatetime().astimezone(UTC)
+    return SourceGapInterval(
+        symbol=symbol, plane="ohlcv_3m", start=start_dt, end=end_dt, reason=reason,
+        evidence="test fixture", verified_at=verified, resolved_at=None,
+        extent=extent,  # type: ignore[arg-type]
+    )
+
+
+def test_no_block_before_announcement(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A data-end OPEN_EDGE explained by settlement never anticipates the delisting."""
+    from src.mhs.params import DELIST_ROSTER_BLOCK_LEAD
+
+    base, _ = _specs()
+    record = _settlement_record(
+        "AAA", "2022-01-09T12:00:00Z", "2022-01-10T00:00:00Z", "2022-01-10T00:00:00Z",
+    )
+    registry = _settlement_registry([record])
+    interval = _gap_interval("AAA", "SOURCE_ABSENT", "OPEN_EDGE", "2022-01-10T00:00:00Z")
+    monkeypatch.setattr(run_mod, "active_intervals", lambda **kwargs: (interval,))
+    days = pd.date_range("2022-01-05", periods=8, freq="D", tz="UTC")
+    frame = frozen_blocked_decisions(
+        days, ("AAA",), strategy=FROZEN_MHS_TOP20_V2, base_spec=base,
+        settlement_registry=registry,
+    )
+    before = pd.Timestamp("2022-01-07", tz="UTC")
+    assert not bool(frame.loc[before, "AAA"])
+    announced_day = pd.Timestamp("2022-01-09", tz="UTC")
+    info = announced_day + pd.Timedelta(hours=int(FROZEN_MHS_TOP20_V2.snapshot_hour_utc))
+    horizon = announced_day + pd.Timedelta(days=1, hours=int(FROZEN_MHS_TOP20_V2.snapshot_hour_utc))
+    horizon += DELIST_ROSTER_BLOCK_LEAD
+    expect = (info >= record.announced_at) and (horizon >= record.delivery_at)
+    assert bool(frame.loc[announced_day, "AAA"]) is expect
+
+
+def test_announced_delisting_withdrawn_within_lead(monkeypatch: pytest.MonkeyPatch) -> None:
+    base, _ = _specs()
+    monkeypatch.setattr(run_mod, "active_intervals", lambda **kwargs: ())
+    record = _settlement_record(
+        "AAA", "2022-01-01T00:00:00Z", "2022-01-08T00:00:00Z", "2022-01-08T00:00:00Z",
+    )
+    registry = _settlement_registry([record])
+    days = pd.date_range("2021-12-28", periods=12, freq="D", tz="UTC")
+    frame = frozen_blocked_decisions(
+        days, ("AAA",), strategy=FROZEN_MHS_TOP20_V2, base_spec=base,
+        settlement_registry=registry,
+    )
+    snapshot = int(FROZEN_MHS_TOP20_V2.snapshot_hour_utc)
+    for day in days:
+        horizon = day + pd.Timedelta(days=1, hours=snapshot) + pd.Timedelta(hours=48)
+        announced = (day + pd.Timedelta(hours=snapshot)) >= record.announced_at
+        assert bool(frame.loc[day, "AAA"]) is bool(announced and horizon >= record.delivery_at)
+
+
+def test_superseded_open_edge_does_not_block(monkeypatch: pytest.MonkeyPatch) -> None:
+    base, _ = _specs()
+    record = _settlement_record(
+        "AAA", "2021-12-25T00:00:00Z", "2022-01-01T00:00:00Z", "2022-01-01T00:00:00Z",
+    )
+    registry = _settlement_registry([record])
+    interval = _gap_interval("AAA", "SOURCE_ABSENT", "OPEN_EDGE", "2022-01-01T00:00:00Z")
+    monkeypatch.setattr(run_mod, "active_intervals", lambda **kwargs: (interval,))
+    days = pd.date_range("2021-12-28", periods=6, freq="D", tz="UTC")
+    frame = frozen_blocked_decisions(
+        days, ("AAA",), strategy=FROZEN_MHS_TOP20_V2, base_spec=base,
+        settlement_registry=registry,
+    )
+    horizon_hits = [
+        bool(
+            (day + pd.Timedelta(hours=int(FROZEN_MHS_TOP20_V2.snapshot_hour_utc)) >= record.announced_at)
+            and (
+                day + pd.Timedelta(days=1, hours=int(FROZEN_MHS_TOP20_V2.snapshot_hour_utc))
+                + pd.Timedelta(hours=48) >= record.delivery_at
+            )
+        )
+        for day in days
+    ]
+    assert frame["AAA"].tolist() == horizon_hits
+
+
+def test_interior_gap_still_blocks(monkeypatch: pytest.MonkeyPatch) -> None:
+    base, _ = _specs()
+    registry = EMPTY_SETTLEMENT_REGISTRY
+    interval = _gap_interval(
+        "AAA", "SOURCE_ABSENT", "INTERIOR", "2022-01-03T00:00:00Z", "2022-01-04T00:00:00Z",
+    )
+    monkeypatch.setattr(run_mod, "active_intervals", lambda **kwargs: (interval,))
+    days = pd.DatetimeIndex([pd.Timestamp("2022-01-02", tz="UTC")], tz="UTC")
+    frame = frozen_blocked_decisions(
+        days, ("AAA",), strategy=FROZEN_MHS_TOP20_V2, base_spec=base,
+        settlement_registry=registry,
+    )
+    assert bool(frame.iloc[0, 0])
+
+
+def test_announcement_perturbation_is_pit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Moving announced_at after T leaves pre-T blocked cells identical (I5)."""
+    base, _ = _specs()
+    interval = _gap_interval("AAA", "SOURCE_ABSENT", "OPEN_EDGE", "2022-01-12T00:00:00Z")
+    monkeypatch.setattr(run_mod, "active_intervals", lambda **kwargs: (interval,))
+    before = _settlement_record(
+        "AAA", "2022-01-05T00:00:00Z", "2022-01-12T00:00:00Z", "2022-01-12T00:00:00Z",
+    )
+    after = _settlement_record(
+        "AAA", "2022-01-10T00:00:00Z", "2022-01-12T00:00:00Z", "2022-01-12T00:00:00Z",
+    )
+    days = pd.date_range("2022-01-01", periods=12, freq="D", tz="UTC")
+    first = frozen_blocked_decisions(
+        days, ("AAA",), strategy=FROZEN_MHS_TOP20_V2, base_spec=base,
+        settlement_registry=_settlement_registry([before]),
+    )
+    second = frozen_blocked_decisions(
+        days, ("AAA",), strategy=FROZEN_MHS_TOP20_V2, base_spec=base,
+        settlement_registry=_settlement_registry([after]),
+    )
+    cutoff = pd.Timestamp("2022-01-04T22:00:00Z")
+    snapshot = int(FROZEN_MHS_TOP20_V2.snapshot_hour_utc)
+    pre = [day for day in days if day + pd.Timedelta(hours=snapshot) <= cutoff]
+    assert pre
+    assert first.loc[pre, "AAA"].tolist() == second.loc[pre, "AAA"].tolist()
+    assert not bool(second.loc[pre, "AAA"].any())
+    assert bool(first.loc[pd.Timestamp("2022-01-09", tz="UTC"), "AAA"])
+    assert not bool(second.loc[pd.Timestamp("2022-01-09", tz="UTC"), "AAA"])
+
+
+def test_parity_with_live_rule(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Cause-1 cells match the live roster withdrawal for a midnight announcement."""
+    from src.live.venue_listing import (
+        VenueListingEntry,
+        VenueListingSnapshot,
+        delisting_blocked_decisions as live_blocked,
+    )
+
+    base, _ = _specs()
+    monkeypatch.setattr(run_mod, "active_intervals", lambda **kwargs: ())
+    announced = pd.Timestamp("2022-01-05T00:00:00Z")
+    delivery = pd.Timestamp("2022-01-12T00:00:00Z")
+    record = _settlement_record(
+        "AAA", announced.isoformat(), "2022-01-12T00:00:00Z", delivery.isoformat(),
+    )
+    registry = _settlement_registry([record])
+    days = pd.date_range("2022-01-01", periods=14, freq="D", tz="UTC")
+    research = frozen_blocked_decisions(
+        days, ("AAA",), strategy=FROZEN_MHS_TOP20_V2, base_spec=base,
+        settlement_registry=registry,
+    )
+    entry = VenueListingEntry(
+        symbol="AAA", status="TRADING", contract_type="PERPETUAL",
+        underlying_type="COIN", quote_asset="USDT", delivery_time=delivery,
+        announced_delisting=True, delisting_first_seen_at=announced,
+    )
+    history = (
+        VenueListingSnapshot(
+            captured_at=announced, entries={"AAA": entry},
+            slot_day=announced.normalize(),
+        ),
+    )
+    live = live_blocked(
+        history, days, ("AAA",),
+        holding_end_offset=pd.Timedelta(
+            days=1, hours=int(FROZEN_MHS_TOP20_V2.snapshot_hour_utc),
+        ),
+        lead=pd.Timedelta(hours=48),
+    )
+    assert research["AAA"].tolist() == live["AAA"].tolist()
+
+
+def test_report_carries_delisting_count(monkeypatch: pytest.MonkeyPatch) -> None:
+    from src.mhs.frozen_research_report import frozen_mhs_backtest_payload
+
+    import tests.unit.mhs.test_frozen_research_report as report_helper
+
+    run = report_helper._run()
+    tagged = dataclasses.replace(run, delisting_blocked_decisions=7)
+    payload = frozen_mhs_backtest_payload(tagged)
+    assert payload["delisting_blocked_decisions"] == 7
+
+
+def test_foreign_settlement_symbol_ignored(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A settlement record outside the census never touches the frame."""
+    base, _ = _specs()
+    monkeypatch.setattr(run_mod, "active_intervals", lambda **kwargs: ())
+    record = _settlement_record(
+        "ZZZ", "2022-01-01T00:00:00Z", "2022-01-08T00:00:00Z", "2022-01-08T00:00:00Z",
+    )
+    registry = _settlement_registry([record])
+    days = pd.date_range("2022-01-01", periods=5, freq="D", tz="UTC")
+    frame = frozen_blocked_decisions(
+        days, ("AAA",), strategy=FROZEN_MHS_TOP20_V2, base_spec=base,
+        settlement_registry=registry,
+    )
+    assert not bool(frame.to_numpy().any())
+
+
+@pytest.mark.parametrize(
+    ("announcement", "expected"),
+    [("2022-01-09T22:00:00Z", True), ("2022-01-09T22:00:00.000000001Z", False)],
+)
+def test_snapshot_announcement_boundary(monkeypatch, announcement, expected) -> None:
+    """An announcement after the snapshot cannot withdraw that day's roster."""
+    record = _settlement_record(
+        "AAA", announcement, "2022-01-10T00:00:00Z", "2022-01-10T00:00:00Z",
+    )
+    interval = _gap_interval("AAA", "SOURCE_ABSENT", "OPEN_EDGE", "2022-01-10T00:00:00Z")
+    monkeypatch.setattr(run_mod, "active_intervals", lambda **kwargs: (interval,))
+    frame = frozen_blocked_decisions(
+        pd.date_range("2022-01-09", periods=1, tz="UTC"), ("AAA",),
+        strategy=FROZEN_MHS_TOP20_V2, base_spec=_specs()[0],
+        settlement_registry=_settlement_registry([record]),
+    )
+    assert bool(frame.iloc[0, 0]) is expected
+
+
+def test_runner_counts_delisting_cause_once(monkeypatch) -> None:
+    """Overlapping causes retain the delisting count and bind to the loaded root."""
+    _install_source(monkeypatch, {})
+    record = _settlement_record(
+        "AAA", "2021-04-01T00:00:00Z", "2021-04-05T00:00:00Z", "2021-04-05T00:00:00Z",
+    )
+    registry = _settlement_registry([record])
+
+    def registry_for_root(root):
+        assert root == "root"
+        return registry
+
+    monkeypatch.setattr(run_mod, "settlement_registry_for_root", registry_for_root)
+    interval = _gap_interval("AAA", "SOURCE_ABSENT", "INTERIOR", "2021-04-03", "2021-04-04")
+    monkeypatch.setattr(run_mod, "active_intervals", lambda **kwargs: (interval,))
+    monkeypatch.setattr(run_mod, "evaluate_frozen_mhs_research", lambda *a, **k: _evidence())
+    result = run_frozen_mhs_backtest(_request())
+    assert result.delisting_blocked_decisions == 9
+    assert result.source_gap_blocked_decisions == 10
