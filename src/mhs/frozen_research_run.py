@@ -326,7 +326,7 @@ def _load_frozen_source(
     census = tuple(close_1h.columns)
     assert_settlement_registry_complete(
         Path(root), census,
-        audit_end=request.evaluation_end + pd.Timedelta(days=1),
+        audit_end=request.evaluation_end,
         registry=settlement_registry_for_root(root),
     )
     daily_close = close_1h.resample("1D").last().astype("float64")

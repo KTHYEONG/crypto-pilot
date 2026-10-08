@@ -1058,3 +1058,68 @@ def test_runner_counts_delisting_cause_once(monkeypatch) -> None:
     result = run_frozen_mhs_backtest(_request())
     assert result.delisting_blocked_decisions == 9
     assert result.source_gap_blocked_decisions == 10
+
+
+def _write_audit_3m(ohlcv_root, symbol: str, last_bar: pd.Timestamp) -> None:
+    from pathlib import Path as _Path
+
+    directory = _Path(ohlcv_root) / "3m"
+    directory.mkdir(parents=True, exist_ok=True)
+    idx = pd.date_range(pd.Timestamp("2021-04-01", tz="UTC"), last_bar, freq="3min", tz="UTC")
+    frame = pd.DataFrame({
+        "timestamp": [int(t.value // 10**6) for t in idx],
+        "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "quote_vol": 1000.0,
+    })
+    frame.to_parquet(directory / f"{symbol}.parquet", index=False)
+
+
+def _install_audit_panel(monkeypatch: pytest.MonkeyPatch, census: tuple[str, ...]) -> None:
+    idx = pd.date_range("2021-04-01", periods=48, freq="h", tz="UTC")
+    panel = {
+        key: pd.DataFrame(100.0, index=idx, columns=list(census), dtype="float64")
+        for key in ("close", "quote_vol", "taker_buy_quote")
+    }
+
+    def _fake_panel(*args: object, **kwargs: object) -> dict:
+        admit = kwargs.get("allocation_admission")
+        if callable(admit):
+            admit(1024)
+        return panel
+
+    monkeypatch.setattr(run_mod, "load_base_panel", _fake_panel)
+    monkeypatch.setattr(run_mod, "_load_funding_series", lambda symbols: ({}, {}))
+
+
+def test_audit_horizon_equals_evaluation_end(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    """The settlement audit is fenced at evaluation end, matching replay coverage."""
+    census = ("AAA",)
+    _install_audit_panel(monkeypatch, census)
+    captured: dict = {}
+    monkeypatch.setattr(
+        run_mod, "assert_settlement_registry_complete",
+        lambda *a, **k: captured.update(k),
+    )
+    request = _request(data_root=tmp_path / "ohlcv")
+    run_mod._load_frozen_source(request, run_mod.resolve_mhs_memory_budget(None), None)
+    assert captured["audit_end"] == request.evaluation_end
+
+
+def test_lake_ending_exactly_at_evaluation_end_passes_audit(
+    monkeypatch: pytest.MonkeyPatch, tmp_path,
+) -> None:
+    """A live symbol whose last 3m bar closes the horizon needs no registry record."""
+    request = _request(data_root=tmp_path / "ohlcv")
+    _install_audit_panel(monkeypatch, ("AAA",))
+    _write_audit_3m(tmp_path / "ohlcv", "AAA", request.evaluation_end - pd.Timedelta(minutes=3))
+    run_mod._load_frozen_source(request, run_mod.resolve_mhs_memory_budget(None), None)
+
+
+def test_data_ending_before_evaluation_end_still_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path,
+) -> None:
+    """A live symbol ending inside the horizon without a record still fails closed."""
+    request = _request(data_root=tmp_path / "ohlcv")
+    _install_audit_panel(monkeypatch, ("AAA",))
+    _write_audit_3m(tmp_path / "ohlcv", "AAA", request.evaluation_end - pd.Timedelta(days=1))
+    with pytest.raises(DataIntegrityError, match=r"settlement registry incomplete.*AAA"):
+        run_mod._load_frozen_source(request, run_mod.resolve_mhs_memory_budget(None), None)
