@@ -350,7 +350,7 @@ def test_execution_module_size_budget_with_allowlist() -> None:
     # frozen at measured size; growth fails, shrink requires deleting/lowering the entry.
     # spec 34: causal settlement interleaving and delivery cutoff.
     # spec 34 part 3: announcement intent policy and venue-halt deferral.
-    allowlist = {"src/mhs/execution/accumulator.py": 2267,
+    allowlist = {"src/mhs/execution/accumulator.py": 2254,
                  # spec 34 part 3: venue-halt registry binding on the window stream.
                  "src/mhs/execution/window_stream.py": 704}
 
@@ -376,7 +376,7 @@ def test_source_module_size_budget() -> None:
     allowlist = {
         # spec 34: causal settlement interleaving and delivery cutoff.
         # spec 34 part 3: announcement intent policy and venue-halt deferral.
-        "src/mhs/execution/accumulator.py": 2267,
+        "src/mhs/execution/accumulator.py": 2254,
         # spec 34 part 3: venue-halt registry binding on the window stream.
         "src/mhs/execution/window_stream.py": 704,
         # Cycle phases stay co-located to preserve runtime module-global test seams;
@@ -400,7 +400,7 @@ def test_source_module_size_budget() -> None:
         "src/application/mhs_frozen_account.py": 815,
         "src/mhs/reporting/inventory.py": 741,
         "src/mhs/backtest/paths.py": 849,
-        "src/mhs/backtest/journal.py": 1091,
+        "src/mhs/backtest/journal.py": 1081,
         # spec 34 part 1: I6 settlement-registry audit gate before the replay stream.
         "src/mhs/backtest/inventory.py": 880,
         # spec 34: settlement events survive the IPC spill.

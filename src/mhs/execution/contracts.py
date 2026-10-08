@@ -5,7 +5,7 @@ from __future__ import annotations
 import datetime as _datetime
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 import numpy as np
 import pandas as pd
@@ -16,6 +16,31 @@ from src.mhs.venue_halts import VenueHaltInterval
 from . import _ExecutionBound, _ExecutionGapCode, _MarkSource
 
 _DEFAULT_MAX_OBSERVATION_GAP = pd.Timedelta(hours=8, minutes=5)
+
+
+def _require_settlement_stamp(value: Any, label: str) -> None:
+    """Reject a non-UTC or missing settlement timestamp without inventing one."""
+    if not isinstance(value, pd.Timestamp) or pd.isna(value):
+        raise DataIntegrityError(f"settlement {label} must be a valid timestamp")
+    if value.tzinfo is None or value.utcoffset() != _datetime.timedelta(0):
+        raise DataIntegrityError(f"settlement {label} must be timezone-aware UTC")
+
+
+def _require_settlement_timing(event: InstrumentSettlementEvent) -> None:
+    """Reject incoherent settlement publication timing without inventing order."""
+    _require_settlement_stamp(event.effective_at, "effective_at")
+    _require_settlement_stamp(event.available_at, "available_at")
+    for name in ("announced_at", "last_trade_at"):
+        value = getattr(event, name)
+        if value is None:
+            continue
+        _require_settlement_stamp(value, name)
+    announced = event.announced_at if event.announced_at is not None else event.effective_at
+    last_trade = event.last_trade_at if event.last_trade_at is not None else event.effective_at
+    if announced > last_trade:
+        raise DataIntegrityError("settlement announced_at must not exceed last_trade_at")
+    if last_trade > event.effective_at:
+        raise DataIntegrityError("settlement last_trade_at must not exceed effective_at")
 
 
 def _utc_epoch_ns(index: pd.Index) -> np.ndarray:
@@ -460,32 +485,13 @@ class InstrumentSettlementEvent:
             raise DataIntegrityError("settlement symbol must be a nonempty string")
         if not isinstance(self.source_digest, str) or not self.source_digest:
             raise DataIntegrityError("settlement source_digest must be a nonempty string")
-        for name in ("effective_at", "available_at"):
-            value = getattr(self, name)
-            if not isinstance(value, pd.Timestamp) or pd.isna(value):
-                raise DataIntegrityError(f"settlement {name} must be a valid timestamp")
-            if value.tzinfo is None or value.utcoffset() != _datetime.timedelta(0):
-                raise DataIntegrityError(f"settlement {name} must be timezone-aware UTC")
+        _require_settlement_timing(self)
         price = float(self.settlement_price)
         if not np.isfinite(price) or price <= 0.0:
             raise DataIntegrityError("settlement_price must be a finite positive price")
         fee = float(self.fee_bps)
         if not np.isfinite(fee) or fee < 0.0:
             raise DataIntegrityError("fee_bps must be a finite nonnegative fee")
-        for name in ("announced_at", "last_trade_at"):
-            value = getattr(self, name)
-            if value is None:
-                continue
-            if not isinstance(value, pd.Timestamp) or pd.isna(value):
-                raise DataIntegrityError(f"settlement {name} must be a valid timestamp")
-            if value.tzinfo is None or value.utcoffset() != _datetime.timedelta(0):
-                raise DataIntegrityError(f"settlement {name} must be timezone-aware UTC")
-        announced = self.announced_at if self.announced_at is not None else self.effective_at
-        last_trade = self.last_trade_at if self.last_trade_at is not None else self.effective_at
-        if announced > last_trade:
-            raise DataIntegrityError("settlement announced_at must not exceed last_trade_at")
-        if last_trade > self.effective_at:
-            raise DataIntegrityError("settlement last_trade_at must not exceed effective_at")
         if self.price_source not in ("flat_1h_klines", "twap30_proxy", "curated", "venue"):
             raise DataIntegrityError(f"unknown settlement price_source {self.price_source!r}")
 
