@@ -1,4 +1,4 @@
-"""Frozen target-weight composite ledger shared by the MHS pre-screen proxy.
+"""Fixed target-weight composite ledger shared by the MHS pre-screen proxy.
 
 :class:`XsCompositeSpec` freezes the execution convention (t+1+delay open
 fills, per-unit-turnover fee + slippage, funding on the held book) and
@@ -24,10 +24,10 @@ _INITIAL_EQUITY = 10_000.0
 
 @dataclass(frozen=True, slots=True)
 class XsCompositeSpec:
-    """Frozen construction and execution contract of the XS composite profile.
+    """Fixed construction and execution contract of the XS composite profile.
 
     ``halflife_bars`` and ``no_trade_band`` are the only fitted parameters in
-    the whole construction and were frozen on discovery data alone, so the
+    the whole construction and were fixed on discovery data alone, so the
     qualification result stays an honest out-of-sample test. The remaining
     fields are the production execution convention shared with the TS screen.
     """
@@ -67,7 +67,7 @@ def _ledger_components(
     o2o: np.ndarray,
     funding: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Rate-independent core of the frozen ledger P&L formula.
+    """Rate-independent core of the fixed ledger P&L formula.
 
     Computes the per-bar ``book_return`` (weighted open-to-open), the per-bar
     ``funding_charge`` (weighted funding-rate), and the per-bar ``turnover``
@@ -104,7 +104,7 @@ def _ledger_pnl(
     funding: np.ndarray,
     cost_rate: float,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Frozen ledger P&L formula: per-bar net returns and turnover.
+    """Fixed ledger P&L formula: per-bar net returns and turnover.
 
     ``lagged`` is the already-lagged weight matrix (row ``t`` is what is held
     against the ``t``-th open-to-open return), ``o2o`` the open-to-open return
@@ -113,7 +113,7 @@ def _ledger_pnl(
     each bar's net return is ``sum(lagged * o2o) - turnover * cost_rate -
     sum(lagged * funding)``.  This is the single source of truth for the round
     -trip cost formula -- callers must not reimplement it. The expression order
-    ``(book_return - turnover * cost_rate) - funding_charge`` is frozen; the
+    ``(book_return - turnover * cost_rate) - funding_charge`` is fixed; the
     multi-tier ledger applies the identical order per rate.
     """
     book_return, funding_charge, turnover = _ledger_components(lagged, o2o, funding)
@@ -178,7 +178,7 @@ def run_xs_composite_ledger(
 
     Weights formed at close[t] are lagged by ``1 + execution_delay_bars`` bars
     so they are only held against the ``open[t+1+delay] -> open[t+2+delay]``
-    return, matching the frozen target-weight execution convention. Each bar's net return is
+    return, matching the fixed target-weight execution convention. Each bar's net return is
     ``sum(w_lagged * open-to-open) - turnover * round_trip_cost_rate() -
     sum(w_lagged * bar_funding)`` where turnover is the row sum of absolute
     lagged-weight changes. Returns the strictly-positive equity ledger and the
@@ -212,7 +212,7 @@ def run_xs_composite_ledger_multi_tier(
     Builds ``(lagged, o2o, funding)`` ONCE via ``_xs_composite_inputs`` (the
     identical construction and index/column validations as
     ``run_xs_composite_ledger``), computes the rate-independent ledger
-    components ONCE via ``_ledger_components``, then applies the frozen net
+    components ONCE via ``_ledger_components``, then applies the fixed net
     expression ``book_return - turnover * cost_rate - funding_charge`` per
     rate. Each returned ``(equity, turnover)`` pair is bit-identical to calling
     ``run_xs_composite_ledger`` with a spec whose ``round_trip_cost_rate()``
@@ -243,7 +243,7 @@ def run_xs_composite_ledger_multi_tier(
 
 
 def _check_contract() -> None:
-    """Executable assertions locking the frozen composite-ledger surface at import."""
+    """Executable assertions locking the fixed composite-ledger surface at import."""
     from inspect import signature
 
     assert list(signature(run_xs_composite_ledger).parameters) == [

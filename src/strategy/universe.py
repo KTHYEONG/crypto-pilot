@@ -1,4 +1,4 @@
-"""Frozen point-in-time liquidity roster for MHS research."""
+"""Strategy point-in-time liquidity roster."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from src.common.errors import DataIntegrityError
 _LIQUIDITY_FLOOR_USD = 1_000_000.0
 
 
-def build_frozen_pit_roster(
+def build_pit_roster(
     daily_close: pd.DataFrame,
     daily_quote_volume: pd.DataFrame,
     census_symbols: tuple[str, ...],

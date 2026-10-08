@@ -2,7 +2,7 @@
 
 Pure computation helpers used by the orchestrator's diagnostic and evidence
 paths. No alpha, cost, or inventory arithmetic is introduced here; this module
-composes the frozen ``src.mhs`` primitives (deflated_sharpe_ratio,
+composes the fixed ``src.mhs`` primitives (deflated_sharpe_ratio,
 autocorrelation_adjusted_sharpe, rank_weight_book, phase_tranche_book).
 """
 
@@ -211,7 +211,7 @@ def _placebo_sharpe_percentile(
     n_cols = len(cols)
     sig_step = signal.reindex(grid_1h)
     el_step = eligible.reindex(grid_1h)
-    # The frozen ledger raises ``DataIntegrityError`` unless weights, opens, and
+    # The fixed ledger raises ``DataIntegrityError`` unless weights, opens, and
     # funding share an identical index and column set; preserve that contract
     # instead of silently aligning via ``reindex``.
     if not opens.index.equals(grid_1h) or not bar_funding.index.equals(grid_1h):

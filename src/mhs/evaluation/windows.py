@@ -72,7 +72,7 @@ def _rescaled_windows(
     windows: Iterable[MhsExecutionWindow],
     scale: pd.Series | None,
 ) -> Iterator[MhsExecutionWindow]:
-    """Yield the frozen windows with ``target_weights`` rescaled by ``scale``.
+    """Yield the fixed windows with ``target_weights`` rescaled by ``scale``.
 
     ``scale=None`` yields the windows unchanged (zero-copy). Otherwise each
     window's target weights are multiplied by ``scale`` reindexed to the
@@ -299,7 +299,7 @@ def _replay_batch_bounds(
     another bound is appended.
 
     Raises:
-        AssertionError: the ladder diagnostic is requested and its frozen schedule contract is
+        AssertionError: the ladder diagnostic is requested and its fixed schedule contract is
             violated (``integrity._validate_ladder_schedule_contract``, unchanged from HEAD).
     """
     stress_spec = dataclass_replace(

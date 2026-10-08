@@ -10,13 +10,13 @@ from src.common.errors import DataIntegrityError
 from src.strategy.books import clip_names_preserving_gross, rank_weight_book
 from src.strategy.features import FEATURE_REGISTRY
 from src.strategy.targets import (
-    FROZEN_MHS_TOP20_GROWTH_V2,
-    FROZEN_MHS_TOP20_V2,
-    FROZEN_MHS_TOP40_CONTROL_V2,
-    FrozenFeatureMember,
-    FrozenMhsCandidate,
-    FrozenMhsStrategySpec,
-    build_frozen_mhs_candidate,
+    FLOW_MOM_TOP20_GROWTH,
+    FLOW_MOM_TOP20,
+    FLOW_MOM_TOP40_CONTROL,
+    FeatureMember,
+    StrategyTargets,
+    StrategySpec,
+    build_strategy_targets,
 )
 
 _SYMBOLS = tuple(f"S{i:02d}" for i in range(10))
@@ -48,10 +48,10 @@ def _hourly(n_bars: int | None = None) -> dict[str, pd.DataFrame]:
     return {"close": close, "quote_vol": qv, "taker_buy_quote": taker, "available_at": available}
 
 
-def _build(strategy: FrozenMhsStrategySpec = FROZEN_MHS_TOP20_V2) -> FrozenMhsCandidate:
+def _build(strategy: StrategySpec = FLOW_MOM_TOP20) -> StrategyTargets:
     daily_close, daily_qv = _daily()
     panels = _hourly()
-    return build_frozen_mhs_candidate(
+    return build_strategy_targets(
         panels, panels["available_at"], daily_close, daily_qv, _SYMBOLS, market_close=panels["close"], strategy=strategy
     )
 
@@ -59,31 +59,31 @@ def _build(strategy: FrozenMhsStrategySpec = FROZEN_MHS_TOP20_V2) -> FrozenMhsCa
 def test_default_strategy_is_explicit_top20() -> None:
     daily_close, daily_qv = _daily()
     panels = _hourly()
-    candidate = build_frozen_mhs_candidate(panels, panels["available_at"], daily_close, daily_qv, _SYMBOLS, market_close=panels["close"])
-    assert candidate.strategy.strategy_id == "frozen_mhs_top20_v2"
+    candidate = build_strategy_targets(panels, panels["available_at"], daily_close, daily_qv, _SYMBOLS, market_close=panels["close"])
+    assert candidate.strategy.strategy_id == "flow_mom_top20"
     assert candidate.strategy.breadth == 20
     assert candidate.breadth == 20
 
 
 def test_top40_control_shares_feature_policy() -> None:
-    assert FROZEN_MHS_TOP40_CONTROL_V2.breadth == 40
-    assert [m.name for m in FROZEN_MHS_TOP40_CONTROL_V2.members] == [m.name for m in FROZEN_MHS_TOP20_V2.members]
-    assert [m.sign for m in FROZEN_MHS_TOP40_CONTROL_V2.members] == [m.sign for m in FROZEN_MHS_TOP20_V2.members]
-    assert FROZEN_MHS_TOP40_CONTROL_V2.strategy_id != FROZEN_MHS_TOP20_V2.strategy_id
+    assert FLOW_MOM_TOP40_CONTROL.breadth == 40
+    assert [m.name for m in FLOW_MOM_TOP40_CONTROL.members] == [m.name for m in FLOW_MOM_TOP20.members]
+    assert [m.sign for m in FLOW_MOM_TOP40_CONTROL.members] == [m.sign for m in FLOW_MOM_TOP20.members]
+    assert FLOW_MOM_TOP40_CONTROL.strategy_id != FLOW_MOM_TOP20.strategy_id
     daily_close, daily_qv = _daily()
     panels = _hourly()
-    top20 = build_frozen_mhs_candidate(
-        panels, panels["available_at"], daily_close, daily_qv, _SYMBOLS, market_close=panels["close"], strategy=FROZEN_MHS_TOP20_V2
+    top20 = build_strategy_targets(
+        panels, panels["available_at"], daily_close, daily_qv, _SYMBOLS, market_close=panels["close"], strategy=FLOW_MOM_TOP20
     )
-    top40 = build_frozen_mhs_candidate(
-        panels, panels["available_at"], daily_close, daily_qv, _SYMBOLS, market_close=panels["close"], strategy=FROZEN_MHS_TOP40_CONTROL_V2
+    top40 = build_strategy_targets(
+        panels, panels["available_at"], daily_close, daily_qv, _SYMBOLS, market_close=panels["close"], strategy=FLOW_MOM_TOP40_CONTROL
     )
     assert top40.breadth == 40
     assert list(top40.target_weights.columns) == list(top20.target_weights.columns)
 
 
 def test_custom_breadth_reaches_pit_roster() -> None:
-    custom = dataclasses.replace(FROZEN_MHS_TOP20_V2, strategy_id="custom_b12", breadth=12)
+    custom = dataclasses.replace(FLOW_MOM_TOP20, strategy_id="custom_b12", breadth=12)
     candidate = _build(custom)
     assert candidate.breadth == 12
     assert candidate.strategy.breadth == 12
@@ -96,22 +96,22 @@ def test_invalid_member_definitions_fail() -> None:
     panels = _hourly()
     with pytest.raises(ValueError, match="unique"):
         dataclasses.replace(
-            FROZEN_MHS_TOP20_V2,
-            members=(FrozenFeatureMember(name="flow_imb_168h", sign=1), FrozenFeatureMember(name="flow_imb_168h", sign=1)),
+            FLOW_MOM_TOP20,
+            members=(FeatureMember(name="flow_imb_168h", sign=1), FeatureMember(name="flow_imb_168h", sign=1)),
         )
     unknown = dataclasses.replace(
-        FROZEN_MHS_TOP20_V2, members=(FrozenFeatureMember(name="no_such_feature", sign=1),)
+        FLOW_MOM_TOP20, members=(FeatureMember(name="no_such_feature", sign=1),)
     )
     with pytest.raises(ValueError, match="unregistered"):
-        build_frozen_mhs_candidate(panels, panels["available_at"], daily_close, daily_qv, _SYMBOLS, market_close=panels["close"], strategy=unknown)
+        build_strategy_targets(panels, panels["available_at"], daily_close, daily_qv, _SYMBOLS, market_close=panels["close"], strategy=unknown)
     with pytest.raises(ValueError, match="strictly earlier"):
-        FrozenMhsStrategySpec(
-            strategy_id="bad-clock", breadth=20, members=FROZEN_MHS_TOP20_V2.members,
+        StrategySpec(
+            strategy_id="bad-clock", breadth=20, members=FLOW_MOM_TOP20.members,
             min_rank_symbols=8, snapshot_hour_utc=23, release_hour_utc=23, entry_hour_utc=0,
         )
     with pytest.raises(ValueError, match="min_rank_symbols"):
-        FrozenMhsStrategySpec(
-            strategy_id="bad-pop", breadth=20, members=FROZEN_MHS_TOP20_V2.members,
+        StrategySpec(
+            strategy_id="bad-pop", breadth=20, members=FLOW_MOM_TOP20.members,
             min_rank_symbols=1, snapshot_hour_utc=22, release_hour_utc=23, entry_hour_utc=0,
         )
 
@@ -119,24 +119,24 @@ def test_invalid_member_definitions_fail() -> None:
 def test_future_perturbation_invariance_remains_exact() -> None:
     daily_close, daily_qv = _daily()
     panels = _hourly()
-    base = build_frozen_mhs_candidate(panels, panels["available_at"], daily_close, daily_qv, _SYMBOLS, market_close=panels["close"])
+    base = build_strategy_targets(panels, panels["available_at"], daily_close, daily_qv, _SYMBOLS, market_close=panels["close"])
     hacked = {k: v.copy() for k, v in panels.items()}
     release = daily_close.index[94] + pd.Timedelta(hours=23)
     later = hacked["close"].index[hacked["close"].index > release]
     hacked["close"].loc[later] *= 7.0
     hacked["quote_vol"].loc[later] *= 7.0
     hacked["taker_buy_quote"].loc[later] *= 7.0
-    rebuilt = build_frozen_mhs_candidate(hacked, hacked["available_at"], daily_close, daily_qv, _SYMBOLS, market_close=hacked["close"])
+    rebuilt = build_strategy_targets(hacked, hacked["available_at"], daily_close, daily_qv, _SYMBOLS, market_close=hacked["close"])
     cutoff = release - pd.Timedelta(hours=23) + pd.Timedelta(days=1)
     early_labels = base.target_weights.index[base.target_weights.index <= cutoff]
     pd.testing.assert_frame_equal(rebuilt.target_weights.loc[early_labels], base.target_weights.loc[early_labels])
 
 
 def test_insufficient_ranked_population_becomes_no_trade() -> None:
-    tiny = dataclasses.replace(FROZEN_MHS_TOP20_V2, strategy_id="tiny-pop", min_rank_symbols=9)
+    tiny = dataclasses.replace(FLOW_MOM_TOP20, strategy_id="tiny-pop", min_rank_symbols=9)
     daily_close, daily_qv = _daily()
     panels = _hourly()
-    candidate = build_frozen_mhs_candidate(
+    candidate = build_strategy_targets(
         panels, panels["available_at"], daily_close, daily_qv, _SYMBOLS, market_close=panels["close"], strategy=tiny
     )
     row = candidate.target_weights.iloc[50]
@@ -148,14 +148,14 @@ def test_target_ignores_unclosed_2300_bar() -> None:
     """Changing a 23:00-open candle leaves the next-midnight target unchanged."""
     daily_close, daily_qv = _daily()
     panels = _hourly()
-    base = build_frozen_mhs_candidate(panels, panels["available_at"], daily_close, daily_qv, _SYMBOLS, market_close=panels["close"])
+    base = build_strategy_targets(panels, panels["available_at"], daily_close, daily_qv, _SYMBOLS, market_close=panels["close"])
     hacked = {k: v.copy() for k, v in panels.items()}
     day = daily_close.index[94]
     bar = day + pd.Timedelta(hours=23)
     hacked["close"].loc[bar] *= 25.0
     hacked["quote_vol"].loc[bar] *= 25.0
     hacked["taker_buy_quote"].loc[bar] *= 25.0
-    rebuilt = build_frozen_mhs_candidate(hacked, hacked["available_at"], daily_close, daily_qv, _SYMBOLS, market_close=hacked["close"])
+    rebuilt = build_strategy_targets(hacked, hacked["available_at"], daily_close, daily_qv, _SYMBOLS, market_close=hacked["close"])
     entry = day + pd.Timedelta(days=1)
     pd.testing.assert_frame_equal(rebuilt.target_weights.loc[[entry]], base.target_weights.loc[[entry]])
 
@@ -164,12 +164,12 @@ def test_target_moves_with_completed_2200_bar() -> None:
     """Changing the 22:00-open candle may change decisions from its release onward."""
     daily_close, daily_qv = _daily()
     panels = _hourly()
-    base = build_frozen_mhs_candidate(panels, panels["available_at"], daily_close, daily_qv, _SYMBOLS, market_close=panels["close"])
+    base = build_strategy_targets(panels, panels["available_at"], daily_close, daily_qv, _SYMBOLS, market_close=panels["close"])
     hacked = {k: v.copy() for k, v in panels.items()}
     day = daily_close.index[94]
     bar = day + pd.Timedelta(hours=22)
     hacked["close"].loc[bar] *= 50.0
-    rebuilt = build_frozen_mhs_candidate(hacked, hacked["available_at"], daily_close, daily_qv, _SYMBOLS, market_close=hacked["close"])
+    rebuilt = build_strategy_targets(hacked, hacked["available_at"], daily_close, daily_qv, _SYMBOLS, market_close=hacked["close"])
     entry = day + pd.Timedelta(days=1)
     assert not np.allclose(
         rebuilt.target_weights.loc[entry].to_numpy(), base.target_weights.loc[entry].to_numpy()
@@ -184,11 +184,11 @@ def test_late_historical_publication_fails_closed() -> None:
     """A late source bar invalidates the dependent feature snapshot."""
     daily_close, daily_qv = _daily()
     panels = _hourly()
-    base = build_frozen_mhs_candidate(panels, panels["available_at"], daily_close, daily_qv, _SYMBOLS, market_close=panels["close"])
+    base = build_strategy_targets(panels, panels["available_at"], daily_close, daily_qv, _SYMBOLS, market_close=panels["close"])
     delayed = panels["available_at"].copy()
     decision = daily_close.index[94]
     delayed.loc[decision + pd.Timedelta(hours=21), :] = decision + pd.Timedelta(hours=24)
-    rebuilt = build_frozen_mhs_candidate(panels, delayed, daily_close, daily_qv, _SYMBOLS, market_close=panels["close"])
+    rebuilt = build_strategy_targets(panels, delayed, daily_close, daily_qv, _SYMBOLS, market_close=panels["close"])
     entry = decision + pd.Timedelta(days=1)
     assert bool((base.target_weights.loc[entry] != 0.0).any())
     assert bool((rebuilt.target_weights.loc[entry] == 0.0).all())
@@ -198,7 +198,7 @@ def test_target_equals_equal_weight_member_average() -> None:
     """Output equals the equal-weight average of the five native rank books."""
     daily_close, daily_qv = _daily()
     panels = _hourly()
-    candidate = build_frozen_mhs_candidate(panels, panels["available_at"], daily_close, daily_qv, _SYMBOLS, market_close=panels["close"])
+    candidate = build_strategy_targets(panels, panels["available_at"], daily_close, daily_qv, _SYMBOLS, market_close=panels["close"])
     registry = {spec.name: spec for spec in FEATURE_REGISTRY}
     decisions = daily_close.index[:-1]
     hourly_index = panels["close"].index
@@ -211,7 +211,7 @@ def test_target_equals_equal_weight_member_average() -> None:
         assert hourly_index.equals(panels["quote_vol"].index)
         mask = snaps.notna()
         mask[:] = True
-        from src.strategy.universe import build_frozen_pit_roster as _roster
+        from src.strategy.universe import build_pit_roster as _roster
 
         roster = _roster(daily_close, daily_qv, _SYMBOLS, breadth=20).loc[decisions]
         books.append(rank_weight_book(snaps, roster & snaps.notna(), 1, 8))
@@ -239,14 +239,14 @@ def test_missing_hourly_archive_for_selected_symbol_fails_closed() -> None:
     panels["quote_vol"] = panels["quote_vol"].drop(columns=[_SYMBOLS[0]])
     panels["taker_buy_quote"] = panels["taker_buy_quote"].drop(columns=[_SYMBOLS[0]])
     with pytest.raises(DataIntegrityError, match="hourly source archive"):
-        build_frozen_mhs_candidate(panels, panels["available_at"], daily_close, daily_qv, _SYMBOLS, market_close=panels["close"])
+        build_strategy_targets(panels, panels["available_at"], daily_close, daily_qv, _SYMBOLS, market_close=panels["close"])
 
 
 def test_warmup_and_sparse_rows_emit_zero_without_fill() -> None:
     """Decisions without hourly coverage emit finite zero rows."""
     daily_close, daily_qv = _daily()
     panels = _hourly(n_bars=200)
-    candidate = build_frozen_mhs_candidate(panels, panels["available_at"], daily_close, daily_qv, _SYMBOLS, market_close=panels["close"])
+    candidate = build_strategy_targets(panels, panels["available_at"], daily_close, daily_qv, _SYMBOLS, market_close=panels["close"])
     tail = candidate.target_weights.iloc[50:]
     assert bool((tail.to_numpy() == 0.0).all())
     assert bool(np.isfinite(candidate.target_weights.to_numpy()).all())
@@ -268,97 +268,97 @@ def test_rejects_invalid_panels_grid_and_registry(monkeypatch: pytest.MonkeyPatc
     daily_close, daily_qv = _daily()
     panels = _hourly()
     with pytest.raises(DataIntegrityError, match="must contain"):
-        build_frozen_mhs_candidate({"close": panels["close"]}, panels["available_at"], daily_close, daily_qv, _SYMBOLS, market_close=panels["close"])
+        build_strategy_targets({"close": panels["close"]}, panels["available_at"], daily_close, daily_qv, _SYMBOLS, market_close=panels["close"])
     naive = {k: v.copy() for k, v in panels.items()}
     for v in naive.values():
         v.index = v.index.tz_localize(None)
     with pytest.raises(DataIntegrityError, match="1h grid"):
-        build_frozen_mhs_candidate(naive, naive["available_at"], daily_close, daily_qv, _SYMBOLS, market_close=naive["close"])
+        build_strategy_targets(naive, naive["available_at"], daily_close, daily_qv, _SYMBOLS, market_close=naive["close"])
     eastern = {k: v.copy() for k, v in panels.items()}
     from datetime import timedelta, timezone
 
     for v in eastern.values():
         v.index = v.index.tz_convert(timezone(timedelta(hours=-5)))
     with pytest.raises(DataIntegrityError, match="1h grid"):
-        build_frozen_mhs_candidate(eastern, eastern["available_at"], daily_close, daily_qv, _SYMBOLS, market_close=eastern["close"])
+        build_strategy_targets(eastern, eastern["available_at"], daily_close, daily_qv, _SYMBOLS, market_close=eastern["close"])
     offminute = {k: v.copy() for k, v in panels.items()}
     for v in offminute.values():
         v.index = v.index + pd.Timedelta(minutes=30)
     with pytest.raises(DataIntegrityError, match="1h grid"):
-        build_frozen_mhs_candidate(offminute, offminute["available_at"], daily_close, daily_qv, _SYMBOLS, market_close=offminute["close"])
+        build_strategy_targets(offminute, offminute["available_at"], daily_close, daily_qv, _SYMBOLS, market_close=offminute["close"])
     duped = {k: v.copy() for k, v in panels.items()}
     for k, v in duped.items():
         duped[k] = pd.concat([v.iloc[[0]], v])
     with pytest.raises(DataIntegrityError, match="1h grid"):
-        build_frozen_mhs_candidate(duped, duped["available_at"], daily_close, daily_qv, _SYMBOLS, market_close=duped["close"])
+        build_strategy_targets(duped, duped["available_at"], daily_close, daily_qv, _SYMBOLS, market_close=duped["close"])
     gapped = {k: v.drop(v.index[100]) for k, v in panels.items()}
     with pytest.raises(DataIntegrityError, match="1h grid"):
-        build_frozen_mhs_candidate(gapped, gapped["available_at"], daily_close, daily_qv, _SYMBOLS, market_close=gapped["close"])
+        build_strategy_targets(gapped, gapped["available_at"], daily_close, daily_qv, _SYMBOLS, market_close=gapped["close"])
     misaligned = {k: v.copy() for k, v in panels.items()}
     misaligned["quote_vol"] = misaligned["quote_vol"].rename(columns={_SYMBOLS[0]: "ZZZ"})
     with pytest.raises(DataIntegrityError, match="identical index"):
-        build_frozen_mhs_candidate(misaligned, misaligned["available_at"], daily_close, daily_qv, _SYMBOLS, market_close=misaligned["close"])
+        build_strategy_targets(misaligned, misaligned["available_at"], daily_close, daily_qv, _SYMBOLS, market_close=misaligned["close"])
     availability_misaligned = panels["available_at"].iloc[:-1]
     with pytest.raises(DataIntegrityError, match="align with the hourly panel"):
-        build_frozen_mhs_candidate(panels, availability_misaligned, daily_close, daily_qv, _SYMBOLS, market_close=panels["close"])
+        build_strategy_targets(panels, availability_misaligned, daily_close, daily_qv, _SYMBOLS, market_close=panels["close"])
     availability_missing = panels["available_at"].copy()
     availability_missing.iloc[0, 0] = pd.NaT
     with pytest.raises(DataIntegrityError, match="missing publication"):
-        build_frozen_mhs_candidate(panels, availability_missing, daily_close, daily_qv, _SYMBOLS, market_close=panels["close"])
+        build_strategy_targets(panels, availability_missing, daily_close, daily_qv, _SYMBOLS, market_close=panels["close"])
     availability_early = panels["available_at"].copy()
     availability_early.iloc[0, 0] = panels["close"].index[0] - pd.Timedelta(hours=1)
     with pytest.raises(DataIntegrityError, match="precede the bar"):
-        build_frozen_mhs_candidate(panels, availability_early, daily_close, daily_qv, _SYMBOLS, market_close=panels["close"])
+        build_strategy_targets(panels, availability_early, daily_close, daily_qv, _SYMBOLS, market_close=panels["close"])
     availability_object = panels["available_at"].astype(object)
     with pytest.raises(DataIntegrityError, match="timezone-aware"):
-        build_frozen_mhs_candidate(panels, availability_object, daily_close, daily_qv, _SYMBOLS, market_close=panels["close"])
+        build_strategy_targets(panels, availability_object, daily_close, daily_qv, _SYMBOLS, market_close=panels["close"])
     import src.strategy.targets as candidate_mod
 
     monkeypatch.setattr(candidate_mod, "FEATURE_REGISTRY", ())
     with pytest.raises(ValueError, match="unregistered"):
-        build_frozen_mhs_candidate(panels, panels["available_at"], daily_close, daily_qv, _SYMBOLS, market_close=panels["close"])
+        build_strategy_targets(panels, panels["available_at"], daily_close, daily_qv, _SYMBOLS, market_close=panels["close"])
 
 
 def test_candidate_row_mismatch_fails_closed() -> None:
     candidate = _build()
     with pytest.raises(DataIntegrityError, match="matching rows"):
-        FrozenMhsCandidate(
+        StrategyTargets(
             target_weights=candidate.target_weights.iloc[:-1],
             signal_available_at=candidate.signal_available_at,
-            strategy=FROZEN_MHS_TOP20_V2,
+            strategy=FLOW_MOM_TOP20,
         )
 
 
 def test_strategy_member_validation_branches() -> None:
     with pytest.raises(ValueError, match="non-empty string"):
-        FrozenFeatureMember(name="", sign=1)
+        FeatureMember(name="", sign=1)
     with pytest.raises(ValueError, match="sign"):
-        FrozenFeatureMember(name="flow_imb_168h", sign=2)  # type: ignore[arg-type]
+        FeatureMember(name="flow_imb_168h", sign=2)  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="strategy_id"):
-        FrozenMhsStrategySpec(
-            strategy_id="", breadth=20, members=FROZEN_MHS_TOP20_V2.members,
+        StrategySpec(
+            strategy_id="", breadth=20, members=FLOW_MOM_TOP20.members,
             min_rank_symbols=8, snapshot_hour_utc=22, release_hour_utc=23, entry_hour_utc=0,
         )
     for bad_breadth in (0, -3, True):
         with pytest.raises(ValueError, match="breadth"):
-            FrozenMhsStrategySpec(
-                strategy_id="bad", breadth=bad_breadth, members=FROZEN_MHS_TOP20_V2.members,  # type: ignore[arg-type]
+            StrategySpec(
+                strategy_id="bad", breadth=bad_breadth, members=FLOW_MOM_TOP20.members,  # type: ignore[arg-type]
                 min_rank_symbols=8, snapshot_hour_utc=22, release_hour_utc=23, entry_hour_utc=0,
             )
     with pytest.raises(ValueError, match="non-empty tuple"):
-        FrozenMhsStrategySpec(
+        StrategySpec(
             strategy_id="bad", breadth=20, members=(),  # type: ignore[arg-type]
             min_rank_symbols=8, snapshot_hour_utc=22, release_hour_utc=23, entry_hour_utc=0,
         )
     with pytest.raises(ValueError, match="integer hour"):
-        FrozenMhsStrategySpec(
-            strategy_id="bad-sign", breadth=20, members=FROZEN_MHS_TOP20_V2.members,
+        StrategySpec(
+            strategy_id="bad-sign", breadth=20, members=FLOW_MOM_TOP20.members,
             min_rank_symbols=8, snapshot_hour_utc=22, release_hour_utc=24, entry_hour_utc=0,
         )
     daily_close, daily_qv = _daily()
     panels = _hourly()
-    with pytest.raises(ValueError, match="FrozenMhsStrategySpec"):
-        build_frozen_mhs_candidate(panels, panels["available_at"], daily_close, daily_qv, _SYMBOLS, market_close=panels["close"], strategy=20)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="StrategySpec"):
+        build_strategy_targets(panels, panels["available_at"], daily_close, daily_qv, _SYMBOLS, market_close=panels["close"], strategy=20)  # type: ignore[arg-type]
 
 
 def _blocked(idx: pd.DatetimeIndex, symbols: tuple[str, ...]) -> pd.DataFrame:
@@ -370,15 +370,15 @@ def test_blocked_symbol_never_targetable() -> None:
     panels = _hourly()
     blocked = _blocked(daily_close.index, _SYMBOLS)
     blocked[_SYMBOLS[0]] = True
-    candidate = build_frozen_mhs_candidate(
+    candidate = build_strategy_targets(
         panels, panels["available_at"], daily_close, daily_qv, _SYMBOLS, market_close=panels["close"], blocked_decisions=blocked
     )
     col = candidate.target_weights[_SYMBOLS[0]].to_numpy()
     assert bool(np.isfinite(col).all())
     assert bool((col == 0.0).all())
-    from src.strategy.universe import build_frozen_pit_roster
+    from src.strategy.universe import build_pit_roster
 
-    roster = build_frozen_pit_roster(daily_close, daily_qv, _SYMBOLS, breadth=20, blocked_decisions=blocked)
+    roster = build_pit_roster(daily_close, daily_qv, _SYMBOLS, breadth=20, blocked_decisions=blocked)
     assert not bool(roster[_SYMBOLS[0]].any())
 
 
@@ -387,7 +387,7 @@ def test_blocking_retains_census_provenance() -> None:
     panels = _hourly()
     blocked = _blocked(daily_close.index, _SYMBOLS)
     blocked.iloc[90, 1] = True
-    candidate = build_frozen_mhs_candidate(
+    candidate = build_strategy_targets(
         panels, panels["available_at"], daily_close, daily_qv, _SYMBOLS, market_close=panels["close"], blocked_decisions=blocked
     )
     assert list(candidate.target_weights.columns) == list(_SYMBOLS)
@@ -396,13 +396,13 @@ def test_blocking_retains_census_provenance() -> None:
 def test_blocked_cell_zeroes_only_that_decision() -> None:
     daily_close, daily_qv = _daily()
     panels = _hourly()
-    plain = build_frozen_mhs_candidate(panels, panels["available_at"], daily_close, daily_qv, _SYMBOLS, market_close=panels["close"])
+    plain = build_strategy_targets(panels, panels["available_at"], daily_close, daily_qv, _SYMBOLS, market_close=panels["close"])
     day = daily_close.index[90]
     entry = day + pd.Timedelta(days=1)
     victim = str(plain.target_weights.loc[entry].abs().idxmax())
     blocked = _blocked(daily_close.index, _SYMBOLS)
     blocked.loc[day, victim] = True
-    candidate = build_frozen_mhs_candidate(
+    candidate = build_strategy_targets(
         panels, panels["available_at"], daily_close, daily_qv, _SYMBOLS, market_close=panels["close"], blocked_decisions=blocked
     )
     assert float(candidate.target_weights.loc[entry, victim]) == 0.0
@@ -413,36 +413,36 @@ def test_blocked_cell_zeroes_only_that_decision() -> None:
 
 
 def test_unknown_block_fails_closed() -> None:
-    from src.strategy.universe import build_frozen_pit_roster
+    from src.strategy.universe import build_pit_roster
 
     daily_close, daily_qv = _daily()
     panels = _hourly()
     bad_cols = _blocked(daily_close.index, _SYMBOLS).rename(columns={_SYMBOLS[0]: "NOPEUSDT"})
     with pytest.raises(DataIntegrityError, match="blocked_decisions"):
-        build_frozen_pit_roster(daily_close, daily_qv, _SYMBOLS, breadth=20, blocked_decisions=bad_cols)
+        build_pit_roster(daily_close, daily_qv, _SYMBOLS, breadth=20, blocked_decisions=bad_cols)
     with pytest.raises(DataIntegrityError, match="blocked_decisions"):
-        build_frozen_mhs_candidate(
+        build_strategy_targets(
             panels, panels["available_at"], daily_close, daily_qv, _SYMBOLS, market_close=panels["close"], blocked_decisions=bad_cols
         )
     bad_idx = _blocked(daily_close.index[1:], _SYMBOLS)
     with pytest.raises(DataIntegrityError, match="blocked_decisions"):
-        build_frozen_mhs_candidate(
+        build_strategy_targets(
             panels, panels["available_at"], daily_close, daily_qv, _SYMBOLS, market_close=panels["close"], blocked_decisions=bad_idx
         )
 
 
 def test_no_block_preserves_behavior() -> None:
-    from src.strategy.universe import build_frozen_pit_roster
+    from src.strategy.universe import build_pit_roster
 
     daily_close, daily_qv = _daily()
     panels = _hourly()
-    base_roster = build_frozen_pit_roster(daily_close, daily_qv, _SYMBOLS, breadth=20)
-    empty_roster = build_frozen_pit_roster(
+    base_roster = build_pit_roster(daily_close, daily_qv, _SYMBOLS, breadth=20)
+    empty_roster = build_pit_roster(
         daily_close, daily_qv, _SYMBOLS, breadth=20, blocked_decisions=_blocked(daily_close.index, _SYMBOLS)
     )
     pd.testing.assert_frame_equal(empty_roster, base_roster)
-    base = build_frozen_mhs_candidate(panels, panels["available_at"], daily_close, daily_qv, _SYMBOLS, market_close=panels["close"])
-    empty = build_frozen_mhs_candidate(
+    base = build_strategy_targets(panels, panels["available_at"], daily_close, daily_qv, _SYMBOLS, market_close=panels["close"])
+    empty = build_strategy_targets(
         panels, panels["available_at"], daily_close, daily_qv, _SYMBOLS, market_close=panels["close"],
         blocked_decisions=_blocked(daily_close.index, _SYMBOLS),
     )
@@ -450,14 +450,14 @@ def test_no_block_preserves_behavior() -> None:
 
 
 def test_breadth_applies_after_block() -> None:
-    from src.strategy.universe import build_frozen_pit_roster
+    from src.strategy.universe import build_pit_roster
 
     daily_close, daily_qv = _daily()
     daily_qv = daily_qv.copy()
     daily_qv[_SYMBOLS[0]] = daily_qv[_SYMBOLS[0]] * 10.0
     blocked = _blocked(daily_close.index, _SYMBOLS)
     blocked[_SYMBOLS[0]] = True
-    roster = build_frozen_pit_roster(daily_close, daily_qv, _SYMBOLS, breadth=3, blocked_decisions=blocked)
+    roster = build_pit_roster(daily_close, daily_qv, _SYMBOLS, breadth=3, blocked_decisions=blocked)
     assert not bool(roster[_SYMBOLS[0]].any())
     row_sums = roster.sum(axis=1).to_numpy()
     assert bool((row_sums <= 3).all())
@@ -468,7 +468,7 @@ def test_market_plane_is_mandatory() -> None:
     daily_close, daily_qv = _daily()
     panels = _hourly()
     with pytest.raises(TypeError):
-        build_frozen_mhs_candidate(panels, panels["available_at"], daily_close, daily_qv, _SYMBOLS)  # type: ignore[call-arg]
+        build_strategy_targets(panels, panels["available_at"], daily_close, daily_qv, _SYMBOLS)  # type: ignore[call-arg]
 
 
 def test_market_plane_census_order_enforced() -> None:
@@ -476,26 +476,26 @@ def test_market_plane_census_order_enforced() -> None:
     panels = _hourly()
     permuted = panels["close"][list(reversed(_SYMBOLS))]
     with pytest.raises(DataIntegrityError, match="census_symbols"):
-        build_frozen_mhs_candidate(
+        build_strategy_targets(
             panels, panels["available_at"], daily_close, daily_qv, _SYMBOLS, market_close=permuted
         )
     shifted = panels["close"].copy()
     shifted.index = shifted.index + pd.Timedelta(hours=1)
     with pytest.raises(DataIntegrityError, match="index"):
-        build_frozen_mhs_candidate(
+        build_strategy_targets(
             panels, panels["available_at"], daily_close, daily_qv, _SYMBOLS, market_close=shifted
         )
 
 
 def test_default_strategy_identity_bumped() -> None:
     candidate = _build()
-    assert candidate.strategy.strategy_id == "frozen_mhs_top20_v2"
+    assert candidate.strategy.strategy_id == "flow_mom_top20"
 
 
-def _build_with(strategy: FrozenMhsStrategySpec) -> FrozenMhsCandidate:
+def _build_with(strategy: StrategySpec) -> StrategyTargets:
     daily_close, daily_qv = _daily()
     panels = _hourly()
-    return build_frozen_mhs_candidate(
+    return build_strategy_targets(
         panels, panels["available_at"], daily_close, daily_qv, _SYMBOLS,
         market_close=panels["close"], strategy=strategy,
     )
@@ -504,7 +504,7 @@ def _build_with(strategy: FrozenMhsStrategySpec) -> FrozenMhsCandidate:
 def test_default_policy_is_identity() -> None:
     default = _build()
     explicit = _build_with(
-        dataclasses.replace(FROZEN_MHS_TOP20_V2, exposure_multiplier=1.0, name_clip=None)
+        dataclasses.replace(FLOW_MOM_TOP20, exposure_multiplier=1.0, name_clip=None)
     )
     pd.testing.assert_frame_equal(explicit.target_weights, default.target_weights)
 
@@ -512,14 +512,14 @@ def test_default_policy_is_identity() -> None:
 def test_multiplier_scales_every_row() -> None:
     default = _build()
     levered = _build_with(
-        dataclasses.replace(FROZEN_MHS_TOP20_V2, exposure_multiplier=2.5, name_clip=None)
+        dataclasses.replace(FLOW_MOM_TOP20, exposure_multiplier=2.5, name_clip=None)
     )
     pd.testing.assert_frame_equal(levered.target_weights, default.target_weights * 2.5)
 
 
 def test_growth_spec_applies_clip_before_scaling() -> None:
     default = _build()
-    growth = _build_with(FROZEN_MHS_TOP20_GROWTH_V2)
+    growth = _build_with(FLOW_MOM_TOP20_GROWTH)
     expected = clip_names_preserving_gross(default.target_weights, 0.05) * 2.5
     pd.testing.assert_frame_equal(growth.target_weights, expected)
     default_gross = default.target_weights.abs().sum(axis=1).to_numpy()
@@ -530,14 +530,77 @@ def test_growth_spec_applies_clip_before_scaling() -> None:
 def test_invalid_policy_fields_rejected() -> None:
     for bad_multiplier in (0, 0.0, -2.0, float("nan"), True):
         with pytest.raises(ValueError, match="exposure_multiplier"):
-            dataclasses.replace(FROZEN_MHS_TOP20_V2, exposure_multiplier=bad_multiplier)
+            dataclasses.replace(FLOW_MOM_TOP20, exposure_multiplier=bad_multiplier)
     for bad_clip in (0.0, -0.1, 1.5, float("nan"), float("inf")):
         with pytest.raises(ValueError, match="name_clip"):
-            dataclasses.replace(FROZEN_MHS_TOP20_V2, name_clip=bad_clip)
+            dataclasses.replace(FLOW_MOM_TOP20, name_clip=bad_clip)
 
 
 def test_policy_does_not_move_the_clock() -> None:
     default = _build()
-    growth = _build_with(FROZEN_MHS_TOP20_GROWTH_V2)
+    growth = _build_with(FLOW_MOM_TOP20_GROWTH)
     assert growth.target_weights.index.equals(default.target_weights.index)
     assert growth.signal_available_at.equals(default.signal_available_at)
+
+
+def test_legacy_strategy_ids_resolve_to_canonical() -> None:
+    """Each pre-rename id maps to its canonical id; canonical ids map to themselves."""
+    from src.strategy.targets import LEGACY_STRATEGY_IDS, resolve_strategy_id
+
+    assert LEGACY_STRATEGY_IDS == {
+        "frozen_mhs_top20_v2": "flow_mom_top20",
+        "frozen_mhs_top40_control_v2": "flow_mom_top40_control",
+        "frozen_mhs_top20_growth_v2": "flow_mom_top20_growth",
+    }
+    for legacy, canonical in LEGACY_STRATEGY_IDS.items():
+        assert resolve_strategy_id(legacy) == canonical
+    for canonical in ("flow_mom_top20", "flow_mom_top40_control", "flow_mom_top20_growth"):
+        assert resolve_strategy_id(canonical) == canonical
+    assert resolve_strategy_id("flow_mom_b60_control") == "flow_mom_b60_control"
+
+
+def test_unknown_strategy_id_fails_closed() -> None:
+    """An id no writer ever produced raises instead of silently matching nothing."""
+    from src.strategy.targets import resolve_strategy_id
+
+    with pytest.raises(DataIntegrityError, match="unknown strategy id"):
+        resolve_strategy_id("no_such_strategy")
+    with pytest.raises(DataIntegrityError, match="strategy id must be a non-empty string"):
+        resolve_strategy_id("")
+    for invalid in ("flow_mom_b0_control", "flow_mom_b60_control\n", "flow_mom_b\u0660_control"):
+        with pytest.raises(DataIntegrityError, match="unknown strategy id"):
+            resolve_strategy_id(invalid)
+
+
+def test_legacy_alias_table_is_immutable() -> None:
+    """Persisted evidence identity cannot be redirected by mutating the alias table."""
+    from src.strategy.targets import LEGACY_STRATEGY_IDS
+
+    with pytest.raises(TypeError):
+        LEGACY_STRATEGY_IDS["frozen_mhs_top20_v2"] = "flow_mom_top40_control"  # type: ignore[index]
+
+
+def test_renamed_strategy_definitions_unchanged() -> None:
+    """Members, signs, breadth, hours, exposure multiplier and name clip equal pre-rename values."""
+    from src.strategy.targets import FLOW_MOM_TOP20_ACCOUNT_UNIT
+
+    expected_members = (
+        ("flow_imb_168h", 1),
+        ("flow_imb_720h", 1),
+        ("xs_mom_336h", 1),
+        ("xs_idio_mom_336h", 1),
+        ("mom3_skew_168h", 1),
+    )
+    for spec, strategy_id, breadth, exposure_multiplier, name_clip in (
+        (FLOW_MOM_TOP20, "flow_mom_top20", 20, 1.0, None),
+        (FLOW_MOM_TOP40_CONTROL, "flow_mom_top40_control", 40, 1.0, None),
+        (FLOW_MOM_TOP20_GROWTH, "flow_mom_top20_growth", 20, 2.5, 0.05),
+        (FLOW_MOM_TOP20_ACCOUNT_UNIT, "flow_mom_top20", 20, 1.0, 0.05),
+    ):
+        assert spec.strategy_id == strategy_id
+        assert spec.breadth == breadth
+        assert [(m.name, m.sign) for m in spec.members] == list(expected_members)
+        assert spec.min_rank_symbols == 8
+        assert (spec.snapshot_hour_utc, spec.release_hour_utc, spec.entry_hour_utc) == (22, 23, 0)
+        assert spec.exposure_multiplier == exposure_multiplier
+        assert spec.name_clip == name_clip

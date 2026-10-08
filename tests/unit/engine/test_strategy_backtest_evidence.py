@@ -14,11 +14,11 @@ from src.engine.execution import (
     SimulatedInventoryLedgerResult,
     StrategyExecutionReplayResult,
 )
-from src.strategy.targets import FROZEN_MHS_TOP20_V2, FrozenMhsCandidate
+from src.strategy.targets import FLOW_MOM_TOP20, StrategyTargets
 from src.core.types import ExecutionSpec
 
 import src.engine.backtest_evidence as evidence_mod
-from src.engine.backtest_evidence import FrozenMhsReportPeriod, evaluate_frozen_mhs_research
+from src.engine.backtest_evidence import StrategyReportPeriod, evaluate_strategy_backtest
 
 _SYMBOLS = ("AAA", "BBB")
 _DAY1 = pd.Timestamp("2021-06-01", tz="UTC")
@@ -39,14 +39,14 @@ def _specs() -> tuple[ExecutionSpec, ExecutionSpec]:
     return base, stress
 
 
-def _uncovered_periods() -> tuple[FrozenMhsReportPeriod, ...]:
-    return (FrozenMhsReportPeriod(label="2022", start=pd.Timestamp("2022-01-01", tz="UTC"), end=pd.Timestamp("2022-12-31", tz="UTC")),)
+def _uncovered_periods() -> tuple[StrategyReportPeriod, ...]:
+    return (StrategyReportPeriod(label="2022", start=pd.Timestamp("2022-01-01", tz="UTC"), end=pd.Timestamp("2022-12-31", tz="UTC")),)
 
 
-def _candidate(labels: list[pd.Timestamp], aaa: float = 0.05, bbb: float = -0.05) -> FrozenMhsCandidate:
+def _candidate(labels: list[pd.Timestamp], aaa: float = 0.05, bbb: float = -0.05) -> StrategyTargets:
     weights = pd.DataFrame({"AAA": [aaa] * len(labels), "BBB": [bbb] * len(labels)}, index=pd.DatetimeIndex(labels, tz="UTC"), dtype="float64")
     avail = pd.DatetimeIndex([label - pd.Timedelta(hours=1) for label in labels], tz="UTC")
-    return FrozenMhsCandidate(target_weights=weights, signal_available_at=avail, strategy=FROZEN_MHS_TOP20_V2)
+    return StrategyTargets(target_weights=weights, signal_available_at=avail, strategy=FLOW_MOM_TOP20)
 
 
 def _frames(grid: pd.DatetimeIndex, price: float = 100.0) -> dict[str, pd.DataFrame]:
@@ -63,7 +63,7 @@ def _frames(grid: pd.DatetimeIndex, price: float = 100.0) -> dict[str, pd.DataFr
 
 
 def _engine_window(
-    grid: pd.DatetimeIndex, candidate: FrozenMhsCandidate, labels: list[pd.Timestamp], **overrides: object
+    grid: pd.DatetimeIndex, candidate: StrategyTargets, labels: list[pd.Timestamp], **overrides: object
 ) -> ExecutionReplayWindow:
     weights = candidate.target_weights.loc[labels].copy()
     avail = pd.DatetimeIndex(
@@ -79,7 +79,7 @@ def _engine_window(
     return ExecutionReplayWindow(**params)  # type: ignore[arg-type]
 
 
-def _engine_case() -> tuple[FrozenMhsCandidate, list[ExecutionReplayWindow]]:
+def _engine_case() -> tuple[StrategyTargets, list[ExecutionReplayWindow]]:
     labels = [_DAY1 + pd.Timedelta(days=i) for i in (1, 2, 3)]
     candidate = _candidate(labels)
     first = _engine_window(pd.date_range(labels[0] - pd.Timedelta(hours=1), labels[1] + pd.Timedelta(hours=1), freq="3min", tz="UTC"), candidate, labels[:1])
@@ -90,10 +90,10 @@ def _engine_case() -> tuple[FrozenMhsCandidate, list[ExecutionReplayWindow]]:
 def test_configured_complete_periods_only(monkeypatch: pytest.MonkeyPatch) -> None:
     candidate, base, stress = _hand_fixture()
     monkeypatch.setattr(evidence_mod, "replay_execution_window_batch", lambda *a, **k: (base, stress))
-    complete = FrozenMhsReportPeriod(label="P1", start=pd.Timestamp("2021-06-02", tz="UTC"), end=pd.Timestamp("2021-06-03", tz="UTC"))
-    incomplete = FrozenMhsReportPeriod(label="P9", start=pd.Timestamp("2021-06-05", tz="UTC"), end=pd.Timestamp("2021-06-10", tz="UTC"))
+    complete = StrategyReportPeriod(label="P1", start=pd.Timestamp("2021-06-02", tz="UTC"), end=pd.Timestamp("2021-06-03", tz="UTC"))
+    incomplete = StrategyReportPeriod(label="P9", start=pd.Timestamp("2021-06-05", tz="UTC"), end=pd.Timestamp("2021-06-10", tz="UTC"))
     base_spec, stress_spec = _specs()
-    evidence = evaluate_frozen_mhs_research(
+    evidence = evaluate_strategy_backtest(
         candidate, [], initial_equity=100000.0, base_spec=base_spec, stress_spec=stress_spec,
         report_periods=(complete, incomplete),
     )
@@ -107,12 +107,12 @@ def test_overlapping_reporting_periods_fail(monkeypatch: pytest.MonkeyPatch) -> 
     candidate, base, stress = _hand_fixture()
     monkeypatch.setattr(evidence_mod, "replay_execution_window_batch", lambda *a, **k: (base, stress))
     overlapping = (
-        FrozenMhsReportPeriod(label="A", start=pd.Timestamp("2021-06-02", tz="UTC"), end=pd.Timestamp("2021-06-03", tz="UTC")),
-        FrozenMhsReportPeriod(label="B", start=pd.Timestamp("2021-06-03", tz="UTC"), end=pd.Timestamp("2021-06-04", tz="UTC")),
+        StrategyReportPeriod(label="A", start=pd.Timestamp("2021-06-02", tz="UTC"), end=pd.Timestamp("2021-06-03", tz="UTC")),
+        StrategyReportPeriod(label="B", start=pd.Timestamp("2021-06-03", tz="UTC"), end=pd.Timestamp("2021-06-04", tz="UTC")),
     )
     base_spec, stress_spec = _specs()
     with pytest.raises(DataIntegrityError, match="overlap"):
-        evaluate_frozen_mhs_research(
+        evaluate_strategy_backtest(
             candidate, [], initial_equity=100000.0, base_spec=base_spec, stress_spec=stress_spec,
             report_periods=overlapping,
         )
@@ -123,29 +123,29 @@ def test_invalid_report_period_branches(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setattr(evidence_mod, "replay_execution_window_batch", lambda *a, **k: (base, stress))
     base_spec, stress_spec = _specs()
     with pytest.raises(DataIntegrityError, match="non-empty tuple"):
-        evaluate_frozen_mhs_research(
+        evaluate_strategy_backtest(
             candidate, [], initial_equity=100000.0, base_spec=base_spec, stress_spec=stress_spec,
             report_periods=(),
         )
     dup_labels = (
-        FrozenMhsReportPeriod(label="A", start=pd.Timestamp("2021-06-02", tz="UTC"), end=pd.Timestamp("2021-06-03", tz="UTC")),
-        FrozenMhsReportPeriod(label="A", start=pd.Timestamp("2021-06-05", tz="UTC"), end=pd.Timestamp("2021-06-06", tz="UTC")),
+        StrategyReportPeriod(label="A", start=pd.Timestamp("2021-06-02", tz="UTC"), end=pd.Timestamp("2021-06-03", tz="UTC")),
+        StrategyReportPeriod(label="A", start=pd.Timestamp("2021-06-05", tz="UTC"), end=pd.Timestamp("2021-06-06", tz="UTC")),
     )
     with pytest.raises(DataIntegrityError, match="unique"):
-        evaluate_frozen_mhs_research(
+        evaluate_strategy_backtest(
             candidate, [], initial_equity=100000.0, base_spec=base_spec, stress_spec=stress_spec,
             report_periods=dup_labels,
         )
     with pytest.raises(DataIntegrityError, match="non-empty string"):
-        FrozenMhsReportPeriod(label="", start=pd.Timestamp("2021-06-02", tz="UTC"), end=pd.Timestamp("2021-06-03", tz="UTC"))
+        StrategyReportPeriod(label="", start=pd.Timestamp("2021-06-02", tz="UTC"), end=pd.Timestamp("2021-06-03", tz="UTC"))
     with pytest.raises(DataIntegrityError, match="valid timestamp"):
-        FrozenMhsReportPeriod(label="X", start="2021-06-02", end=pd.Timestamp("2021-06-03", tz="UTC"))  # type: ignore[arg-type]
+        StrategyReportPeriod(label="X", start="2021-06-02", end=pd.Timestamp("2021-06-03", tz="UTC"))  # type: ignore[arg-type]
     with pytest.raises(DataIntegrityError, match="timezone-aware UTC"):
-        FrozenMhsReportPeriod(
+        StrategyReportPeriod(
             label="X", start=pd.Timestamp("2021-06-02"), end=pd.Timestamp("2021-06-03"),
         )
     with pytest.raises(DataIntegrityError, match="start < end"):
-        FrozenMhsReportPeriod(
+        StrategyReportPeriod(
             label="X", start=pd.Timestamp("2021-06-03", tz="UTC"), end=pd.Timestamp("2021-06-02", tz="UTC"),
         )
 
@@ -154,7 +154,7 @@ def test_evaluate_pairs_same_stream_costs_only() -> None:
     """Both bounds share windows and targets; only crossing cost changes."""
     candidate, windows = _engine_case()
     base_spec, stress_spec = _specs()
-    evidence = evaluate_frozen_mhs_research(candidate, iter(windows), initial_equity=100000.0, base_spec=base_spec, stress_spec=stress_spec, report_periods=_uncovered_periods())
+    evidence = evaluate_strategy_backtest(candidate, iter(windows), initial_equity=100000.0, base_spec=base_spec, stress_spec=stress_spec, report_periods=_uncovered_periods())
     assert evidence.base.fill_source == "OHLCV_IMMEDIATE_TAKER"
     assert evidence.stress.fill_source == "OHLCV_IMMEDIATE_TAKER"
     pd.testing.assert_series_equal(
@@ -182,13 +182,13 @@ def test_evaluate_rejects_cost_contract_and_capital() -> None:
     candidate, windows = _engine_case()
     base_spec, stress_spec = _specs()
     with pytest.raises(DataIntegrityError, match="6 bps"):
-        evaluate_frozen_mhs_research(candidate, iter(windows), initial_equity=100000.0, base_spec=ExecutionSpec(), stress_spec=stress_spec, report_periods=_uncovered_periods())
+        evaluate_strategy_backtest(candidate, iter(windows), initial_equity=100000.0, base_spec=ExecutionSpec(), stress_spec=stress_spec, report_periods=_uncovered_periods())
     other = dataclasses.replace(stress_spec, passive_timeout_minutes=stress_spec.passive_timeout_minutes + 1)
     with pytest.raises(DataIntegrityError, match="except crossing cost"):
-        evaluate_frozen_mhs_research(candidate, iter(windows), initial_equity=100000.0, base_spec=base_spec, stress_spec=other, report_periods=_uncovered_periods())
+        evaluate_strategy_backtest(candidate, iter(windows), initial_equity=100000.0, base_spec=base_spec, stress_spec=other, report_periods=_uncovered_periods())
     for bad in (0.0, -10.0, float("nan")):
         with pytest.raises(DataIntegrityError, match="initial_equity"):
-            evaluate_frozen_mhs_research(candidate, iter(windows), initial_equity=bad, base_spec=base_spec, stress_spec=stress_spec, report_periods=_uncovered_periods())
+            evaluate_strategy_backtest(candidate, iter(windows), initial_equity=bad, base_spec=base_spec, stress_spec=stress_spec, report_periods=_uncovered_periods())
 
 
 def test_evaluate_fails_closed_on_unknown_held_funding() -> None:
@@ -205,7 +205,7 @@ def test_evaluate_fails_closed_on_unknown_held_funding() -> None:
         unknown.append(dataclasses.replace(window, funding_known=known))
     base_spec, stress_spec = _specs()
     with pytest.raises(DataIntegrityError, match="unknown funding"):
-        evaluate_frozen_mhs_research(candidate, iter(unknown), initial_equity=100000.0, base_spec=base_spec, stress_spec=stress_spec, report_periods=_uncovered_periods())
+        evaluate_strategy_backtest(candidate, iter(unknown), initial_equity=100000.0, base_spec=base_spec, stress_spec=stress_spec, report_periods=_uncovered_periods())
 
 
 def test_evaluate_fails_closed_on_unpriced_exit() -> None:
@@ -219,7 +219,7 @@ def test_evaluate_fails_closed_on_unpriced_exit() -> None:
         blot.append(dataclasses.replace(window, marks=marks))
     base_spec, stress_spec = _specs()
     with pytest.raises(DataIntegrityError, match="unpriced marks"):
-        evaluate_frozen_mhs_research(candidate, iter(blot), initial_equity=100000.0, base_spec=base_spec, stress_spec=stress_spec, report_periods=_uncovered_periods())
+        evaluate_strategy_backtest(candidate, iter(blot), initial_equity=100000.0, base_spec=base_spec, stress_spec=stress_spec, report_periods=_uncovered_periods())
 
 
 def test_evaluate_uses_actual_funding_event_holdings() -> None:
@@ -231,14 +231,14 @@ def test_evaluate_uses_actual_funding_event_holdings() -> None:
     frames["bar_funding"].loc[grid[(grid >= labels[0] + pd.Timedelta(hours=12)) & (grid < labels[0] + pd.Timedelta(hours=13))]] = 0.0001
     long_window = _engine_window(grid, long_candidate, labels, **frames)
     base_spec, stress_spec = _specs()
-    long_evidence = evaluate_frozen_mhs_research(long_candidate, iter([long_window]), initial_equity=100000.0, base_spec=base_spec, stress_spec=stress_spec, report_periods=_uncovered_periods())
+    long_evidence = evaluate_strategy_backtest(long_candidate, iter([long_window]), initial_equity=100000.0, base_spec=base_spec, stress_spec=stress_spec, report_periods=_uncovered_periods())
     charges = long_evidence.base.ledger.funding_charge
     funded = charges.loc[charges.index.to_series().between(labels[0] + pd.Timedelta(hours=12), labels[0] + pd.Timedelta(hours=13))]
     assert float(funded.sum()) > 0.0
     assert float(charges.drop(funded.index).abs().max()) == 0.0
     short_candidate = _candidate(labels, aaa=-0.10, bbb=0.0)
     short_window = _engine_window(grid, short_candidate, labels, **frames)
-    short_evidence = evaluate_frozen_mhs_research(short_candidate, iter([short_window]), initial_equity=100000.0, base_spec=base_spec, stress_spec=stress_spec, report_periods=_uncovered_periods())
+    short_evidence = evaluate_strategy_backtest(short_candidate, iter([short_window]), initial_equity=100000.0, base_spec=base_spec, stress_spec=stress_spec, report_periods=_uncovered_periods())
     short_charges = short_evidence.base.ledger.funding_charge
     assert float(short_charges.loc[funded.index].sum()) < 0.0
 
@@ -249,7 +249,7 @@ def test_evaluate_records_funding_gaps_as_limitation() -> None:
     gap = FundingCoverageGap(symbol="BBB", start=windows[0].minute_grid[0], end=windows[0].minute_grid[-1], reason="OBSERVATION_GAP")
     gapped = [dataclasses.replace(windows[0], funding_coverage_gaps=(gap,)), windows[1]]
     base_spec, stress_spec = _specs()
-    evidence = evaluate_frozen_mhs_research(candidate, iter(gapped), initial_equity=100000.0, base_spec=base_spec, stress_spec=stress_spec, report_periods=_uncovered_periods())
+    evidence = evaluate_strategy_backtest(candidate, iter(gapped), initial_equity=100000.0, base_spec=base_spec, stress_spec=stress_spec, report_periods=_uncovered_periods())
     assert evidence.limitations == (*_BASE_LIMITATIONS, "FUNDING_COVERAGE_GAPS_RECORDED")
 
 
@@ -283,7 +283,7 @@ def _hand_result(
     )
 
 
-def _hand_fixture(trough: bool = False) -> tuple[FrozenMhsCandidate, StrategyExecutionReplayResult, StrategyExecutionReplayResult]:
+def _hand_fixture(trough: bool = False) -> tuple[StrategyTargets, StrategyExecutionReplayResult, StrategyExecutionReplayResult]:
     idx = pd.date_range("2021-06-01", "2021-06-04", freq="3min", tz="UTC")
     base_eq = pd.Series(100000.0, index=idx, dtype="float64")
     base_eq.loc[pd.Timestamp("2021-06-02 23:57", tz="UTC")] = 101000.0
@@ -306,18 +306,18 @@ def _hand_fixture(trough: bool = False) -> tuple[FrozenMhsCandidate, StrategyExe
     base_funding.loc[pd.Timestamp("2021-06-01 06:00", tz="UTC")] = 999.0
     labels = [pd.Timestamp("2021-06-02", tz="UTC"), pd.Timestamp("2021-06-03", tz="UTC")]
     weights = pd.DataFrame({"AAA": [0.10, 0.30], "BBB": [-0.10, -0.10]}, index=pd.DatetimeIndex(labels, tz="UTC"), dtype="float64")
-    candidate = FrozenMhsCandidate(
+    candidate = StrategyTargets(
         target_weights=weights,
         signal_available_at=pd.DatetimeIndex([label - pd.Timedelta(hours=1) for label in labels], tz="UTC"),
-        strategy=FROZEN_MHS_TOP20_V2,
+        strategy=FLOW_MOM_TOP20,
     )
     base = _hand_result(base_eq, base_funding, base_turnover, 7.0)
     stress = _hand_result(stress_eq, zeros, zeros, 21.0, forced=1)
     return candidate, base, stress
 
 
-def _covered_periods() -> tuple[FrozenMhsReportPeriod, ...]:
-    return (FrozenMhsReportPeriod(label="P1", start=pd.Timestamp("2021-06-02", tz="UTC"), end=pd.Timestamp("2021-06-03", tz="UTC")),)
+def _covered_periods() -> tuple[StrategyReportPeriod, ...]:
+    return (StrategyReportPeriod(label="P1", start=pd.Timestamp("2021-06-02", tz="UTC"), end=pd.Timestamp("2021-06-03", tz="UTC")),)
 
 
 def test_evaluate_reports_covered_period_economics(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -325,7 +325,7 @@ def test_evaluate_reports_covered_period_economics(monkeypatch: pytest.MonkeyPat
     candidate, base, stress = _hand_fixture()
     monkeypatch.setattr(evidence_mod, "replay_execution_window_batch", lambda *a, **k: (base, stress))
     base_spec, stress_spec = _specs()
-    evidence = evaluate_frozen_mhs_research(candidate, [], initial_equity=100000.0, base_spec=base_spec, stress_spec=stress_spec, report_periods=_covered_periods())
+    evidence = evaluate_strategy_backtest(candidate, [], initial_equity=100000.0, base_spec=base_spec, stress_spec=stress_spec, report_periods=_covered_periods())
     row = evidence.period_metrics.loc["P1"]
     assert float(row["base_coverage"]) == 1.0
     assert float(row["base_cagr"]) == pytest.approx((1.01 * 99000.0 / 101000.0) ** (365.0 / 2.0) - 1.0)
@@ -345,7 +345,7 @@ def test_evaluate_reports_marked_intraday_trough(monkeypatch: pytest.MonkeyPatch
     candidate, base, stress = _hand_fixture(trough=True)
     monkeypatch.setattr(evidence_mod, "replay_execution_window_batch", lambda *a, **k: (base, stress))
     base_spec, stress_spec = _specs()
-    evidence = evaluate_frozen_mhs_research(candidate, [], initial_equity=100000.0, base_spec=base_spec, stress_spec=stress_spec, report_periods=_covered_periods())
+    evidence = evaluate_strategy_backtest(candidate, [], initial_equity=100000.0, base_spec=base_spec, stress_spec=stress_spec, report_periods=_covered_periods())
     reported = float(evidence.period_metrics.loc["P1", "base_max_drawdown"])
     assert reported == pytest.approx(0.10)
     assert reported > 1.0 - 99000.0 / 101000.0
@@ -370,14 +370,14 @@ def test_evaluate_rejects_mismatched_daily_intervals(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(evidence_mod, "inventory_daily_evidence", _evidence)
     base_spec, stress_spec = _specs()
     with pytest.raises(DataIntegrityError, match="must match"):
-        evaluate_frozen_mhs_research(candidate, [], initial_equity=100000.0, base_spec=base_spec, stress_spec=stress_spec, report_periods=_covered_periods())
+        evaluate_strategy_backtest(candidate, [], initial_equity=100000.0, base_spec=base_spec, stress_spec=stress_spec, report_periods=_covered_periods())
 
 
 def test_evaluate_applies_selected_bound_to_both_cases() -> None:
     """The selected crossing model is applied identically to base and stress."""
     candidate, windows = _engine_case()
     base_spec, stress_spec = _specs()
-    evidence = evaluate_frozen_mhs_research(
+    evidence = evaluate_strategy_backtest(
         candidate, iter(windows), initial_equity=100000.0, base_spec=base_spec,
         stress_spec=stress_spec, report_periods=_uncovered_periods(),
         execution_bound="OHLCV_STRICT_PROXY",
@@ -385,7 +385,7 @@ def test_evaluate_applies_selected_bound_to_both_cases() -> None:
     assert evidence.base.fill_source == "OHLCV_STRICT_PROXY"
     assert evidence.stress.fill_source == "OHLCV_STRICT_PROXY"
     with pytest.raises(DataIntegrityError, match="execution_bound"):
-        evaluate_frozen_mhs_research(
+        evaluate_strategy_backtest(
             candidate, iter(windows), initial_equity=100000.0, base_spec=base_spec,
             stress_spec=stress_spec, report_periods=_uncovered_periods(),
             execution_bound="OHLCV_PEG_CHASE_PROXY",  # type: ignore[arg-type]
@@ -396,12 +396,12 @@ def test_evaluate_maker_costs_less_than_taker() -> None:
     """Fully trade-through limits cross at the maker fee above taker equity."""
     candidate, windows = _engine_case()
     base_spec, stress_spec = _specs()
-    maker = evaluate_frozen_mhs_research(
+    maker = evaluate_strategy_backtest(
         candidate, iter(windows), initial_equity=100000.0, base_spec=base_spec,
         stress_spec=stress_spec, report_periods=_uncovered_periods(),
         execution_bound="OHLCV_STRICT_PROXY",
     )
-    taker = evaluate_frozen_mhs_research(
+    taker = evaluate_strategy_backtest(
         candidate, iter(windows), initial_equity=100000.0, base_spec=base_spec,
         stress_spec=stress_spec, report_periods=_uncovered_periods(),
         execution_bound="OHLCV_IMMEDIATE_TAKER",
@@ -414,7 +414,7 @@ def test_evaluate_maker_stress_insensitive_when_fully_passive() -> None:
     """All-passive fills leave no taker remainder for stress to reprice."""
     candidate, windows = _engine_case()
     base_spec, stress_spec = _specs()
-    evidence = evaluate_frozen_mhs_research(
+    evidence = evaluate_strategy_backtest(
         candidate, iter(windows), initial_equity=100000.0, base_spec=base_spec,
         stress_spec=stress_spec, report_periods=_uncovered_periods(),
         execution_bound="OHLCV_STRICT_PROXY",
@@ -422,10 +422,10 @@ def test_evaluate_maker_stress_insensitive_when_fully_passive() -> None:
     pd.testing.assert_series_equal(evidence.base.ledger.equity, evidence.stress.ledger.equity)
 
 
-def test_frozen_evidence_guard_tolerates_haircut_only() -> None:
+def test_strategy_evidence_guard_tolerates_haircut_only() -> None:
     import dataclasses
-    from src.application.mhs_frozen_account import frozen_execution_specs
-    base, stress = frozen_execution_specs()
+    from src.application.strategy_account import strategy_execution_specs
+    base, stress = strategy_execution_specs()
     assert dataclasses.replace(stress, taker_fee_bps=base.taker_fee_bps, taker_slippage_bps=base.taker_slippage_bps, settlement_price_haircut_bps=base.settlement_price_haircut_bps) == base
     bad = dataclasses.replace(stress, passive_timeout_minutes=60)
     assert dataclasses.replace(bad, taker_fee_bps=base.taker_fee_bps, taker_slippage_bps=base.taker_slippage_bps, settlement_price_haircut_bps=base.settlement_price_haircut_bps) != base

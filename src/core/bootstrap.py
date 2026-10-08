@@ -1,7 +1,7 @@
 """Stationary block-bootstrap index kernel shared by MHS evidence and sizing.
 
 One RNG draw protocol serves every seeded bootstrap in ``src.mhs`` so CI bounds,
-deployment-readiness probabilities and frozen-exposure curves stay bit-identical
+deployment-readiness probabilities and exposure curves stay bit-identical
 across refactors. Callers own seeding, chunk sizing, the block-count budget and
 the output reduction; this module owns only index composition.
 """

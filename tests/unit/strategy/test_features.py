@@ -66,7 +66,7 @@ def _gap_spec() -> FeatureSpec:
 def test_feature_spec_validation() -> None:
     # SCENARIO_FEATURE_SPEC_VALIDATION: FeatureSpec rejects an empty name, an
     # empty required_columns tuple, and a min_coverage outside [0.0, 1.0] with
-    # ValueError; a well-formed spec constructs and is frozen (attribute
+    # ValueError; a well-formed spec constructs and is immutable (attribute
     # assignment raises).
     with pytest.raises(ValueError, match="name"):
         FeatureSpec(name="", required_columns=("close",), min_coverage=0.9, builder=lambda p: p["close"])

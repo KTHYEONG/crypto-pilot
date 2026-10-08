@@ -77,9 +77,9 @@ def test_SCENARIO_LIVE_40_PREFLIGHT_CLI_EXITS_NONZERO_ON_FAILURE(monkeypatch, tm
 
 def test_SCENARIO_SIGNAL_10_CLI_SUBCOMMANDS_AND_EXIT_CODES(monkeypatch) -> None:
     parser = build_root_parser()
-    args = parser.parse_args(["live", "frozen-step", "--date", "2026-08-25T00:00:00Z"])
+    args = parser.parse_args(["live", "strategy-step", "--date", "2026-08-25T00:00:00Z"])
     assert args.date == __import__("pandas").Timestamp("2026-08-25T00:00:00Z")
-    assert args.handler.__name__ == "_run_frozen_step"
+    assert args.handler.__name__ == "_run_strategy_step"
     with pytest.raises(SystemExit):
         parser.parse_args(["live", "signal-step", "--date", "2026-08-25T00:00:00Z"])
     # also check daemon still exists
@@ -143,8 +143,8 @@ def test_live_cli_surface_after_v2() -> None:
             parser.parse_args(["live", gone])
     with pytest.raises(SystemExit):
         parser.parse_args(["live", "shadow-cycle", "--decision-time", "2026-08-25T00:00:00Z", "--dry-run"])
-    args = parser.parse_args(["live", "frozen-step", "--date", "2026-08-25T00:00:00Z"])
-    assert args.handler.__name__ == "_run_frozen_step"
+    args = parser.parse_args(["live", "strategy-step", "--date", "2026-08-25T00:00:00Z"])
+    assert args.handler.__name__ == "_run_strategy_step"
 
 
 def test_run_shadow_cycle_paper_no_credentials() -> None:
@@ -337,7 +337,7 @@ def test_run_status_logs_heartbeat_stage(tmp_path, monkeypatch, caplog) -> None:
     assert "stage=execute" in caplog.text
 
 
-def test_run_daemon_cli_uses_default_frozen_step(tmp_path, monkeypatch) -> None:
+def test_run_daemon_cli_uses_default_strategy_step(tmp_path, monkeypatch) -> None:
     import argparse
     import logging
     import src.cli.commands.live as module
@@ -359,7 +359,7 @@ def test_run_daemon_cli_uses_default_frozen_step(tmp_path, monkeypatch) -> None:
             root.removeHandler(handler)
             handler.close()
 
-    # 데몬은 frozen 단계를 기본값(프로세스 내 호출)으로 쓰며 CLI가 대체 함수를 주입하지 않는다.
+    # 데몬은 strategy 단계를 기본값(프로세스 내 호출)으로 쓰며 CLI가 대체 함수를 주입하지 않는다.
     assert "signal_step_fn" not in captured
     assert captured["shutdown"] is not None
 

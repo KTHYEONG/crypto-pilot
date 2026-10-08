@@ -1,4 +1,4 @@
-"""Validated one-pass window stream for the frozen MHS research replay."""
+"""Validated one-pass window stream for the strategy replay."""
 
 from __future__ import annotations
 
@@ -10,16 +10,16 @@ import pandas as pd
 
 from src.common.errors import DataIntegrityError
 from src.engine.execution import ExecutionReplayWindow
-from src.strategy.targets import FrozenMhsCandidate
+from src.strategy.targets import StrategyTargets
 
 
-def validated_frozen_research_windows(
-    candidate: FrozenMhsCandidate,
+def validated_backtest_windows(
+    candidate: StrategyTargets,
     windows: Iterable[ExecutionReplayWindow],
     *,
     settlement_bars: int,
 ) -> Iterator[ExecutionReplayWindow]:
-    """Yield exact 3m execution windows for one frozen entry-target plan.
+    """Yield exact 3m execution windows for one strategy entry-target plan.
 
     Validation proves that every target row is replayed once with market data available
     after its signal release. Source finiteness is asserted only where the plan actually
@@ -83,7 +83,7 @@ def validated_frozen_research_windows(
             local = window.target_weights.loc[label].to_numpy(dtype="float64")
             projected = np.array([full[canon_pos[s]] for s in local_cols], dtype="float64")
             if not bool(np.array_equal(local, projected)):
-                raise DataIntegrityError("window target values must equal the frozen candidate row")
+                raise DataIntegrityError("window target values must equal the strategy candidate row")
             omitted_zero = all(
                 float(full[canon_pos[s]]) == 0.0 for s in expected_columns if s not in canon_pos or s not in set(local_cols)
             )

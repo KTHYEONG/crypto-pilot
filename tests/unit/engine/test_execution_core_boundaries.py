@@ -144,7 +144,7 @@ def test_later_fill_classification() -> None:
 
 
 def test_exception_roster_values() -> None:
-    """Exception roster preservation: the single registry holds the frozen set."""
+    """Exception roster preservation: the single registry holds the fixed set."""
     from src.core.data_policy import SOURCE_GAP_EXCLUDED_SYMBOLS
 
     assert set(SOURCE_GAP_EXCLUDED_SYMBOLS) == frozenset(
@@ -161,7 +161,7 @@ def test_exception_roster_values() -> None:
 
 
 def test_moved_defaults_match_legacy_values() -> None:
-    """Defaults parity: production CLI defaults keep values; research baseline stays frozen."""
+    """Defaults parity: production CLI defaults keep values; research baseline stays fixed."""
     from src.core import params as _params
 
     assert _params.CLI_GROWTH_ENVELOPE_DEFAULT == "growth_extreme_budgeted"

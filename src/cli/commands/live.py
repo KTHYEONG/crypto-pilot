@@ -132,20 +132,20 @@ def _run_liveness_check(args: argparse.Namespace) -> None:
     sys.exit(code)
 
 
-def _run_frozen_step(args: argparse.Namespace) -> None:
-    from src.live.scheduler import _default_frozen_step
+def _run_strategy_step(args: argparse.Namespace) -> None:
+    from src.live.scheduler import _default_strategy_step
 
-    _attach_process_log("frozen_step.log")
+    _attach_process_log("strategy_step.log")
     settings = _settings_with_mode(args)
     target = pd.Timestamp(args.date).tz_convert("UTC").normalize()
     artifact = _resolve_weights_path(getattr(args, "artifact", None), settings)
     try:
-        report = _default_frozen_step(target, settings, artifact)
+        report = _default_strategy_step(target, settings, artifact)
     except Exception as exc:
-        logger.error("[EVAL] frozen_step status=FAILED decision_time=%s reason=%s", target.isoformat(), exc)
+        logger.error("[EVAL] strategy_step status=FAILED decision_time=%s reason=%s", target.isoformat(), exc)
         raise SystemExit(1) from exc
     logger.info(
-        "[EVAL] frozen_step decision_day=%s exposure=%.4f equity_usdt=%.2f unit_observations=%d venue=%s written=%s",
+        "[EVAL] strategy_step decision_day=%s exposure=%.4f equity_usdt=%.2f unit_observations=%d venue=%s written=%s",
         report.decision_day.isoformat(), report.exposure, report.equity_usdt,
         report.unit_observations, report.venue_snapshot, report.written,
     )
@@ -432,11 +432,11 @@ def add_live_commands(live_parser: argparse.ArgumentParser) -> None:
     status.add_argument("--mode", choices=["shadow", "paper", "live_testnet", "live_mainnet"], default=None, help="Override LIVE_MODE for this run")
     status.set_defaults(handler=_run_status)
 
-    frozen = subparsers.add_parser("frozen-step", help="Run one frozen signal step (manual/debug)")
-    frozen.add_argument("--date", type=_parse_decision_time, required=True, help="Decision day as ISO8601 UTC (YYYY-MM-DD)")
-    frozen.add_argument("--artifact", type=str, default=None, help="Override the frozen weights path to append")
-    frozen.add_argument("--mode", choices=["shadow", "paper", "live_testnet", "live_mainnet"], default=None, help="Override LIVE_MODE for this run")
-    frozen.set_defaults(handler=_run_frozen_step)
+    strategy_step = subparsers.add_parser("strategy-step", help="Run one strategy signal step (manual/debug)")
+    strategy_step.add_argument("--date", type=_parse_decision_time, required=True, help="Decision day as ISO8601 UTC (YYYY-MM-DD)")
+    strategy_step.add_argument("--artifact", type=str, default=None, help="Override the strategy weights path to append")
+    strategy_step.add_argument("--mode", choices=["shadow", "paper", "live_testnet", "live_mainnet"], default=None, help="Override LIVE_MODE for this run")
+    strategy_step.set_defaults(handler=_run_strategy_step)
 
     eq = subparsers.add_parser("execution-quality-summary", help="Summarize execution quality")
     eq.set_defaults(handler=_run_execution_quality_summary)

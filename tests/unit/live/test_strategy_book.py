@@ -1,4 +1,4 @@
-"""Invariant guards for the live frozen book core."""
+"""Invariant guards for the live strategy book core."""
 
 from __future__ import annotations
 
@@ -9,17 +9,17 @@ import pandas as pd
 import pytest
 
 from src.common.errors import DataIntegrityError
-from src.live.frozen_book import (
-    LiveFrozenBook,
-    build_live_frozen_book,
+from src.live.strategy_book import (
+    LiveStrategyBook,
+    build_live_strategy_book,
     crypto_census,
     extend_unit_history,
     unit_proxy_returns,
 )
 from src.strategy.books import clip_names_preserving_gross
-from src.strategy.targets import FROZEN_MHS_TOP20_V2, build_frozen_mhs_candidate
+from src.strategy.targets import FLOW_MOM_TOP20, build_strategy_targets
 from src.core.panel import load_base_panel
-from src.core.params import FROZEN_GROWTH_NAME_CLIP, LIVE_FROZEN_WARMUP_DAYS
+from src.core.params import STRATEGY_NAME_CLIP, LIVE_SIGNAL_WARMUP_DAYS
 
 _START = pd.Timestamp("2021-01-01", tz="UTC")
 _SYMBOLS = tuple(f"SYM{i:02d}USDT" for i in range(10))
@@ -59,7 +59,7 @@ def _write_panel(
 
 def _research_comparison(tmp_path: Path, symbols: tuple[str, ...]) -> None:
     start, end = _write_panel(tmp_path, symbols)
-    book = build_live_frozen_book(tmp_path, symbols, panel_start=start, panel_end=end)
+    book = build_live_strategy_book(tmp_path, symbols, panel_start=start, panel_end=end)
     end_inclusive = end - pd.Timedelta(hours=1)
     panel = load_base_panel(
         str(tmp_path / "ohlcv"), "1h", ("close", "quote_vol", "taker_buy_quote"),
@@ -74,13 +74,13 @@ def _research_comparison(tmp_path: Path, symbols: tuple[str, ...]) -> None:
     ).apply(lambda col: pd.to_datetime(col).dt.tz_localize("UTC"))
     daily_close = close_c.resample("1D").last().astype("float64")
     daily_qv = panel["quote_vol"][census].resample("1D").sum(min_count=1).astype("float64")
-    candidate = build_frozen_mhs_candidate(
+    candidate = build_strategy_targets(
         {"close": close_c, "quote_vol": panel["quote_vol"][census],
          "taker_buy_quote": panel["taker_buy_quote"][census]},
         avail, daily_close, daily_qv, tuple(census),
-        market_close=close_c, strategy=FROZEN_MHS_TOP20_V2, blocked_decisions=None,
+        market_close=close_c, strategy=FLOW_MOM_TOP20, blocked_decisions=None,
     )
-    clipped = clip_names_preserving_gross(candidate.target_weights, FROZEN_GROWTH_NAME_CLIP)
+    clipped = clip_names_preserving_gross(candidate.target_weights, STRATEGY_NAME_CLIP)
     for day in book.unit_weights.index:
         entry = day + pd.Timedelta(days=1)
         pd.testing.assert_series_equal(
@@ -88,7 +88,7 @@ def _research_comparison(tmp_path: Path, symbols: tuple[str, ...]) -> None:
         )
 
 
-def _mini_book(panel_last_bar: pd.Timestamp | None = None) -> LiveFrozenBook:
+def _mini_book(panel_last_bar: pd.Timestamp | None = None) -> LiveStrategyBook:
     decisions = pd.DatetimeIndex(["2021-01-01", "2021-01-02", "2021-01-03"], tz="UTC")
     cols = ["AAAUSDT", "BBBUSDT"]
     unit = pd.DataFrame(
@@ -100,7 +100,7 @@ def _mini_book(panel_last_bar: pd.Timestamp | None = None) -> LiveFrozenBook:
     )
     adv = pd.DataFrame(1e6, index=decisions, columns=cols, dtype="float64")
     sigma = pd.DataFrame(0.02, index=decisions, columns=cols, dtype="float64")
-    return LiveFrozenBook(
+    return LiveStrategyBook(
         unit_weights=unit, snapshot_closes=snap,
         adv=adv, daily_sigma=sigma, valid_from=decisions[0],
         panel_last_bar=panel_last_bar or pd.Timestamp("2021-01-10", tz="UTC"),
@@ -119,22 +119,22 @@ def test_book_matches_research_builder_on_same_window(tmp_path: Path) -> None:
 
 def test_rows_before_warmup_are_dropped(tmp_path: Path) -> None:
     start, end = _write_panel(tmp_path, _SYMBOLS)
-    book = build_live_frozen_book(tmp_path, _SYMBOLS, panel_start=start, panel_end=end)
+    book = build_live_strategy_book(tmp_path, _SYMBOLS, panel_start=start, panel_end=end)
     assert book.unit_weights.index.min() >= start.normalize() + pd.Timedelta(
-        days=int(LIVE_FROZEN_WARMUP_DAYS),
+        days=int(LIVE_SIGNAL_WARMUP_DAYS),
     )
 
 
 def test_short_window_fails_closed(tmp_path: Path) -> None:
     start = _START
-    end = start + pd.Timedelta(days=int(LIVE_FROZEN_WARMUP_DAYS) - 1)
+    end = start + pd.Timedelta(days=int(LIVE_SIGNAL_WARMUP_DAYS) - 1)
     with pytest.raises(DataIntegrityError):
-        build_live_frozen_book(tmp_path, _SYMBOLS, panel_start=start, panel_end=end)
+        build_live_strategy_book(tmp_path, _SYMBOLS, panel_start=start, panel_end=end)
 
 
 def test_future_bars_after_snapshot_never_change_decision_row(tmp_path: Path) -> None:
     start, end = _write_panel(tmp_path, _SYMBOLS)
-    book_a = build_live_frozen_book(tmp_path, _SYMBOLS, panel_start=start, panel_end=end)
+    book_a = build_live_strategy_book(tmp_path, _SYMBOLS, panel_start=start, panel_end=end)
     day = book_a.unit_weights.index[1]
     cutoff = day + pd.Timedelta(hours=23)
     for sym in _SYMBOLS:
@@ -143,7 +143,7 @@ def test_future_bars_after_snapshot_never_change_decision_row(tmp_path: Path) ->
         stamps = pd.to_datetime(pd.to_numeric(frame["timestamp"], errors="coerce"), unit="ms", utc=True)
         frame.loc[stamps > cutoff, "close"] = frame.loc[stamps > cutoff, "close"] * 2.0
         frame.to_parquet(path)
-    book_b = build_live_frozen_book(tmp_path, _SYMBOLS, panel_start=start, panel_end=end)
+    book_b = build_live_strategy_book(tmp_path, _SYMBOLS, panel_start=start, panel_end=end)
     pd.testing.assert_series_equal(
         book_a.unit_weights.loc[day], book_b.unit_weights.loc[day], check_names=False,
     )
@@ -154,7 +154,7 @@ def test_panel_last_bar_stops_at_real_data_not_requested_end(tmp_path: Path) -> 
     # -- panel_last_bar 는 요청 경계가 아니라 실제 관측된 마지막 봉이어야 한다.
     start, real_end = _write_panel(tmp_path, _SYMBOLS)
     requested_end = real_end + pd.Timedelta(hours=2)
-    book = build_live_frozen_book(tmp_path, _SYMBOLS, panel_start=start, panel_end=requested_end)
+    book = build_live_strategy_book(tmp_path, _SYMBOLS, panel_start=start, panel_end=requested_end)
     assert book.panel_last_bar == real_end - pd.Timedelta(hours=1)
     # 실제 수집분을 넘어서는 최신 결정일들은 예외 없이 조용히 건너뛴다.
     out = unit_proxy_returns(book, _zero_funding(book), cost_bps=0.0)
@@ -165,7 +165,7 @@ def test_panel_last_bar_stops_at_real_data_not_requested_end(tmp_path: Path) -> 
 
 def test_census_column_restriction(tmp_path: Path) -> None:
     start, end = _write_panel(tmp_path, (*_SYMBOLS, "EXTRAUSDT"))
-    book = build_live_frozen_book(tmp_path, _SYMBOLS, panel_start=start, panel_end=end)
+    book = build_live_strategy_book(tmp_path, _SYMBOLS, panel_start=start, panel_end=end)
     assert "EXTRAUSDT" not in book.unit_weights.columns
 
 
@@ -223,7 +223,7 @@ def test_turnover_cost_uses_weight_change() -> None:
         [[0.0, 0.0], [0.2, -0.2], [0.2, -0.2]], index=decisions, columns=cols, dtype="float64",
     )
     snap = pd.DataFrame(100.0, index=decisions, columns=cols, dtype="float64")
-    book = LiveFrozenBook(
+    book = LiveStrategyBook(
         unit_weights=unit, snapshot_closes=snap,
         adv=snap.copy(), daily_sigma=snap.copy(), valid_from=decisions[0],
         panel_last_bar=pd.Timestamp("2021-01-10", tz="UTC"),
@@ -282,19 +282,19 @@ def test_history_gap_fails_closed() -> None:
 
 def test_build_rejects_empty_and_duplicate_census(tmp_path: Path) -> None:
     with pytest.raises(DataIntegrityError):
-        build_live_frozen_book(tmp_path, (), panel_start=_START, panel_end=_START + pd.Timedelta(days=130))
+        build_live_strategy_book(tmp_path, (), panel_start=_START, panel_end=_START + pd.Timedelta(days=130))
     with pytest.raises(DataIntegrityError):
-        build_live_frozen_book(
+        build_live_strategy_book(
             tmp_path, ("AAAUSDT", "AAAUSDT"), panel_start=_START,
             panel_end=_START + pd.Timedelta(days=130),
         )
     with pytest.raises(DataIntegrityError):
-        build_live_frozen_book(
+        build_live_strategy_book(
             tmp_path, _SYMBOLS, panel_start=_START.tz_localize(None),
             panel_end=_START + pd.Timedelta(days=130),
         )
     with pytest.raises(DataIntegrityError):
-        build_live_frozen_book(
+        build_live_strategy_book(
             tmp_path, _SYMBOLS, panel_start=_START + pd.Timedelta(days=1),
             panel_end=_START,
         )
@@ -308,8 +308,8 @@ def test_census_symbol_without_bars_in_window_is_dropped(tmp_path: Path) -> None
         "timestamp": np.array([int((start - pd.Timedelta(days=400)).value // 1_000_000)], dtype="int64"),
         "close": [1.0], "quote_vol": [1.0], "taker_buy_quote": [0.5],
     }).to_parquet(dead)
-    with_dead = build_live_frozen_book(tmp_path, (*_SYMBOLS, "DEADUSDT"), panel_start=start, panel_end=end)
-    without = build_live_frozen_book(tmp_path, _SYMBOLS, panel_start=start, panel_end=end)
+    with_dead = build_live_strategy_book(tmp_path, (*_SYMBOLS, "DEADUSDT"), panel_start=start, panel_end=end)
+    without = build_live_strategy_book(tmp_path, _SYMBOLS, panel_start=start, panel_end=end)
     assert "DEADUSDT" not in with_dead.unit_weights.columns
     pd.testing.assert_frame_equal(with_dead.unit_weights, without.unit_weights)
 
@@ -322,7 +322,7 @@ def test_census_with_no_bars_in_window_fails_closed(tmp_path: Path) -> None:
         "close": [1.0], "quote_vol": [1.0], "taker_buy_quote": [0.5],
     }).to_parquet(dead)
     with pytest.raises(DataIntegrityError, match="no census symbol"):
-        build_live_frozen_book(tmp_path, ("DEADUSDT",), panel_start=start, panel_end=end)
+        build_live_strategy_book(tmp_path, ("DEADUSDT",), panel_start=start, panel_end=end)
 
 
 def test_build_fails_when_source_malformed(tmp_path: Path) -> None:
@@ -333,11 +333,11 @@ def test_build_fails_when_source_malformed(tmp_path: Path) -> None:
     frame = pd.read_parquet(bad).drop(columns=["taker_buy_quote"])
     frame.to_parquet(bad)
     with pytest.raises(DataIntegrityError):
-        build_live_frozen_book(other, _SYMBOLS, panel_start=start, panel_end=end)
+        build_live_strategy_book(other, _SYMBOLS, panel_start=start, panel_end=end)
     empty_root = tmp_path / "empty"
     (empty_root / "ohlcv" / "1h").mkdir(parents=True, exist_ok=True)
     with pytest.raises(DataIntegrityError):
-        build_live_frozen_book(empty_root, _SYMBOLS, panel_start=start, panel_end=end)
+        build_live_strategy_book(empty_root, _SYMBOLS, panel_start=start, panel_end=end)
 
 
 def test_proxy_ignores_zero_weight_nans_and_empty_books() -> None:
@@ -348,7 +348,7 @@ def test_proxy_ignores_zero_weight_nans_and_empty_books() -> None:
     out = unit_proxy_returns(book, _zero_funding(book), cost_bps=0.0)
     assert np.isfinite(out.to_numpy()).all()
     empty_idx = pd.DatetimeIndex([], tz="UTC")
-    empty = LiveFrozenBook(
+    empty = LiveStrategyBook(
         unit_weights=pd.DataFrame(columns=["AAAUSDT"], index=empty_idx, dtype="float64"),
         snapshot_closes=pd.DataFrame(columns=["AAAUSDT"], index=empty_idx, dtype="float64"),
         adv=pd.DataFrame(columns=["AAAUSDT"], index=empty_idx, dtype="float64"),
@@ -373,15 +373,15 @@ def test_proxy_ignores_zero_weight_nans_and_empty_books() -> None:
 def test_assemble_account_inputs_shares_causal_adv_sigma(tmp_path: Path) -> None:
     from src.strategy.liquidity import causal_adv_sigma
     from src.engine.account_sources import assemble_account_inputs
-    from src.strategy.targets import FrozenMhsCandidate
-    from src.engine.strategy_backtest import FrozenSourceContext
+    from src.strategy.targets import StrategyTargets
+    from src.engine.strategy_backtest import StrategySourceContext
     from src.core.resources import resolve_mhs_memory_budget
 
     sym = "AAAUSDT"
     entries = pd.DatetimeIndex(["2021-02-01", "2021-02-02"], tz="UTC")
     weights = pd.DataFrame([[0.5], [-0.5]], index=entries, columns=[sym], dtype="float64")
-    candidate = FrozenMhsCandidate(
-        target_weights=weights, signal_available_at=entries, strategy=FROZEN_MHS_TOP20_V2,
+    candidate = StrategyTargets(
+        target_weights=weights, signal_available_at=entries, strategy=FLOW_MOM_TOP20,
     )
     daily_idx = pd.date_range("2021-01-01", "2021-02-02", freq="1D", tz="UTC")
     daily_close = pd.DataFrame(100.0, index=daily_idx, columns=[sym], dtype="float64")
@@ -393,7 +393,7 @@ def test_assemble_account_inputs_shares_causal_adv_sigma(tmp_path: Path) -> None
     pd.DataFrame(
         {"timestamp": ms, "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0},
     ).to_parquet(marks_dir / f"{sym}.parquet")
-    context = FrozenSourceContext(
+    context = StrategySourceContext(
         census=(sym,), funding_by_symbol={}, funding_failures={},
         root=str(tmp_path / "marks"), budget=resolve_mhs_memory_budget(None),
         daily_close=daily_close, daily_quote_volume=daily_qv,
@@ -441,14 +441,14 @@ def test_history_validation_rejects_bad_inputs() -> None:
 
 def _assemble_context(tmp_path: Path, sym: str, entries: pd.DatetimeIndex, releases: pd.DatetimeIndex, grid: pd.DatetimeIndex, funding_by_symbol: dict | None = None):
     from src.engine.account_sources import assemble_account_inputs
-    from src.strategy.targets import FrozenMhsCandidate
-    from src.engine.strategy_backtest import FrozenSourceContext
+    from src.strategy.targets import StrategyTargets
+    from src.engine.strategy_backtest import StrategySourceContext
     from src.core.resources import resolve_mhs_memory_budget
     import numpy as np
 
     weights = pd.DataFrame([[0.5]] * len(entries), index=entries, columns=[sym], dtype="float64")
-    candidate = FrozenMhsCandidate(
-        target_weights=weights, signal_available_at=releases, strategy=FROZEN_MHS_TOP20_V2,
+    candidate = StrategyTargets(
+        target_weights=weights, signal_available_at=releases, strategy=FLOW_MOM_TOP20,
     )
     marks_dir = tmp_path / "marks2" / "3m"
     marks_dir.mkdir(parents=True, exist_ok=True)
@@ -459,7 +459,7 @@ def _assemble_context(tmp_path: Path, sym: str, entries: pd.DatetimeIndex, relea
     daily_idx = pd.date_range(pd.Timestamp("2021-01-01", tz="UTC"), entries[-1] + pd.Timedelta(days=1), freq="1D", tz="UTC")
     daily_close = pd.DataFrame(100.0, index=daily_idx, columns=[sym], dtype="float64")
     daily_qv = pd.DataFrame(2e6, index=daily_idx, columns=[sym], dtype="float64")
-    context = FrozenSourceContext(
+    context = StrategySourceContext(
         census=(sym,), funding_by_symbol=dict(funding_by_symbol or {}), funding_failures={},
         root=str(tmp_path / "marks2"), budget=resolve_mhs_memory_budget(None),
         daily_close=daily_close, daily_quote_volume=daily_qv,
@@ -496,16 +496,16 @@ def test_assembled_shared_anchor_fails_closed(tmp_path: Path) -> None:
     import numpy as np
 
     from src.engine.account_sources import assemble_account_inputs
-    from src.strategy.targets import FrozenMhsCandidate
-    from src.engine.strategy_backtest import FrozenSourceContext
+    from src.strategy.targets import StrategyTargets
+    from src.engine.strategy_backtest import StrategySourceContext
     from src.core.resources import resolve_mhs_memory_budget
 
     sym = "AAAUSDT"
     entries = pd.DatetimeIndex(["2021-02-01", "2021-02-02"], tz="UTC")
     releases = pd.DatetimeIndex([entries[0] - pd.Timedelta(hours=1), entries[0] - pd.Timedelta(minutes=59)])
     weights = pd.DataFrame([[0.5], [0.5]], index=entries, columns=[sym], dtype="float64")
-    candidate = FrozenMhsCandidate(
-        target_weights=weights, signal_available_at=releases, strategy=FROZEN_MHS_TOP20_V2,
+    candidate = StrategyTargets(
+        target_weights=weights, signal_available_at=releases, strategy=FLOW_MOM_TOP20,
     )
     grid = pd.date_range(releases[0], entries[-1] + pd.Timedelta(days=1), freq="3min", inclusive="left")
     marks_dir = tmp_path / "marks3" / "3m"
@@ -515,7 +515,7 @@ def test_assembled_shared_anchor_fails_closed(tmp_path: Path) -> None:
         {"timestamp": ms, "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0},
     ).to_parquet(marks_dir / f"{sym}.parquet")
     daily_idx = pd.date_range(pd.Timestamp("2021-01-01", tz="UTC"), entries[-1] + pd.Timedelta(days=1), freq="1D", tz="UTC")
-    context = FrozenSourceContext(
+    context = StrategySourceContext(
         census=(sym,), funding_by_symbol={}, funding_failures={},
         root=str(tmp_path / "marks3"), budget=resolve_mhs_memory_budget(None),
         daily_close=pd.DataFrame(100.0, index=daily_idx, columns=[sym], dtype="float64"),
@@ -529,8 +529,8 @@ def test_assembled_release_before_first_grid_bar_fails_closed(tmp_path: Path) ->
     import numpy as np
 
     from src.engine.account_sources import assemble_account_inputs
-    from src.strategy.targets import FrozenMhsCandidate
-    from src.engine.strategy_backtest import FrozenSourceContext
+    from src.strategy.targets import StrategyTargets
+    from src.engine.strategy_backtest import StrategySourceContext
     from src.core.resources import resolve_mhs_memory_budget
 
     sym = "AAAUSDT"
@@ -539,8 +539,8 @@ def test_assembled_release_before_first_grid_bar_fails_closed(tmp_path: Path) ->
         [pd.Timestamp("2021-02-01", tz="UTC"), pd.Timestamp("2021-01-15", tz="UTC")]
     )
     weights = pd.DataFrame([[0.5], [0.5]], index=entries, columns=[sym], dtype="float64")
-    candidate = FrozenMhsCandidate(
-        target_weights=weights, signal_available_at=releases, strategy=FROZEN_MHS_TOP20_V2,
+    candidate = StrategyTargets(
+        target_weights=weights, signal_available_at=releases, strategy=FLOW_MOM_TOP20,
     )
     grid = pd.date_range(releases[0].floor("3min"), entries[-1] + pd.Timedelta(days=1), freq="3min", inclusive="left")
     marks_dir = tmp_path / "marks4" / "3m"
@@ -550,7 +550,7 @@ def test_assembled_release_before_first_grid_bar_fails_closed(tmp_path: Path) ->
         {"timestamp": ms, "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0},
     ).to_parquet(marks_dir / f"{sym}.parquet")
     daily_idx = pd.date_range(pd.Timestamp("2021-01-01", tz="UTC"), entries[-1] + pd.Timedelta(days=1), freq="1D", tz="UTC")
-    context = FrozenSourceContext(
+    context = StrategySourceContext(
         census=(sym,), funding_by_symbol={}, funding_failures={},
         root=str(tmp_path / "marks4"), budget=resolve_mhs_memory_budget(None),
         daily_close=pd.DataFrame(100.0, index=daily_idx, columns=[sym], dtype="float64"),
@@ -564,15 +564,15 @@ def _assemble_with_daily(
     tmp_path: Path, name: str, daily_close: pd.DataFrame, daily_qv: pd.DataFrame,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     from src.engine.account_sources import assemble_account_inputs
-    from src.strategy.targets import FrozenMhsCandidate
-    from src.engine.strategy_backtest import FrozenSourceContext
+    from src.strategy.targets import StrategyTargets
+    from src.engine.strategy_backtest import StrategySourceContext
     from src.core.resources import resolve_mhs_memory_budget
 
     sym = str(daily_close.columns[0])
     entries = pd.DatetimeIndex(["2021-02-01", "2021-02-02"], tz="UTC")
     weights = pd.DataFrame([[0.5], [-0.5]], index=entries, columns=[sym], dtype="float64")
-    candidate = FrozenMhsCandidate(
-        target_weights=weights, signal_available_at=entries, strategy=FROZEN_MHS_TOP20_V2,
+    candidate = StrategyTargets(
+        target_weights=weights, signal_available_at=entries, strategy=FLOW_MOM_TOP20,
     )
     grid = pd.date_range(entries[0], entries[-1] + pd.Timedelta(days=1), freq="3min", inclusive="left")
     marks_dir = tmp_path / name / "3m"
@@ -581,7 +581,7 @@ def _assemble_with_daily(
     pd.DataFrame(
         {"timestamp": ms, "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0},
     ).to_parquet(marks_dir / f"{sym}.parquet")
-    context = FrozenSourceContext(
+    context = StrategySourceContext(
         census=(sym,), funding_by_symbol={}, funding_failures={},
         root=str(tmp_path / name), budget=resolve_mhs_memory_budget(None),
         daily_close=daily_close, daily_quote_volume=daily_qv,
@@ -624,7 +624,7 @@ def test_proxy_prices_snapshot_to_snapshot() -> None:
     snap = pd.DataFrame(
         [[100.0], [110.0], [110.0]], index=decisions, columns=cols, dtype="float64",
     )
-    book = LiveFrozenBook(
+    book = LiveStrategyBook(
         unit_weights=unit, snapshot_closes=snap,
         adv=pd.DataFrame(1e6, index=decisions, columns=cols, dtype="float64"),
         daily_sigma=pd.DataFrame(0.02, index=decisions, columns=cols, dtype="float64"),
@@ -641,7 +641,7 @@ def test_proxy_funding_window_is_snapshot_to_snapshot() -> None:
     snap = pd.DataFrame(100.0, index=decisions, columns=cols, dtype="float64")
     adv = pd.DataFrame(1e6, index=decisions, columns=cols, dtype="float64")
     sigma = pd.DataFrame(0.02, index=decisions, columns=cols, dtype="float64")
-    book = LiveFrozenBook(
+    book = LiveStrategyBook(
         unit_weights=unit, snapshot_closes=snap, adv=adv, daily_sigma=sigma,
         valid_from=decisions[0], panel_last_bar=pd.Timestamp("2021-01-10", tz="UTC"),
     )
@@ -669,7 +669,7 @@ def test_unobserved_closing_snapshot_is_skipped() -> None:
     snap = pd.DataFrame([[100.0], [110.0]], index=decisions, columns=cols, dtype="float64")
     adv = pd.DataFrame(1e6, index=decisions, columns=cols, dtype="float64")
     sigma = pd.DataFrame(0.02, index=decisions, columns=cols, dtype="float64")
-    book = LiveFrozenBook(
+    book = LiveStrategyBook(
         unit_weights=unit, snapshot_closes=snap, adv=adv, daily_sigma=sigma,
         valid_from=decisions[0],
         panel_last_bar=pd.Timestamp("2021-01-02 12:00", tz="UTC"),
@@ -717,7 +717,7 @@ def test_proxy_matches_replay_anchor_to_anchor() -> None:
     )
     replay_ret = float(result.daily_equity.loc[entries[1]] / result.daily_equity.loc[entries[0]] - 1.0)
     decisions = pd.DatetimeIndex(["2021-01-02", "2021-01-03"], tz="UTC")
-    book = LiveFrozenBook(
+    book = LiveStrategyBook(
         unit_weights=pd.DataFrame([[1.0], [1.0]], index=decisions, columns=[sym], dtype="float64"),
         snapshot_closes=pd.DataFrame(
             [[100.0], [110.0]], index=decisions, columns=[sym], dtype="float64",
@@ -737,7 +737,7 @@ def _write_block_panel(root: Path) -> tuple[pd.Timestamp, pd.Timestamp]:
 def test_blocked_build_withdraws_seat_and_reranks(tmp_path: Path) -> None:
     start, end = _write_block_panel(tmp_path)
     census = tuple(f"BK{i:02d}USDT" for i in range(22))
-    plain = build_live_frozen_book(tmp_path, census, panel_start=start, panel_end=end)
+    plain = build_live_strategy_book(tmp_path, census, panel_start=start, panel_end=end)
     day = plain.unit_weights.index[2]
     weights_d = plain.unit_weights.loc[day]
     symbol_a = str(weights_d.abs().idxmax())
@@ -748,7 +748,7 @@ def test_blocked_build_withdraws_seat_and_reranks(tmp_path: Path) -> None:
         frame.loc[day, symbol_a] = True
         return frame
 
-    blocked = build_live_frozen_book(
+    blocked = build_live_strategy_book(
         tmp_path, census, panel_start=start, panel_end=end, blocked_decisions=_blocked,
     )
     assert float(blocked.unit_weights.loc[day, symbol_a]) == 0.0
@@ -767,19 +767,19 @@ def test_blocked_build_withdraws_seat_and_reranks(tmp_path: Path) -> None:
 def test_all_false_blocked_build_matches_unblocked(tmp_path: Path) -> None:
     start, end = _write_block_panel(tmp_path)
     census = tuple(f"BK{i:02d}USDT" for i in range(22))
-    plain = build_live_frozen_book(tmp_path, census, panel_start=start, panel_end=end)
+    plain = build_live_strategy_book(tmp_path, census, panel_start=start, panel_end=end)
 
     def _none_blocked(index: pd.DatetimeIndex, order: tuple[str, ...]) -> pd.DataFrame:
         return pd.DataFrame(False, index=index, columns=list(order), dtype="bool")
 
-    same = build_live_frozen_book(
+    same = build_live_strategy_book(
         tmp_path, census, panel_start=start, panel_end=end, blocked_decisions=_none_blocked,
     )
     pd.testing.assert_frame_equal(same.unit_weights, plain.unit_weights)
     pd.testing.assert_frame_equal(same.snapshot_closes, plain.snapshot_closes)
 
 
-def _settlement_proxy_book() -> LiveFrozenBook:
+def _settlement_proxy_book() -> LiveStrategyBook:
     decisions = pd.DatetimeIndex(["2021-01-01", "2021-01-02", "2021-01-03"], tz="UTC")
     cols = ["SSUSDT"]
     unit = pd.DataFrame([[1.0], [1.0], [0.0]], index=decisions, columns=cols, dtype="float64")
@@ -788,7 +788,7 @@ def _settlement_proxy_book() -> LiveFrozenBook:
     )
     adv = pd.DataFrame(1e6, index=decisions, columns=cols, dtype="float64")
     sigma = pd.DataFrame(0.02, index=decisions, columns=cols, dtype="float64")
-    return LiveFrozenBook(
+    return LiveStrategyBook(
         unit_weights=unit, snapshot_closes=snap, adv=adv, daily_sigma=sigma,
         valid_from=decisions[0], panel_last_bar=pd.Timestamp("2021-01-10", tz="UTC"),
     )
@@ -842,7 +842,7 @@ def test_proxy_finite_close_wins_over_settlement() -> None:
 
 
 def test_venue_gap_snapshot_close_is_never_substituted(tmp_path: Path) -> None:
-    from src.live.frozen_book import classify_snapshot_gaps, snapshot_gap_blocked_decisions
+    from src.live.strategy_book import classify_snapshot_gaps, snapshot_gap_blocked_decisions
 
     start, end = _write_panel(tmp_path, _SYMBOLS)
     victim = _SYMBOLS[0]
@@ -853,7 +853,7 @@ def test_venue_gap_snapshot_close_is_never_substituted(tmp_path: Path) -> None:
     assert (stamps == gap_bar).sum() == 1
     frame = frame[stamps != gap_bar]
     frame.to_parquet(path)
-    book = build_live_frozen_book(tmp_path, _SYMBOLS, panel_start=start, panel_end=end)
+    book = build_live_strategy_book(tmp_path, _SYMBOLS, panel_start=start, panel_end=end)
     gap_day = pd.Timestamp("2021-05-05", tz="UTC")
     assert gap_day in book.unit_weights.index
     # venue gap(뒤 봉이 있으니 영구 결손)이지 refresh 문제가 아니어야 한다.
@@ -878,7 +878,7 @@ def test_unobserved_funding_defers_scoring() -> None:
     cols = ["FUSDT"]
     unit = pd.DataFrame([[1.0], [1.0], [1.0]], index=decisions, columns=cols, dtype="float64")
     snap = pd.DataFrame(100.0, index=decisions, columns=cols, dtype="float64")
-    book = LiveFrozenBook(
+    book = LiveStrategyBook(
         unit_weights=unit, snapshot_closes=snap,
         adv=pd.DataFrame(1e6, index=decisions, columns=cols, dtype="float64"),
         daily_sigma=pd.DataFrame(0.02, index=decisions, columns=cols, dtype="float64"),
@@ -906,7 +906,7 @@ def test_held_symbol_without_any_funding_defers_scoring() -> None:
     cols = ["AAAUSDT", "BBBUSDT"]
     unit = pd.DataFrame([[0.5, -0.5]] * 3, index=decisions, columns=cols, dtype="float64")
     snap = pd.DataFrame(100.0, index=decisions, columns=cols, dtype="float64")
-    book = LiveFrozenBook(
+    book = LiveStrategyBook(
         unit_weights=unit, snapshot_closes=snap,
         adv=pd.DataFrame(1e6, index=decisions, columns=cols, dtype="float64"),
         daily_sigma=pd.DataFrame(0.02, index=decisions, columns=cols, dtype="float64"),
@@ -927,7 +927,7 @@ def test_observed_funding_scores_identically_to_legacy() -> None:
         [[100.0, 100.0], [110.0, 100.0], [110.0, 100.0]],
         index=decisions, columns=cols, dtype="float64",
     )
-    book = LiveFrozenBook(
+    book = LiveStrategyBook(
         unit_weights=unit, snapshot_closes=snap,
         adv=pd.DataFrame(1e6, index=decisions, columns=cols, dtype="float64"),
         daily_sigma=pd.DataFrame(0.02, index=decisions, columns=cols, dtype="float64"),
@@ -953,7 +953,7 @@ def test_observed_funding_scores_identically_to_legacy() -> None:
 def test_classify_snapshot_gaps_unreadable_file_fails_closed(tmp_path: Path) -> None:
     import pandas as pd
 
-    from src.live.frozen_book import classify_snapshot_gaps
+    from src.live.strategy_book import classify_snapshot_gaps
 
     (tmp_path / "ohlcv" / "1h").mkdir(parents=True)
     (tmp_path / "ohlcv" / "1h" / "BROKENUSDT.parquet").write_bytes(b"not a parquet")
@@ -966,7 +966,7 @@ def test_classify_snapshot_gaps_unreadable_file_fails_closed(tmp_path: Path) -> 
 def test_funding_coverage_empty_series_has_no_last_settlement() -> None:
     import pandas as pd
 
-    from src.live.frozen_book import _funding_coverage_ms
+    from src.live.strategy_book import _funding_coverage_ms
 
     assert _funding_coverage_ms(None) == (None, 28800000)
     assert _funding_coverage_ms(pd.Series([], dtype="float64")) == (None, 28800000)

@@ -2,7 +2,7 @@
 
 ``causal_adv_sigma`` lives here instead of ``account_sources`` so the live
 daemon can size exposure without importing the research replay assembly
-(``FrozenSourceContext`` pulls in the frozen research run and its evaluation
+(``StrategySourceContext`` pulls in the strategy backtest run and its evaluation
 machinery).
 """
 

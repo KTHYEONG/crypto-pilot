@@ -1,4 +1,4 @@
-"""Durable research-only payload for one frozen-MHS inventory run."""
+"""Durable research-only payload for one strategy inventory run."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ import pandas as pd
 
 from src.common.errors import DataIntegrityError
 from src.core.types import JsonValue
-from src.engine.strategy_backtest import FrozenMhsBacktestRun
+from src.engine.strategy_backtest import StrategyBacktestRun
 
 _logger = logging.getLogger(__name__)
 
@@ -39,7 +39,7 @@ def _jsonable(value: object) -> JsonValue:
     raise DataIntegrityError(f"evidence value {value!r} has no JSON representation")
 
 
-def frozen_mhs_backtest_payload(run: FrozenMhsBacktestRun) -> dict[str, JsonValue]:
+def strategy_backtest_payload(run: StrategyBacktestRun) -> dict[str, JsonValue]:
     """Serialize research evidence without discarding provenance or limitations.
 
     The payload is a durable human- and machine-readable summary of one
@@ -47,7 +47,7 @@ def frozen_mhs_backtest_payload(run: FrozenMhsBacktestRun) -> dict[str, JsonValu
     while keeping raw target and fill tables as separately referenced artifacts.
 
     Args:
-        run: Completed frozen-MHS historical replay result.
+        run: Completed strategy historical replay result.
     Returns:
         JSON-safe provenance, strategy, base/stress, and limitation fields.
     Raises:
@@ -138,7 +138,7 @@ def frozen_mhs_backtest_payload(run: FrozenMhsBacktestRun) -> dict[str, JsonValu
     return payload
 
 
-def frozen_mhs_daily_frame(run: FrozenMhsBacktestRun) -> pd.DataFrame:
+def strategy_daily_frame(run: StrategyBacktestRun) -> pd.DataFrame:
     """Daily ledger evidence needed to audit and re-derive the exposure policy.
 
     Summary metrics cannot answer how a drawdown budget binds, how intraday marks deepen
@@ -147,7 +147,7 @@ def frozen_mhs_daily_frame(run: FrozenMhsBacktestRun) -> pd.DataFrame:
     with the run instead of being reconstructed by ad-hoc probes.
 
     Args:
-        run: Completed frozen replay with valid paired ledgers.
+        run: Completed strategy replay with valid paired ledgers.
     Returns:
         UTC-daily indexed frame with float64 columns ``base_return``, ``stress_return``,
         ``base_equity_close``, ``stress_equity_close``, ``base_equity_low``,
@@ -199,8 +199,8 @@ def frozen_mhs_daily_frame(run: FrozenMhsBacktestRun) -> pd.DataFrame:
     return frame
 
 
-def persist_frozen_mhs_backtest(run: FrozenMhsBacktestRun, output: Path) -> Path:
-    """Atomically persist one fresh frozen-MHS research result envelope.
+def persist_strategy_backtest(run: StrategyBacktestRun, output: Path) -> Path:
+    """Atomically persist one fresh strategy research result envelope.
 
     Args:
         run: Completed research replay to persist.
@@ -220,8 +220,8 @@ def persist_frozen_mhs_backtest(run: FrozenMhsBacktestRun, output: Path) -> Path
     daily_path = output.parent / "daily.parquet"
     if os.path.lexists(daily_path):
         raise DataIntegrityError(f"daily artifact must be fresh: {daily_path} already exists")
-    payload = frozen_mhs_backtest_payload(run)
-    daily = frozen_mhs_daily_frame(run)
+    payload = strategy_backtest_payload(run)
+    daily = strategy_daily_frame(run)
     daily_tmp = output.parent / "daily.parquet.tmp"
     tmp = output.parent / f"{output.name}.tmp"
     try:
@@ -241,7 +241,7 @@ def persist_frozen_mhs_backtest(run: FrozenMhsBacktestRun, output: Path) -> Path
             os.unlink(output)
         raise
     _logger.debug(
-        "[EVAL] frozen daily artifact rows=%d start=%s end=%s worst_base_day=%.6f min_base_equity_low=%.2f",
+        "[EVAL] strategy daily artifact rows=%d start=%s end=%s worst_base_day=%.6f min_base_equity_low=%.2f",
         len(daily), daily.index[0], daily.index[-1],
         float(daily["base_return"].min()), float(daily["base_equity_low"].min()),
     )

@@ -13,7 +13,7 @@ def _resolved_base_execution_spec(request: Any) -> ExecutionSpec:
     """Single owner of the request-driven base execution spec (S6).
 
     Threads the configured execution window (``passive_timeout_minutes``) into
-    every replay bound; the frozen default 30 reproduces legacy specs exactly.
+    every replay bound; the fixed default 30 reproduces legacy specs exactly.
     """
     return dataclass_replace(
         ExecutionSpec(), passive_timeout_minutes=int(request.passive_timeout_minutes), name_drift_trim_max_weight=NAME_DRIFT_TRIM_MAX_WEIGHT if bool(request.name_drift_trim) else None, name_drift_trim_interval_hours=NAME_DRIFT_TRIM_INTERVAL_HOURS

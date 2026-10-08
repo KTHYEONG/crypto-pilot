@@ -9,8 +9,8 @@ import numpy as np
 import pandas as pd
 
 from src.common.errors import DataIntegrityError
-from src.engine.execution.accounting import QTY_EPS, CausalPortfolioState, reconcile_causal_state
 from src.core.types import ExecutionSpec
+from src.engine.execution.accounting import QTY_EPS, CausalPortfolioState, reconcile_causal_state
 
 from . import _ExecutionBound, _MarkSource
 from . import contracts as _contracts
@@ -360,7 +360,7 @@ class _BoundExecutionReplayAccumulator:
         Under ``corwin_schultz`` the column's EWMA half-spread replaces the
         flat slippage whenever it is finite; a degenerate estimate (nan)
         falls back to ``taker_slippage_bps``. Under ``flat`` this is exactly
-        the frozen slippage, reproducing legacy behaviour bit-identically.
+        the fixed slippage, reproducing legacy behaviour bit-identically.
         """
         if self.spec.liquidity_cost_model == "corwin_schultz":
             est = float(self.half_spread_bps[gcol])
@@ -871,7 +871,7 @@ class _BoundExecutionReplayAccumulator:
 
         Cash moves in two roundings (notional, then fee) because the fill-track cash feeds the next
         decision's sizing equity and therefore every downstream fill quantity; the ledger and the
-        causal mirror settle the same fill in one rounding. Both conventions are frozen by the golden
+        causal mirror settle the same fill in one rounding. Both conventions are pinned by the golden
         digests and must not be harmonized.
 
         The fill is only queued for the causal mirror; the mirror applies it after that bar's mark and
@@ -1086,8 +1086,8 @@ class _BoundExecutionReplayAccumulator:
         Columns without admitted events are bit-identical to today; the policy
         reads the admitted event index with no registry access in the hot path.
         """
-        from src.engine.execution.lifecycle import lifecycle_desired_units
         from src.core.params import DELIST_FORCED_EXIT_LEAD
+        from src.engine.execution.lifecycle import lifecycle_desired_units
 
         event = self._admitted_by_symbol.get(sym)
         if event is None:

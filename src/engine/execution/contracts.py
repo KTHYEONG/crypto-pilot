@@ -548,7 +548,7 @@ class ForwardExecutionObservation:
 
     Every intent is recorded, including rejected, cancelled, unfilled, and
     partial-filled orders. This data calibrates proxy fill/cost bounds and
-    gates Execution/Pilot/Scale; it must never alter an already frozen signal,
+    gates Execution/Pilot/Scale; it must never alter an already finalized signal,
     stop, exit, or sizing architecture after final OOS.
     """
 

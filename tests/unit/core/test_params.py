@@ -76,7 +76,7 @@ def test_growth_envelope_fail_closed_bounds() -> None:
         GrowthRiskEnvelope(**{**base, "ruin_fraction": 1.0})
     with pytest.raises(ValueError, match="horizon_years"):
         GrowthRiskEnvelope(**{**base, "horizon_years": 0.0})
-    # Valid construction with leverage_ceiling=2.0 succeeds and is frozen
+    # Valid construction with leverage_ceiling=2.0 succeeds and is immutable
     env = GrowthRiskEnvelope(**{**base, "leverage_ceiling": 2.0})
     assert env.leverage_ceiling == 2.0
     with pytest.raises(AttributeError):

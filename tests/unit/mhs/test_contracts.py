@@ -114,7 +114,7 @@ class TestFrozenLiterals:
         assert BOOK_BLEND_WEIGHTS["fast_reversal"] == 0.0
         assert abs(sum(BOOK_BLEND_WEIGHTS.values()) - 1.0) < 1e-12
 
-    def test_book_specs_contain_only_frozen_books(self) -> None:
+    def test_book_specs_contain_only_fixed_books(self) -> None:
         assert set(BOOK_SPECS) == {"fast_reversal", "slow_momentum"}
         fast = BOOK_SPECS["fast_reversal"]
         slow = BOOK_SPECS["slow_momentum"]
@@ -131,7 +131,7 @@ class TestFrozenLiterals:
         # SCENARIO_MHS_FOLD_SAFE_HORIZON_04_WIDENED_BAND_ACCEPTS_CANDIDATES:
         # the slow band's allowed set is the full measured momentum candidate
         # grid (all 19 horizons, 72..504 step 24) so a fold-selected horizon
-        # passes BookSpec.__post_init__'s band check, while the frozen 168h
+        # passes BookSpec.__post_init__'s band check, while the fixed 168h
         # default is unchanged and out-of-band values still fail closed.
         slow = BOOK_SPECS["slow_momentum"]
         assert slow.band.horizons_hours == MOMENTUM_HORIZON_CANDIDATES_HOURS

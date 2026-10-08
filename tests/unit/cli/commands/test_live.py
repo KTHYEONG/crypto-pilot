@@ -218,24 +218,26 @@ COVERED_SCENARIOS: tuple[str, ...] = (
 
 
 
-def test_frozen_step_registered_and_signal_step_removed() -> None:
-    """frozen-step replaces signal-step/signal-daemon/signal-refresh."""
+def test_strategy_step_registered_and_old_names_rejected() -> None:
+    """strategy-step replaces frozen-step/signal-step/signal-daemon/signal-refresh."""
     import argparse
 
     import pytest
 
-    from src.cli.commands.live import _run_frozen_step, add_live_commands
+    from src.cli.commands.live import _run_strategy_step, add_live_commands
     from src.cli.main import build_root_parser
 
     parser = argparse.ArgumentParser()
     add_live_commands(parser)
-    args = parser.parse_args(["frozen-step", "--date", "2026-08-25T00:00:00Z"])
-    assert args.handler is _run_frozen_step
+    args = parser.parse_args(["strategy-step", "--date", "2026-08-25T00:00:00Z"])
+    assert args.handler is _run_strategy_step
     root = build_root_parser()
-    a = root.parse_args(["live", "frozen-step", "--date", "2026-08-25T00:00:00Z"])
-    assert a.handler is _run_frozen_step
+    a = root.parse_args(["live", "strategy-step", "--date", "2026-08-25T00:00:00Z"])
+    assert a.handler is _run_strategy_step
     b = root.parse_args(["live", "daemon"])
     assert b.handler is not None
+    with pytest.raises(SystemExit):
+        parser.parse_args(["frozen-step", "--date", "2026-08-25T00:00:00Z"])
     with pytest.raises(SystemExit):
         parser.parse_args(["signal-step", "--date", "2026-08-25T00:00:00Z"])
     with pytest.raises(SystemExit):
@@ -244,7 +246,7 @@ def test_frozen_step_registered_and_signal_step_removed() -> None:
         parser.parse_args(["signal-refresh"])
 
 
-def test_frozen_delivery_boundary_under_deploy_mhs() -> None:
+def test_strategy_delivery_boundary_under_deploy_mhs() -> None:
     from src.common.paths import DATA_DIR, DEPLOY_MHS_DIR
     from src.live.settings import LiveSettings
 
@@ -254,7 +256,7 @@ def test_frozen_delivery_boundary_under_deploy_mhs() -> None:
     assert settings.venue_fallback_path.startswith(str(DEPLOY_MHS_DIR))
 
 
-def test_run_frozen_step_reports_and_fails_closed(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_run_strategy_step_reports_and_fails_closed(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     import argparse
     from types import SimpleNamespace
 
@@ -272,18 +274,18 @@ def test_run_frozen_step_reports_and_fails_closed(monkeypatch: pytest.MonkeyPatc
         seen.update(target=t, weights=weights)
         return report
 
-    monkeypatch.setattr("src.live.scheduler._default_frozen_step", _ok)
+    monkeypatch.setattr("src.live.scheduler._default_strategy_step", _ok)
     args = argparse.Namespace(date=target, artifact=str(tmp_path / "w.parquet"), mode=None)
-    live_mod._run_frozen_step(args)
+    live_mod._run_strategy_step(args)
     assert seen["target"] == target
     assert seen["weights"] == tmp_path / "w.parquet"
 
     def _boom(t, settings, weights):
         raise RuntimeError("unit history gap")
 
-    monkeypatch.setattr("src.live.scheduler._default_frozen_step", _boom)
+    monkeypatch.setattr("src.live.scheduler._default_strategy_step", _boom)
     with pytest.raises(SystemExit):
-        live_mod._run_frozen_step(args)
+        live_mod._run_strategy_step(args)
 
 
 def test_run_ledger_resync_dry_run_logs_adjustment_count(monkeypatch, caplog) -> None:

@@ -8,18 +8,18 @@ import pytest
 
 from src.common.errors import DataIntegrityError
 from src.engine.execution import ExecutionReplayWindow, InstrumentSettlementEvent
-from src.strategy.targets import FROZEN_MHS_TOP20_V2, FrozenMhsCandidate
-from src.engine.backtest_windows import validated_frozen_research_windows
+from src.strategy.targets import FLOW_MOM_TOP20, StrategyTargets
+from src.engine.backtest_windows import validated_backtest_windows
 
 _SETTLEMENT_BARS = 10
 
 
 def _validated(
-    candidate: FrozenMhsCandidate,
+    candidate: StrategyTargets,
     windows: object,
     settlement_bars: int = _SETTLEMENT_BARS,
 ) -> object:
-    return validated_frozen_research_windows(candidate, windows, settlement_bars=settlement_bars)  # type: ignore[arg-type]
+    return validated_backtest_windows(candidate, windows, settlement_bars=settlement_bars)  # type: ignore[arg-type]
 
 _SYMBOLS = ("AAA", "BBB")
 _DAY0 = pd.Timestamp("2021-06-01", tz="UTC")
@@ -27,7 +27,7 @@ _DAY0 = pd.Timestamp("2021-06-01", tz="UTC")
 
 def _candidate(
     n_days: int = 4, zero_tail: bool = False, symbols: tuple[str, ...] = _SYMBOLS
-) -> FrozenMhsCandidate:
+) -> StrategyTargets:
     labels = pd.DatetimeIndex([_DAY0 + pd.Timedelta(days=i + 1) for i in range(n_days)], tz="UTC")
     weights = pd.DataFrame(0.0, index=labels, columns=list(symbols), dtype="float64")
     if "AAA" in weights.columns:
@@ -37,14 +37,14 @@ def _candidate(
     if zero_tail:
         weights.loc[labels[2:], :] = 0.0
     avail = pd.DatetimeIndex([label - pd.Timedelta(hours=1) for label in labels], tz="UTC")
-    return FrozenMhsCandidate(
-        target_weights=weights, signal_available_at=avail, strategy=FROZEN_MHS_TOP20_V2
+    return StrategyTargets(
+        target_weights=weights, signal_available_at=avail, strategy=FLOW_MOM_TOP20
     )
 
 
 def _window(
     grid: pd.DatetimeIndex,
-    candidate: FrozenMhsCandidate,
+    candidate: StrategyTargets,
     labels: list[pd.Timestamp],
     symbols: tuple[str, ...] | None = None,
     **overrides: object,
@@ -80,7 +80,7 @@ def _grid(start: pd.Timestamp, end: pd.Timestamp) -> pd.DatetimeIndex:
     return pd.date_range(start, end, freq="3min", tz="UTC")
 
 
-def _pair(candidate: FrozenMhsCandidate) -> tuple[ExecutionReplayWindow, ExecutionReplayWindow]:
+def _pair(candidate: StrategyTargets) -> tuple[ExecutionReplayWindow, ExecutionReplayWindow]:
     labels = list(candidate.target_weights.index)
     first = _window(_grid(labels[0] - pd.Timedelta(hours=1), labels[1] + pd.Timedelta(hours=2)), candidate, labels[:2])
     second = _window(_grid(labels[2] - pd.Timedelta(hours=1), labels[3] + pd.Timedelta(hours=2)), candidate, labels[2:])
@@ -322,7 +322,7 @@ def test_validated_windows_reject_unknown_or_altered_targets() -> None:
             grid, candidate, labels[:1], target_weights=alien_weights, signal_available_at=alien_avail)]))
     doped = candidate.target_weights.loc[labels[:2]].copy()
     doped.iloc[0, 0] += 0.5
-    with pytest.raises(DataIntegrityError, match="equal the frozen candidate"):
+    with pytest.raises(DataIntegrityError, match="equal the strategy candidate"):
         list(_validated(candidate, [_window(grid, candidate, labels[:2], target_weights=doped)]))
 
 
@@ -416,9 +416,9 @@ def test_validated_windows_stream_without_retaining_source() -> None:
 
 def test_validated_windows_reject_empty_candidate() -> None:
     """A candidate without target rows cannot anchor any window."""
-    empty = FrozenMhsCandidate(
+    empty = StrategyTargets(
         target_weights=pd.DataFrame(columns=list(_SYMBOLS), dtype="float64"),
-        signal_available_at=pd.DatetimeIndex([], tz="UTC"), strategy=FROZEN_MHS_TOP20_V2,
+        signal_available_at=pd.DatetimeIndex([], tz="UTC"), strategy=FLOW_MOM_TOP20,
     )
     with pytest.raises(DataIntegrityError, match="at least one target row"):
         list(_validated(empty, []))
@@ -454,11 +454,11 @@ def test_local_roster_subset_and_order_branches() -> None:
         list(_validated(candidate, [_window(grid, candidate, labels[:2], marks=narrow_marks)]))
 
 
-def _idle_candidate() -> FrozenMhsCandidate:
+def _idle_candidate() -> StrategyTargets:
     base = _candidate()
     weights = base.target_weights.copy()
     weights.loc[list(weights.index)[:2]] = 0.0
-    return FrozenMhsCandidate(
+    return StrategyTargets(
         target_weights=weights, signal_available_at=base.signal_available_at, strategy=base.strategy
     )
 
@@ -523,7 +523,7 @@ def test_structure_checked_for_unheld_roster() -> None:
     base = _candidate()
     weights = base.target_weights.copy()
     weights.loc[:, :] = 0.0
-    flat = FrozenMhsCandidate(
+    flat = StrategyTargets(
         target_weights=weights, signal_available_at=base.signal_available_at, strategy=base.strategy
     )
     labels = list(flat.target_weights.index)
@@ -537,7 +537,7 @@ def test_negative_volume_only_matters_when_held() -> None:
     base = _candidate()
     weights = base.target_weights.copy()
     weights["BBB"] = 0.0
-    candidate = FrozenMhsCandidate(
+    candidate = StrategyTargets(
         target_weights=weights, signal_available_at=base.signal_available_at, strategy=base.strategy
     )
     labels = list(candidate.target_weights.index)

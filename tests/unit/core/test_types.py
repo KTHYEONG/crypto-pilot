@@ -71,9 +71,9 @@ def test_settlement_haircut_validation() -> None:
 
 
 def test_stress_builders_carry_haircut() -> None:
-    from src.application.mhs_frozen_account import frozen_execution_specs
+    from src.application.strategy_account import strategy_execution_specs
     from src.engine.execution.specs import _stress_cost_execution_spec
     assert _stress_cost_execution_spec().settlement_price_haircut_bps == 450.0
-    base, stress = frozen_execution_specs()
+    base, stress = strategy_execution_specs()
     assert base.settlement_price_haircut_bps == 0.0
     assert stress.settlement_price_haircut_bps == 450.0

@@ -219,7 +219,7 @@ def choose_refit_policy(
     Args:
         evidence: Complete fixed-pool policy trajectories and their provenance.
         point: Outer application interval and its fitting information cutoff.
-        spec: Frozen comparison pool, control, uncertainty and tie rules.
+        spec: Fixed comparison pool, control, uncertainty and tie rules.
     Returns:
         An auditable choice, or an inactive choice if common evidence is insufficient.
     Raises:

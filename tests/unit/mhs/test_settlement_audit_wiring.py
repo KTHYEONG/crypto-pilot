@@ -100,9 +100,9 @@ def test_panel_audit_horizon_covers_fold_calendar(tmp_path, monkeypatch: pytest.
 
 def test_frozen_source_fails_closed(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     import src.engine.strategy_backtest as frozen_mod
-    from src.engine.strategy_backtest import _load_frozen_source
+    from src.engine.strategy_backtest import _load_strategy_source
     from src.core.resources import resolve_mhs_memory_budget
-    from tests.unit.engine.test_frozen_research_run import _request
+    from tests.unit.engine.test_strategy_backtest_run import _request
 
     _write_3m(tmp_path, "AAAUSDT", T0, 20)
     grid = pd.date_range("2025-01-01", periods=10, freq="1h", tz="UTC")
@@ -123,7 +123,7 @@ def test_frozen_source_fails_closed(tmp_path, monkeypatch: pytest.MonkeyPatch) -
         evaluation_end=pd.Timestamp("2025-01-10", tz="UTC"),
     )
     with pytest.raises(DataIntegrityError, match="AAAUSDT"):
-        _load_frozen_source(request, resolve_mhs_memory_budget(None), None)
+        _load_strategy_source(request, resolve_mhs_memory_budget(None), None)
 
 
 def test_process_backtest_fails_closed(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:

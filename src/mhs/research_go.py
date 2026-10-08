@@ -1,7 +1,7 @@
 """MHS Research-GO gate: fail-closed decision from fold and book evidence.
 
 This module owns the GO reason-code constants and the top-level Research-GO
-decision logic. It composes the frozen ``src.mhs`` primitives and the
+decision logic. It composes the fixed ``src.mhs`` primitives and the
 application request/report contracts; no alpha, cost, ranking, liquidity,
 funding, or inventory arithmetic is reimplemented here.
 """

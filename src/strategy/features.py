@@ -13,6 +13,7 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
+from src.core.types import FEATURE_MIN_COVERAGE
 from src.strategy.books import rank_weight_book
 from src.strategy.feature_admission import (
     _admission_row_vectors,
@@ -21,7 +22,6 @@ from src.strategy.feature_admission import (
     feature_admission_coverage,
 )
 from src.strategy.horizons import horizon_log_return, realized_vol, vol_normalized_horizon_signal
-from src.core.types import FEATURE_MIN_COVERAGE
 
 MARKET_CLOSE_PANEL: str = "market_close"
 
@@ -546,7 +546,7 @@ def _hl_range_168h_builder(panels: Mapping[str, pd.DataFrame]) -> pd.DataFrame:
 
 
 # The declared feature registry. Each entry's sign is baked into its builder;
-# min_coverage defaults to the frozen FEATURE_MIN_COVERAGE floor.
+# min_coverage defaults to the registered FEATURE_MIN_COVERAGE floor.
 FEATURE_REGISTRY: tuple[FeatureSpec, ...] = (
     FeatureSpec(
         name="mom_168h",

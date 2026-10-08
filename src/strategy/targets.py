@@ -1,26 +1,28 @@
-"""Frozen PIT target policy and causal candidate builder."""
+"""Strategy PIT target policy and causal candidate builder."""
 
 from __future__ import annotations
 
 import math
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Literal
 
 import pandas as pd
 
 from src.common.errors import DataIntegrityError
+from src.core.params import GROWTH_EXPOSURE_MULTIPLIER, STRATEGY_NAME_CLIP
 from src.strategy.books import clip_names_preserving_gross, rank_weight_book
 from src.strategy.features import FEATURE_REGISTRY, MARKET_CLOSE_PANEL
-from src.strategy.universe import build_frozen_pit_roster
-from src.core.params import FROZEN_GROWTH_EXPOSURE_MULTIPLIER, FROZEN_GROWTH_NAME_CLIP
+from src.strategy.universe import build_pit_roster
 
 _REQUIRED_PANELS = ("close", "quote_vol", "taker_buy_quote")
 _HISTORY_BARS = 720
 
 
 @dataclass(frozen=True, slots=True)
-class FrozenFeatureMember:
+class FeatureMember:
     """Declare one registered cross-sectional feature and its fixed rank direction."""
 
     name: str
@@ -34,7 +36,7 @@ class FrozenFeatureMember:
 
 
 @dataclass(frozen=True, slots=True)
-class FrozenMhsStrategySpec:
+class StrategySpec:
     """Declare an immutable PIT target policy independently of execution mechanics.
 
     The definition binds universe breadth, registered feature identities,
@@ -48,7 +50,7 @@ class FrozenMhsStrategySpec:
 
     strategy_id: str
     breadth: int
-    members: tuple[FrozenFeatureMember, ...]
+    members: tuple[FeatureMember, ...]
     min_rank_symbols: int
     snapshot_hour_utc: int
     release_hour_utc: int
@@ -62,7 +64,7 @@ class FrozenMhsStrategySpec:
         if isinstance(self.breadth, bool) or not isinstance(self.breadth, int) or self.breadth <= 0:
             raise ValueError(f"breadth must be a positive integer, got {self.breadth!r}")
         if not isinstance(self.members, tuple) or len(self.members) == 0:
-            raise ValueError("members must be a non-empty tuple of FrozenFeatureMember")
+            raise ValueError("members must be a non-empty tuple of FeatureMember")
         names = [m.name for m in self.members]
         if any(not isinstance(n, str) or not n for n in names) or len(set(names)) != len(names):
             raise ValueError("member names must be unique non-empty strings")
@@ -99,15 +101,15 @@ class FrozenMhsStrategySpec:
             )
 
 
-FROZEN_MHS_TOP20_V2 = FrozenMhsStrategySpec(
-    strategy_id="frozen_mhs_top20_v2",
+FLOW_MOM_TOP20 = StrategySpec(
+    strategy_id="flow_mom_top20",
     breadth=20,
     members=(
-        FrozenFeatureMember(name="flow_imb_168h", sign=1),
-        FrozenFeatureMember(name="flow_imb_720h", sign=1),
-        FrozenFeatureMember(name="xs_mom_336h", sign=1),
-        FrozenFeatureMember(name="xs_idio_mom_336h", sign=1),
-        FrozenFeatureMember(name="mom3_skew_168h", sign=1),
+        FeatureMember(name="flow_imb_168h", sign=1),
+        FeatureMember(name="flow_imb_720h", sign=1),
+        FeatureMember(name="xs_mom_336h", sign=1),
+        FeatureMember(name="xs_idio_mom_336h", sign=1),
+        FeatureMember(name="mom3_skew_168h", sign=1),
     ),
     min_rank_symbols=8,
     snapshot_hour_utc=22,
@@ -115,15 +117,15 @@ FROZEN_MHS_TOP20_V2 = FrozenMhsStrategySpec(
     entry_hour_utc=0,
 )
 
-FROZEN_MHS_TOP40_CONTROL_V2 = FrozenMhsStrategySpec(
-    strategy_id="frozen_mhs_top40_control_v2",
+FLOW_MOM_TOP40_CONTROL = StrategySpec(
+    strategy_id="flow_mom_top40_control",
     breadth=40,
     members=(
-        FrozenFeatureMember(name="flow_imb_168h", sign=1),
-        FrozenFeatureMember(name="flow_imb_720h", sign=1),
-        FrozenFeatureMember(name="xs_mom_336h", sign=1),
-        FrozenFeatureMember(name="xs_idio_mom_336h", sign=1),
-        FrozenFeatureMember(name="mom3_skew_168h", sign=1),
+        FeatureMember(name="flow_imb_168h", sign=1),
+        FeatureMember(name="flow_imb_720h", sign=1),
+        FeatureMember(name="xs_mom_336h", sign=1),
+        FeatureMember(name="xs_idio_mom_336h", sign=1),
+        FeatureMember(name="mom3_skew_168h", sign=1),
     ),
     min_rank_symbols=8,
     snapshot_hour_utc=22,
@@ -131,46 +133,96 @@ FROZEN_MHS_TOP40_CONTROL_V2 = FrozenMhsStrategySpec(
     entry_hour_utc=0,
 )
 
-FROZEN_MHS_TOP20_GROWTH_V2 = FrozenMhsStrategySpec(
-    strategy_id="frozen_mhs_top20_growth_v2",
+FLOW_MOM_TOP20_GROWTH = StrategySpec(
+    strategy_id="flow_mom_top20_growth",
     breadth=20,
     members=(
-        FrozenFeatureMember(name="flow_imb_168h", sign=1),
-        FrozenFeatureMember(name="flow_imb_720h", sign=1),
-        FrozenFeatureMember(name="xs_mom_336h", sign=1),
-        FrozenFeatureMember(name="xs_idio_mom_336h", sign=1),
-        FrozenFeatureMember(name="mom3_skew_168h", sign=1),
+        FeatureMember(name="flow_imb_168h", sign=1),
+        FeatureMember(name="flow_imb_720h", sign=1),
+        FeatureMember(name="xs_mom_336h", sign=1),
+        FeatureMember(name="xs_idio_mom_336h", sign=1),
+        FeatureMember(name="mom3_skew_168h", sign=1),
     ),
     min_rank_symbols=8,
     snapshot_hour_utc=22,
     release_hour_utc=23,
     entry_hour_utc=0,
-    exposure_multiplier=FROZEN_GROWTH_EXPOSURE_MULTIPLIER,
-    name_clip=FROZEN_GROWTH_NAME_CLIP,
+    exposure_multiplier=GROWTH_EXPOSURE_MULTIPLIER,
+    name_clip=STRATEGY_NAME_CLIP,
 )
 
-# 계좌 원장이 노출을 정책으로 고르는 무레버리지 클립 북이며, 신호 북은 v2와 같아 라이브 부트스트랩 식별자를 유지한다.
-FROZEN_MHS_TOP20_ACCOUNT_UNIT_V2 = FrozenMhsStrategySpec(
-    strategy_id="frozen_mhs_top20_v2",
+# 계좌 원장이 노출을 정책으로 고르는 무레버리지 클립 북이며, 신호 북은 FLOW_MOM_TOP20과 같아 라이브 부트스트랩 식별자를 유지한다.
+FLOW_MOM_TOP20_ACCOUNT_UNIT = StrategySpec(
+    strategy_id="flow_mom_top20",
     breadth=20,
     members=(
-        FrozenFeatureMember(name="flow_imb_168h", sign=1),
-        FrozenFeatureMember(name="flow_imb_720h", sign=1),
-        FrozenFeatureMember(name="xs_mom_336h", sign=1),
-        FrozenFeatureMember(name="xs_idio_mom_336h", sign=1),
-        FrozenFeatureMember(name="mom3_skew_168h", sign=1),
+        FeatureMember(name="flow_imb_168h", sign=1),
+        FeatureMember(name="flow_imb_720h", sign=1),
+        FeatureMember(name="xs_mom_336h", sign=1),
+        FeatureMember(name="xs_idio_mom_336h", sign=1),
+        FeatureMember(name="mom3_skew_168h", sign=1),
     ),
     min_rank_symbols=8,
     snapshot_hour_utc=22,
     release_hour_utc=23,
     entry_hour_utc=0,
     exposure_multiplier=1.0,
-    name_clip=FROZEN_GROWTH_NAME_CLIP,
+    name_clip=STRATEGY_NAME_CLIP,
 )
 
 
+LEGACY_STRATEGY_IDS: Mapping[str, str] = MappingProxyType({
+    "frozen_mhs_top20_v2": "flow_mom_top20",
+    "frozen_mhs_top40_control_v2": "flow_mom_top40_control",
+    "frozen_mhs_top20_growth_v2": "flow_mom_top20_growth",
+})
+"""Pre-rename strategy ids. Read-only: persisted evidence keeps resolving through them."""
+
+
+_AD_HOC_CONTROL_PATTERN = re.compile(r"flow_mom_b[1-9][0-9]*_control")
+"""Writer-known ad-hoc control family minted by the backtest CLI for non-registered breadths."""
+
+
+def resolve_strategy_id(raw: str) -> str:
+    """Canonical strategy id for an id read from persisted evidence.
+
+    Run manifests, backtest index rows and result envelopes written before the
+    rename carry legacy ids; they denote the same strategy definition and must
+    keep matching it. Unknown ids raise DataIntegrityError rather than silently
+    matching nothing.
+    """
+    if not isinstance(raw, str) or not raw:
+        raise DataIntegrityError(f"strategy id must be a non-empty string, got {raw!r}")
+    if raw in LEGACY_STRATEGY_IDS:
+        return LEGACY_STRATEGY_IDS[raw]
+    if _AD_HOC_CONTROL_PATTERN.fullmatch(raw):
+        return raw
+    known = {
+        spec.strategy_id
+        for spec in (
+            FLOW_MOM_TOP20,
+            FLOW_MOM_TOP40_CONTROL,
+            FLOW_MOM_TOP20_GROWTH,
+            FLOW_MOM_TOP20_ACCOUNT_UNIT,
+        )
+    }
+    if raw in known:
+        return raw
+    raise DataIntegrityError(f"unknown strategy id: {raw!r}")
+
+
+def strategy_id_matches(stored: object, canonical: object) -> bool:
+    """True when a persisted strategy id denotes the canonical strategy."""
+    if not isinstance(stored, str):
+        return False
+    try:
+        return resolve_strategy_id(stored) == canonical
+    except DataIntegrityError:
+        return False
+
+
 @dataclass(frozen=True, slots=True)
-class FrozenMhsCandidate:
+class StrategyTargets:
     """Bind exact PIT target weights to their release and entry timestamps.
 
     ``target_weights.index`` is the UTC entry time, not the source-observation
@@ -180,7 +232,7 @@ class FrozenMhsCandidate:
 
     target_weights: pd.DataFrame
     signal_available_at: pd.DatetimeIndex
-    strategy: FrozenMhsStrategySpec
+    strategy: StrategySpec
 
     def __post_init__(self) -> None:
         if len(self.target_weights) != len(self.signal_available_at):
@@ -191,7 +243,7 @@ class FrozenMhsCandidate:
         return self.strategy.breadth
 
 
-def build_frozen_mhs_candidate(
+def build_strategy_targets(
     hourly_panels: Mapping[str, pd.DataFrame],
     hourly_available_at: pd.DataFrame,
     daily_close: pd.DataFrame,
@@ -199,9 +251,9 @@ def build_frozen_mhs_candidate(
     census_symbols: tuple[str, ...],
     *,
     market_close: pd.DataFrame,
-    strategy: FrozenMhsStrategySpec = FROZEN_MHS_TOP20_V2,
+    strategy: StrategySpec = FLOW_MOM_TOP20,
     blocked_decisions: pd.DataFrame | None = None,
-) -> FrozenMhsCandidate:
+) -> StrategyTargets:
     """Build one immutable, causal target plan from complete hourly sources.
 
     The builder evaluates only registered features and source bars known by each strategy
@@ -219,7 +271,7 @@ def build_frozen_mhs_candidate(
             index as ``hourly_panels``) defining the contemporaneous market cross-section for
             market-relative features; required so no feature can fall back to the hindsight-selected
             ``hourly_panels`` columns.
-        strategy: Frozen target definition; Top-20 v2 is the primary default.
+        strategy: Strategy target definition; the primary Top-20 is the default.
         blocked_decisions: Boolean decision-day frame withdrawing a symbol from both roster
             eligibility and target emission for exactly those days.
     Returns:
@@ -228,13 +280,13 @@ def build_frozen_mhs_candidate(
     Raises:
         DataIntegrityError: Source planes, census, or roster evidence is inconsistent.
     """
-    if not isinstance(strategy, FrozenMhsStrategySpec):
-        raise ValueError("strategy must be a FrozenMhsStrategySpec")
+    if not isinstance(strategy, StrategySpec):
+        raise ValueError("strategy must be a StrategySpec")
     census = list(census_symbols)
     registry = {spec.name: spec for spec in FEATURE_REGISTRY}
     if any(m.name not in registry for m in strategy.members):
         raise ValueError("strategy references an unregistered feature")
-    roster = build_frozen_pit_roster(
+    roster = build_pit_roster(
         daily_close,
         daily_quote_volume,
         census_symbols,
@@ -309,7 +361,7 @@ def build_frozen_mhs_candidate(
     available = pd.DatetimeIndex(
         [d + pd.Timedelta(hours=int(strategy.release_hour_utc)) for d in decisions], tz="UTC"
     )
-    return FrozenMhsCandidate(target_weights=target, signal_available_at=available, strategy=strategy)
+    return StrategyTargets(target_weights=target, signal_available_at=available, strategy=strategy)
 
 
 def _is_utc_hourly_grid(idx: pd.DatetimeIndex) -> bool:

@@ -1,4 +1,4 @@
-"""Frozen research configuration for MHS golden fixtures and unit suites.
+"""Strategy research configuration for MHS golden fixtures and unit suites.
 
 ``research_baseline`` reproduces the pre-unification ``MhsDiagnosticRequest()``
 defaults (the configuration every golden fixture was captured under) on top of
@@ -35,7 +35,7 @@ RESEARCH_BASELINE: Final[Mapping[str, object]] = MappingProxyType({
 
 
 def research_baseline(**overrides: object) -> MhsDiagnosticRequest:
-    """The frozen research configuration the golden fixtures and unit suites were captured under.
+    """The strategy research configuration the golden fixtures and unit suites were captured under.
 
     Equals the pre-unification ``MhsDiagnosticRequest()`` defaults. When
     ``committee_target_gross`` is not overridden it resolves exactly as the

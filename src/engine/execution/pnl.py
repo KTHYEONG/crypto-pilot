@@ -55,7 +55,7 @@ def mhs_ledger_pnl_multi_tier(
 
     Mirrors ``mhs_ledger_pnl`` exactly for each entry in ``one_way_bps_list``:
     the spec is built with ``fee_rate = slippage_rate = bps / 2.0 * 1e-4`` and
-    the frozen round-trip rate ``half + half`` (IEEE doubling is exact, so it
+    the fixed round-trip rate ``half + half`` (IEEE doubling is exact, so it
     equals the single call's ``round_trip_cost_rate()`` bit-for-bit). The shared
     array construction means element ``i``'s ``(net, turnover)`` is bit-identical
     to ``mhs_ledger_pnl(weights, opens, bar_funding, bps_i)`` for the same
