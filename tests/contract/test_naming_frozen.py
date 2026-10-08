@@ -54,7 +54,7 @@ _FILE_ALLOWED_TOKENS: Final[dict[str, frozenset[str]]] = {
         "frozen_mhs_top20_v2", "frozen_mhs_top40_control_v2", "frozen_mhs_top20_growth_v2",
     }),
     "src/core/parallel.py": frozenset({"_INHERITED_FROZEN"}),
-    "src/core/params.py": frozenset({"boundary_frozen_warmup_excluded_v1"}),
+    "src/lab/mhs/params.py": frozenset({"boundary_frozen_warmup_excluded_v1"}),
     "src/common/paths.py": frozenset({"LEGACY_FROZEN_BACKTESTS_DIR"}),
     "src/application/strategy_account.py": frozenset({"mhs_frozen", "mhs_frozen_account"}),
     "src/backtests/catalog.py": frozenset({"mhs_frozen", "mhs_frozen_account"}),

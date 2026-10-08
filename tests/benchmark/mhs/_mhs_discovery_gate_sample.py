@@ -16,7 +16,7 @@ import time
 import numpy as np
 import pandas as pd
 
-from src.mhs.discovery import select_horizon_by_discovery_qualification
+from src.lab.mhs.discovery import select_horizon_by_discovery_qualification
 
 N_SYMBOLS = 64
 SEED = 20260811

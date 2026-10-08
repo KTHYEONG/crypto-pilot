@@ -62,7 +62,7 @@ def build_report_digest(
 
     Covers every replay reachable from the report INCLUDING touch and ladder.
     """
-    from src.mhs.report.persist import _collect_replay_entries
+    from src.lab.mhs.report.persist import _collect_replay_entries
 
     digest: dict[str, dict[str, dict[str, Any]]] = {}
     for replay_id, replay in _collect_replay_entries(report):
@@ -76,7 +76,7 @@ def build_report_digest(
 
 def build_report_summary(report: Any) -> dict[str, Any]:
     """Row-count-stubbed payload of ``report`` (<= ~100 KB for the golden shape)."""
-    from src.mhs.report.persist import (
+    from src.lab.mhs.report.persist import (
         _collect_replay_entries,
         _replay_category_row_counts,
         _stubbed_report_for_payload,

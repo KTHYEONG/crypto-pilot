@@ -1,0 +1,115 @@
+"""MHS pipeline: orchestration layer.
+
+``run_mhs_diagnostic`` composes the six stage functions plus report assembly.
+Each stage is a function with signature ``(ctx: PipelineContext, telemetry:
+StageTelemetry) -> None`` (``assemble_report`` returns the report) that reads and
+writes a shared ``PipelineContext`` -- the single communication channel for
+long-lived state. The orchestrator handles setup and wiring only (<=150 lines).
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import time
+from pathlib import Path
+
+import pandas as pd
+
+from src.common.errors import DataIntegrityError
+from src.core.marks import clear_mhs_market_data_caches
+from src.core.params import DISCOVERY_START, MHS_FINAL_OOS_CUTOFF_2026H1
+from src.core.resources import _TreeMemorySampler
+from src.lab.mhs import preregistration as _prereg
+from src.lab.mhs.contracts import MhsDiagnosticRequest
+from src.lab.mhs.pipeline.context import PipelineContext
+from src.lab.mhs.pipeline.runner import run_stages
+from src.lab.mhs.report.schema import MhsHorizonDiagnosticReport
+from src.lab.mhs.telemetry import StageTelemetry
+from src.quant.evaluation.policy import HOLDOUT_CUTOFF, resolve_evaluation_end
+
+
+def run_mhs_diagnostic(
+    config: MhsDiagnosticRequest,
+    *,
+    procedure_registry: Path | None = None,
+    history_dir: Path | None = None,
+) -> MhsHorizonDiagnosticReport:
+    """Compose the dev-only MHS diagnostic: six stages + report assembly.
+
+    Constructs a ``PipelineContext`` from the run config and drives the stage
+    functions in the original computation order (I-IDENTITY). The previous
+    delegation to the monolithic ``run_mhs_horizon_diagnostic`` has been
+    removed -- this function is now the sole composition point.
+
+    A ``_TreeMemorySampler`` observes the whole process tree for the duration
+    of the run; its COW-correct PSS/USS/available-floor stats are attached to
+    the report as ``tree_memory`` (observational, never raises into the run).
+
+    ``procedure_registry`` is the forward-look store. It is required exactly when
+    ``config.forward_registration_digest`` is set, because that branch verifies the registration and appends an
+    evaluation event before any market data is read (reserve-before-read); the same path serves both. Without a
+    forward digest it is unused and the run writes no registry.
+
+    ``history_dir`` threads the run-history directory through the fold-stage DSR reads
+    (``None`` keeps the documented read-only canonical default).
+
+    Raises:
+        TypeError: A forward digest is set and ``procedure_registry`` is not a ``pathlib.Path``; raised before the
+            market-data cache reset, the registration read, or the evaluation append.
+    """
+    if config.forward_registration_digest is not None and not isinstance(procedure_registry, Path):
+        raise TypeError("procedure_registry must be a pathlib.Path when a forward digest is set")
+    clear_mhs_market_data_caches()
+    if config.forward_registration_digest is not None:
+        assert isinstance(procedure_registry, Path)
+        _now = pd.Timestamp.now(tz="UTC")
+        _registration = _prereg.find_registration(config.forward_registration_digest, procedure_registry)
+        if _prereg.procedure_identity_digest(config) != _registration.procedure_digest:
+            raise DataIntegrityError("run flags do not match the registered procedure digest")
+        _evaluation_ceiling = _prereg.forward_evaluation_end_ceiling(_now)
+        resolved_end = resolve_evaluation_end(config.end, unseal_holdout=True, ceiling=_evaluation_ceiling)
+        _prereg.record_forward_evaluation(_registration, resolved_end, now=_now, registry_path=procedure_registry)
+    else:
+        _evaluation_ceiling = MHS_FINAL_OOS_CUTOFF_2026H1 if config.final_oos_2026h1 else HOLDOUT_CUTOFF
+        resolved_end = resolve_evaluation_end(config.end, unseal_holdout=config.final_oos_2026h1, ceiling=_evaluation_ceiling)
+    _run_start = time.perf_counter()
+    if config.partition != "dev":
+        raise RuntimeError(
+            "MHS Phase 1 is dev-only; the holdout partition requires an "
+            "architecture-freeze final-OOS command"
+        )
+    if config.start is not None:
+        start = pd.Timestamp(config.start)
+        start = start.tz_localize("UTC") if start.tz is None else start.tz_convert("UTC")
+    else:
+        start = DISCOVERY_START
+
+    end = resolved_end
+    if end > _evaluation_ceiling:
+        raise RuntimeError(f"Holdout sealed: requested end {end} past {_evaluation_ceiling}")
+
+    ctx = PipelineContext(
+        config=config,
+        history_dir=history_dir,
+        resolved_end=resolved_end,
+        start=start,
+        end=end,
+        rss_budget_bytes=None,
+        rss_reserve_bytes=None,
+        root="",
+        grid_1h=pd.DatetimeIndex([]),
+        close=pd.DataFrame(),
+        opens=pd.DataFrame(),
+        quote_vol=pd.DataFrame(),
+        taker_buy_quote=None,
+        symbols=[],
+    )
+    ctx.run_start = _run_start
+    telemetry = StageTelemetry(log_run=config.log_run)
+    tree_sampler = _TreeMemorySampler()
+    try:
+        tree_sampler.start()
+        report = run_stages(ctx, telemetry)
+    finally:
+        tree_stats = tree_sampler.stop()
+    return dataclasses.replace(report, tree_memory=tree_stats)

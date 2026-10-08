@@ -9,12 +9,12 @@ from src.cli.main import build_root_parser, main
 def test_root_parser_exposes_the_two_groups() -> None:
     parser = build_root_parser()
     assert parser.parse_args(["data", "collect", "funding", "BTCUSDT", "--end", "2025-01-01"]).group == "data"
-    assert parser.parse_args(["research", "run", "portfolio", "mhs-horizon-diagnostic"]).group == "research"
+    assert build_root_parser(["lab", "horizon-diagnostic"]).parse_args(["lab", "horizon-diagnostic"]).group == "lab"
 
 
 def test_root_parser_does_not_expose_provenance_group() -> None:
     # SCENARIO_MHS_REFACTOR_09: the provenance group was removed during the
-    # legacy isolation refactor; only data + research remain.
+    # legacy isolation refactor; only data + backtest + lab + live + ops remain.
     with pytest.raises(SystemExit):
         build_root_parser().parse_args(["provenance", "compare-runs"])
 
@@ -24,13 +24,9 @@ def test_root_parser_requires_a_group() -> None:
         build_root_parser().parse_args([])
 
 
-def test_root_parser_requires_run_command_and_evaluation() -> None:
+def test_root_parser_requires_lab_command() -> None:
     with pytest.raises(SystemExit):
-        build_root_parser().parse_args(["research"])
-    with pytest.raises(SystemExit):
-        build_root_parser().parse_args(["research", "run"])
-    with pytest.raises(SystemExit):
-        build_root_parser().parse_args(["research", "run", "portfolio"])
+        build_root_parser(["lab"]).parse_args(["lab"])
 
 
 def test_data_collect_funding_subcommand_parses_and_dispatches(monkeypatch) -> None:
@@ -69,3 +65,24 @@ def test_data_collect_retired_collectors_are_rejected(argv: list[str]) -> None:
     with pytest.raises(SystemExit) as exc_info:
         build_root_parser().parse_args(argv)
     assert exc_info.value.code == 2
+
+
+def test_lab_group_selection_skips_global_options() -> None:
+    from src.cli.main import _lab_group_selected
+
+    assert _lab_group_selected(["lab", "process-backtest"]) is True
+    assert _lab_group_selected(["--log-level", "DEBUG", "lab"]) is True
+    assert _lab_group_selected(["--debug-streams", "lab"]) is True
+    assert _lab_group_selected(["live", "status"]) is False
+    assert _lab_group_selected([]) is False
+    assert _lab_group_selected(["--help"]) is False
+    assert _lab_group_selected(["--log-level", "lab"]) is False
+
+
+def test_root_parser_lazily_registers_lab_from_parse_arguments() -> None:
+    parser = build_root_parser([])
+    assert parser.parse_args(["live", "status"]).group == "live"
+    args = parser.parse_args(["lab", "horizon-diagnostic", "--start", "2021-01-01"])
+    assert args.lab_command == "horizon-diagnostic"
+    assert args.start == "2021-01-01"
+    assert parser.parse_args(["lab", "process-backtest"]).lab_command == "process-backtest"

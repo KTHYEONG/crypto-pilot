@@ -338,7 +338,7 @@ def test_fallback_stream_is_consumer_independent(tmp_path, monkeypatch) -> None:
     """Fallback output is a pure function of the target path for every bound."""
     _patch_budget(monkeypatch, 40)
     from src.engine.execution import replay_execution_window_batch
-    from src.mhs.evaluation.windows import _rescaled_windows
+    from src.lab.mhs.evaluation.windows import _rescaled_windows
 
     targets, signals, dec = _s2_targets()
     end = START + pd.Timedelta(days=1)

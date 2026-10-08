@@ -1,0 +1,33 @@
+"""P4 path-presence pin for the MHS composition root.
+
+Behavioral coverage lives in the moved evaluation suite
+(``tests/lab/mhs/test_evaluation_appresearch.py``) and
+``tests/lab/mhs/integration/test_mhs_horizon_diagnostic.py``.
+"""
+
+from __future__ import annotations
+
+from src.lab.mhs.diagnostic_run import run_mhs_horizon_diagnostic
+
+
+def test_diagnostic_run_module_present() -> None:
+    assert callable(run_mhs_horizon_diagnostic)
+
+
+def test_programmatic_entry_delegates_to_orchestrator_unchanged(monkeypatch) -> None:
+    from src.lab.mhs.contracts import MhsDiagnosticRequest
+    from src.lab.mhs.pipeline import orchestrator
+
+    sentinel = object()
+    seen: dict[str, object] = {}
+
+    def _fake(request, **kwargs):
+        seen["request"] = request
+        seen["kwargs"] = kwargs
+        return sentinel
+
+    monkeypatch.setattr(orchestrator, "run_mhs_diagnostic", _fake)
+    request = MhsDiagnosticRequest()
+    assert run_mhs_horizon_diagnostic(request) is sentinel
+    assert seen["request"] is request
+    assert seen["kwargs"] == {"procedure_registry": None, "history_dir": None}

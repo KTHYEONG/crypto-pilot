@@ -6,9 +6,9 @@ import ast
 from collections.abc import Mapping
 from pathlib import Path
 
-STAGES_DIR = Path("src/mhs/pipeline/stages")
-SCHEMA = Path("src/mhs/report/schema.py")
-ARTIFACTS = Path("src/mhs/report/artifacts.py")
+STAGES_DIR = Path("src/lab/mhs/pipeline/stages")
+SCHEMA = Path("src/lab/mhs/report/schema.py")
+ARTIFACTS = Path("src/lab/mhs/report/artifacts.py")
 
 
 def _assert_frozen_entries_live(
@@ -36,14 +36,14 @@ def test_schema_imports_jsonable_from_artifacts_not_evaluation() -> None:
         node.lineno
         for node in ast.walk(schema_tree)
         if isinstance(node, ast.ImportFrom)
-        and node.module == "src.mhs.evaluation"
+        and node.module == "src.lab.mhs.evaluation"
         and any(alias.name == "_jsonable" for alias in node.names)
     ]
     artifacts_jsonable = [
         node.lineno
         for node in ast.walk(schema_tree)
         if isinstance(node, ast.ImportFrom)
-        and node.module == "src.mhs.report.artifacts"
+        and node.module == "src.lab.mhs.report.artifacts"
         and any(alias.name == "_jsonable" for alias in node.names)
     ]
     assert evaluation_jsonable == []
@@ -100,7 +100,7 @@ def test_file_size_budget() -> None:
         "tests/unit/live/test_runner_ledger.py": 63891,
         "tests/unit/live/test_executor.py": 193626,
         "tests/unit/live/test_data_refresh.py": 71709,
-        "tests/unit/mhs/test_process_backtest.py": 140056,
+        "tests/lab/mhs/test_process_backtest.py": 140056,
     }
     measured = {
         str(path): path.stat().st_size
@@ -140,7 +140,7 @@ def test_evaluation_package_has_no_pipeline_dependency() -> None:
     import ast
     from pathlib import Path
 
-    package = Path("src/mhs/evaluation")
+    package = Path("src/lab/mhs/evaluation")
     assert package.is_dir(), "evaluation must be a package after P2"
 
     offenders: list[str] = []
@@ -152,7 +152,7 @@ def test_evaluation_package_has_no_pipeline_dependency() -> None:
                 names.append(node.module)
             elif isinstance(node, ast.Import):
                 names.extend(a.name for a in node.names)
-            if any(n.startswith("src.mhs.pipeline") for n in names):
+            if any(n.startswith("src.lab.mhs.pipeline") for n in names):
                 offenders.append(f"{path}:{node.lineno}")
 
     assert offenders == [], f"evaluation package imports pipeline: {offenders}"
@@ -163,10 +163,10 @@ def test_stage_services_seam_is_deleted() -> None:
     from pathlib import Path
 
     assert not Path(
-        "src/mhs/stage_services.py"
+        "src/lab/mhs/stage_services.py"
     ).exists()
     assert not Path(
-        "tests/unit/mhs/test_stage_services.py"
+        "tests/lab/mhs/test_stage_services.py"
     ).exists()
 
 
@@ -175,7 +175,7 @@ def test_evaluation_facade_preserves_public_surface() -> None:
     import ast
     from pathlib import Path
 
-    import src.mhs.evaluation as ev
+    import src.lab.mhs.evaluation as ev
 
     wanted: set[str] = set()
     for root in ("src", "tests", "tools"):
@@ -184,7 +184,7 @@ def test_evaluation_facade_preserves_public_surface() -> None:
             for node in ast.walk(tree):
                 if (
                     isinstance(node, ast.ImportFrom)
-                    and node.module == "src.mhs.evaluation"
+                    and node.module == "src.lab.mhs.evaluation"
                 ):
                     wanted.update(a.name for a in node.names)
 
@@ -201,13 +201,13 @@ def test_composition_root_owns_the_pipeline_edge() -> None:
     import inspect
     from pathlib import Path
 
-    from src.mhs.diagnostic_run import (
+    from src.lab.mhs.diagnostic_run import (
         run_mhs_horizon_diagnostic,
     )
 
     assert callable(run_mhs_horizon_diagnostic)
 
-    path = Path("src/mhs/diagnostic_run.py")
+    path = Path("src/lab/mhs/diagnostic_run.py")
     tree = ast.parse(path.read_text(encoding="utf-8"))
     top_level_lines = {node.lineno for node in tree.body}
     pipeline_imports = [
@@ -215,7 +215,7 @@ def test_composition_root_owns_the_pipeline_edge() -> None:
         for node in ast.walk(tree)
         if isinstance(node, ast.ImportFrom)
         and node.module
-        and node.module.startswith("src.mhs.pipeline")
+        and node.module.startswith("src.lab.mhs.pipeline")
     ]
     assert pipeline_imports, "composition root must import the pipeline"
     assert all(is_top for _, is_top in pipeline_imports), (
@@ -233,13 +233,13 @@ def test_evaluation_modules_respect_size_budget() -> None:
     allowlist: dict[str, int] = {
         # spec 34: settlement events survive the IPC spill.
         # spec 34 part 3: venue halts survive the IPC spill.
-        "src/mhs/evaluation/windows.py": 732,
+        "src/lab/mhs/evaluation/windows.py": 732,
         # Fold validation, shared train-reference reuse and fork scheduling form one lifecycle.
-        "src/mhs/evaluation/folds.py": 1084,
+        "src/lab/mhs/evaluation/folds.py": 1084,
     }
     measured = {
         str(path): len(path.read_text(encoding="utf-8").splitlines())
-        for path in Path("src/mhs/evaluation").rglob("*.py")
+        for path in Path("src/lab/mhs/evaluation").rglob("*.py")
     }
     offenders = {
         key: lines for key, lines in measured.items() if lines > allowlist.get(key, budget)
@@ -363,7 +363,7 @@ def test_execution_module_size_budget_with_allowlist() -> None:
     }
 
     assert offenders == {}, f"modules over budget: {offenders}"
-    assert not Path("src/mhs/execution").exists(), "moved package must be gone"
+    assert not Path("src/lab/mhs/execution").exists(), "moved package must be gone"
     _assert_frozen_entries_live(allowlist, measured, default_budget, "execution module size budget")
 
 
@@ -391,29 +391,29 @@ def test_source_module_size_budget() -> None:
         "src/live/rest.py": 815,
         # spec 38 part 1: MhsResourceMeasurement canonical home (moved from contracts).
         "src/core/resources.py": 937,
-        "src/mhs/evidence.py": 1267,
-        "src/mhs/deploy_gate.py": 723,
-        "src/mhs/scaling.py": 892,
-        "src/application/mhs_supervisor.py": 1214,
+        "src/lab/mhs/evidence.py": 1267,
+        "src/lab/mhs/deploy_gate.py": 723,
+        "src/lab/mhs/scaling.py": 892,
+        "src/lab/mhs/app/supervisor.py": 1214,
         # Account replay/exposure scan services stay co-located: two research workflows share
         # the catalog seam and unit-ledger helpers; split only with a new service boundary.
         # spec 34: stress settlement haircut on the strategy stress spec.
         "src/application/strategy_account.py": 815,
-        "src/mhs/reporting/inventory.py": 741,
-        "src/mhs/backtest/paths.py": 849,
-        "src/mhs/backtest/journal.py": 1081,
+        "src/lab/mhs/reporting/inventory.py": 741,
+        "src/lab/mhs/backtest/paths.py": 849,
+        "src/lab/mhs/backtest/journal.py": 1081,
         # spec 34 part 1: I6 settlement-registry audit gate before the replay stream.
-        "src/mhs/backtest/inventory.py": 880,
+        "src/lab/mhs/backtest/inventory.py": 880,
         # spec 34: settlement events survive the IPC spill.
         # spec 34 part 3: venue halts survive the IPC spill.
-        "src/mhs/evaluation/windows.py": 732,
+        "src/lab/mhs/evaluation/windows.py": 732,
         # Unified MhsDiagnosticRequest carries per-field CLI/validation metadata as the single schema source (spec 10 parts 2-3).
         # Freeze the existing fold lifecycle; further growth requires decomposition.
-        "src/mhs/evaluation/folds.py": 1084,
+        "src/lab/mhs/evaluation/folds.py": 1084,
         # spec 34 part 3: build-venue-halts operator command next to build-settlement-registry.
         "src/cli/commands/data.py": 708,
         # Declare-once request schema: each MHS option is exactly one field plus CLI metadata.
-        "src/mhs/contracts.py": 878,
+        "src/lab/mhs/contracts.py": 878,
         # Checkpoint advancement, retention and the loop stay co-located for review;
         # _run_retention_pass persists the checkpoint and is not split out.
         "src/market_data/streams/normalizer.py": 1112,
@@ -495,14 +495,14 @@ def test_no_function_exceeds_length_budget() -> None:
         "src/live/scheduler.py::run_daemon": 354,
         "src/live/strategy_signal.py::run_strategy_signal_step": 312,
         "src/engine/account_ledger.py::replay_account": 308,
-        "src/mhs/evaluation/windows.py::_book_outcome": 368,
+        "src/lab/mhs/evaluation/windows.py::_book_outcome": 368,
         "src/engine/execution/accumulator.py::_consume_append_ledger": 252,
         "src/engine/execution/window_stream.py::_iter_mhs_execution_windows": 382,
-        "src/mhs/backtest/paths.py::run_process_paths": 261,
+        "src/lab/mhs/backtest/paths.py::run_process_paths": 261,
         # spec 34 part 1: I6 settlement-registry audit gate before the replay stream.
-        "src/mhs/backtest/inventory.py::evaluate_process_inventory_backtest": 293,
-        "src/mhs/discovery.py::select_horizon_by_discovery_qualification": 270,
-        "src/mhs/pipeline/stages/committee.py::build_committee": 278,
+        "src/lab/mhs/backtest/inventory.py::evaluate_process_inventory_backtest": 293,
+        "src/lab/mhs/discovery.py::select_horizon_by_discovery_qualification": 270,
+        "src/lab/mhs/pipeline/stages/committee.py::build_committee": 278,
     }
     measured: dict[str, int] = {}
     offenders: dict[str, int] = {}

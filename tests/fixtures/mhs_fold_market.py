@@ -7,7 +7,7 @@ from typing import Final
 
 import pandas as pd
 
-from src.mhs.evidence import AnchoredPurgedFold
+from src.lab.mhs.evidence import AnchoredPurgedFold
 
 COMPLETING_FOLD_MARKET_HOURS: Final[int] = 4400
 """Hourly bars in the shared completing-fold market (2021-01-01 00:00 → 2021-07-03 07:00 UTC)."""
@@ -41,7 +41,7 @@ def write_completing_fold_market(root: Path) -> pd.Timestamp:
     Returns:
         The last hourly bar timestamp (``2021-07-03 07:00 UTC``), used as the request ``end``.
     """
-    from tests.unit.mhs.test_evaluation_appresearch import _write_3m_cache, _write_mhs_market
+    from tests.lab.mhs.test_evaluation_appresearch import _write_3m_cache, _write_mhs_market
 
     end = _write_mhs_market(root, n_hours=COMPLETING_FOLD_MARKET_HOURS)
     _write_3m_cache(root)

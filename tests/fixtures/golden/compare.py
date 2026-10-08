@@ -128,7 +128,7 @@ def assert_report_digest_identical(
                     f"Golden digest mismatch: {replay_id}/{series_name} length "
                     f"{block['n']} != {actual_block['n']}"
                 )
-            from src.mhs.report.persist import _collect_replay_entries
+            from src.lab.mhs.report.persist import _collect_replay_entries
 
             series = next(
                 getattr(replay.ledger, series_name)

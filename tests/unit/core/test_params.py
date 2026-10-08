@@ -127,14 +127,8 @@ def test_scenario_mhs_kelly_two_sided_05_registered_roster_cap_and_extreme_rung(
 
 # SCENARIO_MHS_CONSTANT_RISK_PARAMS_REGISTERED
 def test_constant_risk_params_registered() -> None:
-    from src.core.params import (
-        CONSTANT_RISK_CAP_BINDING_QUANTILE,
-        CONSTANT_RISK_EWMA_HALFLIFE_DAYS,
-        CONSTANT_RISK_MIN_PERIODS_DAYS,
-        CONSTANT_RISK_TARGET_ANNUAL_VOL,
-        FOLD_REALIZED_RISK_PARITY_TOLERANCE,
-        PNL_VOL_TARGET_EWMA_HALFLIFE_DAYS,
-    )
+    from src.core.params import PNL_VOL_TARGET_EWMA_HALFLIFE_DAYS
+    from src.lab.mhs.params import (CONSTANT_RISK_CAP_BINDING_QUANTILE, CONSTANT_RISK_EWMA_HALFLIFE_DAYS, CONSTANT_RISK_MIN_PERIODS_DAYS, CONSTANT_RISK_TARGET_ANNUAL_VOL, FOLD_REALIZED_RISK_PARITY_TOLERANCE)
 
     assert CONSTANT_RISK_EWMA_HALFLIFE_DAYS == 90
     assert CONSTANT_RISK_MIN_PERIODS_DAYS == 45
@@ -148,13 +142,8 @@ def test_constant_risk_params_registered() -> None:
 # SCENARIO_MHS_EVIDENCE_GATE_ALPHA_REGISTERED
 def test_evidence_gate_alpha_registered() -> None:
     import src.core.params as params_module
-    from src.core.params import (
-        EVIDENCE_GATE_ALPHA,
-        NULL_BOOTSTRAP_MEAN_BLOCK_DAYS,
-        NULL_BOOTSTRAP_MIN_ROWS,
-        NULL_BOOTSTRAP_TRIALS,
-        NULL_BOOTSTRAP_SEED,
-    )
+    from src.core.params import NULL_BOOTSTRAP_MEAN_BLOCK_DAYS
+    from src.lab.mhs.params import (EVIDENCE_GATE_ALPHA, NULL_BOOTSTRAP_MIN_ROWS, NULL_BOOTSTRAP_TRIALS, NULL_BOOTSTRAP_SEED)
 
     assert EVIDENCE_GATE_ALPHA == 0.05
     assert 0.0 < EVIDENCE_GATE_ALPHA < 0.5
@@ -183,8 +172,8 @@ def test_SCENARIO_MHS_EVID_02_SELECTION_OVERLAP_IS_DISCLOSED() -> None:
     on an inverted window."""
     import pandas as pd
 
-    from src.mhs.evidence import selection_overlap_fraction
-    from src.core.params import DEFAULT_SELECTION_WINDOW
+    from src.lab.mhs.evidence import selection_overlap_fraction
+    from src.lab.mhs.params import DEFAULT_SELECTION_WINDOW
 
     registered_window = DEFAULT_SELECTION_WINDOW
     assert registered_window == (
@@ -222,12 +211,8 @@ def test_scenario_kelly_lcb_02_penalty_below_registered_train_edge() -> None:
     # Given: 등록된 Kelly-LCB 정책 상수와 측정 상수
     import math
 
-    from src.core.params import (
-        COMMITTEE_KELLY_FRACTION,
-        COMMITTEE_KELLY_LCB_Z,
-        COMMITTEE_KELLY_TRAIN_DAILY_SHARPE,
-        COMMITTEE_KELLY_WINDOW_DAYS,
-    )
+    from src.core.params import COMMITTEE_KELLY_TRAIN_DAILY_SHARPE
+    from src.lab.mhs.params import (COMMITTEE_KELLY_FRACTION, COMMITTEE_KELLY_LCB_Z, COMMITTEE_KELLY_WINDOW_DAYS)
 
     # When: LCB 페널티를 표준오차 배수로 환산
     penalty = COMMITTEE_KELLY_LCB_Z / math.sqrt(COMMITTEE_KELLY_WINDOW_DAYS)

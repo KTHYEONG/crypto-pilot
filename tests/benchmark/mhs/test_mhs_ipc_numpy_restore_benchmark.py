@@ -32,7 +32,7 @@ import pyarrow.ipc as pa_ipc
 import psutil
 
 from src.common.logging import LOG_DIR
-from src.mhs.evaluation.windows import _load_window_from_ipc, _spill_window_to_ipc
+from src.lab.mhs.evaluation.windows import _load_window_from_ipc, _spill_window_to_ipc
 from src.engine.execution import ExecutionSpec
 from src.engine.execution.contracts import ExecutionReplayWindow
 from src.core.resources import _TreeMemorySampler

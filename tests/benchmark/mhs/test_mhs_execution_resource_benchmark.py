@@ -12,8 +12,8 @@ SCENARIO_MHS_PERF_ACCEPT_02_END_TO_END (docs/specs/mhs_perf_refactor_contract.js
 this fast paired-replay benchmark is the proxy this file automates; the full
 end-to-end acceptance gate (CLI wall time including report persistence,
 byte-identical output) is a manual reproduction run against production data,
-not a pytest scenario -- ``uv run python -m src.cli.main research run
-portfolio mhs-horizon-diagnostic``, per docs/specs/mhs_perf_refactor.md §10-11.
+not a pytest scenario -- ``uv run python -m src.cli.main lab
+horizon-diagnostic``, per docs/specs/mhs_perf_refactor.md §10-11.
 """
 
 from __future__ import annotations

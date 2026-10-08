@@ -43,7 +43,7 @@ def test_single_window_producer() -> None:
                 event_ctors.append(rel)
     assert sorted(set(window_ctors)) == sorted([
         "src/engine/execution/window_stream.py",
-        "src/mhs/evaluation/windows.py",
+        "src/lab/mhs/evaluation/windows.py",
     ])
     assert set(event_ctors) <= {
         "src/engine/execution/settlement.py",

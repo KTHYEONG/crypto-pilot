@@ -235,7 +235,7 @@ def _integration_targets(test_files: list[str]) -> list[str]:
     """Select edited integration tests without narrowing explicitly requested files."""
     targets: list[str] = []
     for file in test_files:
-        if not file.startswith("tests/integration/"):
+        if not (file.startswith("tests/integration/") or file.startswith("tests/lab/mhs/integration/")):
             targets.append(file)
             continue
         diff = run_cmd(["git", "diff", "--unified=0", "HEAD", "--", file])
@@ -253,8 +253,8 @@ def _integration_targets(test_files: list[str]) -> list[str]:
 
 
 HEAVY_MARKER: Final[str] = "e2e_heavy"
-PERIODIC_HEAVY_GATE: Final[str] = "uv run pytest tests/integration -m e2e_heavy -n 8 --dist loadgroup"
-PERIODIC_SLOW_GATE: Final[str] = "uv run pytest tests/unit tests/integration -m slow -n 0 -p no:cacheprovider -rfEs"
+PERIODIC_HEAVY_GATE: Final[str] = "uv run pytest tests/lab/mhs/integration -m e2e_heavy -n 8 --dist loadgroup"
+PERIODIC_SLOW_GATE: Final[str] = "uv run pytest tests/unit tests/lab tests/integration -m slow -n 0 -p no:cacheprovider -rfEs"
 _HEAVY_TIMEOUT_SECONDS: Final[int] = 3600
 
 
@@ -273,13 +273,18 @@ def _marker_expression(*, run_slow: bool, include_heavy: bool) -> str:
 
 
 def _is_integration_target(target: str) -> bool:
-    """Whether a pytest target (path or node id) lies under a ``tests/integration/`` directory.
+    """Whether a pytest target (path or node id) lies under an integration directory.
 
     The path part before the first ``::`` is compared in POSIX form: it starts with
-    ``tests/integration/`` or contains ``/tests/integration/``.
+    ``tests/integration/`` or ``tests/lab/mhs/integration/``, or contains the
+    corresponding ``/tests/...`` segment (absolute repo paths).
     """
     path_part = target.split("::", 1)[0].replace("\\", "/")
-    return path_part.startswith("tests/integration/") or "/tests/integration/" in path_part
+    return (
+        path_part.startswith(("tests/integration/", "tests/lab/mhs/integration/"))
+        or "/tests/integration/" in path_part
+        or "/tests/lab/mhs/integration/" in path_part
+    )
 
 
 def _collect_deferred_heavy(targets: list[str]) -> list[str]:
