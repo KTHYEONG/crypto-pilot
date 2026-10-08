@@ -139,7 +139,13 @@ def _require_returns(daily_returns: pd.Series) -> np.ndarray:
     if not isinstance(daily_returns.index, pd.DatetimeIndex):
         raise DataIntegrityError("daily_returns must carry a DatetimeIndex")
     index = daily_returns.index
-    if index.tz is None or str(index.tz) != "UTC" or index.hasnans or not index.is_unique or not index.is_monotonic_increasing:
+    if (
+        index.tz is None
+        or str(index.tz) != "UTC"
+        or index.hasnans
+        or not index.is_unique
+        or not index.is_monotonic_increasing
+    ):
         raise DataIntegrityError("daily_returns must have a unique increasing UTC index")
     if bool((values < -1.0).any()):
         raise DataIntegrityError("daily_returns cannot fall below -100%")
@@ -156,19 +162,7 @@ def strategy_statistics(
     seed: int = REPORT_BOOTSTRAP_SEED,
     n_paths: int = REPORT_BOOTSTRAP_PATHS,
 ) -> StrategyStatistics:
-    """Decision-grade statistics of one daily return path. Sharpe uses 365-day annualization on simple daily returns;
-    CAGR/MDD on the compounded path. The bootstrap resamples daily returns with a stationary block bootstrap
-    (``src.core.bootstrap``, mean block from ``src.quant.evaluation.reliability.derive_block_size``) to give the distribution a
-    same-length future path could have, which is what a holdout window is compared against (part 6). Days at or before
-    ``design_data_cutoff`` are counted as in-sample.
-
-    ``daily_funding_share`` is the daily funding charge divided by ``initial_equity``
-    (negative = income), indexed exactly like ``daily_returns``. ``funding_by_symbol``
-    holds per-symbol funding charge totals in currency (same sign convention) over
-    the statistics path.
-    Zero-variance Sharpe is NaN. Sortino uses zero-target downside RMS over
-    all days; zero downside deviation is NaN. Drawdown includes initial equity.
-    """
+    """Compute decision-grade statistics of one daily strategy return path."""
     values = _require_returns(daily_returns)
     if not isinstance(daily_funding_share, pd.Series) or len(daily_funding_share) != len(daily_returns):
         raise DataIntegrityError("daily_funding_share must align one-to-one with daily_returns")
@@ -230,8 +224,13 @@ def strategy_statistics(
     filled = 0
     chunk_size = min(n_paths, 500)
     for chunk in iter_stationary_bootstrap_index_chunks(
-        rng, source_len=n, path_len=n, n_replicates=n_paths,
-        mean_block=mean_block, chunk_size=chunk_size, max_blocks=max_blocks,
+        rng,
+        source_len=n,
+        path_len=n,
+        n_replicates=n_paths,
+        mean_block=mean_block,
+        chunk_size=chunk_size,
+        max_blocks=max_blocks,
     ):
         paths = values[chunk.indices]
         for row in range(paths.shape[0]):

@@ -19,7 +19,7 @@ SourceGapExtent = Literal["LISTING_EDGE", "OPEN_EDGE", "INTERIOR", "UNSCOPED"]
 _VALID_PLANES: Final[tuple[str, ...]] = ("ohlcv_1h", "ohlcv_3m", "funding")
 _VALID_REASONS: Final[tuple[str, ...]] = ("SOURCE_ABSENT", "DELISTED", "SETTLING")
 _VALID_EXTENTS: Final[tuple[str, ...]] = ("LISTING_EDGE", "OPEN_EDGE", "INTERIOR", "UNSCOPED")
-# 과거 레지스트리 행에는 extent 가 없다. 측정되지 않은 범위이므로 가장 보수적인 UNSCOPED 로 읽는다.
+# Legacy registry rows lack an extent; default to conservative UNSCOPED.
 _LEGACY_EXTENT: Final[SourceGapExtent] = "UNSCOPED"
 _REQUIRED_FIELDS: Final[tuple[str, ...]] = (
     "symbol",

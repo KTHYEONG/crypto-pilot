@@ -37,19 +37,7 @@ class FeatureMember:
 
 @dataclass(frozen=True, slots=True)
 class StrategySpec:
-    """Declare an immutable PIT target policy independently of execution mechanics.
-
-    The definition binds universe breadth, registered feature identities,
-    ranking population, and the UTC observation-to-entry clock.  It lets new
-    research variants create the same executable target contract without
-    changing the inventory accounting engine.
-    ``name_clip`` shapes per-name concentration via
-    ``clip_names_preserving_gross`` before ``exposure_multiplier`` scales every row; ``1.0`` /
-    ``None`` reproduce the unlevered consensus book exactly.
-    ``design_data_cutoff`` is the last instant of market data that could have influenced the
-    strategy's design (feature selection, parameters). Backtest days at or before it are
-    in-sample by construction; only later days can be evidence of out-of-sample performance.
-    """
+    """Declare an immutable PIT target policy independently of execution mechanics."""
 
     strategy_id: str
     breadth: int
@@ -98,17 +86,13 @@ class StrategySpec:
             or not isinstance(self.exposure_multiplier, (int, float))
             or not (math.isfinite(float(self.exposure_multiplier)) and float(self.exposure_multiplier) > 0.0)
         ):
-            raise ValueError(
-                f"exposure_multiplier must be a finite float > 0, got {self.exposure_multiplier!r}"
-            )
+            raise ValueError(f"exposure_multiplier must be a finite float > 0, got {self.exposure_multiplier!r}")
         if self.name_clip is not None and (
             isinstance(self.name_clip, bool)
             or not isinstance(self.name_clip, (int, float))
             or not (math.isfinite(float(self.name_clip)) and 0.0 < float(self.name_clip) <= 1.0)
         ):
-            raise ValueError(
-                f"name_clip must be None or a finite float in (0, 1], got {self.name_clip!r}"
-            )
+            raise ValueError(f"name_clip must be None or a finite float in (0, 1], got {self.name_clip!r}")
 
 
 FLOW_MOM_TOP20 = StrategySpec(
@@ -164,7 +148,7 @@ FLOW_MOM_TOP20_GROWTH = StrategySpec(
     name_clip=STRATEGY_NAME_CLIP,
 )
 
-# 계좌 원장이 노출을 정책으로 고르는 무레버리지 클립 북이며, 신호 북은 FLOW_MOM_TOP20과 같아 라이브 부트스트랩 식별자를 유지한다.
+# Unleveraged clip book with exposure chosen by account policy; signals match FLOW_MOM_TOP20.
 FLOW_MOM_TOP20_ACCOUNT_UNIT = StrategySpec(
     strategy_id="flow_mom_top20",
     breadth=20,
@@ -185,11 +169,13 @@ FLOW_MOM_TOP20_ACCOUNT_UNIT = StrategySpec(
 )
 
 
-LEGACY_STRATEGY_IDS: Mapping[str, str] = MappingProxyType({
-    "frozen_mhs_top20_v2": "flow_mom_top20",
-    "frozen_mhs_top40_control_v2": "flow_mom_top40_control",
-    "frozen_mhs_top20_growth_v2": "flow_mom_top20_growth",
-})
+LEGACY_STRATEGY_IDS: Mapping[str, str] = MappingProxyType(
+    {
+        "frozen_mhs_top20_v2": "flow_mom_top20",
+        "frozen_mhs_top40_control_v2": "flow_mom_top40_control",
+        "frozen_mhs_top20_growth_v2": "flow_mom_top20_growth",
+    }
+)
 """Pre-rename strategy ids. Read-only: persisted evidence keeps resolving through them."""
 
 
@@ -324,8 +310,7 @@ def build_strategy_targets(
     if hourly_available_at.isna().any().any():
         raise DataIntegrityError("hourly_available_at must not contain missing publication timestamps")
     if not all(
-        isinstance(dtype, pd.DatetimeTZDtype) and str(dtype.tz) == "UTC"
-        for dtype in hourly_available_at.dtypes
+        isinstance(dtype, pd.DatetimeTZDtype) and str(dtype.tz) == "UTC" for dtype in hourly_available_at.dtypes
     ):
         raise DataIntegrityError("hourly_available_at must contain timezone-aware timestamps")
     available_values = hourly_available_at.to_numpy(dtype="datetime64[ns]")
@@ -372,9 +357,7 @@ def build_strategy_targets(
         [d + pd.Timedelta(days=1, hours=int(strategy.entry_hour_utc)) for d in decisions], tz="UTC"
     )
     target = pd.DataFrame(ensemble.to_numpy(dtype="float64"), index=entries, columns=census, dtype="float64")
-    available = pd.DatetimeIndex(
-        [d + pd.Timedelta(hours=int(strategy.release_hour_utc)) for d in decisions], tz="UTC"
-    )
+    available = pd.DatetimeIndex([d + pd.Timedelta(hours=int(strategy.release_hour_utc)) for d in decisions], tz="UTC")
     return StrategyTargets(target_weights=target, signal_available_at=available, strategy=strategy)
 
 

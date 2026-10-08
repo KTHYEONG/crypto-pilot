@@ -210,14 +210,10 @@ def ensure_venue_leverage(
     for symbol in plan.leverage_changes:
         leverage = plan.target_leverage[symbol]
         try:
-            client.request(
-                "POST", "/fapi/v1/leverage", {"symbol": symbol, "leverage": leverage}, signed=True
-            )
+            client.request("POST", "/fapi/v1/leverage", {"symbol": symbol, "leverage": leverage}, signed=True)
         except VenueError as exc:
             if exc.code in BLOCKED_LEVERAGE_CHANGE_CODES:
-                raise RiskGateBreach(
-                    f"leverage change to {leverage} blocked for {symbol} (code={exc.code})"
-                ) from exc
+                raise RiskGateBreach(f"leverage change to {leverage} blocked for {symbol} (code={exc.code})") from exc
             raise
         audit.record("venue_leverage_set", symbol=symbol, leverage=leverage)
     return dict(plan.target_leverage)
@@ -383,18 +379,14 @@ def resolve_sizing_equity(
                             mk = candidate
                 if mk is None:
                     raise RiskGateBreach(
-                        f"sizing equity missing mark for held {sym}; "
-                        "neither a live mark nor a fallback mark exists"
+                        f"sizing equity missing mark for held {sym}; neither a live mark nor a fallback mark exists"
                     )
                 total += qty * mk
         # 합성 원장은 캡을 적용하지 않는다: 백테스트의 자유 복리 vol-target 북과의
         # 정합성을 위해 cap_usdt 는 첫 사이클 현금 시드로만 쓰인다(I-PAPER-IS-BACKTEST-CONTINUATION).
         equity = total
         if equity <= Decimal(0):
-            raise RiskGateBreach(
-                f"sizing equity {equity} must be positive "
-                f"(virtual_mtm={total} seed={cap_usdt})"
-            )
+            raise RiskGateBreach(f"sizing equity {equity} must be positive (virtual_mtm={total} seed={cap_usdt})")
         return equity
     equity = snapshot.wallet_balance + snapshot.unrealized_pnl
     if equity <= Decimal(0):
@@ -424,9 +416,7 @@ def find_position_breaches(
     if qty_tolerance_fraction < 0:
         raise ValueError("qty_tolerance_fraction must be >= 0")
     epsilon = Decimal("1e-12")
-    symbols = set(ledger_positions) | {
-        sym for sym, qty in snapshot.positions.items() if qty != 0
-    }
+    symbols = set(ledger_positions) | {sym for sym, qty in snapshot.positions.items() if qty != 0}
     breaches: list[PositionBreach] = []
     for symbol in sorted(symbols):
         ledger_qty = ledger_positions.get(symbol, Decimal(0))
@@ -436,9 +426,7 @@ def find_position_breaches(
         denominator = max(abs(ledger_qty), epsilon)
         deviation = abs(venue_qty - ledger_qty) / denominator
         if deviation > Decimal(str(qty_tolerance_fraction)):
-            breaches.append(
-                PositionBreach(symbol=symbol, venue_qty=venue_qty, ledger_qty=ledger_qty)
-            )
+            breaches.append(PositionBreach(symbol=symbol, venue_qty=venue_qty, ledger_qty=ledger_qty))
     return tuple(breaches)
 
 
@@ -449,7 +437,7 @@ def reconcile_or_halt(
     qty_tolerance_fraction: float,
     settled_symbols: Collection[str] = (),
 ) -> None:
-    """Raise `ReconciliationBreach` naming the first breach returned by `find_position_breaches`. Kept for callers that must fail closed (resync verification, `derisk_mode_enabled=False`)."""
+    """Raise ReconciliationBreach on the first position discrepancy found."""
     breaches = find_position_breaches(
         snapshot,
         ledger_positions,
@@ -464,9 +452,7 @@ def reconcile_or_halt(
         )
 
 
-def fetch_venue_force_closes(
-    client: Any, *, since: pd.Timestamp, until: pd.Timestamp
-) -> tuple[VenueForceClose, ...]:
+def fetch_venue_force_closes(client: Any, *, since: pd.Timestamp, until: pd.Timestamp) -> tuple[VenueForceClose, ...]:
     """Fetch the account's venue-initiated liquidation and ADL orders (`GET /fapi/v1/forceOrders`, both auto-close types) filled in `[since, until]`, paginating by time until the range is exhausted.
 
     Raises: DataIntegrityError: the response is not a list, or an entry lacks symbol/side/executedQty/avgPrice/updateTime or has non-positive quantity or price. Only filled quantity is returned; entries with zero executed quantity are skipped.
@@ -565,13 +551,10 @@ def explain_breaches(
 
 
 def free_margin_breached(snapshot: AccountSnapshot, *, min_free_margin_fraction: float) -> bool:
-    """True when the wallet balance is positive and `available_balance / wallet_balance` is below the floor. A zero wallet (credential-less synthetic snapshot) is never a breach."""
+    """True when available balance falls below the minimum free margin fraction."""
     if snapshot.wallet_balance <= 0:
         return False
-    return (
-        snapshot.available_balance / snapshot.wallet_balance
-        < Decimal(str(min_free_margin_fraction))
-    )
+    return snapshot.available_balance / snapshot.wallet_balance < Decimal(str(min_free_margin_fraction))
 
 
 def synthetic_flat_snapshot(now: pd.Timestamp) -> AccountSnapshot:
@@ -596,13 +579,10 @@ def synthetic_flat_snapshot(now: pd.Timestamp) -> AccountSnapshot:
 
 def assert_suppressed_venue_flat(snapshot: AccountSnapshot) -> None:
     """억제 모드에서 거래소 포지션이 모두 0임을 증명한다."""
-    non_zero = sorted(
-        symbol for symbol, qty in snapshot.positions.items() if qty != Decimal(0)
-    )
+    non_zero = sorted(symbol for symbol, qty in snapshot.positions.items() if qty != Decimal(0))
     if non_zero:
         raise ReconciliationBreach(
-            f"suppressed venue position non-zero for {', '.join(non_zero)}: "
-            f"venue={snapshot.positions}"
+            f"suppressed venue position non-zero for {', '.join(non_zero)}: venue={snapshot.positions}"
         )
 
 

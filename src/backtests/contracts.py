@@ -95,7 +95,7 @@ def utc_now_iso8601() -> str:
 
 @dataclass(frozen=True, slots=True)
 class RunRegistration:
-    """One execution attempt and its request provenance, independent of financial trial admission. Args: run identity, UTC registration time, request metadata and optional owned directory."""
+    """One execution attempt and its request provenance."""
 
     run_id: str
     strategy_id: str
@@ -115,7 +115,7 @@ class RunRegistration:
 
 @dataclass(frozen=True, slots=True)
 class RunFinalization:
-    """Observed execution outcome with financial validity kept separate. Unknown financial evidence remains null. Args: run identity, UTC finalization time, process status, financial flags and complete outcome metadata."""
+    """Observed execution outcome and financial trial validity."""
 
     run_id: str
     status: Literal["completed", "failed", "timed_out", "signaled", "resource_rejected", "interrupted"]
@@ -138,7 +138,7 @@ class RunFinalization:
 
 @dataclass(frozen=True, slots=True)
 class ArtifactReference:
-    """Verified artifact ownership and content identity for safe shared-evidence retention. Args: owning run, artifact role, absolute path, SHA-256, nonnegative size, ownership and optional shared evidence identity."""
+    """Verified artifact ownership and content identity for retention."""
 
     run_id: str
     role: str
@@ -166,7 +166,7 @@ class ArtifactReference:
 
 @dataclass(frozen=True, slots=True)
 class RetentionPolicy:
-    """Explicit detail-retention budgets; absent budgets do not authorize evidence loss. Args: positive optional byte and run budgets. Raises: ValueError for invalid budgets."""
+    """Explicit detail-retention budgets."""
 
     max_detail_bytes: int | None = None
     max_detail_runs: int | None = None
@@ -178,7 +178,7 @@ class RetentionPolicy:
 
 @dataclass(frozen=True, slots=True)
 class RetentionPlan:
-    """Detail reclamation observations that never authorize removal of run metadata, trial history or protected evidence. Args: evidence identities, byte observations and budget feasibility."""
+    """Reclamation plan for unmanaged detail bundles."""
 
     evidence_ids: tuple[str, ...]
     reclaimable_bytes: int
@@ -197,7 +197,7 @@ class RetentionPlan:
 
 @dataclass(frozen=True, slots=True)
 class RetentionResult:
-    """Detail reclamation observations that never authorize removal of run metadata, trial history or protected evidence. Args: evidence identities, byte observations and budget feasibility."""
+    """Observed result of an executed retention reclamation."""
 
     removed_evidence_ids: tuple[str, ...]
     reclaimed_bytes: int
@@ -207,8 +207,14 @@ class RetentionResult:
         if not isinstance(self.removed_evidence_ids, tuple) or any(
             not isinstance(v, str) or not v for v in self.removed_evidence_ids
         ):
-            raise ValueError(f"removed_evidence_ids must be a tuple of non-empty strings, got {self.removed_evidence_ids!r}")
-        if isinstance(self.reclaimed_bytes, bool) or not isinstance(self.reclaimed_bytes, int) or self.reclaimed_bytes < 0:
+            raise ValueError(
+                f"removed_evidence_ids must be a tuple of non-empty strings, got {self.removed_evidence_ids!r}"
+            )
+        if (
+            isinstance(self.reclaimed_bytes, bool)
+            or not isinstance(self.reclaimed_bytes, int)
+            or self.reclaimed_bytes < 0
+        ):
             raise ValueError(f"reclaimed_bytes must be a nonnegative integer, got {self.reclaimed_bytes!r}")
         if not isinstance(self.budget_satisfied, bool):
             raise ValueError(f"budget_satisfied must be bool, got {self.budget_satisfied!r}")
