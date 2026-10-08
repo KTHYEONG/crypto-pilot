@@ -423,6 +423,52 @@ def _build_settlement_registry(args: argparse.Namespace) -> None:
         _logger.info("[DATA] stage=build_settlement_registry status=WRITTEN records=%d path=%s", count, args.output)
 
 
+def _build_venue_halts(args: argparse.Namespace) -> None:
+    from src.application.ops.settlement_registry import (
+        build_venue_halt_registry,
+        write_venue_halt_registry,
+    )
+    from src.common.errors import DataIntegrityError
+    from src.common.paths import FUTURES_DATA_DIR
+    from src.mhs.instrument_settlements import (
+        EMPTY_SETTLEMENT_REGISTRY,
+        default_instrument_settlement_registry_path,
+        load_instrument_settlement_registry,
+    )
+    from src.mhs.venue_halts import default_venue_halt_registry_path
+
+    committed_path = default_instrument_settlement_registry_path()
+    try:
+        settlements = load_instrument_settlement_registry()
+    except DataIntegrityError:
+        if committed_path.exists():
+            raise
+        _logger.warning(
+            "[DATA] stage=build_venue_halts status=NO_COMMITTED_REGISTRY bootstrapping from empty",
+        )
+        settlements = EMPTY_SETTLEMENT_REGISTRY
+
+    horizon = pd.Timestamp(args.horizon)
+    registry = build_venue_halt_registry(
+        FUTURES_DATA_DIR / "ohlcv",
+        horizon=horizon,
+        settlements=settlements,
+        verified_at=pd.Timestamp.now(tz="UTC"),
+    )
+    _logger.info(
+        "[DATA] stage=build_venue_halts halts=%d horizon=%s",
+        len(registry.halts), horizon.isoformat(),
+    )
+    if args.write:
+        count = write_venue_halt_registry(registry, default_venue_halt_registry_path())
+        _logger.info("[DATA] stage=build_venue_halts status=WRITTEN records=%d", count)
+    elif args.output:
+        from pathlib import Path
+
+        count = write_venue_halt_registry(registry, Path(args.output))
+        _logger.info("[DATA] stage=build_venue_halts status=WRITTEN records=%d path=%s", count, args.output)
+
+
 def _sync_execution_coverage(args: argparse.Namespace) -> None:
     from src.market_data.services import collection as _collection
     from src.market_data.services.execution_coverage import (
@@ -641,6 +687,15 @@ def add_data_commands(data_parser: argparse.ArgumentParser) -> None:
     build_reg.add_argument("--output", default=None)
     build_reg.add_argument("--write", action="store_true", default=False)
     build_reg.set_defaults(handler=_build_settlement_registry)
+
+    build_halts = collect.add_parser(
+        "build-venue-halts",
+        help="Detect exchange-wide halts from the full 3m cross-section",
+    )
+    build_halts.add_argument("--horizon", required=True)
+    build_halts.add_argument("--output", default=None)
+    build_halts.add_argument("--write", action="store_true", default=False)
+    build_halts.set_defaults(handler=_build_venue_halts)
 
     sync_cov = collect.add_parser(
         "sync-execution-coverage",

@@ -232,7 +232,8 @@ def test_evaluation_modules_respect_size_budget() -> None:
     # frozen at measured size; growth fails, shrink requires deleting/lowering the entry.
     allowlist: dict[str, int] = {
         # spec 34: settlement events survive the IPC spill.
-        "src/mhs/evaluation/windows.py": 721,
+        # spec 34 part 3: venue halts survive the IPC spill.
+        "src/mhs/evaluation/windows.py": 732,
         # Fold validation, shared train-reference reuse and fork scheduling form one lifecycle.
         "src/mhs/evaluation/folds.py": 1084,
     }
@@ -348,7 +349,10 @@ def test_execution_module_size_budget_with_allowlist() -> None:
     default_budget = 700
     # frozen at measured size; growth fails, shrink requires deleting/lowering the entry.
     # spec 34: causal settlement interleaving and delivery cutoff.
-    allowlist = {"src/mhs/execution/accumulator.py": 2037}
+    # spec 34 part 3: announcement intent policy and venue-halt deferral.
+    allowlist = {"src/mhs/execution/accumulator.py": 2267,
+                 # spec 34 part 3: venue-halt registry binding on the window stream.
+                 "src/mhs/execution/window_stream.py": 704}
 
     measured = {
         str(path): len(path.read_text(encoding="utf-8").splitlines())
@@ -371,7 +375,10 @@ def test_source_module_size_budget() -> None:
     # frozen at measured size; growth fails, shrink requires deleting/lowering the entry.
     allowlist = {
         # spec 34: causal settlement interleaving and delivery cutoff.
-        "src/mhs/execution/accumulator.py": 2037,
+        # spec 34 part 3: announcement intent policy and venue-halt deferral.
+        "src/mhs/execution/accumulator.py": 2267,
+        # spec 34 part 3: venue-halt registry binding on the window stream.
+        "src/mhs/execution/window_stream.py": 704,
         # Cycle phases stay co-located to preserve runtime module-global test seams;
         # explicit phase contracts add lines while reducing orchestration complexity.
         # spec 17: venue snapshot passthrough, disabled-collection audit, genesis alert.
@@ -397,10 +404,13 @@ def test_source_module_size_budget() -> None:
         # spec 34 part 1: I6 settlement-registry audit gate before the replay stream.
         "src/mhs/backtest/inventory.py": 880,
         # spec 34: settlement events survive the IPC spill.
-        "src/mhs/evaluation/windows.py": 721,
+        # spec 34 part 3: venue halts survive the IPC spill.
+        "src/mhs/evaluation/windows.py": 732,
         # Unified MhsDiagnosticRequest carries per-field CLI/validation metadata as the single schema source (spec 10 parts 2-3).
         # Freeze the existing fold lifecycle; further growth requires decomposition.
         "src/mhs/evaluation/folds.py": 1084,
+        # spec 34 part 3: build-venue-halts operator command next to build-settlement-registry.
+        "src/cli/commands/data.py": 708,
         # Declare-once request schema: each MHS option is exactly one field plus CLI metadata.
         "src/mhs/contracts.py": 898,
         # Checkpoint advancement, retention and the loop stay co-located for review;

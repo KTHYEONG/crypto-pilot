@@ -15,6 +15,7 @@ from contextlib import suppress
 from dataclasses import dataclass, replace
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from src.common.errors import DataIntegrityError
@@ -37,6 +38,7 @@ from src.mhs.settlement_evidence import (
     derive_settlement_price,
     measure_symbol_tail,
 )
+from src.mhs.venue_halts import VenueHaltRegistry
 
 _logger = logging.getLogger(__name__)
 
@@ -306,3 +308,184 @@ def write_settlement_registry(build: SettlementRegistryBuild, path: Path) -> int
             os.unlink(tmp_name)
         raise
     return len(build.registry.settlements) + len(build.registry.truncations)
+
+
+_HALT_STEP: pd.Timedelta = pd.Timedelta(minutes=3)
+
+
+def build_venue_halt_registry(
+    ohlcv_root: Path, *, horizon: pd.Timestamp, settlements: InstrumentSettlementRegistry,
+    verified_at: pd.Timestamp,
+) -> VenueHaltRegistry:
+    """Detect exchange-wide halts from the full 3m cross-section.
+
+    For every 3m label before ``horizon`` count present symbols and zero-quote-volume symbols,
+    excluding each symbol's bars at or after its settlement ``last_trade_at`` (a delisted
+    forward-filled tail must neither dilute nor fake a venue halt). A label is halted when
+    ``present >= VENUE_HALT_MIN_PRESENT_SYMBOLS`` and ``zero >= VENUE_HALT_MIN_ZERO_FRACTION x present``;
+    contiguous halted labels form one interval.
+
+    Raises:
+        DataIntegrityError: unreadable archive; horizon naive/non-UTC.
+    """
+    from src.mhs.params import VENUE_HALT_MIN_PRESENT_SYMBOLS, VENUE_HALT_MIN_ZERO_FRACTION
+    from src.mhs.venue_halts import VenueHaltInterval, assemble_venue_halt_registry
+
+    end = _require_utc_moment(horizon, "horizon")
+    stamped = _require_utc_moment(verified_at, "verified_at")
+    root = Path(ohlcv_root)
+    three_dir = root / "3m" if (root / "3m").is_dir() else root
+    if not three_dir.is_dir():
+        raise DataIntegrityError(f"venue halt build unreadable: {three_dir}")
+    try:
+        archives = sorted(three_dir.glob("*.parquet"))
+    except OSError as exc:
+        raise DataIntegrityError(f"venue halt build unreadable: {three_dir}") from exc
+    if not archives:
+        raise DataIntegrityError(f"venue halt build unreadable: {three_dir}")
+
+    zombie_floor: dict[str, int] = {}
+    for record in settlements.settlements:
+        prev = zombie_floor.get(record.symbol)
+        cur = int(record.last_trade_at.value)
+        if prev is None or cur < prev:
+            zombie_floor[record.symbol] = cur
+
+    horizon_ns = int(end.value)
+    global_min: int | None = None
+    step_ns = int(_HALT_STEP.value)
+    present = np.zeros(0, dtype="int64")
+    zero = np.zeros(0, dtype="int64")
+    for count, path in enumerate(archives):
+        if count % 100 == 0 and count:
+            _logger.info("[DATA] stage=build_venue_halts scanned=%d", count)
+        try:
+            frame = pd.read_parquet(path, columns=["timestamp", "quote_vol"])
+        except Exception as exc:
+            raise DataIntegrityError(f"venue halt bars unreadable: {path.name}") from exc
+        stamps_ms = pd.to_numeric(frame["timestamp"], errors="coerce").to_numpy(dtype="float64")
+        finite = np.isfinite(stamps_ms)
+        if not finite.all() or bool((stamps_ms % (step_ns // 1_000_000) != 0).any()):
+            raise DataIntegrityError(f"venue halt timestamps invalid or off-grid: {path.name}")
+        labels_ns = stamps_ms.astype("int64") * 1_000_000
+        qv = pd.to_numeric(frame["quote_vol"], errors="coerce").to_numpy(dtype="float64")
+        keep = labels_ns < horizon_ns
+        labels_ns = labels_ns[keep]
+        qv = qv[keep]
+        if labels_ns.size == 0:
+            continue
+        order = np.argsort(labels_ns, kind="stable")
+        labels_ns = labels_ns[order]
+        qv = qv[order]
+        if bool((np.diff(labels_ns) == 0).any()):
+            raise DataIntegrityError(f"venue halt duplicate symbol bars: {path.name}")
+        if not np.isfinite(qv).all() or bool((qv < 0.0).any()):
+            raise DataIntegrityError(f"venue halt quote volume invalid: {path.name}")
+        start_ns = int(labels_ns[0]) // step_ns * step_ns
+        if present.size == 0:
+            global_min = start_ns
+            size = (horizon_ns - start_ns + step_ns - 1) // step_ns
+            present = np.zeros(size, dtype="int64")
+            zero = np.zeros(size, dtype="int64")
+        elif global_min is not None and start_ns < global_min:
+            padding = (global_min - start_ns) // step_ns
+            present = np.pad(present, (padding, 0))
+            zero = np.pad(zero, (padding, 0))
+            global_min = start_ns
+        origin = start_ns if global_min is None else global_min
+        qv_hit = qv
+        floor = zombie_floor.get(path.stem)
+        if floor is not None:
+            live = labels_ns < floor
+            labels_ns = labels_ns[live]
+            qv_hit = qv_hit[live]
+        pos = (labels_ns - origin) // step_ns
+        np.add.at(present, pos, 1)
+        np.add.at(zero, pos, (qv_hit == 0.0).astype("int64"))
+    if global_min is None:
+        registry = assemble_venue_halt_registry([])
+        _logger.info("[DATA] stage=build_venue_halts halts=0 halted_bars=0")
+        return registry
+    grid = pd.date_range(
+        pd.Timestamp(int(global_min), unit="ns", tz="UTC"), end, freq="3min", tz="UTC",
+    )
+    grid = grid[grid < end]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        share = np.where(present > 0, zero / np.maximum(present, 1), 0.0)
+    halted = (present >= VENUE_HALT_MIN_PRESENT_SYMBOLS) & (
+        zero >= VENUE_HALT_MIN_ZERO_FRACTION * present
+    )
+    intervals: list[VenueHaltInterval] = []
+    idx = np.flatnonzero(halted)
+    if idx.size:
+        run_start = int(idx[0])
+        prev = int(idx[0])
+        for cursor in idx[1:].tolist():
+            cursor = int(cursor)
+            if cursor == prev + 1:
+                prev = cursor
+                continue
+            start = grid[run_start]
+            halt_id = start.strftime("%Y-%m-%dT%H:%MZ")
+            run_share = float(share[run_start : prev + 1].min())
+            intervals.append(
+                VenueHaltInterval(
+                    halt_id=halt_id, start=start, end=grid[prev] + _HALT_STEP,
+                    present_symbols=int(present[run_start]),
+                    zero_symbols=int(zero[run_start]),
+                    evidence=(
+                        f"exchange-wide halt: {prev - run_start + 1} bars,"
+                        f" present={int(present[run_start])},"
+                        f" zero={int(zero[run_start])},"
+                        f" min_zero_share={run_share:.4f}"
+                    ),
+                    verified_at=stamped,
+                )
+            )
+            run_start = cursor
+            prev = cursor
+        start = grid[run_start]
+        halt_id = start.strftime("%Y-%m-%dT%H:%MZ")
+        run_share = float(share[run_start : prev + 1].min())
+        intervals.append(
+            VenueHaltInterval(
+                halt_id=halt_id, start=start, end=grid[prev] + _HALT_STEP,
+                present_symbols=int(present[run_start]),
+                zero_symbols=int(zero[run_start]),
+                evidence=(
+                    f"exchange-wide halt: {prev - run_start + 1} bars,"
+                    f" present={int(present[run_start])},"
+                    f" zero={int(zero[run_start])},"
+                    f" min_zero_share={run_share:.4f}"
+                ),
+                verified_at=stamped,
+            )
+        )
+    registry = assemble_venue_halt_registry(intervals)
+    halted_bars = int(halted.sum())
+    _logger.info(
+        "[DATA] stage=build_venue_halts halts=%d halted_bars=%d",
+        len(intervals), halted_bars,
+    )
+    return registry
+
+
+def write_venue_halt_registry(registry: VenueHaltRegistry, path: Path) -> int:
+    """Atomic canonical JSONL write; re-parses before replace."""
+    from src.mhs.venue_halts import parse_venue_halt_registry, venue_halt_registry_jsonl
+
+    payload = venue_halt_registry_jsonl(registry)
+    parse_venue_halt_registry(payload, source=str(path))
+    target = Path(path)
+    if target.parent and not target.parent.exists():
+        target.parent.mkdir(parents=True, exist_ok=True)
+    handle, tmp_name = tempfile.mkstemp(dir=str(target.parent), prefix=".venue-halts-", suffix=".tmp")
+    try:
+        with os.fdopen(handle, "wb") as stream:
+            stream.write(payload)
+        os.replace(tmp_name, target)
+    except BaseException:
+        with suppress(OSError):
+            os.unlink(tmp_name)
+        raise
+    return len(registry.halts)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from typing import cast
 
 import numpy as np
 import pandas as pd
@@ -14,8 +15,54 @@ from src.mhs.instrument_settlements import (
     record_digest,
 )
 from src.mhs.types import ExecutionSpec
+from src.mhs.venue_halts import VenueHaltInterval
 
 from .contracts import InstrumentSettlementEvent
+
+
+def venue_halt_to_json(event: VenueHaltInterval) -> dict[str, object]:
+    """Lossless JSON codec payload for one halt interval (epoch-ns integers)."""
+    return {
+        "halt_id": event.halt_id,
+        "start_ns": int(event.start.value),
+        "end_ns": int(event.end.value),
+        "present_symbols": int(event.present_symbols),
+        "zero_symbols": int(event.zero_symbols),
+        "evidence": event.evidence,
+        "verified_at_ns": int(event.verified_at.value),
+    }
+
+
+def venue_halt_from_json(payload: Mapping[str, object]) -> VenueHaltInterval:
+    """Lossless JSON codec for one halt interval (epoch-ns integers)."""
+    try:
+        halt_id = payload["halt_id"]
+        evidence = payload["evidence"]
+    except KeyError as exc:
+        raise DataIntegrityError(f"venue halt payload missing field {exc}") from exc
+    if not isinstance(halt_id, str) or not halt_id:
+        raise DataIntegrityError("venue halt halt_id must be a nonempty string")
+    if not isinstance(evidence, str) or not evidence.strip():
+        raise DataIntegrityError("venue halt evidence must be a non-empty string")
+    for name in ("present_symbols", "zero_symbols"):
+        value = payload.get(name)
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise DataIntegrityError(f"venue halt field {name} must be an integer")
+    try:
+        start = _require_ts_ns(payload["start_ns"], "start_ns")
+        end = _require_ts_ns(payload["end_ns"], "end_ns")
+        verified_at = _require_ts_ns(payload["verified_at_ns"], "verified_at_ns")
+    except KeyError as exc:
+        raise DataIntegrityError(f"venue halt payload missing field {exc}") from exc
+    return VenueHaltInterval(
+        halt_id=halt_id,
+        start=start,
+        end=end,
+        present_symbols=cast(int, payload["present_symbols"]),
+        zero_symbols=cast(int, payload["zero_symbols"]),
+        evidence=evidence,
+        verified_at=verified_at,
+    )
 
 _PROXY_SOURCES: frozenset[str] = frozenset({"flat_1h_klines", "twap30_proxy"})
 _INT64_MAX: int = np.iinfo(np.int64).max
@@ -219,4 +266,6 @@ __all__ = [
     "settlement_event_to_json",
     "settlement_events_for_piece",
     "settlement_fill_price",
+    "venue_halt_from_json",
+    "venue_halt_to_json",
 ]
