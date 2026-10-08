@@ -25,9 +25,8 @@ from .contracts import (
     TerminalPositionEvidence,
     VenueHaltExitBlock,
 )
+from .settlement import _INT64_MAX
 from .window_staging import WindowStaging
-
-_INT64_MAX = np.iinfo(np.int64).max
 
 _BOOKED_FILL_REASONS: frozenset[str] = frozenset({"passive_fill", "timeout_taker", "delist_settlement"})
 

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import timedelta, timezone
+from datetime import timedelta, timezone, UTC
 from pathlib import Path
 from typing import Any
 
@@ -13,7 +13,9 @@ import pytest
 from src.common.errors import DataIntegrityError
 from src.mhs import data_policy as data_policy_mod
 from src.mhs.data_policy import SOURCE_GAP_EXCLUDED_SYMBOLS, source_gap_excluded_symbols
+from src.mhs.instrument_settlements import EMPTY_SETTLEMENT_REGISTRY
 from src.mhs.source_gaps import (
+    SourceGapInterval,
     active_intervals,
     blocked_mask,
     blocked_symbols_between,
@@ -179,12 +181,31 @@ def test_blocked_symbols_between_excludes_touching_window(tmp_path: Path) -> Non
 
 
 def test_source_gap_excluded_symbols_matches_active_view(monkeypatch: pytest.MonkeyPatch) -> None:
+    from datetime import datetime
+
     expected = source_gap_excluded_symbols()
     assert set(SOURCE_GAP_EXCLUDED_SYMBOLS) == expected
     assert len(SOURCE_GAP_EXCLUDED_SYMBOLS) == len(expected)
-    assert "LUNAUSDT" in SOURCE_GAP_EXCLUDED_SYMBOLS
+    assert "LUNAUSDT" not in SOURCE_GAP_EXCLUDED_SYMBOLS
     monkeypatch.setattr(data_policy_mod, "active_intervals", lambda **kwargs: ())
     assert source_gap_excluded_symbols() == frozenset()
+    monkeypatch.setattr(
+        data_policy_mod, "load_instrument_settlement_registry",
+        lambda *a, **k: EMPTY_SETTLEMENT_REGISTRY,
+    )
+    monkeypatch.setattr(
+        data_policy_mod, "active_intervals",
+        lambda **kwargs: (
+            SourceGapInterval(
+                symbol="LUNAUSDT", plane="ohlcv_3m",
+                start=datetime(2021, 1, 1, tzinfo=UTC),
+                end=None, reason="DELISTED", evidence="test",
+                verified_at=datetime(2026, 1, 1, tzinfo=UTC),
+                resolved_at=None, extent="UNSCOPED",
+            ),
+        ),
+    )
+    assert "LUNAUSDT" in source_gap_excluded_symbols()
 
 
 def test_packaged_registry_loads_probe_confirmed_intervals() -> None:
@@ -385,4 +406,39 @@ def test_excluded_symbols_follow_reason_and_extent_not_evidence(
     )
     intervals = load_source_gap_registry(path)
     monkeypatch.setattr(data_policy_mod, "active_intervals", lambda **kwargs: intervals)
+    monkeypatch.setattr(
+        data_policy_mod, "load_instrument_settlement_registry",
+        lambda *a, **k: EMPTY_SETTLEMENT_REGISTRY,
+    )
     assert (source_gap_excluded_symbols() == frozenset({"AAAUSDT"})) is excluded
+
+
+def test_settled_delisted_not_excluded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A DELISTED symbol explained by a settlement record is replayed causally, not hidden."""
+    import json
+
+    settlement = {
+        "kind": "settlement", "symbol": "AAAUSDT",
+        "event_id": "AAAUSDT:1640995200000",
+        "announced_at": "2021-12-25T00:00:00Z",
+        "announcement_source": "proxy_lead", "announcement_evidence": "",
+        "last_trade_at": "2022-01-01T00:00:00Z",
+        "delivery_at": "2022-01-01T00:00:00Z",
+        "settlement_price": 1.25, "price_source": "flat_1h_klines",
+        "price_evidence": "flat bars", "fee_bps": 5.0,
+        "evidence_digest": "sha256:" + "ab" * 32, "verified_at": "2026-07-01T00:00:00Z",
+    }
+    from src.mhs.instrument_settlements import parse_instrument_settlement_registry
+
+    registry = parse_instrument_settlement_registry(
+        (json.dumps(settlement) + "\n").encode(), source="test",
+    )
+    path = _write_registry(
+        tmp_path, [{**_row(reason="DELISTED", evidence="delisted"), "extent": "UNSCOPED"}]
+    )
+    intervals = load_source_gap_registry(path)
+    monkeypatch.setattr(data_policy_mod, "active_intervals", lambda **kwargs: intervals)
+    monkeypatch.setattr(
+        data_policy_mod, "load_instrument_settlement_registry", lambda *a, **k: registry,
+    )
+    assert source_gap_excluded_symbols() == frozenset()

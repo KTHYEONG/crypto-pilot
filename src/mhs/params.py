@@ -493,7 +493,8 @@ SETTLEMENT_AUDIT_MIN_TRAILING_FLAT_BARS: int = 3
 
 # --- spec 34: instrument lifecycle settlement (part 2 engine) ---
 SETTLEMENT_PRICE_STRESS_HAIRCUT_BPS: float = 450.0
-INSTRUMENT_LIFECYCLE_PROCEDURE: str = "pit_registry_settlement_halts_v2"
+INSTRUMENT_LIFECYCLE_PROCEDURE: str = "pit_registry_settlement_halts_causal_exclusions_v3"
+DELIST_ROSTER_BLOCK_LEAD: pd.Timedelta = pd.Timedelta(hours=48)
 DELIST_FORCED_EXIT_LEAD: pd.Timedelta = pd.Timedelta(hours=72)
 VENUE_HALT_MIN_ZERO_FRACTION: float = 0.9
 VENUE_HALT_MIN_PRESENT_SYMBOLS: int = 10

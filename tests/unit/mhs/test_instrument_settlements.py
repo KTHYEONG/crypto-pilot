@@ -304,3 +304,65 @@ def test_empty_registry_serializes_empty() -> None:
 def test_loader_rejects_missing_path(tmp_path) -> None:
     with pytest.raises(DataIntegrityError, match="unreadable"):
         load_instrument_settlement_registry(tmp_path / "absent.jsonl")
+
+
+def _gap_interval(symbol: str, reason: str, extent: str, start: str, end: str | None = None):
+    from datetime import UTC
+
+    from src.mhs.source_gaps import SourceGapInterval
+
+    def _dt(value: str):
+        return pd.Timestamp(value, tz="UTC").to_pydatetime().astimezone(UTC)
+
+    verified = _dt("2026-01-01T00:00:00Z")
+    return SourceGapInterval(
+        symbol=symbol, plane="ohlcv_3m", start=_dt(start),
+        end=_dt(end) if end is not None else None, reason=reason,
+        evidence="test fixture", verified_at=verified, resolved_at=None,
+        extent=extent,  # type: ignore[arg-type]
+    )
+
+
+def test_superseded_delisted_by_any_record() -> None:
+    from src.mhs.instrument_settlements import source_gap_superseded_by_settlement
+
+    registry = _parse_many(_settlement(symbol="LUNAUSDT", last_trade_at="2022-05-12T15:33:00Z"))
+    assert source_gap_superseded_by_settlement(
+        _gap_interval("LUNAUSDT", "DELISTED", "UNSCOPED", "2021-01-01T00:00:00Z"), registry
+    ) is True
+    assert source_gap_superseded_by_settlement(
+        _gap_interval("LUNAUSDT", "DELISTED", "UNSCOPED", "2021-01-01T00:00:00Z"),
+        EMPTY_SETTLEMENT_REGISTRY,
+    ) is False
+
+
+def test_superseded_post_trade_open_edge() -> None:
+    from src.mhs.instrument_settlements import source_gap_superseded_by_settlement
+
+    registry = _parse_many(_settlement(symbol="AAAUSDT", last_trade_at="2022-01-01T00:00:00Z"))
+    assert source_gap_superseded_by_settlement(
+        _gap_interval("AAAUSDT", "SOURCE_ABSENT", "OPEN_EDGE", "2022-01-01T00:00:00Z"), registry
+    ) is True
+    assert source_gap_superseded_by_settlement(
+        _gap_interval("AAAUSDT", "SOURCE_ABSENT", "OPEN_EDGE", "2021-12-31T00:00:00Z"), registry
+    ) is False
+
+
+def test_pre_delivery_unscoped_not_superseded() -> None:
+    from src.mhs.instrument_settlements import source_gap_superseded_by_settlement
+
+    registry = _parse_many(_settlement(symbol="BTCSTUSDT", last_trade_at="2021-03-12T02:00:00Z"))
+    assert source_gap_superseded_by_settlement(
+        _gap_interval("BTCSTUSDT", "SOURCE_ABSENT", "UNSCOPED", "2021-01-01T00:00:00Z", "2021-03-04T07:00:00Z"),
+        registry,
+    ) is False
+
+
+def test_interior_never_superseded() -> None:
+    from src.mhs.instrument_settlements import source_gap_superseded_by_settlement
+
+    registry = _parse_many(_settlement(symbol="AAAUSDT", last_trade_at="2022-01-01T00:00:00Z"))
+    assert source_gap_superseded_by_settlement(
+        _gap_interval("AAAUSDT", "SOURCE_ABSENT", "INTERIOR", "2022-01-02T00:00:00Z", "2022-01-03T00:00:00Z"),
+        registry,
+    ) is False
