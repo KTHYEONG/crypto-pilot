@@ -108,6 +108,11 @@ def frozen_mhs_backtest_payload(run: FrozenMhsBacktestRun) -> dict[str, JsonValu
         "source_gap_excluded_symbols": cast(JsonValue, sorted(run.source_gap_excluded_symbols)),
         "source_gap_excluded_count": len(run.source_gap_excluded_symbols),
         "source_gap_blocked_decisions": run.source_gap_blocked_decisions,
+        "delisting_blocked_decisions": run.delisting_blocked_decisions,
+        "delisting_announcement_policy": (
+            "Registry announced_at controls roster withdrawal; proxy_lead announcements are "
+            "last_trade_at minus the registered lead, not evidenced public announcement times."
+        ),
         "base_one_way_taker_bps": request.base_spec.one_way_taker_bps(),
         "stress_one_way_taker_bps": request.stress_spec.one_way_taker_bps(),
         "execution_bound": request.execution_bound,

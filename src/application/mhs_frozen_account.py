@@ -685,7 +685,7 @@ def derive_frozen_exposure(
 
     The PIT roster is built from source start (preserving 30-day liquidity and 90-day
     seasoning warm-up) with no trading-exclusion filter, then cut to the evaluation window.
-    Only structurally excluded (registry `DELISTED`) symbols feed the gap sample: every other
+    Only structurally excluded (see `structurally_excluded_symbols`) symbols feed the gap sample: every other
     symbol's crashes already occurred inside the ledger's realized returns, so re-adding them
     would double-count the same risk. An empty exclusion set yields an empty `GapSample`
     without invoking the sampler on a zero-column frame.

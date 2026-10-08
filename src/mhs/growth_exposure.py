@@ -11,6 +11,10 @@ import numpy as np
 import pandas as pd
 
 from src.mhs.bootstrap import iter_stationary_bootstrap_index_chunks
+from src.mhs.instrument_settlements import (
+    InstrumentSettlementRegistry,
+    load_instrument_settlement_registry,
+)
 from src.mhs.source_gaps import SourceGapPlane, active_intervals
 
 _logger = logging.getLogger(__name__)
@@ -37,24 +41,35 @@ class LogGrowthExposureSolution:
     gap_sample_size: int
 
 
-def structurally_excluded_symbols(*, plane: SourceGapPlane = "ohlcv_3m", path: Path | None = None) -> frozenset[str]:
-    """Symbols the ledger can never trade because their exit is unevidencable.
+def structurally_excluded_symbols(
+    *, plane: SourceGapPlane = "ohlcv_3m", path: Path | None = None,
+    settlement_registry: InstrumentSettlementRegistry | None = None,
+) -> frozenset[str]:
+    """Symbols whose end-of-life price path may be missing from the ledger's realized returns.
 
-    A registry reason of ``DELISTED`` means no forced exit can ever be priced with a real
-    settlement, so the strategy has excluded the symbol from trading for its whole life
-    (see ``src/mhs/policy/source_gaps.jsonl``). That symbol's realized price history is the
-    only source of genuine single-name gap risk that is structurally absent from every
-    historical ledger return series, because the ledger has never held it and never will.
-    Every other symbol's crashes, however large, already occurred inside the ledger's own
-    realized returns and must never be re-added on top of them as a separate gap stress.
+    A DELISTED symbol without a settlement record is never traded, so its crash is structurally
+    absent from the ledger. A settled delisting is traded causally, but when its announcement is a
+    ``proxy_lead`` the ledger may have exited ahead of the real announcement and so avoided the
+    terminal move on evidence it did not have; such symbols stay in the gap stress sample until a
+    curated announcement replaces the proxy. Symbols with a curated announcement are fully inside
+    the ledger and are not re-added.
 
     Args:
-        plane: Source-gap plane to query (the execution plane governs tradability).
-        path: Registry override forwarded to the loader.
+        plane: Source-gap plane to query.
+        path: Source-gap registry override.
+        settlement_registry: Defaults to the committed registry.
     Returns:
-        Symbols with an unresolved ``DELISTED`` record on the given plane.
+        DELISTED-record symbols that are unsettled or settled only on a proxy announcement.
     """
-    return frozenset(iv.symbol for iv in active_intervals(plane=plane, path=path) if iv.reason == "DELISTED")
+    registry = settlement_registry if settlement_registry is not None else load_instrument_settlement_registry()
+    excluded: set[str] = set()
+    for iv in active_intervals(plane=plane, path=path):
+        if iv.reason != "DELISTED":
+            continue
+        records = registry.settlements_for(iv.symbol)
+        if not records or all(record.announcement_source == "proxy_lead" for record in records):
+            excluded.add(iv.symbol)
+    return frozenset(excluded)
 
 
 def roster_gap_sample(daily_close: pd.DataFrame, roster: pd.DataFrame, *, threshold: float) -> GapSample:

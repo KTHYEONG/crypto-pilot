@@ -12,6 +12,7 @@ from collections.abc import Iterator, Set
 from enum import StrEnum
 from typing import Final, Literal
 
+from src.mhs.instrument_settlements import load_instrument_settlement_registry
 from src.mhs.source_gaps import SourceGapExtent, active_intervals
 
 
@@ -40,23 +41,26 @@ _SYMBOL_EXCLUDING_EXTENTS: Final[frozenset[SourceGapExtent]] = frozenset({"UNSCO
 def source_gap_excluded_symbols() -> frozenset[str]:
     """Return symbols the legacy symbol-level view must drop for their whole history.
 
-    A symbol is excluded when at least one active interval is ``DELISTED`` or has
-    ``UNSCOPED`` extent (a legacy or manual record whose scope was never measured).
-    Measured ``LISTING_EDGE``, ``OPEN_EDGE`` and ``INTERIOR`` spans do not exclude the
-    symbol: an absence before listing, after the last observed bar or between observed
-    bars is not evidence that the symbol was untradeable while it traded, so dropping
-    its entire history would be survivorship-style selection. This view exists only for
-    legacy consumers that filter a universe before they know their evaluation grid;
-    interval-aware callers must consult `src.mhs.source_gaps.blocked_mask`, which
-    blocks exactly the measured bars.
+    A symbol is excluded when at least one active interval that is not superseded by an evidenced
+    settlement is ``DELISTED`` or has ``UNSCOPED`` extent. A delisting explained by the settlement
+    registry is replayed causally (announcement policy, delivery settlement) instead of hiding the
+    symbol's whole life, which would select the universe on its future. Measured ``LISTING_EDGE``,
+    ``OPEN_EDGE`` and ``INTERIOR`` spans never exclude the symbol. Interval-aware callers must
+    consult ``src.mhs.source_gaps.blocked_mask``.
 
     Returns:
-        Symbols with at least one active DELISTED or UNSCOPED interval across all planes.
+        Symbols with at least one active, unsuperseded DELISTED or UNSCOPED interval.
+    Raises:
+        DataIntegrityError: the settlement or source-gap registry is invalid.
     """
+    from src.mhs.instrument_settlements import source_gap_superseded_by_settlement
+
+    registry = load_instrument_settlement_registry()
     return frozenset(
         iv.symbol
         for iv in active_intervals()
-        if iv.reason in _SYMBOL_EXCLUDING_REASONS or iv.extent in _SYMBOL_EXCLUDING_EXTENTS
+        if (iv.reason in _SYMBOL_EXCLUDING_REASONS or iv.extent in _SYMBOL_EXCLUDING_EXTENTS)
+        and not source_gap_superseded_by_settlement(iv, registry)
     )
 
 
