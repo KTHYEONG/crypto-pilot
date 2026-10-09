@@ -15,6 +15,7 @@ import pandas as pd
 
 from src.common.errors import DataIntegrityError
 from src.core.types import JsonValue
+from src.engine.execution.integrity import replay_ledger_certified
 from src.engine.strategy_backtest import StrategyBacktestRun
 
 _logger = logging.getLogger(__name__)
@@ -134,6 +135,7 @@ def strategy_backtest_payload(
         "maker_fee_bps": request.base_spec.maker_fee_bps,
         "base_valid": evidence.base.ledger.primary_valid,
         "stress_valid": evidence.stress.ledger.primary_valid,
+        "ledger_certified": replay_ledger_certified(evidence.base) and replay_ledger_certified(evidence.stress),
         "base_source_gaps": len(evidence.base.data_gaps),
         "stress_source_gaps": len(evidence.stress.data_gaps),
         "base_terminal": cast(
@@ -202,10 +204,17 @@ def strategy_daily_frame(run: StrategyBacktestRun) -> pd.DataFrame:
         frame[f"{prefix}_funding"] = ledger.funding_charge.groupby(
             ledger.funding_charge.index.normalize()
         ).sum().reindex(days)
+    funding = evidence.stress.ledger.funding_by_symbol_daily
+    if funding is not None:
+        opening_equity = frame["stress_equity_close"].shift(1).fillna(run.request.initial_equity)
+        income = -funding.reindex(days, fill_value=0.0).div(opening_equity, axis=0)
+        for symbol in income.columns:
+            frame[f"stress_funding_income_{symbol}"] = income[symbol]
     gross = run.candidate.target_weights.abs().sum(axis=1)
     frame["target_gross"] = gross.reindex(days, fill_value=0.0)
     max_name = run.candidate.target_weights.abs().max(axis=1)
     frame["max_name_weight"] = max_name.reindex(days, fill_value=0.0)
+    funding_columns = [column for column in frame if column.startswith("stress_funding_income_")]
     frame = frame[
         [
             "base_return", "stress_return",
@@ -213,6 +222,7 @@ def strategy_daily_frame(run: StrategyBacktestRun) -> pd.DataFrame:
             "base_equity_low", "stress_equity_low",
             "base_turnover", "stress_turnover",
             "base_funding", "stress_funding", "target_gross", "max_name_weight",
+            *funding_columns,
         ]
     ].astype("float64")
     if not bool(np.isfinite(frame.to_numpy(dtype="float64")).all()):

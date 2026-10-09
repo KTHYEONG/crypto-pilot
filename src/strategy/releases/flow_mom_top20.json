@@ -1,0 +1,34 @@
+{
+  "criteria": {
+    "dsr_min": 0.95,
+    "growth_lcb_alpha": 0.05,
+    "holdout_drawdown_max_quantile": 0.95,
+    "holdout_growth_min_quantile": 0.05,
+    "max_participation_p95": 0.01,
+    "max_top5_funding_dependence": true,
+    "min_discovery_days": 730,
+    "min_holdout_days": 60,
+    "plateau_min_fraction": 0.5,
+    "risk_envelope": "growth_extreme_budgeted"
+  },
+  "criteria_digest": "d1b7a0e7d18822b891175e959442e0445fca600c293e1d908aaadc2fbd63458e",
+  "design_data_cutoff": "2026-07-01T00:00:00+00:00",
+  "evaluation_digest": null,
+  "legacy_ids": [
+    "frozen_mhs_top20_v2"
+  ],
+  "risk_envelope": "growth_extreme_budgeted",
+  "sizing": {
+    "execution_policy": "strict_passive_repeg",
+    "name_clip": 0.05,
+    "unit_bootstrap_sha256": "2cc6a4e9c11dd8fc6c509c3233645d38d226702b73f650e1f1f6ac4d0d9e956b"
+  },
+  "spec_digest": "cfd8fb54854f458d8ac8398c2c7bbf877962cff7948ab823c90279a6b76b0eeb",
+  "strategy_id": "flow_mom_top20",
+  "target_capital_usdt": 2100.0,
+  "verdict": null,
+  "unit_bootstrap_provenance": {
+    "host": "or-vps",
+    "manifest": "/home/ubuntu/crypto-pilot/data/state/runs/frozen_top20_v2_repeg_fillcap_20261002/run_manifest.json"
+  }
+}

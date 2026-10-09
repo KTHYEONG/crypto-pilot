@@ -97,7 +97,7 @@ def test_live_cli_startup_does_not_load_lab() -> None:
 def test_cli_contract_groups() -> None:
     parser = build_root_parser()
     groups = parser._subparsers._group_actions[0].choices  # type: ignore[union-attr]
-    assert set(groups) == {"backtest", "data", "live", "ops", "lab"}
+    assert set(groups) == {"backtest", "data", "evaluate", "live", "ops", "lab"}
 
 
 def test_lab_procedure_registry_migrate_requires_explicit_paths() -> None:

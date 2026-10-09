@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import logging
 from pathlib import Path
@@ -90,6 +91,14 @@ def add_backtest_commands(backtest_parser: argparse.ArgumentParser) -> None:
     strategy.add_argument(
         "--execution", choices=("taker", "maker"), default="taker",
         help="taker = immediate crossing; maker = resting limit for the passive timeout, remainder crosses as taker (strategy variant: candle trade-through fill model).",
+    )
+    strategy.add_argument(
+        "--neighbors", action="store_true", default=False,
+        help="Run the pre-declared neighbor set for the spec (same window) into sibling run dirs.",
+    )
+    strategy.add_argument(
+        "--evaluate-holdout", action="store_true", default=False,
+        help="Record the one-look holdout journal entry before running on a consumed holdout window.",
     )
     strategy.set_defaults(handler=run_strategy_backtest_command)
     exposure = sub.add_parser(
@@ -311,6 +320,125 @@ def _strategy_run_statistics(run: StrategyBacktestRun) -> dict[str, Any]:
     return out
 
 
+def _trial_family(strategy_id: str) -> str:
+    if strategy_id.startswith("flow_mom"):
+        return "flow_mom"
+    return strategy_id
+
+
+def _record_trial_for_window(
+    strategy: Any, start: pd.Timestamp, end: pd.Timestamp, daily_sharpe: float | None, n_obs: int
+) -> None:
+    """Append one trial record when the window overlaps the discovery window (before cutoff)."""
+    from src.evaluation.trials import TrialRecord, append_trial
+    from src.strategy.release import releases_dir, strategy_spec_digest
+
+    cutoff = pd.Timestamp(strategy.design_data_cutoff).tz_convert("UTC")
+    if not (start < cutoff):
+        return
+    sizing = {"name_clip": strategy.name_clip, "exposure_multiplier": float(strategy.exposure_multiplier)}
+    try:
+        digest = strategy_spec_digest(strategy, sizing)
+    except Exception:
+        digest = str(strategy.strategy_id)
+    record = TrialRecord(
+        family=_trial_family(str(strategy.strategy_id)),
+        spec_digest=digest,
+        window_start=start,
+        window_end=end,
+        daily_sharpe=daily_sharpe,
+        n_obs=int(n_obs),
+        recorded_at=pd.Timestamp.now(tz="UTC"),
+        source="cli",
+    )
+    append_trial(record, path=releases_dir() / f"{_trial_family(str(strategy.strategy_id))}.trials.jsonl")
+
+
+def _holdout_gate(strategy_id: str, start: pd.Timestamp, end: pd.Timestamp, evaluate_holdout: bool) -> None:
+    """Refuse windows overlapping a consumed holdout unless the one look is recorded first."""
+    from src.common.errors import DataIntegrityError
+    from src.evaluation.holdout import consume_holdout_look, holdout_overlaps
+    from src.strategy.release import load_release, releases_dir
+
+    family = _trial_family(strategy_id)
+    path = releases_dir() / f"{family}.holdout.jsonl"
+    release = load_release("flow_mom_top20" if family == "flow_mom" else strategy_id)
+    if end > release.design_data_cutoff and not evaluate_holdout:
+        raise SystemExit("post-design windows require --evaluate-holdout before observing returns")
+    if holdout_overlaps(strategy_id, (start, end), path=path):
+        if not evaluate_holdout:
+            raise SystemExit(f"window overlaps a consumed holdout for {strategy_id}; pass --evaluate-holdout for the one look")
+        try:
+            consume_holdout_look(strategy_id, release.spec_digest, (start, end), path=path)
+        except DataIntegrityError as exc:
+            raise SystemExit(str(exc)) from exc
+    elif evaluate_holdout:
+        try:
+            if start < release.design_data_cutoff:
+                raise DataIntegrityError("holdout window must start at or after the design cutoff")
+            consume_holdout_look(strategy_id, release.spec_digest, (start, end), path=path)
+        except DataIntegrityError as exc:
+            raise SystemExit(str(exc)) from exc
+
+
+def _neighbor_specs(strategy: Any) -> list[Any]:
+    """Pre-declared plateau set: each feature dropped once, breadth x0.75 and x1.25 rounded."""
+    import dataclasses
+
+    neighbors: list[Any] = []
+    for index in range(len(strategy.members)):
+        kept = tuple(m for position, m in enumerate(strategy.members) if position != index)
+        if kept:
+            neighbors.append(dataclasses.replace(strategy, members=kept))
+    for factor in (0.75, 1.25):
+        breadth = max(1, round(strategy.breadth * factor))
+        if breadth != strategy.breadth:
+            neighbors.append(dataclasses.replace(strategy, breadth=breadth))
+    return neighbors
+
+
+def _run_neighbor_set(
+    strategy: Any, *, source_start: pd.Timestamp, start: pd.Timestamp, end: pd.Timestamp,
+    base_spec: Any, stress_spec: Any, report_periods: Any, data_root: Path | None,
+    budget: Any, execution_bound: StrategyExecutionBound, output: Path,
+) -> None:
+    """Run the pre-declared plateau neighbor set (same window) into sibling run dirs."""
+    from src.common.errors import DataIntegrityError
+    from src.engine.backtest_persist import persist_strategy_backtest
+    from src.engine.strategy_backtest import StrategyBacktestRequest as _Request
+    from src.engine.strategy_backtest import run_strategy_backtest
+
+    for position, neighbor in enumerate(_neighbor_specs(strategy)):
+        neighbor_request = _Request(
+            source_start=source_start, evaluation_start=start, evaluation_end=end,
+            strategy=neighbor, initial_equity=100000.0,
+            base_spec=base_spec, stress_spec=stress_spec,
+            report_periods=report_periods,
+            data_root=data_root,
+            memory_budget=budget,
+            execution_bound=execution_bound,
+        )
+        try:
+            neighbor_run = run_strategy_backtest(neighbor_request)
+            neighbor_stats = _strategy_run_statistics(neighbor_run)
+            sibling = output.parent.parent / f"{output.parent.name}_neighbor{position}"
+            sibling.mkdir(parents=True, exist_ok=True)
+            persist_strategy_backtest(neighbor_run, sibling / "result.json", statistics=neighbor_stats)
+            try:
+                import numpy as np
+
+                neighbor_values = neighbor_run.evidence.base_daily.returns.to_numpy(dtype="float64")
+                neighbor_std = float(np.std(neighbor_values, ddof=1)) if neighbor_values.size >= 2 else 0.0
+                neighbor_sharpe = float(neighbor_values.mean() / neighbor_std) if neighbor_std > 1e-12 else None
+                _record_trial_for_window(neighbor, start, end, neighbor_sharpe, int(neighbor_values.size))
+            except Exception:
+                _logger.exception("[EVAL] neighbor trial ledger append failed")
+        except (DataIntegrityError, ValueError, OSError) as exc:
+            with contextlib.suppress(Exception):
+                _record_trial_for_window(neighbor, start, end, None, 2)
+            raise SystemExit(f"neighbor backtest failed: {exc}") from exc
+
+
 def run_strategy_backtest_command(args: argparse.Namespace) -> None:
     """Run a strategy Top-20/variant 3m inventory evaluation.
 
@@ -357,6 +485,7 @@ def run_strategy_backtest_command(args: argparse.Namespace) -> None:
             raise SystemExit("strategy conflicts with breadth or variant")
         breadth, variant = selected_breadth, selected_variant
     strategy = _strategy_policy(breadth, variant)
+    _holdout_gate(strategy.strategy_id, start, end, bool(getattr(args, "evaluate_holdout", False)))
     execution = getattr(args, "execution", "taker")
     if execution not in ("taker", "maker"):
         raise SystemExit(f"execution must be 'taker' or 'maker', got {execution!r}")
@@ -388,13 +517,31 @@ def run_strategy_backtest_command(args: argparse.Namespace) -> None:
         statistics = _strategy_run_statistics(run)
         persist_strategy_backtest(run, output, statistics=statistics)
         _write_strategy_manifest(output, request=request, breadth=breadth)
+        try:
+            import numpy as np
+
+            base_values = run.evidence.base_daily.returns.to_numpy(dtype="float64")
+            std = float(np.std(base_values, ddof=1)) if base_values.size >= 2 else 0.0
+            sharpe = float(base_values.mean() / std) if std > 1e-12 else None
+            _record_trial_for_window(strategy, start, end, sharpe, int(base_values.size))
+        except Exception:
+            _logger.exception("[EVAL] trial ledger append failed")
         _logger.info(
             "[EVAL] backtest strategy source_gap_excluded=%s",
             list(getattr(run, "source_gap_excluded_symbols", ())),
         )
     except (DataIntegrityError, ValueError, OSError) as exc:
+        with contextlib.suppress(Exception):
+            _record_trial_for_window(strategy, start, end, None, 2)
         raise SystemExit(f"strategy backtest failed: {exc}") from exc
-    if output.parent.parent == STRATEGY_BACKTESTS_DIR and DEFAULT_DETAIL_RETENTION_MAX_RUNS is not None:
+    if bool(getattr(args, "neighbors", False)):
+        _run_neighbor_set(
+            strategy, source_start=source_start, start=start, end=end,
+            base_spec=base_spec, stress_spec=stress_spec, report_periods=report_periods,
+            data_root=Path(args.data_root) if getattr(args, "data_root", None) else None,
+            budget=budget, execution_bound=execution_bound, output=output,
+        )
+    if not getattr(args, "neighbors", False) and output.parent.parent == STRATEGY_BACKTESTS_DIR and DEFAULT_DETAIL_RETENTION_MAX_RUNS is not None:
         _prune_strategy_runs(keep=DEFAULT_DETAIL_RETENTION_MAX_RUNS)
     status = "primary" if breadth == 20 else "research control"
     _logger.info(
@@ -514,7 +661,23 @@ def run_account_replay_command(args: argparse.Namespace) -> None:
     except ValueError as exc:
         raise SystemExit(f"invalid account replay request: {exc}") from exc
     except AccountReplayError as exc:
+        from src.strategy.targets import FLOW_MOM_TOP20_ACCOUNT_UNIT
+
+        with contextlib.suppress(Exception):
+            _record_trial_for_window(FLOW_MOM_TOP20_ACCOUNT_UNIT, start, end, None, 2)
         raise SystemExit(str(exc)) from exc
+    try:
+        import numpy as np
+
+        equity = report.result.daily_equity.to_numpy(dtype="float64")
+        returns = equity[1:] / equity[:-1] - 1.0 if equity.size >= 2 else np.asarray([], dtype="float64")
+        std = float(np.std(returns, ddof=1)) if returns.size >= 2 else 0.0
+        sharpe = float(returns.mean() / std) if std > 1e-12 else None
+        from src.strategy.targets import FLOW_MOM_TOP20_ACCOUNT_UNIT
+
+        _record_trial_for_window(FLOW_MOM_TOP20_ACCOUNT_UNIT, start, end, sharpe, int(returns.size))
+    except Exception:
+        _logger.exception("[EVAL] account trial ledger append failed")
     _logger.info(
         "[EVAL] account-replay capital=%.0f policy=%s moment_source=%s cagr=%.4f mdd=%.4f liquidated=%s execution=%s maker_fill=%.3f",
         capital, policy_name, report.payload["moment_source"], report.payload["cagr"], report.payload["mdd"],
