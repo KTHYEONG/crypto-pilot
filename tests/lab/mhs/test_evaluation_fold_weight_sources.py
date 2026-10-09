@@ -129,14 +129,13 @@ def test_fold_weights_funding_gap_preservation() -> None:
     """Unknown funding coverage still blocks fold weights explicitly."""
 
     import src.lab.mhs.evaluation.fold_weights as fw
-    import src.core.data_policy as data_policy_mod
 
     idx, cols, base_panel, fold, _funding = _synthetic_fold_panel()
     request = research_baseline()
     with pytest.raises(RuntimeError, match="no fold symbol has funding coverage"):
         fw._build_fold_target_weights("root", fold, request, {}, base_panel=base_panel,
             require_minute_roster=False, panel_warmup_hours=24)
-    excluded = sorted(data_policy_mod.SOURCE_GAP_EXCLUDED_SYMBOLS)[0]
+    excluded = "GAPUSDT"
     with pytest.raises(RuntimeError, match="no fold symbol has funding coverage"):
         fw._build_fold_target_weights("root", fold, request, {excluded: _funding[cols[0]].copy()},
             base_panel=base_panel, require_minute_roster=False, panel_warmup_hours=24)

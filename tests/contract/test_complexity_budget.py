@@ -67,7 +67,6 @@ COMPLEXITY_CEILINGS: Final[dict[str, int]] = {
     "src/engine/execution/ledger.py::simulated_inventory_ledger": 24,
     "src/engine/execution/microstructure.py::peg_chase_partial_schedule": 19,
     "src/engine/execution/window_stream.py::_iter_mhs_execution_windows": 38,
-    "src/strategy/targets.py::build_strategy_targets": 18,
     "src/engine/strategy_backtest.py::__post_init__": 16,
     "src/engine/backtest_windows.py::validated_backtest_windows": 21,
     "src/evaluation/exposure.py::solve_log_growth_exposure": 18,

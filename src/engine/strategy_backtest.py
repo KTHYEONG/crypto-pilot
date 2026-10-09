@@ -365,25 +365,7 @@ def strategy_blocked_decisions(
     base_spec: ExecutionSpec,
     settlement_registry: InstrumentSettlementRegistry,
 ) -> pd.DataFrame:
-    """Withdraw symbols from decision days using only information available on that day.
-
-    Two causes block a decision. (1) An announced delisting: once a record's ``announced_at`` is at
-    or before the day's snapshot instant and the holding horizon plus the registered lead reaches
-    delivery, the symbol leaves the roster exactly as the live roster withdrawal does. (2) An
-    evidenced ``INTERIOR`` or ``LISTING_EDGE`` source gap the execution and holding window would
-    cross, restricted to intervals not explained by a settlement; ``OPEN_EDGE`` and ``UNSCOPED``
-    gaps never withdraw (they fail the run via ``LakeCoverageError`` instead), and an absence
-    that only exists because the symbol delisted is never used to anticipate the delisting.
-
-    Args:
-        decision_index: Daily UTC decision grid shared with the roster inputs.
-        census_symbols: Canonical column order for the returned frame.
-        strategy: Supplies snapshot and entry hours.
-        base_spec: Supplies the passive timeout that extends each holding window.
-        settlement_registry: Registry bound to the run's OHLCV root.
-    Returns:
-        Boolean frame indexed by ``decision_index`` with ``census_symbols`` columns.
-    """
+    """Mask decisions crossing announced delistings or unsuperseded bounded source gaps."""
     census = list(census_symbols)
     entry_hour = int(strategy.entry_hour_utc)
     snapshot_hour = int(strategy.snapshot_hour_utc)
@@ -437,30 +419,7 @@ def assert_strategy_execution_coverage(
     entry_hour_utc: int,
     data_root: Path | None = None,
 ) -> None:
-    """Fail closed before replay when a selected symbol lacks execution evidence.
-
-    Every decision the roster grants must be executable and markable on the 3m plane
-    through the bar that closes it, otherwise the engine enters a position it can never
-    exit and the failure only surfaces much later at an unrelated symbol's bar. Checking
-    the whole roster up front converts a multi-minute replay crash into one actionable list.
-
-    The check consumes only archive extents, never future prices, so it states what the
-    researcher's own lake contains and makes no claim about what was knowable at any
-    decision time.
-
-    Args:
-        roster: Boolean decision-day roster in canonical column order.
-        execution_end: Exclusive UTC fence the replay will stream to.
-        settlement: Extra span past a decision's holding window during which its closing
-            order may still cross; derived from the execution spec, never guessed.
-        entry_hour_utc: Hour a decision's entry lands on, taken from the strategy rather
-            than assumed, so a variant that enters off midnight is checked at its own clock.
-        data_root: OHLCV root override; defaults to the canonical futures lake.
-    Raises:
-        DataIntegrityError: At least one selected symbol's 3m archive ends before the bar
-            that closes its last granted decision. The message names every such symbol with
-            its required and available coverage end.
-    """
+    """Reject archives lacking closing-bar coverage for any selected roster seat."""
     root = resolve_mhs_input_layout(data_root).ohlcv_root
     deficient: list[str] = []
     for symbol in roster.columns:
@@ -665,22 +624,7 @@ def run_strategy_backtest(
     source: LoadedStrategySource | None = None,
     snapshot_cache: MemberSnapshotCache | None = None,
 ) -> StrategyBacktestRun:
-    """Build and replay a strategy PIT target plan using the shared 3m inventory ledger.
-
-    The runner first reconstructs the full historical universe from Binance
-    archive sources, then materializes only historically selected hourly and
-    active/held 3m symbols.  It produces research evidence for the exact
-    request interval without changing or consulting live strategy state.
-
-    Args:
-        request: Complete historical source, target-policy, cost, and resource request.
-    Returns:
-        Exact candidate provenance and paired base/stress inventory evidence.
-    Raises:
-        DataIntegrityError: Input chronology, source coverage, timing, or
-            execution evidence is incomplete.
-        MhsResourceAdmissionError: A declared memory budget cannot admit work.
-    """
+    """Build causal PIT targets and return paired base/stress 3m inventory evidence."""
     candidate, context = build_request_targets(request, source=source, snapshot_cache=snapshot_cache)
     budget = context.budget
     root = context.root

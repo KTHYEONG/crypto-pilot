@@ -16,6 +16,7 @@ import pandas as pd
 from src.common.errors import DataIntegrityError
 from src.common.paths import FUTURES_DATA_DIR
 from src.core.source_gaps import (
+    SourceGapExtent,
     SourceGapInterval,
     SourceGapPlane,
     load_source_gap_registry,
@@ -354,6 +355,83 @@ def _merge_clipped(
     return merged
 
 
+def _rescope_evidence(commit: SourceGapInterval, extent: str) -> str:
+    end_text = _iso_z(commit.end) if commit.end is not None else "open"
+    return (
+        f"{commit.evidence} | Audit rescope: measured as {extent} "
+        f"[{_iso_z(commit.start)}, {end_text}) in the local lake."
+    )
+
+
+def _interior_rescope_confirmed(
+    commit: SourceGapInterval,
+    plane: SourceGapPlane,
+    data_root: Path | None,
+) -> bool:
+    if commit.end is None:
+        return False
+    expanded = _measure_one_symbol(
+        commit.symbol,
+        plane,
+        pd.Timestamp(commit.start) - _plane_step(plane),
+        pd.Timestamp(commit.end) + _plane_step(plane),
+        data_root,
+    )
+    return any(
+        gap.extent == "INTERIOR"
+        and gap.start == commit.start
+        and gap.end == commit.end
+        for gap in expanded
+    )
+
+
+def _rescope_extent(
+    commit: SourceGapInterval,
+    overlapping: list[SourceGapInterval],
+    window_start: datetime,
+    window_end: datetime,
+    plane: SourceGapPlane,
+    data_root: Path | None,
+) -> SourceGapExtent | None:
+    if commit.extent != "UNSCOPED" or commit.reason != "SOURCE_ABSENT":
+        return None
+    if len(overlapping) != 1:
+        return None
+    sole = overlapping[0]
+    if sole.start != commit.start or sole.end != commit.end:
+        return None
+    if sole.extent not in ("INTERIOR", "LISTING_EDGE", "OPEN_EDGE"):
+        return None
+    if sole.extent in ("LISTING_EDGE", "OPEN_EDGE"):
+        return sole.extent
+    if commit.end is not None and commit.start > window_start and commit.end < window_end:
+        return sole.extent
+    if _interior_rescope_confirmed(commit, plane, data_root):
+        return sole.extent
+    return None
+
+
+def _inherited_narrowed_extent(
+    merged: list[tuple[datetime, datetime | None]],
+    overlapping: list[SourceGapInterval],
+) -> SourceGapExtent:
+    if len(merged) == 1 and len(overlapping) == 1:
+        sole = overlapping[0]
+        if merged[0][0] == sole.start and merged[0][1] == sole.end:
+            return sole.extent
+    return "UNSCOPED"
+
+
+def _window_cover(
+    commit: SourceGapInterval, overlapping: list[SourceGapInterval],
+    start: datetime, end: datetime,
+) -> tuple[datetime, datetime | None]:
+    if commit.end is not None:
+        return max(commit.start, start), min(commit.end, end)
+    stop = None if any(g.end is None for g in overlapping) else end
+    return max(commit.start, start), stop
+
+
 def audit_source_gap_registry(
     *,
     plane: SourceGapPlane,
@@ -363,21 +441,7 @@ def audit_source_gap_registry(
     registry_path: Path | None = None,
     data_root: Path | None = None,
 ) -> SourceGapAuditReport:
-    """Reconcile the committed registry against freshly measured local evidence.
-
-    Args:
-        plane: Source plane to reconcile.
-        start: Inclusive UTC reconciliation start.
-        end: Exclusive UTC reconciliation end.
-        symbols: Symbols to reconcile; None reconciles every symbol the registry names
-            plus every symbol present in the lake for that plane.
-        registry_path: Registry override forwarded to the loader.
-        data_root: OHLCV root override forwarded to measurement.
-    Returns:
-        Classified differences; an empty report means the registry matches the lake.
-    Raises:
-        DataIntegrityError: Registry load or measurement fails.
-    """
+    """Classify registry differences against measured gaps within a UTC window."""
     _plane_step(plane)
     _require_window(start, end)
     records = load_source_gap_registry(registry_path)
@@ -415,40 +479,22 @@ def audit_source_gap_registry(
         gaps = by_symbol.get(symbol, [])
         for commit in commits:
             overlapping = [g for g in gaps if _overlaps(g.start, g.end, commit.start, commit.end)]
+            if commit.reason == "DELISTED":
+                if overlapping:
+                    unchanged.append(commit)
+                continue
             if not overlapping:
                 resolved.append(commit)
                 continue
-            pieces: list[tuple[datetime, datetime | None]] = []
-            for gap in overlapping:
-                clipped = _clip_to_commit(gap, commit, window_start_dt, window_end_dt)
-                if clipped is not None:
-                    pieces.append(clipped)
+            pieces = [
+                clipped
+                for gap in overlapping
+                if (clipped := _clip_to_commit(gap, commit, window_start_dt, window_end_dt)) is not None
+            ]
             merged = _merge_clipped(pieces)
             if len(merged) == 1 and merged[0][0] == commit.start and merged[0][1] == commit.end:
-                if (
-                    commit.extent == "UNSCOPED"
-                    and commit.reason == "SOURCE_ABSENT"
-                    and commit.end is not None
-                    and len(overlapping) == 1
-                    and overlapping[0].extent == "INTERIOR"
-                    and overlapping[0].start == commit.start
-                    and overlapping[0].end == commit.end
-                    and (
-                        (commit.start > window_start_dt and commit.end < window_end_dt)
-                        or any(
-                            gap.extent == "INTERIOR"
-                            and gap.start == commit.start
-                            and gap.end == commit.end
-                            for gap in _measure_one_symbol(
-                                commit.symbol,
-                                plane,
-                                pd.Timestamp(commit.start) - _plane_step(plane),
-                                pd.Timestamp(commit.end) + _plane_step(plane),
-                                data_root,
-                            )
-                        )
-                    )
-                ):
+                extent = _rescope_extent(commit, overlapping, window_start_dt, window_end_dt, plane, data_root)
+                if extent is not None:
                     rescoped.append(
                         SourceGapInterval(
                             symbol=commit.symbol,
@@ -456,28 +502,19 @@ def audit_source_gap_registry(
                             start=commit.start,
                             end=commit.end,
                             reason=commit.reason,
-                            evidence=(
-                                f"{commit.evidence} | Audit rescope: measured as bounded "
-                                f"interior absence [{_iso_z(commit.start)}, "
-                                f"{_iso_z(commit.end)}) in the local lake."
-                            ),
+                            evidence=_rescope_evidence(commit, extent),
                             verified_at=end.to_pydatetime(),
                             resolved_at=None,
-                            extent="INTERIOR",
+                            extent=extent,
                         )
                     )
                     continue
                 unchanged.append(commit)
                 continue
-            c_start = max(commit.start, window_start_dt)
-            if commit.end is None:
-                has_open_tail = any(g.end is None for g in overlapping)
-                c_end: datetime | None = None if has_open_tail else window_end_dt
-            else:
-                c_end = min(commit.end, window_end_dt)
-            if len(merged) == 1 and merged[0][0] == c_start and merged[0][1] == c_end:
+            if merged == [_window_cover(commit, overlapping, window_start_dt, window_end_dt)]:
                 unchanged.append(commit)
                 continue
+            inherited = _inherited_narrowed_extent(merged, overlapping)
             for piece_start, piece_end in merged:
                 narrowed.append(
                     SourceGapInterval(
@@ -495,11 +532,9 @@ def audit_source_gap_registry(
                         ),
                         verified_at=end.to_pydatetime(),
                         resolved_at=None,
-                        extent="UNSCOPED",
+                        extent=inherited,
                     )
                 )
-    # Measured gaps come from the reconciled scope itself, so every gap here
-    # necessarily belongs to a scoped symbol.
     for gap in measured:
         commits = committed_by_symbol.get(gap.symbol, [])
         if any(_overlaps(gap.start, gap.end, c.start, c.end) for c in commits):
@@ -537,17 +572,7 @@ def write_audited_registry(
     registry_path: Path | None = None,
     verified_at: pd.Timestamp,
 ) -> int:
-    """Persist an audited registry, preserving history rather than deleting records.
-
-    Args:
-        report: Result of `audit_source_gap_registry`.
-        registry_path: Registry override; defaults to the packaged file.
-        verified_at: UTC stamp written onto every record this audit re-confirmed.
-    Returns:
-        Number of records written.
-    Raises:
-        DataIntegrityError: The resulting registry would violate a loader invariant.
-    """
+    """Persist confirmed audit changes atomically while preserving record history."""
     if not isinstance(verified_at, pd.Timestamp) or verified_at.tzinfo is None:
         raise DataIntegrityError("verified_at must be a tz-aware UTC Timestamp")
     if verified_at.utcoffset() != timedelta(0):

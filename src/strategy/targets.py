@@ -375,6 +375,42 @@ class MemberSnapshotCache:
         return frame
 
 
+def _validated_hourly_panels(
+    hourly_panels: Mapping[str, pd.DataFrame], hourly_available_at: pd.DataFrame,
+    market_close: pd.DataFrame, census_symbols: tuple[str, ...], roster: pd.DataFrame,
+) -> dict[str, pd.DataFrame]:
+    if any(k not in hourly_panels for k in _REQUIRED_PANELS):
+        raise DataIntegrityError("hourly_panels must contain close, quote_vol, and taker_buy_quote")
+    panels = {k: hourly_panels[k] for k in _REQUIRED_PANELS}
+    first = panels["close"]
+    if any(not isinstance(p.index, pd.DatetimeIndex) or not _is_utc_hourly_grid(p.index) for p in panels.values()):
+        raise DataIntegrityError("hourly indexes must be unique increasing UTC hour-open labels on a 1h grid")
+    if any(not p.index.equals(first.index) or list(p.columns) != list(first.columns) for p in panels.values()):
+        raise DataIntegrityError("hourly panels must share an identical index and column order")
+    hourly_symbols = list(first.columns)
+    ever_selected = list(roster.columns[roster.any(axis=0)])
+    if any(s not in hourly_symbols for s in ever_selected):
+        raise DataIntegrityError("every historically selected symbol must have an hourly source archive")
+    if not hourly_available_at.index.equals(first.index) or list(hourly_available_at.columns) != hourly_symbols:
+        raise DataIntegrityError("hourly_available_at must align with the hourly panel")
+    if hourly_available_at.isna().any().any():
+        raise DataIntegrityError("hourly_available_at must not contain missing publication timestamps")
+    if not all(
+        isinstance(dtype, pd.DatetimeTZDtype) and str(dtype.tz) == "UTC" for dtype in hourly_available_at.dtypes
+    ):
+        raise DataIntegrityError("hourly_available_at must contain timezone-aware timestamps")
+    available_values = hourly_available_at.to_numpy(dtype="datetime64[ns]")
+    grid_values = first.index.to_numpy(dtype="datetime64[ns]")[:, None]
+    if bool((available_values < grid_values).any()):
+        raise DataIntegrityError("hourly publication cannot precede the bar open")
+    if not market_close.index.equals(first.index):
+        raise DataIntegrityError("market_close must share the hourly close panel index exactly")
+    if list(market_close.columns) != list(census_symbols):
+        raise DataIntegrityError("market_close columns must match census_symbols order")
+    panels[MARKET_CLOSE_PANEL] = market_close
+    return panels
+
+
 def build_strategy_targets(
     hourly_panels: Mapping[str, pd.DataFrame],
     hourly_available_at: pd.DataFrame,
@@ -427,35 +463,8 @@ def build_strategy_targets(
         breadth=strategy.breadth,
         blocked_decisions=blocked_decisions,
     )
-    if any(k not in hourly_panels for k in _REQUIRED_PANELS):
-        raise DataIntegrityError("hourly_panels must contain close, quote_vol, and taker_buy_quote")
-    panels = {k: hourly_panels[k] for k in _REQUIRED_PANELS}
+    panels = _validated_hourly_panels(hourly_panels, hourly_available_at, market_close, census_symbols, roster)
     first = panels["close"]
-    if any(not isinstance(p.index, pd.DatetimeIndex) or not _is_utc_hourly_grid(p.index) for p in panels.values()):
-        raise DataIntegrityError("hourly indexes must be unique increasing UTC hour-open labels on a 1h grid")
-    if any(not p.index.equals(first.index) or list(p.columns) != list(first.columns) for p in panels.values()):
-        raise DataIntegrityError("hourly panels must share an identical index and column order")
-    hourly_symbols = list(first.columns)
-    ever_selected = list(roster.columns[roster.any(axis=0)])
-    if any(s not in hourly_symbols for s in ever_selected):
-        raise DataIntegrityError("every historically selected symbol must have an hourly source archive")
-    if not hourly_available_at.index.equals(first.index) or list(hourly_available_at.columns) != hourly_symbols:
-        raise DataIntegrityError("hourly_available_at must align with the hourly panel")
-    if hourly_available_at.isna().any().any():
-        raise DataIntegrityError("hourly_available_at must not contain missing publication timestamps")
-    if not all(
-        isinstance(dtype, pd.DatetimeTZDtype) and str(dtype.tz) == "UTC" for dtype in hourly_available_at.dtypes
-    ):
-        raise DataIntegrityError("hourly_available_at must contain timezone-aware timestamps")
-    available_values = hourly_available_at.to_numpy(dtype="datetime64[ns]")
-    grid_values = first.index.to_numpy(dtype="datetime64[ns]")[:, None]
-    if bool((available_values < grid_values).any()):
-        raise DataIntegrityError("hourly publication cannot precede the bar open")
-    if not market_close.index.equals(first.index):
-        raise DataIntegrityError("market_close must share the hourly close panel index exactly")
-    if list(market_close.columns) != list(census_symbols):
-        raise DataIntegrityError("market_close columns must match census_symbols order")
-    panels[MARKET_CLOSE_PANEL] = market_close
     census = list(census_symbols)
     daily_idx = roster.index
     decisions = daily_idx[:-1]

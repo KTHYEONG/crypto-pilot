@@ -820,21 +820,25 @@ def test_measure_assigns_explicit_extent_per_site(tmp_path: Path) -> None:
 
 
 def test_audit_narrowed_legacy_record_is_unscoped_and_written(tmp_path: Path) -> None:
-    """A residual narrowed from an unmeasured legacy record stays UNSCOPED and the writer persists extent."""
+    """Residuals narrowed across two measured gaps stay UNSCOPED and the writer persists extent."""
     registry = _write_registry(
         tmp_path / "reg.jsonl",
         [_row(symbol="CCCUUSDT", start="2020-01-01T00:00:00Z", end=None, evidence="legacy open")],
     )
     root = tmp_path / "lake"
     grid = _grid("2022-06-01T00:00:00Z", "2022-07-01T00:00:00Z")
-    kept = grid[(grid < pd.Timestamp("2022-06-10T00:00:00Z")) | (grid >= pd.Timestamp("2022-06-11T00:00:00Z"))]
+    kept = grid[
+        ((grid < pd.Timestamp("2022-06-10T00:00:00Z")) | (grid >= pd.Timestamp("2022-06-11T00:00:00Z")))
+        & ((grid < pd.Timestamp("2022-06-20T00:00:00Z")) | (grid >= pd.Timestamp("2022-06-21T00:00:00Z")))
+    ]
     _write_ohlcv(root, "CCCUUSDT", "3m", kept)
     report = audit_source_gap_registry(
         plane="ohlcv_3m",
         start=pd.Timestamp("2022-06-01T00:00:00Z"), end=pd.Timestamp("2022-07-01T00:00:00Z"),
         symbols=["CCCUUSDT"], registry_path=registry, data_root=root,
     )
-    assert [iv.extent for iv in report.narrowed] == ["UNSCOPED"]
+    assert len(report.narrowed) == 2
+    assert [iv.extent for iv in report.narrowed] == ["UNSCOPED", "UNSCOPED"]
     write_audited_registry(report, registry_path=registry, verified_at=pd.Timestamp("2022-07-01T00:00:00Z"))
     rows = [json.loads(line) for line in registry.read_text(encoding="utf-8").splitlines()]
     assert rows
@@ -867,7 +871,7 @@ def test_audit_exact_interior_hole_is_rescoped(tmp_path: Path, exact_window: boo
     assert rescoped.end is not None
     assert rescoped.end.isoformat() == pd.Timestamp("2022-03-01T00:00:00Z").isoformat()
     assert rescoped.evidence == (
-        original.evidence + " | Audit rescope: measured as bounded interior absence "
+        original.evidence + " | Audit rescope: measured as INTERIOR "
         "[2022-02-26T00:00:00Z, 2022-03-01T00:00:00Z) in the local lake."
     )
     assert rescoped.symbol == original.symbol
@@ -902,7 +906,7 @@ def test_audit_mismatched_bounds_stay_narrowed(tmp_path: Path) -> None:
     assert report.rescoped == ()
 
 
-def test_audit_open_ended_unscoped_is_not_rescoped(tmp_path: Path) -> None:
+def test_audit_open_ended_unscoped_matching_trailing_edge_is_rescoped(tmp_path: Path) -> None:
     registry = _write_registry(
         tmp_path / "reg.jsonl",
         [_row(start="2022-06-05T00:00:00Z", end=None, evidence="legacy open")],
@@ -914,8 +918,10 @@ def test_audit_open_ended_unscoped_is_not_rescoped(tmp_path: Path) -> None:
         start=pd.Timestamp("2022-06-01T00:00:00Z"), end=pd.Timestamp("2022-07-01T00:00:00Z"),
         symbols=["AAAUSDT"], registry_path=registry, data_root=root,
     )
-    assert report.rescoped == ()
-    assert len(report.unchanged) == 1
+    assert len(report.rescoped) == 1
+    assert report.rescoped[0].extent == "OPEN_EDGE"
+    assert report.rescoped[0].end is None
+    assert report.unchanged == ()
     assert report.narrowed == ()
 
 
@@ -1068,3 +1074,190 @@ def test_window_clipping_does_not_rescope_a_larger_hole(tmp_path: Path, offset: 
     assert report.rescoped == ()
     assert report.unchanged == load_source_gap_registry(registry)
     assert registry.read_bytes() == before
+
+
+def test_audit_listing_edge_is_rescoped(tmp_path: Path) -> None:
+    first = pd.Timestamp("2022-06-10T00:00:00Z")
+    registry = _write_registry(
+        tmp_path / "reg.jsonl",
+        [_row(symbol="LEADUSDT", start="2022-06-01T00:00:00Z", end="2022-06-10T00:00:00Z", evidence="legacy")],
+    )
+    root = tmp_path / "lake"
+    _write_ohlcv(root, "LEADUSDT", "3m", _grid("2022-06-10T00:00:00Z", "2022-07-01T00:00:00Z"))
+    report = audit_source_gap_registry(
+        plane="ohlcv_3m",
+        start=pd.Timestamp("2022-06-01T00:00:00Z"), end=pd.Timestamp("2022-07-01T00:00:00Z"),
+        symbols=["LEADUSDT"], registry_path=registry, data_root=root,
+    )
+    assert len(report.rescoped) == 1
+    rescoped = report.rescoped[0]
+    assert rescoped.extent == "LISTING_EDGE"
+    assert rescoped.start == pd.Timestamp("2022-06-01T00:00:00Z").to_pydatetime()
+    assert rescoped.end is not None
+    assert rescoped.end == first.to_pydatetime()
+    assert rescoped.reason == "SOURCE_ABSENT"
+    assert rescoped.verified_at == pd.Timestamp("2022-07-01T00:00:00Z").to_pydatetime()
+    assert rescoped.resolved_at is None
+    assert report.unchanged == ()
+    assert report.narrowed == ()
+    assert report.resolved == ()
+
+
+def test_audit_open_edge_is_rescoped(tmp_path: Path) -> None:
+    registry = _write_registry(
+        tmp_path / "reg.jsonl",
+        [_row(symbol="TAILUSDT", start="2022-06-05T00:00:00Z", end=None, evidence="legacy")],
+    )
+    root = tmp_path / "lake"
+    _write_ohlcv(root, "TAILUSDT", "3m", _grid("2022-06-01T00:00:00Z", "2022-06-05T00:00:00Z"))
+    report = audit_source_gap_registry(
+        plane="ohlcv_3m",
+        start=pd.Timestamp("2022-06-01T00:00:00Z"), end=pd.Timestamp("2022-07-01T00:00:00Z"),
+        symbols=["TAILUSDT"], registry_path=registry, data_root=root,
+    )
+    assert len(report.rescoped) == 1
+    rescoped = report.rescoped[0]
+    assert rescoped.extent == "OPEN_EDGE"
+    assert rescoped.end is None
+    assert rescoped.start == pd.Timestamp("2022-06-05T00:00:00Z").to_pydatetime()
+    assert "OPEN_EDGE" in rescoped.evidence
+    assert "open" in rescoped.evidence
+    assert rescoped.verified_at == pd.Timestamp("2022-07-01T00:00:00Z").to_pydatetime()
+    assert rescoped.resolved_at is None
+
+
+def test_audit_narrowed_piece_inherits_edge_extent(tmp_path: Path) -> None:
+    registry = _write_registry(
+        tmp_path / "reg.jsonl",
+        [_row(symbol="WIDEUSDT", start="2020-01-01T00:00:00Z", end=None, evidence="legacy wide")],
+    )
+    root = tmp_path / "lake"
+    grid = _grid("2022-06-01T00:00:00Z", "2022-07-01T00:00:00Z")
+    kept = grid[grid < pd.Timestamp("2022-06-10T00:00:00Z")]
+    _write_ohlcv(root, "WIDEUSDT", "3m", kept)
+    report = audit_source_gap_registry(
+        plane="ohlcv_3m",
+        start=pd.Timestamp("2022-06-01T00:00:00Z"), end=pd.Timestamp("2022-07-01T00:00:00Z"),
+        symbols=["WIDEUSDT"], registry_path=registry, data_root=root,
+    )
+    assert len(report.narrowed) == 1
+    assert report.narrowed[0].extent == "OPEN_EDGE"
+    assert report.narrowed[0].end is None
+    assert report.rescoped == ()
+
+
+def test_audit_merged_two_gaps_stays_unscoped(tmp_path: Path) -> None:
+    registry = _write_registry(
+        tmp_path / "reg.jsonl",
+        [_row(symbol="AMBUSDT", start="2020-01-01T00:00:00Z", end=None, evidence="legacy wide")],
+    )
+    root = tmp_path / "lake"
+    grid = _grid("2022-06-01T00:00:00Z", "2022-07-01T00:00:00Z")
+    kept = grid[
+        ((grid < pd.Timestamp("2022-06-10T00:00:00Z")) | (grid >= pd.Timestamp("2022-06-11T00:00:00Z")))
+        & ((grid < pd.Timestamp("2022-06-20T00:00:00Z")) | (grid >= pd.Timestamp("2022-06-21T00:00:00Z")))
+    ]
+    _write_ohlcv(root, "AMBUSDT", "3m", kept)
+    report = audit_source_gap_registry(
+        plane="ohlcv_3m",
+        start=pd.Timestamp("2022-06-01T00:00:00Z"), end=pd.Timestamp("2022-07-01T00:00:00Z"),
+        symbols=["AMBUSDT"], registry_path=registry, data_root=root,
+    )
+    assert len(report.narrowed) == 2
+    assert {iv.extent for iv in report.narrowed} == {"UNSCOPED"}
+    assert report.rescoped == ()
+
+
+def test_audit_delisted_record_is_never_rewritten(tmp_path: Path) -> None:
+    registry = _write_registry(
+        tmp_path / "reg.jsonl",
+        [_row(symbol="OLDUSDT", start="2021-01-01T00:00:00Z", end=None, reason="DELISTED", evidence="official delisting")],
+    )
+    root = tmp_path / "lake"
+    _write_ohlcv(root, "OLDUSDT", "3m", _grid("2022-06-01T00:00:00Z", "2022-06-05T00:00:00Z"))
+    before = load_source_gap_registry(registry)[0]
+    report = audit_source_gap_registry(
+        plane="ohlcv_3m",
+        start=pd.Timestamp("2022-06-01T00:00:00Z"), end=pd.Timestamp("2022-07-01T00:00:00Z"),
+        symbols=["OLDUSDT"], registry_path=registry, data_root=root,
+    )
+    assert report.resolved == ()
+    assert report.narrowed == ()
+    assert report.rescoped == ()
+    assert len(report.unchanged) == 1
+    verified_at = pd.Timestamp("2022-07-01T00:00:00Z")
+    write_audited_registry(report, registry_path=registry, verified_at=verified_at)
+    (after,) = [iv for iv in load_source_gap_registry(registry) if iv.resolved_at is None]
+    assert after.symbol == before.symbol
+    assert after.plane == before.plane
+    assert after.start == before.start
+    assert after.end == before.end
+    assert after.reason == "DELISTED"
+    assert after.evidence == before.evidence
+    assert after.extent == before.extent
+    assert after.resolved_at is None
+    assert after.verified_at == verified_at.to_pydatetime()
+
+
+def test_audit_second_run_after_edge_rescope_is_idempotent(tmp_path: Path) -> None:
+    registry = _write_registry(
+        tmp_path / "reg.jsonl",
+        [_row(symbol="LEADUSDT", start="2022-06-01T00:00:00Z", end="2022-06-10T00:00:00Z", evidence="legacy")],
+    )
+    root = tmp_path / "lake"
+    _write_ohlcv(root, "LEADUSDT", "3m", _grid("2022-06-10T00:00:00Z", "2022-07-01T00:00:00Z"))
+    report = audit_source_gap_registry(
+        plane="ohlcv_3m",
+        start=pd.Timestamp("2022-06-01T00:00:00Z"), end=pd.Timestamp("2022-07-01T00:00:00Z"),
+        symbols=["LEADUSDT"], registry_path=registry, data_root=root,
+    )
+    assert len(report.rescoped) == 1
+    write_audited_registry(report, registry_path=registry, verified_at=pd.Timestamp("2022-07-01T00:00:00Z"))
+    second = audit_source_gap_registry(
+        plane="ohlcv_3m",
+        start=pd.Timestamp("2022-06-01T00:00:00Z"), end=pd.Timestamp("2022-07-01T00:00:00Z"),
+        symbols=["LEADUSDT"], registry_path=registry, data_root=root,
+    )
+    assert second.rescoped == ()
+    assert second.narrowed == ()
+    assert len(second.unchanged) == 1
+    assert second.unchanged[0].extent == "LISTING_EDGE"
+
+
+@pytest.mark.parametrize("resolved_at", [None, "2022-07-01T00:00:00Z"])
+def test_unconfirmed_delisting_preserves_all_fields(tmp_path: Path, resolved_at: str | None) -> None:
+    from dataclasses import asdict
+
+    registry = _write_registry(tmp_path / "reg.jsonl", [_row(reason="DELISTED", resolved_at=resolved_at)])
+    root = tmp_path / "lake"
+    _write_ohlcv(root, "AAAUSDT", "3m", _grid("2022-02-20T00:00:00Z", "2022-03-05T00:00:00Z"))
+    original = load_source_gap_registry(registry)
+    report = audit_source_gap_registry(
+        plane="ohlcv_3m", start=pd.Timestamp("2022-02-20T00:00:00Z"),
+        end=pd.Timestamp("2022-03-05T00:00:00Z"), registry_path=registry, data_root=root,
+    )
+    assert report == SourceGapAuditReport()
+    write_audited_registry(report, registry_path=registry, verified_at=pd.Timestamp("2022-08-01T00:00:00Z"))
+    assert [asdict(iv) for iv in load_source_gap_registry(registry)] == [asdict(iv) for iv in original]
+
+
+def test_touching_measured_gaps_do_not_infer_extent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from dataclasses import replace
+    import src.market_data.services.source_gap_audit as audit_mod
+
+    registry = _write_registry(tmp_path / "reg.jsonl", [_row(start="2022-02-20T00:00:00Z")])
+    original = load_source_gap_registry(registry)[0]
+    measured = (
+        replace(original, start=pd.Timestamp("2022-02-26T00:00:00Z").to_pydatetime(),
+                end=pd.Timestamp("2022-02-27T00:00:00Z").to_pydatetime(), extent="LISTING_EDGE"),
+        replace(original, start=pd.Timestamp("2022-02-27T00:00:00Z").to_pydatetime(), extent="INTERIOR"),
+    )
+    monkeypatch.setattr(audit_mod, "measure_source_gaps", lambda *args, **kwargs: measured)
+    report = audit_source_gap_registry(
+        plane="ohlcv_3m", start=pd.Timestamp("2022-02-20T00:00:00Z"),
+        end=pd.Timestamp("2022-03-05T00:00:00Z"), symbols=["AAAUSDT"], registry_path=registry,
+    )
+    assert len(report.narrowed) == 1
+    assert report.narrowed[0].extent == "UNSCOPED"
+    assert report.narrowed[0].start == measured[0].start
+    assert report.narrowed[0].end == measured[1].end

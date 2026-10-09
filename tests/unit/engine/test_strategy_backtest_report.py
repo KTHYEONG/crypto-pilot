@@ -256,7 +256,8 @@ def test_registry_is_single_source_gap_view() -> None:
     assert isinstance(resolved, frozenset)
     assert source_gap_excluded_symbols() is not resolved
     assert set(resolved) == set(SOURCE_GAP_EXCLUDED_SYMBOLS)
-    assert "PUMPUSDT" in SOURCE_GAP_EXCLUDED_SYMBOLS
+    assert resolved == frozenset()
+    assert "PUMPUSDT" not in SOURCE_GAP_EXCLUDED_SYMBOLS
     assert "LUNAUSDT" not in SOURCE_GAP_EXCLUDED_SYMBOLS
     assert MHS_DATA_POLICY_DEFAULT == "zombie_mask_v1"
     parser = argparse.ArgumentParser()
