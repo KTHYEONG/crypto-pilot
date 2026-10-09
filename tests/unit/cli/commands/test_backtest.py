@@ -22,6 +22,18 @@ from tests.unit.application.test_strategy_account import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _isolated_release_ledgers(tmp_path, monkeypatch):
+    import shutil
+    import src.strategy.release as release_mod
+
+    source = release_mod.release_path("flow_mom_top20")
+    root = tmp_path / "default_releases"
+    root.mkdir()
+    shutil.copy(source, root / "flow_mom_top20.json")
+    monkeypatch.setattr(release_mod, "releases_dir", lambda root_arg=None: root)
+
+
 def _parse(argv: list[str]) -> argparse.Namespace:
     return build_root_parser(argv).parse_args(argv)
 
@@ -1052,3 +1064,211 @@ def test_strategy_run_statistics_reports_base_and_stress() -> None:
     legacy_stats = backtest_mod._strategy_run_statistics(legacy_run)
     assert set(legacy_stats) == {"base", "stress"}
     assert legacy_stats["base"]["funding"]["total_contribution"] == pytest.approx(-10.0 / 100000.0)
+
+
+def _patch_releases_root(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    import src.strategy.release as release_mod
+    import shutil
+
+    root = tmp_path / "releases"
+    root.mkdir(parents=True, exist_ok=True)
+    shutil.copy(release_mod.release_path("flow_mom_top20"), root / "flow_mom_top20.json")
+    monkeypatch.setattr(release_mod, "releases_dir", lambda root_arg=None: root)
+    return root
+
+
+def test_trial_family_maps_flow_mom_lineage() -> None:
+    assert backtest_mod._trial_family("flow_mom_top20") == "flow_mom"
+    assert backtest_mod._trial_family("other") == "other"
+
+
+def test_record_trial_for_window_appends_before_cutoff(tmp_path, monkeypatch) -> None:
+    import json
+
+    from src.strategy.targets import FLOW_MOM_TOP20
+
+    root = _patch_releases_root(monkeypatch, tmp_path)
+    backtest_mod._record_trial_for_window(
+        FLOW_MOM_TOP20,
+        pd.Timestamp("2025-01-01", tz="UTC"), pd.Timestamp("2025-02-01", tz="UTC"),
+        0.05, 31,
+    )
+    rows = (root / "flow_mom.trials.jsonl").read_text(encoding="utf-8").strip().splitlines()
+    assert len(rows) == 1
+    row = json.loads(rows[0])
+    assert row["source"] == "cli"
+    assert row["daily_sharpe"] == 0.05
+    backtest_mod._record_trial_for_window(
+        FLOW_MOM_TOP20,
+        pd.Timestamp("2026-08-01", tz="UTC"), pd.Timestamp("2026-09-01", tz="UTC"),
+        0.05, 31,
+    )
+    assert len((root / "flow_mom.trials.jsonl").read_text(encoding="utf-8").strip().splitlines()) == 1
+
+
+def test_record_trial_for_window_falls_back_on_digest_failure(tmp_path, monkeypatch) -> None:
+    import json
+    import types
+
+    root = _patch_releases_root(monkeypatch, tmp_path)
+    stub = types.SimpleNamespace(
+        strategy_id="flow_mom_top20",
+        design_data_cutoff=pd.Timestamp("2026-07-01", tz="UTC"),
+        name_clip=0.05,
+        exposure_multiplier=1.0,
+    )
+    backtest_mod._record_trial_for_window(
+        stub, pd.Timestamp("2025-01-01", tz="UTC"), pd.Timestamp("2025-02-01", tz="UTC"), None, 31,
+    )
+    row = json.loads((root / "flow_mom.trials.jsonl").read_text(encoding="utf-8").strip())
+    assert row["spec_digest"] == "flow_mom_top20"
+    assert row["daily_sharpe"] is None
+
+
+def test_holdout_gate_refuses_consumed_window(tmp_path, monkeypatch) -> None:
+    from src.evaluation.holdout import consume_holdout_look
+
+    root = _patch_releases_root(monkeypatch, tmp_path)
+    window = (pd.Timestamp("2026-07-01", tz="UTC"), pd.Timestamp("2026-10-01", tz="UTC"))
+    with pytest.raises(SystemExit, match="post-design"):
+        backtest_mod._holdout_gate("flow_mom_top20", *window, False)
+    assert (root / "flow_mom.holdout.jsonl").exists() is False
+    backtest_mod._holdout_gate("flow_mom_top20", *window, True)
+    assert (root / "flow_mom.holdout.jsonl").exists() is True
+    with pytest.raises(SystemExit, match="post-design"):
+        backtest_mod._holdout_gate("flow_mom_top20", *window, False)
+    with pytest.raises(SystemExit):
+        backtest_mod._holdout_gate("flow_mom_top20", *window, True)
+    with pytest.raises(SystemExit, match="design cutoff"):
+        backtest_mod._holdout_gate("flow_mom_top20", pd.Timestamp("2026-06-01", tz="UTC"),
+                                  pd.Timestamp("2026-06-20", tz="UTC"), True)
+    consume_holdout_look("flow_mom_top20", "legacy", (pd.Timestamp("2026-06-01", tz="UTC"),
+                                                    pd.Timestamp("2026-06-20", tz="UTC")),
+                         path=root / "flow_mom.holdout.jsonl")
+    with pytest.raises(SystemExit, match="consumed holdout"):
+        backtest_mod._holdout_gate("flow_mom_top20", pd.Timestamp("2026-06-01", tz="UTC"),
+                                  pd.Timestamp("2026-06-20", tz="UTC"), False)
+    _ = consume_holdout_look
+
+
+def test_neighbor_specs_cover_drops_and_breadths() -> None:
+    from src.strategy.targets import FLOW_MOM_TOP20
+
+    neighbors = backtest_mod._neighbor_specs(FLOW_MOM_TOP20)
+    assert len(neighbors) == 7
+    assert sorted(n.breadth for n in neighbors if len(n.members) == 5) == [15, 25]
+    assert sorted(len(n.members) for n in neighbors) == [4, 4, 4, 4, 4, 5, 5]
+
+
+def _account_namespace(tmp_path: Path, start: str = "2025-01-01", end: str = "2025-02-01") -> argparse.Namespace:
+    return argparse.Namespace(
+        source_start="2024-01-01", start=start, end=end,
+        policy="growth", execution="taker", fixed_exposure=None, capital=2100.0,
+        impact_y=0.6, no_order_filters=False, venue_rules=None, data_root=None,
+        export_unit_returns=None, total_tree_pss_bytes=None,
+        replay_tree_pss_bytes=None, min_available_bytes=None,
+    )
+
+
+def test_holdout_gate_converts_journal_race_to_exit(tmp_path, monkeypatch) -> None:
+    """A journal that appears between check and record maps to SystemExit, not a traceback."""
+    import src.evaluation.holdout as holdout_mod
+    from src.common.errors import DataIntegrityError
+
+    _patch_releases_root(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        holdout_mod, "consume_holdout_look",
+        lambda *args, **kwargs: (_ for _ in ()).throw(DataIntegrityError("race")),
+    )
+    window = (pd.Timestamp("2026-07-01", tz="UTC"), pd.Timestamp("2026-10-01", tz="UTC"))
+    with pytest.raises(SystemExit, match="race"):
+        backtest_mod._holdout_gate("flow_mom_top20", *window, True)
+
+
+def test_strategy_command_records_trial_and_neighbors(tmp_path, monkeypatch) -> None:
+    """A successful strategy run appends a trial and fans out the neighbor set."""
+    import src.engine.backtest_persist as persist_mod
+    import src.engine.strategy_backtest as run_mod
+
+    root = _patch_releases_root(monkeypatch, tmp_path)
+    index = pd.date_range("2025-01-01", periods=31, freq="D", tz="UTC")
+    returns = pd.Series(np.linspace(0.001, 0.002, 31), index=index, dtype="float64")
+    run = types.SimpleNamespace(
+        evidence=types.SimpleNamespace(base_daily=types.SimpleNamespace(returns=returns)),
+        source_gap_excluded_symbols=(),
+    )
+    monkeypatch.setattr(run_mod, "run_strategy_backtest", lambda request: run)
+    monkeypatch.setattr(backtest_mod, "_strategy_run_statistics", lambda run: {})
+    monkeypatch.setattr(
+        persist_mod, "persist_strategy_backtest",
+        lambda run, output, **kwargs: Path(output).write_text("{}", encoding="utf-8"),
+    )
+    argv = [
+        "backtest", "strategy",
+        "--source-start", "2024-01-01", "--start", "2025-01-01", "--end", "2025-02-01",
+        "--output", str(tmp_path / "strategy.json"), "--neighbors",
+    ]
+    backtest_mod.run_strategy_backtest_command(_parse(argv))
+    rows = (root / "flow_mom.trials.jsonl").read_text(encoding="utf-8").strip().splitlines()
+    assert len(rows) == 1 + 7
+    run_output = tmp_path / "strategy.json"
+    expected = {
+        run_output.parent.parent / f"{run_output.parent.name}_neighbor{i}" / "result.json"
+        for i in range(7)
+    }
+    assert all(path.exists() for path in expected)
+    import json as _json
+
+    assert all(_json.loads(line)["source"] == "cli" for line in rows)
+
+
+def test_account_command_suppresses_trial_ledger_failure(tmp_path, monkeypatch) -> None:
+    """A broken trial journal never fails an otherwise successful account replay."""
+    import src.application.strategy_account as account_mod
+    import src.strategy.release as release_mod
+
+    def _boom(root_arg=None) -> Path:
+        raise OSError("journal unavailable")
+
+    monkeypatch.setattr(release_mod, "releases_dir", _boom)
+    index = pd.date_range("2025-01-01", periods=31, freq="D", tz="UTC")
+    equity = pd.Series(np.linspace(2100.0, 2200.0, 31), index=index, dtype="float64")
+    report = types.SimpleNamespace(
+        result=types.SimpleNamespace(
+            daily_equity=equity, liquidated_at=None, maker_fill_fraction=0.98,
+        ),
+        payload={"moment_source": "stub", "cagr": 0.5, "mdd": 0.05},
+    )
+    monkeypatch.setattr(account_mod, "run_account_replay", lambda request: report)
+    backtest_mod.run_account_replay_command(_account_namespace(tmp_path))
+
+
+def test_run_neighbor_set_suppresses_evidence_failures(tmp_path, monkeypatch) -> None:
+    """A neighbor without readable evidence still persists; its trial is skipped quietly."""
+    import src.engine.backtest_persist as persist_mod
+    import src.engine.strategy_backtest as run_mod
+    from src.strategy.targets import FLOW_MOM_TOP20
+
+    root = _patch_releases_root(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        run_mod, "run_strategy_backtest",
+        lambda request: types.SimpleNamespace(request=request, evidence=None),
+    )
+    monkeypatch.setattr(
+        run_mod, "StrategyBacktestRequest",
+        lambda **kwargs: types.SimpleNamespace(**kwargs),
+    )
+    monkeypatch.setattr(
+        persist_mod, "persist_strategy_backtest",
+        lambda run, output, **kwargs: Path(output).write_text("{}", encoding="utf-8"),
+    )
+    monkeypatch.setattr(backtest_mod, "_strategy_run_statistics", lambda run: {})
+    output = tmp_path / "runs" / "unit" / "result.json"
+    output.parent.mkdir(parents=True)
+    backtest_mod._run_neighbor_set(
+        FLOW_MOM_TOP20, source_start=pd.Timestamp("2024-01-01", tz="UTC"),
+        start=pd.Timestamp("2025-01-01", tz="UTC"), end=pd.Timestamp("2025-02-01", tz="UTC"),
+        base_spec=None, stress_spec=None, report_periods=(), data_root=None,
+        budget=None, execution_bound="OHLCV_IMMEDIATE_TAKER", output=output,
+    )
+    assert not (root / "flow_mom.trials.jsonl").exists()

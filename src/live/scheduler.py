@@ -1,9 +1,4 @@
-"""24/7 무인 섬도우 데몬 스케줄러 (ADR_LIVE_DAEMON_DOCKER_DEPLOY).
-
-I-DAEMON-IDEMPOTENT: 상태 파일에 기록된 마지막 처리 시각 이상은 재실행하지 않는다.
-I-DAEMON-CATCHUP: 오늘의 실행 윈도우(T+1h)가 이미 지났으면 즉시 캐치업 실행한다.
-I-DAEMON-NO-CRASH-LOOP: 사이클 예외는 로그로 흡수하고 다음 날짜로 진행한다.
-"""
+"""Idempotent daemon scheduling with durable catch-up and bounded retries."""
 
 from __future__ import annotations
 
@@ -42,7 +37,6 @@ from src.live.settings import LiveSettings
 from src.strategy.targets import FLOW_MOM_TOP20
 
 logger = logging.getLogger("LiveScheduler")
-
 #: 대기 중 sleep_fn 호출 간격 상한(초). 종료 시그널 처리 지연과 테스트 대기 횟수를 bound한다.
 DAEMON_POLL_INTERVAL_SECONDS: float = 300.0
 # stale_after_s(2700초/45분)보다 한참 짧게 잡아, 스케줄러 지연이 겹쳐도 여유가 크다.
@@ -50,12 +44,10 @@ DAEMON_HEARTBEAT_PULSE_INTERVAL_SECONDS: float = 120.0
 _HEARTBEAT_PULSE_JOIN_TIMEOUT_S: float = 10.0
 #: strategy 신호 공개 시각이며, 공식 메이커 원장의 제출봉과 같은 기준이다.
 DECISION_RELEASE_OFFSET: pd.Timedelta = pd.Timedelta(hours=FLOW_MOM_TOP20.release_hour_utc)
-
 DAEMON_RETRY_BACKOFF_SECONDS: tuple[float, ...] = (300.0, 600.0, 1200.0, 2400.0)
 DAEMON_COLD_UNIVERSE_EXIT_CODE: int = 3
 #: Maximum signal-step duration assumed for the liveness ``expected_by`` deadline.
 SIGNAL_STEP_TIMEOUT_S: float = 900.0
-
 _STATE_KEY = "last_processed_decision_time"
 
 
@@ -649,6 +641,23 @@ def _run_cycle_at(
     return run_shadow_cycle(settings, decision_time, weights_path, now=now_fn(), shutdown=shutdown)
 
 
+def _run_startup_gates(settings: LiveSettings) -> None:
+    """Fail loud before any venue call when a start gate refuses the daemon."""
+    from src.live.preflight import release_gate_check, tax_collection_check
+    from src.live.tax_ledger import resolve_tax_ledger_dir
+
+    tax_check = tax_collection_check(settings, resolve_tax_ledger_dir(settings))
+    if not tax_check.passed:
+        logger.critical("[RISK] daemon_refused reason=tax_collection_disabled mode=%s detail=%s", settings.mode.value, tax_check.detail)
+        raise LiveTradingError(f"daemon refused to start: {tax_check.detail}")
+    if tax_check.detail.startswith("WARNING:"):
+        logger.warning("[RISK] %s", tax_check.detail)
+    release_check = release_gate_check(settings)
+    if not release_check.passed:
+        logger.critical("[RISK] daemon_refused reason=release_gate mode=%s detail=%s", settings.mode.value, release_check.detail)
+        raise LiveTradingError(f"daemon refused to start: {release_check.detail}")
+
+
 def run_daemon(
     settings: LiveSettings,
     weights_path: Path,
@@ -669,15 +678,7 @@ def run_daemon(
     ``refresh_fn`` / ``signal_step_fn`` / ``venue_fn`` / ``prefetch_fn`` default to the live
     wiring and are injected only by tests -- there is no path-sniffing test detection.
     """
-    from src.live.preflight import tax_collection_check
-    from src.live.tax_ledger import resolve_tax_ledger_dir
-
-    tax_check = tax_collection_check(settings, resolve_tax_ledger_dir(settings))
-    if not tax_check.passed:
-        logger.critical("[RISK] daemon_refused reason=tax_collection_disabled mode=%s detail=%s", settings.mode.value, tax_check.detail)
-        raise LiveTradingError(f"daemon refused to start: {tax_check.detail}")
-    if tax_check.detail.startswith("WARNING:"):
-        logger.warning("[RISK] %s", tax_check.detail)
+    _run_startup_gates(settings)
     defaults = default_step_fns(settings, weights_path)
     if signal_step_fn is None:
         signal_step_fn = defaults["signal"]
@@ -1004,4 +1005,3 @@ def run_daemon(
         ):
             break
         continue
-

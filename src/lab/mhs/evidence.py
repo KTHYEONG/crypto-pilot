@@ -13,20 +13,28 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-from scipy.stats import norm
 
 from src.core.bootstrap import iter_stationary_bootstrap_index_chunks, stationary_bootstrap_max_blocks
 from src.core.types import DISCOVERY_START, MEASURED_EXECUTION_COST_TIERS_BPS
 from src.engine.execution import mhs_ledger_pnl
+from src.evaluation.statistics import (  # noqa: F401 -- re-exported canonical location
+    _expected_max_trial_sr,
+    _psr_radicand,
+    deflated_sharpe_ratio,
+    probabilistic_sharpe_ratio,
+)
+
+__all__ = [
+    "_expected_max_trial_sr",
+    "_psr_radicand",
+    "deflated_sharpe_ratio",
+    "probabilistic_sharpe_ratio",
+]
 from src.lab.mhs.params import DEFAULT_SELECTION_WINDOW, PERIODS_PER_YEAR_1H, PNL_VOL_TARGET_BURN_IN_DAYS
 from src.quant.evaluation.policy import HOLDOUT_CUTOFF
 
-_EULER_GAMMA = 0.577215664901532860606512090082402431
 
-
-def selection_overlap_fraction(
-    report_start: pd.Timestamp, report_end: pd.Timestamp
-) -> float:
+def selection_overlap_fraction(report_start: pd.Timestamp, report_end: pd.Timestamp) -> float:
     """Fraction of the report window inside ``DEFAULT_SELECTION_WINDOW``.
 
     Observational disclosure only (never a blocking gate): the CLI defaults
@@ -36,9 +44,7 @@ def selection_overlap_fraction(
     raises ``ValueError`` when ``report_end < report_start``.
     """
     if report_end < report_start:
-        raise ValueError(
-            f"report_end ({report_end}) must not precede report_start ({report_start})"
-        )
+        raise ValueError(f"report_end ({report_end}) must not precede report_start ({report_start})")
     span = report_end - report_start
     if span <= pd.Timedelta(0):
         return 0.0
@@ -59,9 +65,7 @@ def _daily_segment_metrics(segment: pd.Series) -> dict[str, Any]:
     running_max = curve.cummax()
     max_drawdown = float((curve / running_max - 1.0).min())
     std = float(segment.std(ddof=1))
-    naive_sharpe = (
-        float(segment.mean() / std * np.sqrt(365.25)) if std > 0 else float("nan")
-    )
+    naive_sharpe = float(segment.mean() / std * np.sqrt(365.25)) if std > 0 else float("nan")
     return {
         "start": str(segment.index[0]),
         "end": str(segment.index[-1]),
@@ -119,9 +123,7 @@ def parameter_oos_split_evidence(
     oos_metrics = _daily_segment_metrics(oos_seg)
     in_sharpe = in_metrics["naive_sharpe"]
     sharpe_decay_ratio = (
-        float(oos_metrics["naive_sharpe"] / in_sharpe)
-        if np.isfinite(in_sharpe) and in_sharpe > 0.0
-        else None
+        float(oos_metrics["naive_sharpe"] / in_sharpe) if np.isfinite(in_sharpe) and in_sharpe > 0.0 else None
     )
     return {
         "boundary": str(boundary),
@@ -144,6 +146,7 @@ def _sharpe(series: pd.Series, periods_per_year: float) -> float:
         return float("inf") if mean > 0 else float("-inf")
     return float(mean / sd * math.sqrt(periods_per_year))
 
+
 def effective_breadth(returns: pd.DataFrame) -> tuple[float, float]:
     """Participation-ratio effective breadth of a return panel.
 
@@ -156,9 +159,7 @@ def effective_breadth(returns: pd.DataFrame) -> tuple[float, float]:
     """
     n_columns, n_rows = returns.shape[1], returns.shape[0]
     if n_columns < 2 or n_rows < 2:
-        raise ValueError(
-            f"effective_breadth requires >= 2 columns and >= 2 rows, got {returns.shape}"
-        )
+        raise ValueError(f"effective_breadth requires >= 2 columns and >= 2 rows, got {returns.shape}")
     corr = returns.corr().to_numpy()
     corr = np.where(np.isfinite(corr), corr, 0.0)
     np.fill_diagonal(corr, 1.0)
@@ -277,9 +278,7 @@ def cost_response_curve(
     for rate in cost_grid_bps:
         net, _turnover = mhs_ledger_pnl(weights, opens, bar_funding, rate)
         sd = float(net.std(ddof=1)) if len(net) > 1 else 0.0
-        t_stat = (
-            float(net.mean() / sd * math.sqrt(len(net))) if sd > 0 else float("nan")
-        )
+        t_stat = float(net.mean() / sd * math.sqrt(len(net))) if sd > 0 else float("nan")
         out[rate] = CostResponsePoint(
             net_ann=float(net.mean()) * periods_per_year,
             net_sharpe=_sharpe(net, periods_per_year),
@@ -310,7 +309,8 @@ def year_restricted_correlation(
 
 
 def _event_clusters(
-    base: pd.Series, window_bars: int,
+    base: pd.Series,
+    window_bars: int,
 ) -> tuple[list[tuple[int, int]], list[float]]:
     """Coalesce holding-horizon windows around the top positive bars.
 
@@ -327,10 +327,7 @@ def _event_clusters(
     n_seeds = max(1, math.ceil(0.01 * n))
     seeds = list(positive.index[:n_seeds])
     positions = {t: i for i, t in enumerate(base.index)}
-    intervals = [
-        (max(0, positions[t] - window_bars), min(n - 1, positions[t] + window_bars))
-        for t in seeds
-    ]
+    intervals = [(max(0, positions[t] - window_bars), min(n - 1, positions[t] + window_bars)) for t in seeds]
     intervals.sort()
     merged: list[tuple[int, int]] = []
     for lo, hi in intervals:
@@ -442,14 +439,23 @@ def book_evidence(
         raise ValueError(f"tail_one_way_bps must be >= 0, got {tail_one_way_bps}")
 
     prescreen = cost_response_curve(
-        weights_1h, opens, bar_funding, cost_grid_bps, periods_per_year,
+        weights_1h,
+        opens,
+        bar_funding,
+        cost_grid_bps,
+        periods_per_year,
     )
 
     effective_weights = weights_1h.shift(2).fillna(0.0)
     fwd = opens.pct_change()
     _net, turnover = mhs_ledger_pnl(weights_1h, opens, bar_funding, tail_one_way_bps)
     tail = tail_sensitivity_curve(
-        effective_weights, fwd, turnover, tail_one_way_bps, periods_per_year, event_window_bars,
+        effective_weights,
+        fwd,
+        turnover,
+        tail_one_way_bps,
+        periods_per_year,
+        event_window_bars,
     )
     del effective_weights, fwd, _net, turnover
     return BookEvidence(prescreen=prescreen, tail=tail)
@@ -487,9 +493,7 @@ def autocorrelation_adjusted_sharpe(
     if not daily_net_returns.index.is_monotonic_increasing:
         raise ValueError("daily_net_returns must be monotonic in time")
     if len(daily_net_returns) < max_lag_days + 2:
-        raise ValueError(
-            f"need at least {max_lag_days + 2} observations, got {len(daily_net_returns)}"
-        )
+        raise ValueError(f"need at least {max_lag_days + 2} observations, got {len(daily_net_returns)}")
     if annualization_days < 1:
         raise ValueError(f"annualization_days must be >= 1, got {annualization_days}")
     if max_lag_days < 1:
@@ -534,80 +538,6 @@ def effective_observation_count(returns: pd.Series, max_lag: int = 24) -> int:
     denom = 1.0 + 2.0 * _bartlett_weighted_acf_sum(demeaned, var, max_lag)
     n_eff = int(n / denom) if denom > 0.0 else 0
     return int(min(max(n_eff, 1), n))
-
-
-def _psr_radicand(observed_sr: float, skew: float, kurtosis: float) -> float:
-    """PSR variance correction ``1 - skew*SR + ((kurt-1)/4)*SR^2`` (shared form)."""
-    return 1.0 - skew * observed_sr + ((kurtosis - 1.0) / 4.0) * observed_sr**2
-
-
-def probabilistic_sharpe_ratio(
-    observed_sr: float,
-    benchmark_sr: float,
-    n_obs: int,
-    skew: float,
-    kurtosis: float,
-) -> float:
-    """Probabilistic Sharpe Ratio (Bailey & Lopez de Prado): normal CDF of the
-    probability that the true (non-annualized) Sharpe exceeds ``benchmark_sr``.
-
-    All Sharpe inputs are per-observation (non-annualized): the raw ``mean/std``
-    of the return series, never scaled by ``sqrt(periods_per_year)``.
-    ``kurtosis`` is the full (non-excess) fourth standardized moment, so pass
-    ``excess_kurtosis + 3.0``. Returns NaN (never ``inf`` or a complex value)
-    when the denominator radicand is not strictly positive.
-    """
-    if n_obs < 2:
-        raise ValueError(f"n_obs must be >= 2, got {n_obs}")
-    radicand = _psr_radicand(observed_sr, skew, kurtosis)
-    if radicand <= 0.0:
-        return float("nan")
-    z = (observed_sr - benchmark_sr) * math.sqrt(n_obs - 1.0) / math.sqrt(radicand)
-    return float(norm.cdf(z))
-
-
-def _expected_max_trial_sr(trial_sr_variance: float, n_trials: int) -> float:
-    """Expected maximum Sharpe over ``n_trials`` independent zero-edge trials."""
-    sd = math.sqrt(trial_sr_variance)
-    return float(
-        sd
-        * (
-            (1.0 - _EULER_GAMMA) * norm.ppf(1.0 - 1.0 / n_trials)
-            + _EULER_GAMMA * norm.ppf(1.0 - 1.0 / (n_trials * math.e))
-        )
-    )
-
-
-def deflated_sharpe_ratio(
-    observed_sr: float,
-    trial_sr_variance: float,
-    n_trials: int,
-    n_obs: int,
-    skew: float,
-    kurtosis: float,
-) -> float:
-    """Deflated Sharpe Ratio (Bailey & Lopez de Prado): PSR against the expected
-    maximum Sharpe over ``n_trials`` independent trials under the null.
-
-    The benchmark is ``sqrt(trial_sr_variance) * ((1 - gamma) * Phi_inv(1 - 1/N)
-    + gamma * Phi_inv(1 - 1/(N*e)))`` with ``gamma`` the Euler-Mascheroni
-    constant. All Sharpe inputs are per-observation (non-annualized);
-    ``trial_sr_variance`` is the variance of the per-observation Sharpe across
-    trials. With zero trial dispersion the benchmark collapses to zero and the
-    result equals the plain PSR against a zero benchmark.
-    """
-    if n_trials < 1:
-        raise ValueError(f"n_trials must be >= 1, got {n_trials}")
-    if n_obs < 2:
-        raise ValueError(f"n_obs must be >= 2, got {n_obs}")
-    if trial_sr_variance < 0.0:
-        raise ValueError(
-            f"trial_sr_variance must be >= 0, got {trial_sr_variance}"
-        )
-    if trial_sr_variance == 0.0:
-        return probabilistic_sharpe_ratio(observed_sr, 0.0, n_obs, skew, kurtosis)
-    benchmark_sr = _expected_max_trial_sr(trial_sr_variance, n_trials)
-    return probabilistic_sharpe_ratio(observed_sr, benchmark_sr, n_obs, skew, kurtosis)
 
 
 TRIAL_SHARPE_DEDUP_DECIMALS: int = 6
@@ -700,14 +630,8 @@ def deflated_sharpe_decomposition(
     if n_obs_effective < 2:
         raise ValueError(f"n_obs_effective must be >= 2, got {n_obs_effective}")
     if trial_sr_variance < 0.0:
-        raise ValueError(
-            f"trial_sr_variance must be >= 0, got {trial_sr_variance}"
-        )
-    benchmark_sr = (
-        0.0
-        if trial_sr_variance == 0.0
-        else _expected_max_trial_sr(trial_sr_variance, n_trials)
-    )
+        raise ValueError(f"trial_sr_variance must be >= 0, got {trial_sr_variance}")
+    benchmark_sr = 0.0 if trial_sr_variance == 0.0 else _expected_max_trial_sr(trial_sr_variance, n_trials)
     margin = observed_sr - benchmark_sr
     return DsrDecomposition(
         observed_sr=observed_sr,
@@ -754,9 +678,7 @@ def causal_regime_labels(returns: pd.Series, btc_close: pd.Series) -> pd.DataFra
     """
     btc_level = btc_close.reindex(returns.index).astype("float64")
     trailing_high = (
-        btc_level.rolling(
-            _REGIME_TRAILING_HIGH_HOURS, min_periods=_REGIME_TRAILING_HIGH_MIN_HOURS
-        ).max().shift(1)
+        btc_level.rolling(_REGIME_TRAILING_HIGH_HOURS, min_periods=_REGIME_TRAILING_HIGH_MIN_HOURS).max().shift(1)
     )
     drawdown = btc_level / trailing_high - 1.0
     bull = (drawdown > _BTC_DRAWDOWN_BULL_FLOOR).fillna(False).to_numpy(dtype=bool)
@@ -766,22 +688,11 @@ def causal_regime_labels(returns: pd.Series, btc_close: pd.Series) -> pd.DataFra
     states[~bull & ((drawdown >= _BTC_DRAWDOWN_BEAR_FLOOR).fillna(False).to_numpy(dtype=bool))] = "correction"
     states[bear] = "bear"
 
-    realized_vol = (
-        returns.rolling(_REGIME_VOL_LOOKBACK_HOURS, min_periods=_REGIME_VOL_MIN_HOURS)
-        .std().shift(1)
-    )
-    quantile_low = (
-        realized_vol.expanding(min_periods=_REGIME_TERCILE_MIN_HOURS)
-        .quantile(1.0 / 3.0).shift(1)
-    )
-    quantile_high = (
-        realized_vol.expanding(min_periods=_REGIME_TERCILE_MIN_HOURS)
-        .quantile(2.0 / 3.0).shift(1)
-    )
+    realized_vol = returns.rolling(_REGIME_VOL_LOOKBACK_HOURS, min_periods=_REGIME_VOL_MIN_HOURS).std().shift(1)
+    quantile_low = realized_vol.expanding(min_periods=_REGIME_TERCILE_MIN_HOURS).quantile(1.0 / 3.0).shift(1)
+    quantile_high = realized_vol.expanding(min_periods=_REGIME_TERCILE_MIN_HOURS).quantile(2.0 / 3.0).shift(1)
     is_low = (realized_vol <= quantile_low).fillna(False).to_numpy(dtype=bool)
-    is_mid = (
-        (realized_vol > quantile_low) & (realized_vol <= quantile_high)
-    ).fillna(False).to_numpy(dtype=bool)
+    is_mid = ((realized_vol > quantile_low) & (realized_vol <= quantile_high)).fillna(False).to_numpy(dtype=bool)
     is_high = (realized_vol > quantile_high).fillna(False).to_numpy(dtype=bool)
     terciles: np.ndarray = np.full(len(returns), "", dtype=object)
     terciles[is_low] = "low"
@@ -795,7 +706,8 @@ def causal_regime_labels(returns: pd.Series, btc_close: pd.Series) -> pd.DataFra
 
 
 def regime_conditional_sharpe_blocks(
-    returns: pd.Series, btc_close: pd.Series,
+    returns: pd.Series,
+    btc_close: pd.Series,
 ) -> dict[str, dict[str, float]]:
     """Causal regime stratification of hourly returns (observational only).
 
@@ -841,9 +753,7 @@ class AnchoredPurgedFold:
         bounds = (self.train_start, self.train_end, self.validation_start, self.validation_end)
         if any(b.tzinfo is None for b in bounds):
             raise ValueError("fold bounds must be tz-aware")
-        if not (
-            self.train_start < self.train_end < self.validation_start < self.validation_end
-        ):
+        if not (self.train_start < self.train_end < self.validation_start < self.validation_end):
             raise ValueError("fold bounds must be strictly ascending")
         if self.forward_dependency_hours < 1:
             raise ValueError("forward_dependency_hours must be >= 1")
@@ -930,7 +840,8 @@ def synthetic_stress_scenarios() -> tuple[SyntheticStressScenario, ...]:
         SyntheticStressScenario("PASSIVE_FILL_DEGRADATION", "passive fill rate degrades"),
         SyntheticStressScenario("FUNDING_EXTREME", "funding rate reaches an extreme"),
         SyntheticStressScenario(
-            "LIQUIDITY_DETERIORATION_50PCT", "50% of symbols face liquidity deterioration",
+            "LIQUIDITY_DETERIORATION_50PCT",
+            "50% of symbols face liquidity deterioration",
         ),
         SyntheticStressScenario("VENUE_API_OUTAGE_30M", "venue/API outage of 30 minutes"),
     )
@@ -1009,7 +920,10 @@ def _bootstrap_chunk_size(n: int) -> int:
 
 
 def _stationary_block_bootstrap_paths(
-    net_returns: np.ndarray, n_replicates: int, mean_block: int, seed: int,
+    net_returns: np.ndarray,
+    n_replicates: int,
+    mean_block: int,
+    seed: int,
 ) -> np.ndarray:
     """Wealth multipliers (final wealth / initial) per replicate, vectorized.
 
@@ -1038,8 +952,13 @@ def _stationary_block_bootstrap_paths(
     chunk = _bootstrap_chunk_size(n)
     max_blocks = stationary_bootstrap_max_blocks(n, mean_block)
     for index_chunk in iter_stationary_bootstrap_index_chunks(
-        rng, source_len=n, path_len=n, n_replicates=n_replicates, mean_block=mean_block,
-        chunk_size=chunk, max_blocks=max_blocks,
+        rng,
+        source_len=n,
+        path_len=n,
+        n_replicates=n_replicates,
+        mean_block=mean_block,
+        chunk_size=chunk,
+        max_blocks=max_blocks,
     ):
         rows = index_chunk.indices.shape[0]
         sample = net_returns[index_chunk.indices]
@@ -1048,7 +967,10 @@ def _stationary_block_bootstrap_paths(
 
 
 def _bootstrap_mdd_paths(
-    net_returns: np.ndarray, n_replicates: int, mean_block: int, seed: int,
+    net_returns: np.ndarray,
+    n_replicates: int,
+    mean_block: int,
+    seed: int,
 ) -> np.ndarray:
     """Per-replicate max drawdown of the block-bootstrap equity path, vectorized.
 
@@ -1075,8 +997,13 @@ def _bootstrap_mdd_paths(
     chunk = _bootstrap_chunk_size(n)
     max_blocks = stationary_bootstrap_max_blocks(n, mean_block)
     for index_chunk in iter_stationary_bootstrap_index_chunks(
-        rng, source_len=n, path_len=n, n_replicates=n_replicates, mean_block=mean_block,
-        chunk_size=chunk, max_blocks=max_blocks,
+        rng,
+        source_len=n,
+        path_len=n,
+        n_replicates=n_replicates,
+        mean_block=mean_block,
+        chunk_size=chunk,
+        max_blocks=max_blocks,
     ):
         rows = index_chunk.indices.shape[0]
         sample = net_returns[index_chunk.indices]
@@ -1143,9 +1070,7 @@ def compute_deployment_readiness(
     if k7 > 1:
         from numpy.lib.stride_tricks import sliding_window_view
 
-        worst_7d = float(
-            sliding_window_view(net.to_numpy(dtype="float64"), k7).sum(axis=1).min()
-        )
+        worst_7d = float(sliding_window_view(net.to_numpy(dtype="float64"), k7).sum(axis=1).min())
     else:
         worst_7d = worst_1d
     worst_event = worst_7d if k7 > 1 else worst_1d
@@ -1162,9 +1087,7 @@ def compute_deployment_readiness(
     # per leverage is exactly equivalent (ruin_probs[lev] is 0.0 or 1.0).
     ruin_probs: dict[float, float] = {}
     for lev in leverage_grid:
-        ruin_probs[lev] = float(
-            bool((np.cumprod(1.0 + lev * net_arr) <= 0.0).any())
-        )
+        ruin_probs[lev] = float(bool((np.cumprod(1.0 + lev * net_arr) <= 0.0).any()))
 
     return DeploymentReadinessResult(
         geometric_cagr=geometric_cagr,
@@ -1191,7 +1114,4 @@ def compute_deployment_readiness(
 
 def required_cost_tiers() -> tuple[float, ...]:
     """The three named measured execution tiers, always reported together."""
-    return tuple(
-        MEASURED_EXECUTION_COST_TIERS_BPS[tier]
-        for tier in ("optimistic", "base", "stress")
-    )
+    return tuple(MEASURED_EXECUTION_COST_TIERS_BPS[tier] for tier in ("optimistic", "base", "stress"))

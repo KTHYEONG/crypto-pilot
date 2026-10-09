@@ -1,7 +1,7 @@
 """``lab`` command group: exploratory research.
 
 Results here never deploy by themselves; a strategy reaches live trading only
-as a ``StrategyRelease`` promoted by ``evaluate promote``.
+as a ``StrategyRelease`` accepted by ``evaluate strategy``.
 
 Every ``src.lab`` import lives inside handler (or leaf-registration) function
 bodies, so importing this module and building parsers for the other groups
