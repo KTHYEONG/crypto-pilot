@@ -215,14 +215,19 @@ def load_ledger(path: Path) -> LedgerState:
         if not isinstance(watermarks_raw, dict):
             raise DataIntegrityError(f"ledger funding_watermarks must be an object: {path}")
         watermarks = {
-            str(symbol): _parse_utc(value, "funding_watermarks", path) for symbol, value in watermarks_raw.items()
+            str(symbol): _parse_utc(value, "funding_watermarks", path)
+            for symbol, value in watermarks_raw.items()
         }
         history_raw = raw.get(_HISTORY_KEY, [])
         if not isinstance(history_raw, list):
             raise DataIntegrityError(f"ledger position_history must be a list: {path}")
         parsed_history: list[PositionSnapshot] = []
         for entry in history_raw:
-            if not isinstance(entry, dict) or "effective_from" not in entry or "positions" not in entry:
+            if (
+                not isinstance(entry, dict)
+                or "effective_from" not in entry
+                or "positions" not in entry
+            ):
                 raise DataIntegrityError(f"ledger position_history entry malformed: {path}")
             parsed_history.append(
                 PositionSnapshot(
@@ -347,7 +352,9 @@ def commit_journal_fills(
     seqs = [int(fill.fill_seq) for fill in pending]
     expected = list(range(watermark + 1, seqs[-1] + 1))
     if seqs != expected:
-        raise DataIntegrityError(f"journal fill gap: watermark {watermark}, got fill_seq {seqs}")
+        raise DataIntegrityError(
+            f"journal fill gap: watermark {watermark}, got fill_seq {seqs}"
+        )
     positions = dict(base_state.positions)
     cash: Decimal | None = base_state.cash_usdt
     if track_cash and cash is None:
@@ -355,7 +362,9 @@ def commit_journal_fills(
     for fill in pending:
         side = str(fill.side)
         if side not in ("BUY", "SELL"):
-            raise DataIntegrityError(f"journal fill {fill.fill_seq} has unknown side {fill.side!r}")
+            raise DataIntegrityError(
+                f"journal fill {fill.fill_seq} has unknown side {fill.side!r}"
+            )
         qty = Decimal(str(fill.quantity))
         if side == "BUY":
             positions[fill.symbol] = positions.get(fill.symbol, Decimal(0)) + qty
@@ -363,7 +372,9 @@ def commit_journal_fills(
             positions[fill.symbol] = positions.get(fill.symbol, Decimal(0)) - qty
         if track_cash and str(getattr(fill, "kind", "execution")) != "operator_resync":
             assert cash is not None
-            cash = cash + _fill_cash_delta(side, qty, Decimal(str(fill.price)), float(fill.fee_bps))
+            cash = cash + _fill_cash_delta(
+                side, qty, Decimal(str(fill.price)), float(fill.fee_bps)
+            )
     latest_filled_at = max(pd.Timestamp(fill.filled_at) for fill in pending)
     history = append_position_snapshot(
         base_state.position_history,
@@ -380,7 +391,9 @@ def commit_journal_fills(
         equity_high_water_mark=hwm,
         cash_usdt=cash,
         last_executed_decision_time=(
-            executed_decision_time if executed_decision_time is not None else base_state.last_executed_decision_time
+            executed_decision_time
+            if executed_decision_time is not None
+            else base_state.last_executed_decision_time
         ),
         position_history=history,
         journal_applied_fill_seq=seqs[-1],
@@ -389,13 +402,13 @@ def commit_journal_fills(
     return new_state
 
 
-def mark_fills_recorded(path: Path, base_state: LedgerState, through_fill_seq: int) -> LedgerState:
+def mark_fills_recorded(
+    path: Path, base_state: LedgerState, through_fill_seq: int
+) -> LedgerState:
     """Advance journal_recorded_fill_seq watermark after downstream evidence is written."""
     through = int(through_fill_seq)
     if through < base_state.journal_recorded_fill_seq:
-        raise ValueError(
-            f"journal_recorded_fill_seq would move backwards: {base_state.journal_recorded_fill_seq} -> {through}"
-        )
+        raise ValueError(f"journal_recorded_fill_seq would move backwards: {base_state.journal_recorded_fill_seq} -> {through}")
     if through > base_state.journal_applied_fill_seq:
         raise ValueError(
             f"journal_recorded_fill_seq ({through}) above "
@@ -411,7 +424,9 @@ def mark_fills_recorded(path: Path, base_state: LedgerState, through_fill_seq: i
     return new_state
 
 
-def enter_derisk(path: Path, base_state: LedgerState, *, reasons: Sequence[str], now: pd.Timestamp) -> LedgerState:
+def enter_derisk(
+    path: Path, base_state: LedgerState, *, reasons: Sequence[str], now: pd.Timestamp
+) -> LedgerState:
     """Persist the de-risk-only state and unioned reasons."""
     now_ts = pd.Timestamp(now)
     if now_ts.tzinfo is None:
@@ -483,14 +498,18 @@ def append_position_snapshot(
     return tuple(snaps[start:])
 
 
-def position_at(history: Sequence[PositionSnapshot], symbol: str, at: pd.Timestamp) -> Decimal:
+def position_at(
+    history: Sequence[PositionSnapshot], symbol: str, at: pd.Timestamp
+) -> Decimal:
     latest: PositionSnapshot | None = None
     for snap in history:
         if snap.effective_from >= at:
             break
         latest = snap
     if latest is None:
-        raise DataIntegrityError(f"paper funding epoch {at.isoformat()} predates position history for {symbol}")
+        raise DataIntegrityError(
+            f"paper funding epoch {at.isoformat()} predates position history for {symbol}"
+        )
     return latest.positions.get(symbol, Decimal(0))
 
 

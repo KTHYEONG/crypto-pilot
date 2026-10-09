@@ -59,9 +59,13 @@ def _parse_ts(value: Any, *, line: int, path: Path) -> pd.Timestamp:
     try:
         stamp = pd.Timestamp(value)
     except (TypeError, ValueError) as exc:
-        raise DataIntegrityError(f"order journal bad timestamp at line {line}: {path}") from exc
+        raise DataIntegrityError(
+            f"order journal bad timestamp at line {line}: {path}"
+        ) from exc
     if stamp.tzinfo is None:
-        raise DataIntegrityError(f"order journal naive timestamp at line {line}: {path}")
+        raise DataIntegrityError(
+            f"order journal naive timestamp at line {line}: {path}"
+        )
     return stamp
 
 
@@ -69,7 +73,9 @@ def _parse_decimal(value: Any, *, line: int, path: Path) -> Decimal:
     try:
         return Decimal(str(value))
     except (ValueError, TypeError, ArithmeticError) as exc:
-        raise DataIntegrityError(f"order journal bad decimal at line {line}: {path}") from exc
+        raise DataIntegrityError(
+            f"order journal bad decimal at line {line}: {path}"
+        ) from exc
 
 
 @dataclass(frozen=True, slots=True)
@@ -198,17 +204,23 @@ class OrderJournal:
                 if index == len(lines) and not ends_with_newline:
                     self._torn_offset = len(raw.encode("utf-8")) - len(line.encode("utf-8"))
                     return
-                raise DataIntegrityError(f"order journal corrupt at line {index}: {self._path}") from None
+                raise DataIntegrityError(
+                    f"order journal corrupt at line {index}: {self._path}"
+                ) from None
             try:
                 self._apply_record(record, line=index)
             except DataIntegrityError:
                 raise
             except (KeyError, TypeError, ValueError) as exc:
-                raise DataIntegrityError(f"order journal corrupt at line {index}: {self._path}") from exc
+                raise DataIntegrityError(
+                    f"order journal corrupt at line {index}: {self._path}"
+                ) from exc
 
     def _apply_record(self, record: Any, *, line: int) -> None:
         if not isinstance(record, dict):
-            raise DataIntegrityError(f"order journal corrupt at line {line}: {self._path}")
+            raise DataIntegrityError(
+                f"order journal corrupt at line {line}: {self._path}"
+            )
         event = record.get("event")
         if event == "schema":
             self._has_schema = True
@@ -219,7 +231,11 @@ class OrderJournal:
             attempt_seq = record.get("attempt_seq")
             side = record.get("side")
             quantity_raw = record.get("quantity")
-            quantity = _parse_decimal(quantity_raw, line=line, path=self._path) if quantity_raw is not None else None
+            quantity = (
+                _parse_decimal(quantity_raw, line=line, path=self._path)
+                if quantity_raw is not None
+                else None
+            )
             reduce_only = record.get("reduce_only")
             leg_index = record.get("leg_index")
             recorded_raw = record.get("recorded_at", record.get("ts"))
@@ -251,14 +267,21 @@ class OrderJournal:
                 self._next_attempt_seq = seq + 1
             marks_raw = record.get("decision_marks", {})
             if not isinstance(marks_raw, dict):
-                raise DataIntegrityError(f"order journal corrupt at line {line}: {self._path}")
-            marks = {str(sym): _parse_decimal(val, line=line, path=self._path) for sym, val in marks_raw.items()}
+                raise DataIntegrityError(
+                    f"order journal corrupt at line {line}: {self._path}"
+                )
+            marks = {
+                str(sym): _parse_decimal(val, line=line, path=self._path)
+                for sym, val in marks_raw.items()
+            }
             self._attempts[seq] = JournalAttempt(
                 attempt_seq=seq,
                 decision_time=_parse_ts(record["decision_time"], line=line, path=self._path),
                 run_id=str(record["run_id"]),
                 mode=str(record["mode"]),
-                pre_trade_equity=_parse_decimal(record["pre_trade_equity"], line=line, path=self._path),
+                pre_trade_equity=_parse_decimal(
+                    record["pre_trade_equity"], line=line, path=self._path
+                ),
                 sizing_anchor=str(record["sizing_anchor"]),
                 decision_marks=marks,
                 started_at=_parse_ts(record["started_at"], line=line, path=self._path),
@@ -269,13 +292,17 @@ class OrderJournal:
                 self._next_fill_seq = seq + 1
             cumulative_raw = record.get("cumulative_executed_qty")
             cumulative = (
-                _parse_decimal(cumulative_raw, line=line, path=self._path) if cumulative_raw is not None else None
+                _parse_decimal(cumulative_raw, line=line, path=self._path)
+                if cumulative_raw is not None
+                else None
             )
             attempt_raw = record.get("attempt_seq")
             client_raw = record.get("client_order_id")
             kind_raw = str(record["kind"])
             if kind_raw not in _FILL_KINDS:
-                raise DataIntegrityError(f"order journal unknown fill kind at line {line}: {self._path}")
+                raise DataIntegrityError(
+                    f"order journal unknown fill kind at line {line}: {self._path}"
+                )
             self._fills.append(
                 JournalFill(
                     fill_seq=seq,
@@ -298,14 +325,20 @@ class OrderJournal:
         elif event == "terminal":
             order_id = str(record["client_order_id"])
             recorded_raw = record.get("recorded_at", record.get("ts"))
-            recorded_at = _utc_now() if recorded_raw is None else _parse_ts(recorded_raw, line=line, path=self._path)
+            recorded_at = (
+                _utc_now()
+                if recorded_raw is None
+                else _parse_ts(recorded_raw, line=line, path=self._path)
+            )
             self._terminals[order_id] = JournalTerminal(
                 client_order_id=order_id,
                 status=str(record["status"]),
                 recorded_at=recorded_at,
             )
         else:
-            raise DataIntegrityError(f"order journal unknown event at line {line}: {self._path}")
+            raise DataIntegrityError(
+                f"order journal unknown event at line {line}: {self._path}"
+            )
 
     def begin_attempt(
         self,
@@ -366,7 +399,9 @@ class OrderJournal:
     ) -> None:
         self._ensure_loaded()
         if submit_seq != self._next_submit_seq:
-            raise ValueError(f"submit_seq {submit_seq} does not match next journal sequence {self._next_submit_seq}")
+            raise ValueError(
+                f"submit_seq {submit_seq} does not match next journal sequence {self._next_submit_seq}"
+            )
         if side not in _SIDES:
             raise ValueError(f"unknown side: {side!r}")
         qty = Decimal(quantity)
@@ -442,8 +477,16 @@ class OrderJournal:
         stamp = pd.Timestamp(filled_at)
         if stamp.tzinfo is None:
             raise ValueError("filled_at must be tz-aware")
-        cumulative = Decimal(cumulative_executed_qty) if cumulative_executed_qty is not None else None
-        if cumulative is not None and client_order_id is not None and cumulative <= self.observed_qty(client_order_id):
+        cumulative = (
+            Decimal(cumulative_executed_qty)
+            if cumulative_executed_qty is not None
+            else None
+        )
+        if (
+            cumulative is not None
+            and client_order_id is not None
+            and cumulative <= self.observed_qty(client_order_id)
+        ):
             raise ValueError(f"cumulative_executed_qty {cumulative} does not exceed observed qty for {client_order_id}")
         seq = self._next_fill_seq
         fill = JournalFill(
@@ -541,7 +584,9 @@ class OrderJournal:
         selected = [
             s
             for s in self._submits
-            if s.attempt_seq is not None and s.recorded_at >= floor and s.client_order_id not in self._terminals
+            if s.attempt_seq is not None
+            and s.recorded_at >= floor
+            and s.client_order_id not in self._terminals
         ]
         selected.sort(key=lambda s: s.submit_seq)
         return tuple(selected)

@@ -174,6 +174,23 @@ def test_synthetic_flat_snapshot_passes_guards() -> None:
     assert_suppressed_venue_flat(snap)
 
 
+def test_suppressed_nonzero_position_fails_closed() -> None:
+    """A suppressed venue holding inventory raises instead of trading blind."""
+    import dataclasses
+    from decimal import Decimal
+
+    import pandas as pd
+    import pytest
+
+    from src.live.account import assert_suppressed_venue_flat, synthetic_flat_snapshot
+    from src.live.errors import ReconciliationBreach
+
+    snap = synthetic_flat_snapshot(pd.Timestamp("2026-08-30 01:00", tz="UTC"))
+    held = dataclasses.replace(snap, positions={"AAA": Decimal("1")})
+    with pytest.raises(ReconciliationBreach, match="non-zero"):
+        assert_suppressed_venue_flat(held)
+
+
 def test_parse_leverage_brackets_sorts_by_bracket_and_parses_decimals() -> None:
     from decimal import Decimal
     from src.live.account import LeverageBracket, parse_leverage_brackets
