@@ -152,17 +152,16 @@ def _require_returns(daily_returns: pd.Series) -> np.ndarray:
     return values
 
 
-def strategy_statistics(
+def _validate_strategy_inputs(
     daily_returns: pd.Series,
     *,
     daily_funding_share: pd.Series,
     funding_by_symbol: Mapping[str, float],
     initial_equity: float,
     design_data_cutoff: pd.Timestamp,
-    seed: int = REPORT_BOOTSTRAP_SEED,
-    n_paths: int = REPORT_BOOTSTRAP_PATHS,
-) -> StrategyStatistics:
-    """Compute decision-grade statistics of one daily strategy return path."""
+    seed: int,
+    n_paths: int,
+) -> tuple[np.ndarray, np.ndarray, dict[str, float], float, pd.Timestamp, int, int]:
     values = _require_returns(daily_returns)
     if not isinstance(daily_funding_share, pd.Series) or len(daily_funding_share) != len(daily_returns):
         raise DataIntegrityError("daily_funding_share must align one-to-one with daily_returns")
@@ -179,7 +178,6 @@ def strategy_statistics(
             raise DataIntegrityError("funding_by_symbol values must be finite")
     if isinstance(initial_equity, bool) or not np.isfinite(float(initial_equity)) or not float(initial_equity) > 0.0:
         raise DataIntegrityError("initial_equity must be a positive finite capital")
-    equity0 = float(initial_equity)
     if not isinstance(design_data_cutoff, pd.Timestamp) or pd.isna(design_data_cutoff):
         raise DataIntegrityError("design_data_cutoff must be a valid timestamp")
     if design_data_cutoff.tzinfo is None or design_data_cutoff.utcoffset().total_seconds() != 0:
@@ -188,15 +186,14 @@ def strategy_statistics(
         raise DataIntegrityError(f"seed must be an integer, got {seed!r}")
     if isinstance(n_paths, bool) or not isinstance(n_paths, (int, np.integer)) or int(n_paths) < 1:
         raise DataIntegrityError(f"n_paths must be a positive integer, got {n_paths!r}")
-    n_paths = int(n_paths)
-    n = int(values.size)
+    return values, funding_share, per_symbol, float(initial_equity), design_data_cutoff, int(seed), int(n_paths)
 
-    equity = equity0 * np.cumprod(1.0 + values)
-    start_equity = np.empty(n, dtype="float64")
-    start_equity[0] = equity0
-    start_equity[1:] = equity[:-1]
-    funding_income_day = -funding_share * equity0
 
+def _yearly_breakdown(
+    daily_returns: pd.Series,
+    funding_income_day: np.ndarray,
+    start_equity: np.ndarray,
+) -> list[YearStatistics]:
     years: list[YearStatistics] = []
     for year, group in daily_returns.groupby(daily_returns.index.year):
         arr = group.to_numpy(dtype="float64")
@@ -215,7 +212,10 @@ def strategy_statistics(
             )
         )
     years.sort(key=lambda y: y.year)
+    return years
 
+
+def _bootstrap_distribution(values: np.ndarray, n: int, seed: int, n_paths: int) -> BootstrapStatistics:
     mean_block = max(1, int(derive_block_size(values)))
     max_blocks = stationary_bootstrap_max_blocks(n, mean_block)
     rng = np.random.default_rng(int(seed))
@@ -238,7 +238,7 @@ def strategy_statistics(
             cagrs[filled] = _cagr(rep)
             mdds[filled] = _max_drawdown(rep)
             filled += 1
-    bootstrap = BootstrapStatistics(
+    return BootstrapStatistics(
         horizon_days=n,
         n_paths=n_paths,
         mean_block_days=mean_block,
@@ -250,8 +250,15 @@ def strategy_statistics(
         max_drawdown_q95=float(np.quantile(mdds, 0.95)),
     )
 
-    contributions = {sym: val / equity0 for sym, val in per_symbol.items()}
-    total_contribution = float(sum(contributions.values()))
+
+def _funding_summary(
+    per_symbol: dict[str, float],
+    equity0: float,
+    funding_income_day: np.ndarray,
+    start_equity: np.ndarray,
+    daily_returns: pd.Series,
+) -> FundingConcentration:
+    total_contribution = float(sum(val / equity0 for val in per_symbol.values()))
     total_income = float(sum(max(-val, 0.0) for val in per_symbol.values()))
     ranked = sorted(((sym, val) for sym, val in per_symbol.items() if val < 0), key=lambda kv: (kv[1], kv[0]))
     top = tuple((sym, float(val / equity0)) for sym, val in ranked[:5])
@@ -263,7 +270,7 @@ def strategy_statistics(
     with np.errstate(divide="ignore", invalid="ignore"):
         day_share = np.where(start_equity > 0, funding_income_day / start_equity, 0.0)
     best_pos = int(np.argmax(day_share))
-    funding = FundingConcentration(
+    return FundingConcentration(
         total_contribution=total_contribution,
         top5_symbols=top,
         top5_share=float(min(1.0, max(0.0, top_share))),
@@ -271,8 +278,38 @@ def strategy_statistics(
         max_day=pd.Timestamp(daily_returns.index[best_pos]).tz_convert("UTC"),
     )
 
-    cutoff = pd.Timestamp(design_data_cutoff).tz_convert("UTC")
-    in_sample = int((daily_returns.index <= cutoff).sum())
+
+def strategy_statistics(
+    daily_returns: pd.Series,
+    *,
+    daily_funding_share: pd.Series,
+    funding_by_symbol: Mapping[str, float],
+    initial_equity: float,
+    design_data_cutoff: pd.Timestamp,
+    seed: int = REPORT_BOOTSTRAP_SEED,
+    n_paths: int = REPORT_BOOTSTRAP_PATHS,
+) -> StrategyStatistics:
+    """Compute decision-grade statistics of one daily strategy return path."""
+    values, funding_share, per_symbol, equity0, cutoff, seed, n_paths = _validate_strategy_inputs(
+        daily_returns,
+        daily_funding_share=daily_funding_share,
+        funding_by_symbol=funding_by_symbol,
+        initial_equity=initial_equity,
+        design_data_cutoff=design_data_cutoff,
+        seed=seed,
+        n_paths=n_paths,
+    )
+    n = int(values.size)
+    equity = equity0 * np.cumprod(1.0 + values)
+    start_equity = np.empty(n, dtype="float64")
+    start_equity[0] = equity0
+    start_equity[1:] = equity[:-1]
+    funding_income_day = -funding_share * equity0
+    years = _yearly_breakdown(daily_returns, funding_income_day, start_equity)
+    bootstrap = _bootstrap_distribution(values, n, seed, n_paths)
+    funding = _funding_summary(per_symbol, equity0, funding_income_day, start_equity, daily_returns)
+    cutoff_ts = pd.Timestamp(cutoff).tz_convert("UTC")
+    in_sample = int((daily_returns.index <= cutoff_ts).sum())
     return StrategyStatistics(
         sharpe=_annualized_sharpe(values),
         sortino=_sortino(values),

@@ -84,6 +84,17 @@ def test_growth_lcb_orders_with_alpha() -> None:
     assert math.isfinite(lcb_25)
 
 
+def test_renamed_helpers_keep_values() -> None:
+    import pytest
+
+    from src.evaluation.statistics import expected_max_trial_sr, psr_radicand
+
+    assert psr_radicand(0.05, 0.2, 3.5) == pytest.approx(0.9915625)
+    assert expected_max_trial_sr(0.0025, 100) == pytest.approx(0.12653014466008425)
+    assert psr_radicand(-0.1, -0.5, 4.0) == pytest.approx(0.9575)
+    assert expected_max_trial_sr(0.01, 50) == pytest.approx(0.22763030934203485)
+
+
 def test_psr_and_dsr_reject_degenerate_inputs() -> None:
     """Degenerate moments fail closed (NaN or ValueError), never silently pass."""
     import pytest

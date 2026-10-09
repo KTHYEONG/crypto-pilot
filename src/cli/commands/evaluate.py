@@ -187,12 +187,8 @@ def build_evaluation_inputs(
             pd.Timestamp(str(holdout_payload["evaluation_start"])).tz_convert("UTC"),
             pd.Timestamp(str(holdout_payload["evaluation_end"])).tz_convert("UTC"),
         )
-        from src.evaluation.holdout import _read_rows
-        looks = _read_rows(releases_dir() / f"{_family_of(release.strategy_id)}.holdout.jsonl")
-        journaled = any(row.get("spec_digest") == release.spec_digest
-                        and row.get("window_start") == holdout_window[0].isoformat()
-                        and row.get("window_end") == holdout_window[1].isoformat() for row in looks)
-        if not journaled:
+        from src.evaluation.holdout import holdout_look_recorded
+        if not holdout_look_recorded(release.strategy_id, release.spec_digest, holdout_window):
             raise DataIntegrityError("holdout run has no matching one-look journal entry")
         holdout_daily = pd.read_parquet(Path(holdout_run) / "daily.parquet")
         holdout_returns = _utc_series(
