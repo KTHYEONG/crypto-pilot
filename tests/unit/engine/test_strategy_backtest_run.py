@@ -1148,3 +1148,136 @@ def test_data_ending_before_evaluation_end_still_fails(
     _write_audit_3m(tmp_path / "ohlcv", "AAA", request.evaluation_end - pd.Timedelta(days=1))
     with pytest.raises(DataIntegrityError, match=r"settlement registry incomplete.*AAA"):
         run_mod._load_strategy_source(request, run_mod.resolve_mhs_memory_budget(None), None)
+
+
+def test_shared_source_gives_identical_results(monkeypatch: pytest.MonkeyPatch) -> None:
+    from pathlib import Path as _Path
+    from tests.unit.engine.test_strategy_backtest_windows import _window
+
+    seen: dict = {}
+    _install_source(monkeypatch, seen)
+    monkeypatch.setattr(run_mod, "build_strategy_targets", lambda *a, **k: _candidate(n_days=2))
+
+    def stream(candidate, start, end, *args):
+        grid = pd.date_range(start, end, freq="3min", tz="UTC")
+        yield _window(grid, candidate, list(candidate.target_weights.index))
+
+    monkeypatch.setattr(run_mod, "_strategy_window_stream", stream)
+    request = _request(data_root=_Path("root"), evaluation_end=pd.Timestamp("2021-04-03", tz="UTC"),
+                       report_periods=(StrategyReportPeriod("P1", pd.Timestamp("2021-04-01", tz="UTC"),
+                                                            pd.Timestamp("2021-04-02", tz="UTC")),))
+    source = run_mod.load_strategy_source(request)
+    run = run_strategy_backtest(request, source=source)
+    direct = run_strategy_backtest(request)
+    pd.testing.assert_frame_equal(run.candidate.target_weights, direct.candidate.target_weights)
+    assert bool((run.candidate.signal_available_at == direct.candidate.signal_available_at).all())
+    pd.testing.assert_frame_equal(run.evidence.period_metrics, direct.evidence.period_metrics, check_exact=True)
+    for case in ("base", "stress"):
+        pd.testing.assert_series_equal(getattr(run.evidence, f"{case}_daily").returns,
+                                       getattr(direct.evidence, f"{case}_daily").returns, check_exact=True)
+        pd.testing.assert_frame_equal(getattr(run.evidence, case).simulated_fills, getattr(direct.evidence, case).simulated_fills,
+                                      check_exact=True)
+        assert not getattr(run.evidence, case).simulated_fills.empty
+
+
+def test_foreign_source_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    from pathlib import Path as _Path
+
+    seen: dict = {}
+    _install_source(monkeypatch, seen)
+    monkeypatch.setattr(run_mod, "evaluate_strategy_backtest", lambda *a, **k: _evidence())
+    request = _request(data_root=_Path("root"))
+    source = run_mod.load_strategy_source(request)
+    other = _request(data_root=_Path("root"), evaluation_end=pd.Timestamp("2021-04-11", tz="UTC"))
+    with pytest.raises(DataIntegrityError, match="does not match"):
+        run_strategy_backtest(other, source=source)
+
+
+def test_audit_once_per_neighbor_set(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    import src.cli.commands.backtest as backtest_mod
+
+    seen: dict = {"loads": 0}
+    index = pd.date_range("2021-01-01", periods=2400, freq="h", tz="UTC")
+    panels = {key: pd.DataFrame(100.0 if key == "close" else 300000.0, index=index, columns=list(_SYMBOLS))
+              for key in ("close", "quote_vol", "taker_buy_quote")}
+
+    def panel(*args, **kwargs):
+        seen["loads"] += 1
+        return panels
+
+    monkeypatch.setattr(run_mod, "load_base_panel", panel)
+    monkeypatch.setattr(run_mod, "_load_funding_series", lambda symbols: ({}, {}))
+    monkeypatch.setattr(run_mod, "evaluate_strategy_backtest", lambda *a, **k: _evidence())
+    import src.engine.backtest_persist as persist_mod
+
+    monkeypatch.setattr(
+        persist_mod, "persist_strategy_backtest",
+        lambda run, output, **kwargs: __import__("pathlib").Path(output).write_text("{}", encoding="utf-8"),
+    )
+    monkeypatch.setattr(backtest_mod, "_strategy_run_statistics", lambda run: {})
+    audits = []
+    monkeypatch.setattr(run_mod, "assert_settlement_registry_complete", lambda *a, **k: audits.append(k))
+    monkeypatch.setattr(backtest_mod, "_record_trial_for_window", lambda *a, **k: None)
+    from pathlib import Path as _Path
+
+    request = _request(data_root=_Path("root"))
+    source = run_mod.load_strategy_source(request)
+    assert seen["loads"] == 1
+    from src.strategy.targets import MemberSnapshotCache
+
+    cache = MemberSnapshotCache()
+    output = tmp_path / "unit" / "result.json"
+    output.parent.mkdir(parents=True)
+    backtest_mod._run_neighbor_set(
+        FLOW_MOM_TOP20, source_start=request.source_start,
+        start=request.evaluation_start, end=request.evaluation_end,
+        base_spec=request.base_spec, stress_spec=request.stress_spec,
+        report_periods=request.report_periods, data_root=request.data_root,
+        budget=None, execution_bound="OHLCV_IMMEDIATE_TAKER",
+        output=output, source=source, snapshot_cache=cache,
+    )
+    assert seen["loads"] == 1
+    assert len(audits) == 1
+
+
+def test_shared_cache_accepts_changing_selected_universe(monkeypatch) -> None:
+    from pathlib import Path
+    from src.strategy.targets import MemberSnapshotCache
+    import src.strategy.targets as targets_mod
+
+    _install_source(monkeypatch, {})
+    request = _request(data_root=Path("root"), strategy=dataclasses.replace(FLOW_MOM_TOP20, breadth=1))
+    source = run_mod.load_strategy_source(request)
+    cache = MemberSnapshotCache()
+    calls = []
+    real_compute = targets_mod.compute_source_readiness
+
+    def compute(*args):
+        calls.append(1)
+        return real_compute(*args)
+
+    monkeypatch.setattr(targets_mod, "compute_source_readiness", compute)
+    for breadth in (1, 3):
+        variant = dataclasses.replace(request, strategy=dataclasses.replace(request.strategy, breadth=breadth))
+        shared, _ = run_mod.build_request_targets(variant, source=source, snapshot_cache=cache)
+        direct, _ = run_mod.build_request_targets(variant)
+        pd.testing.assert_frame_equal(shared.target_weights, direct.target_weights, check_exact=True)
+    assert len(calls) == 3
+
+
+def test_source_registry_changes_and_read_errors_fail_closed(monkeypatch) -> None:
+    from pathlib import Path
+
+    _install_source(monkeypatch, {})
+    request = _request(data_root=Path("root"))
+    source = run_mod.load_strategy_source(request)
+    monkeypatch.setattr(run_mod, "venue_halt_registry_for_root", lambda root: types.SimpleNamespace(digest="changed"))
+    with pytest.raises(DataIntegrityError, match="does not match"):
+        run_mod.build_request_targets(request, source=source)
+
+    def unreadable(root):
+        raise DataIntegrityError("registry unreadable")
+
+    monkeypatch.setattr(run_mod, "venue_halt_registry_for_root", unreadable)
+    with pytest.raises(DataIntegrityError, match="registry unreadable"):
+        run_mod.load_strategy_source(request)

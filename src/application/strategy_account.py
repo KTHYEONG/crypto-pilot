@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+__all__ = ["AccountReplayError"]
+
 import dataclasses
 import json
 import logging
