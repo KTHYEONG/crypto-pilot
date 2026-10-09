@@ -228,7 +228,7 @@ def test_backtest_strategy_variant_breadth_and_failures(tmp_path: Path, monkeypa
         )
     import src.engine.strategy_backtest as run_mod
 
-    monkeypatch.setattr(run_mod, "run_strategy_backtest", lambda request: (_ for _ in ()).throw(ValueError("boom")))
+    monkeypatch.setattr(run_mod, "run_strategy_backtest", lambda request, *a, **k: (_ for _ in ()).throw(ValueError("boom")))
     failed = tmp_path / "failed.json"
     with pytest.raises(SystemExit, match=r"strategy backtest failed"):
         backtest_mod.run_strategy_backtest_command(
@@ -497,7 +497,8 @@ def test_strategy_command_records_trial_and_neighbors(tmp_path, monkeypatch) -> 
         evidence=types.SimpleNamespace(base_daily=types.SimpleNamespace(returns=returns)),
         source_gap_excluded_symbols=(),
     )
-    monkeypatch.setattr(run_mod, "run_strategy_backtest", lambda request: run)
+    monkeypatch.setattr(run_mod, "run_strategy_backtest", lambda request, *a, **k: run)
+    monkeypatch.setattr(run_mod, "load_strategy_source", lambda request: types.SimpleNamespace(request=request))
     monkeypatch.setattr(backtest_mod, "_strategy_run_statistics", lambda run: {})
     monkeypatch.setattr(
         persist_mod, "persist_strategy_backtest",
@@ -550,3 +551,47 @@ def test_run_neighbor_set_suppresses_evidence_failures(tmp_path, monkeypatch) ->
         budget=None, execution_bound="OHLCV_IMMEDIATE_TAKER", output=output,
     )
     assert not (root / "flow_mom.trials.jsonl").exists()
+
+
+def test_neighbor_set_shares_one_source(tmp_path, monkeypatch) -> None:
+    """The primary run plus all neighbors load the source once and reuse one snapshot cache."""
+    import src.engine.backtest_persist as persist_mod
+    import src.engine.strategy_backtest as run_mod
+
+    _patch_releases_root(monkeypatch, tmp_path)
+    loads: list = []
+    seen_sources: list = []
+    seen_caches: list = []
+
+    def _fake_load(request):
+        loads.append(request)
+        return types.SimpleNamespace(request=request)
+
+    def _fake_run(request, *args, **kwargs):
+        seen_sources.append(kwargs.get("source"))
+        seen_caches.append(kwargs.get("snapshot_cache"))
+        index = pd.date_range("2025-01-01", periods=3, freq="D", tz="UTC")
+        returns = pd.Series(np.zeros(3), index=index, dtype="float64")
+        return types.SimpleNamespace(
+            request=request,
+            evidence=types.SimpleNamespace(base_daily=types.SimpleNamespace(returns=returns)),
+            source_gap_excluded_symbols=(),
+        )
+
+    monkeypatch.setattr(run_mod, "load_strategy_source", _fake_load)
+    monkeypatch.setattr(run_mod, "run_strategy_backtest", _fake_run)
+    monkeypatch.setattr(backtest_mod, "_strategy_run_statistics", lambda run: {})
+    monkeypatch.setattr(
+        persist_mod, "persist_strategy_backtest",
+        lambda run, output, **kwargs: Path(output).write_text("{}", encoding="utf-8"),
+    )
+    backtest_mod.run_strategy_backtest_command(_parse([
+        "backtest", "strategy",
+        "--source-start", "2024-01-01", "--start", "2025-01-01", "--end", "2025-02-01",
+        "--output", str(tmp_path / "strategy.json"), "--neighbors",
+    ]))
+    assert len(loads) == 1
+    assert len(seen_sources) == 1 + 7
+    assert all(source is seen_sources[0] for source in seen_sources)
+    assert all(cache is seen_caches[0] for cache in seen_caches)
+    assert seen_caches[0] is not None

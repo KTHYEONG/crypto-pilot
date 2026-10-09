@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import hashlib
 import math
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Literal
 
+import numpy as np
 import pandas as pd
 
 from src.common.errors import DataIntegrityError
@@ -243,6 +245,136 @@ class StrategyTargets:
         return self.strategy.breadth
 
 
+@dataclass(frozen=True, slots=True)
+class SourceReadiness:
+    """Per decision day and hourly symbol, whether every bar in the trailing 720-bar history was published at or before the release instant."""
+
+    decisions: pd.DatetimeIndex
+    bar_positions: np.ndarray
+    ready: np.ndarray
+
+
+_READINESS_CHUNK_BARS = 4096
+
+
+def _sliding_window_max(a: np.ndarray, window: int) -> np.ndarray:
+    out = np.empty_like(a)
+    n = a.shape[0]
+    if n == 0:
+        return out
+    prefix = np.empty_like(a)
+    prefix[0] = a[0]
+    for i in range(1, n):
+        if i % window == 0:
+            prefix[i] = a[i]
+        else:
+            np.maximum(a[i], prefix[i - 1], out=prefix[i])
+    suffix = np.empty_like(a)
+    suffix[-1] = a[-1]
+    for i in range(n - 2, -1, -1):
+        if (i + 1) % window == 0:
+            suffix[i] = a[i]
+        else:
+            np.maximum(a[i], suffix[i + 1], out=suffix[i])
+    out[: min(window - 1, n)] = prefix[: min(window - 1, n)]
+    for i in range(window - 1, n):
+        np.maximum(suffix[i - window + 1], prefix[i], out=out[i])
+    return out
+
+
+def compute_source_readiness(
+    hourly_available_at: pd.DataFrame,
+    decisions: pd.DatetimeIndex,
+    strategy: StrategySpec,
+) -> SourceReadiness:
+    """Per decision day and hourly symbol, whether every bar in the trailing 720-bar history was published at or before the release instant."""
+    hourly_index = hourly_available_at.index
+    bars = decisions + pd.Timedelta(hours=int(strategy.snapshot_hour_utc))
+    bar_positions = np.asarray(hourly_index.get_indexer(bars), dtype=np.int64)
+    n_bars = len(hourly_index)
+    n_sym = hourly_available_at.shape[1]
+    n_dec = len(decisions)
+    ready = np.zeros((n_dec, n_sym), dtype=bool)
+    if n_dec == 0 or n_sym == 0 or n_bars == 0:
+        return SourceReadiness(decisions=decisions, bar_positions=bar_positions, ready=ready)
+    release_ns = (decisions + pd.Timedelta(hours=int(strategy.release_hour_utc))).to_numpy(
+        dtype="datetime64[ns]"
+    ).astype(np.int64)
+    window = _HISTORY_BARS
+    for chunk_start in range(0, n_bars, _READINESS_CHUNK_BARS):
+        chunk_end = min(chunk_start + _READINESS_CHUNK_BARS, n_bars)
+        slice_start = max(0, chunk_start - (window - 1))
+        mask = (bar_positions >= chunk_start) & (bar_positions < chunk_end)
+        if not bool(mask.any()):
+            continue
+        block = hourly_available_at.iloc[slice_start:chunk_end].to_numpy(dtype="datetime64[ns]").view(np.int64)
+        win = _sliding_window_max(block, window)
+        local = win[(chunk_start - slice_start):]
+        hit = np.flatnonzero(mask)
+        ready[hit] = local[bar_positions[hit] - chunk_start] <= release_ns[hit, None]
+    return SourceReadiness(decisions=decisions, bar_positions=bar_positions, ready=ready)
+
+
+def _snapshot_inputs_fingerprint(
+    hourly_panels: Mapping[str, pd.DataFrame],
+    hourly_available_at: pd.DataFrame,
+) -> tuple[object, ...]:
+    frames = {**hourly_panels, "available_at": hourly_available_at}
+    return tuple(
+        (
+            key, frame.shape, tuple(frame.columns),
+            hashlib.sha256(pd.util.hash_pandas_object(frame.index).to_numpy().tobytes()).digest(),
+            hashlib.sha256(pd.util.hash_pandas_object(frame.iloc[-1:]).to_numpy().tobytes()).digest(),
+        )
+        for key, frame in sorted(frames.items())
+    )
+
+
+class MemberSnapshotCache:
+    """Member snapshot frame (decisions x census), built once per feature name and reused across strategy variants."""
+
+    def __init__(self) -> None:
+        self._store: dict[tuple[str, int | None, int | None], pd.DataFrame] = {}
+        self._fingerprint: tuple[object, ...] | None = None
+        self._readiness: dict[tuple[int, int], SourceReadiness] = {}
+
+    def bind(self, fingerprint: tuple[object, ...]) -> None:
+        """Reject reuse with a different source or decision grid."""
+        if self._fingerprint is None:
+            self._fingerprint = fingerprint
+        elif fingerprint != self._fingerprint:
+            raise DataIntegrityError("member snapshot cache built for different source inputs")
+
+    def source_readiness(
+        self, available: pd.DataFrame, decisions: pd.DatetimeIndex, strategy: StrategySpec,
+    ) -> SourceReadiness:
+        """Reuse publication readiness across members and variants on the same clock."""
+        key = (strategy.snapshot_hour_utc, strategy.release_hour_utc)
+        if key not in self._readiness:
+            self._readiness[key] = compute_source_readiness(available, decisions, strategy)
+        return self._readiness[key]
+
+    def snapshots(
+        self,
+        member: FeatureMember,
+        build: Callable[[], pd.DataFrame],
+        *,
+        snapshot_hour: int | None = None,
+        release_hour: int | None = None,
+        fingerprint: tuple[object, ...] | None = None,
+    ) -> pd.DataFrame:
+        key = (str(member.name), snapshot_hour, release_hour)
+        if fingerprint is not None:
+            self.bind(fingerprint)
+        elif self._fingerprint is not None:
+            raise DataIntegrityError("member snapshot cache built for different source inputs")
+        if key in self._store:
+            return self._store[key]
+        frame = build()
+        self._store[key] = frame
+        return frame
+
+
 def build_strategy_targets(
     hourly_panels: Mapping[str, pd.DataFrame],
     hourly_available_at: pd.DataFrame,
@@ -253,6 +385,8 @@ def build_strategy_targets(
     market_close: pd.DataFrame,
     strategy: StrategySpec = FLOW_MOM_TOP20,
     blocked_decisions: pd.DataFrame | None = None,
+    readiness: SourceReadiness | None = None,
+    snapshot_cache: MemberSnapshotCache | None = None,
 ) -> StrategyTargets:
     """Build one immutable, causal target plan from complete hourly sources.
 
@@ -317,33 +451,72 @@ def build_strategy_targets(
     grid_values = first.index.to_numpy(dtype="datetime64[ns]")[:, None]
     if bool((available_values < grid_values).any()):
         raise DataIntegrityError("hourly publication cannot precede the bar open")
-    available_utc = hourly_available_at.apply(lambda col: pd.to_datetime(col, utc=True))
     if not market_close.index.equals(first.index):
         raise DataIntegrityError("market_close must share the hourly close panel index exactly")
     if list(market_close.columns) != list(census_symbols):
         raise DataIntegrityError("market_close columns must match census_symbols order")
     panels[MARKET_CLOSE_PANEL] = market_close
     census = list(census_symbols)
-    features = [(m, registry[m.name].builder(panels)) for m in strategy.members]
     daily_idx = roster.index
     decisions = daily_idx[:-1]
     roster_dec = roster.loc[decisions]
-    hourly_index = first.index
+    hourly_symbols = list(first.columns)
+    column_of = {s: i for i, s in enumerate(hourly_symbols)}
+    census_hourly = np.array([column_of.get(s, -1) for s in census], dtype=np.int64)
+    fingerprint: tuple[object, ...] | None = None
+    if snapshot_cache is not None:
+        fingerprint = (_snapshot_inputs_fingerprint(panels, hourly_available_at), tuple(decisions), tuple(census))
+        snapshot_cache.bind(fingerprint)
+    if readiness is None:
+        readiness = (
+            compute_source_readiness(hourly_available_at, decisions, strategy)
+            if snapshot_cache is None else snapshot_cache.source_readiness(hourly_available_at, decisions, strategy)
+        )
+    bar_positions = np.asarray(readiness.bar_positions, dtype=np.int64)
+    ready = np.asarray(readiness.ready, dtype=bool)
+    expected_positions = first.index.get_indexer(decisions + pd.Timedelta(hours=strategy.snapshot_hour_utc))
+    if (
+        not readiness.decisions.equals(decisions)
+        or ready.shape != (len(decisions), len(hourly_symbols))
+        or not np.array_equal(bar_positions, expected_positions)
+    ):
+        raise DataIntegrityError("source readiness does not match decision grid or hourly sources")
+
+    def _snapshot_frame(member: FeatureMember) -> pd.DataFrame:
+        feature = registry[member.name].builder(panels)
+        aligned_values = feature.reindex(index=first.index, columns=census).to_numpy(dtype="float64")
+        n_dec = len(decisions)
+        n_cen = len(census)
+        census_ready = np.zeros((n_dec, n_cen), dtype=bool)
+        valid_cols = census_hourly >= 0
+        if bool(valid_cols.any()) and n_dec:
+            census_ready[:, valid_cols] = ready[:, census_hourly[valid_cols]]
+        snaps_values = np.full((n_dec, n_cen), np.nan, dtype=np.float64)
+        hit = np.flatnonzero(bar_positions >= 0)
+        if hit.size:
+            rows = aligned_values[bar_positions[hit]]
+            snaps_values[hit] = np.where(census_ready[hit], rows, np.nan)
+        return pd.DataFrame(snaps_values, index=decisions, columns=census, dtype="float64")
+
+    def _snapshot_builder(member: FeatureMember) -> Callable[[], pd.DataFrame]:
+        def _build() -> pd.DataFrame:
+            return _snapshot_frame(member)
+
+        return _build
+
     books = []
-    for member, feature in features:
-        aligned = feature.reindex(columns=census)
-        snaps = pd.DataFrame(float("nan"), index=decisions, columns=census, dtype="float64")
-        for stamp in decisions:
-            bar = stamp + pd.Timedelta(hours=int(strategy.snapshot_hour_utc))
-            release = stamp + pd.Timedelta(hours=int(strategy.release_hour_utc))
-            if bar in hourly_index:
-                bar_pos = hourly_index.get_loc(bar)
-                history_start = max(0, int(bar_pos) - (_HISTORY_BARS - 1))
-                publication = available_utc.iloc[history_start : int(bar_pos) + 1]
-                source_ready = publication.le(release).all(axis=0)
-                values = aligned.loc[bar].reindex(census)
-                values = values.where(source_ready.reindex(census), other=float("nan"))
-                snaps.loc[stamp] = values.to_numpy()
+    for member in strategy.members:
+        if snapshot_cache is not None:
+            assert fingerprint is not None
+            snaps = snapshot_cache.snapshots(
+                member,
+                _snapshot_builder(member),
+                snapshot_hour=int(strategy.snapshot_hour_utc),
+                release_hour=int(strategy.release_hour_utc),
+                fingerprint=fingerprint,
+            )
+        else:
+            snaps = _snapshot_frame(member)
         eligible = roster_dec & snaps.notna()
         books.append(rank_weight_book(snaps, eligible, int(member.sign), int(strategy.min_rank_symbols)))
     ensemble = books[0]

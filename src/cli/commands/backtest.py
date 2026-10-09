@@ -401,6 +401,7 @@ def _run_neighbor_set(
     strategy: Any, *, source_start: pd.Timestamp, start: pd.Timestamp, end: pd.Timestamp,
     base_spec: Any, stress_spec: Any, report_periods: Any, data_root: Path | None,
     budget: Any, execution_bound: StrategyExecutionBound, output: Path,
+    source: Any = None, snapshot_cache: Any = None,
 ) -> None:
     """Run the pre-declared plateau neighbor set (same window) into sibling run dirs."""
     from src.common.errors import DataIntegrityError
@@ -419,7 +420,12 @@ def _run_neighbor_set(
             execution_bound=execution_bound,
         )
         try:
-            neighbor_run = run_strategy_backtest(neighbor_request)
+            if source is None and snapshot_cache is None:
+                neighbor_run = run_strategy_backtest(neighbor_request)
+            else:
+                neighbor_run = run_strategy_backtest(
+                    neighbor_request, source=source, snapshot_cache=snapshot_cache
+                )
             neighbor_stats = _strategy_run_statistics(neighbor_run)
             sibling = output.parent.parent / f"{output.parent.name}_neighbor{position}"
             sibling.mkdir(parents=True, exist_ok=True)
@@ -457,7 +463,8 @@ def run_strategy_backtest_command(args: argparse.Namespace) -> None:
     from src.common.errors import DataIntegrityError
     from src.engine.backtest_evidence import StrategyReportPeriod
     from src.engine.backtest_persist import persist_strategy_backtest
-    from src.engine.strategy_backtest import StrategyBacktestRequest, run_strategy_backtest
+    from src.engine.strategy_backtest import StrategyBacktestRequest, load_strategy_source, run_strategy_backtest
+    from src.strategy.targets import MemberSnapshotCache
 
     breadth = getattr(args, "breadth", 20)
     if isinstance(breadth, bool) or not isinstance(breadth, int) or breadth <= 0:
@@ -513,7 +520,14 @@ def run_strategy_backtest_command(args: argparse.Namespace) -> None:
     except (DataIntegrityError, ValueError) as exc:
         raise SystemExit(f"invalid strategy backtest request: {exc}") from exc
     try:
-        run = run_strategy_backtest(request)
+        shared_source = None
+        shared_cache = None
+        if bool(getattr(args, "neighbors", False)):
+            shared_source = load_strategy_source(request)
+            shared_cache = MemberSnapshotCache()
+            run = run_strategy_backtest(request, source=shared_source, snapshot_cache=shared_cache)
+        else:
+            run = run_strategy_backtest(request)
         statistics = _strategy_run_statistics(run)
         persist_strategy_backtest(run, output, statistics=statistics)
         _write_strategy_manifest(output, request=request, breadth=breadth)
@@ -540,6 +554,7 @@ def run_strategy_backtest_command(args: argparse.Namespace) -> None:
             base_spec=base_spec, stress_spec=stress_spec, report_periods=report_periods,
             data_root=Path(args.data_root) if getattr(args, "data_root", None) else None,
             budget=budget, execution_bound=execution_bound, output=output,
+            source=shared_source, snapshot_cache=shared_cache,
         )
     if not getattr(args, "neighbors", False) and output.parent.parent == STRATEGY_BACKTESTS_DIR and DEFAULT_DETAIL_RETENTION_MAX_RUNS is not None:
         _prune_strategy_runs(keep=DEFAULT_DETAIL_RETENTION_MAX_RUNS)
