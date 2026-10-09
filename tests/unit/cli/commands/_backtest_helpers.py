@@ -29,8 +29,10 @@ def _install_strategy(monkeypatch: pytest.MonkeyPatch) -> dict:
 
     seen: dict = {}
 
-    def _fake_run(request: object) -> object:
+    def _fake_run(request: object, *args: object, **kwargs: object) -> object:
         seen["request"] = request
+        seen["source"] = kwargs.get("source")
+        seen["snapshot_cache"] = kwargs.get("snapshot_cache")
         return types.SimpleNamespace(request=request)
 
     def _fake_persist(run: object, output: Path, **kwargs: object) -> Path:
@@ -40,6 +42,7 @@ def _install_strategy(monkeypatch: pytest.MonkeyPatch) -> dict:
         return output
 
     monkeypatch.setattr(run_mod, "run_strategy_backtest", _fake_run)
+    monkeypatch.setattr(run_mod, "load_strategy_source", lambda request: types.SimpleNamespace(request=request))
     monkeypatch.setattr(backtest_mod, "_strategy_run_statistics", lambda run: {})
     import src.engine.backtest_persist as report_mod
 

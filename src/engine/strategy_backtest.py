@@ -28,8 +28,9 @@ from src.core.resources import (
     resolve_mhs_memory_budget,
 )
 from src.core.settlement_evidence import assert_settlement_registry_complete
-from src.core.source_gaps import active_intervals
+from src.core.source_gaps import active_intervals, load_source_gap_registry
 from src.core.types import ExecutionSpec
+from src.core.venue_halts import venue_halt_registry_for_root
 from src.engine.backtest_evidence import (
     StrategyBacktestEvidence,
     StrategyExecutionBound,
@@ -40,6 +41,7 @@ from src.engine.execution import ExecutionReplayWindow, live_required_symbols
 from src.engine.execution.batch import _LiveAccumulatorSets
 from src.engine.execution.window_stream import _iter_mhs_execution_windows
 from src.strategy.targets import (
+    MemberSnapshotCache,
     StrategySpec,
     StrategyTargets,
     build_strategy_targets,
@@ -125,6 +127,61 @@ class StrategySourceContext:
     budget: MhsMemoryBudget
     daily_close: pd.DataFrame
     daily_quote_volume: pd.DataFrame
+
+
+@dataclass(frozen=True, slots=True)
+class LoadedStrategySource:
+    """One loaded source bundle shared by the inventory replay and alternative ledgers."""
+
+    fingerprint: tuple[object, ...]
+    daily_close: pd.DataFrame
+    daily_quote_volume: pd.DataFrame
+    hourly_panels: dict[str, pd.DataFrame]
+    hourly_available_at: pd.DataFrame
+    census: tuple[str, ...]
+    funding_by_symbol: dict[str, pd.Series]
+    funding_failures: dict[str, str]
+    root: str
+    budget: MhsMemoryBudget
+
+
+def _strategy_source_fingerprint(request: StrategyBacktestRequest, root: str) -> tuple[object, ...]:
+    import hashlib
+
+    settlement_digest = settlement_registry_for_root(root).digest
+    halt_digest = venue_halt_registry_for_root(root).digest
+    gap_digest = hashlib.sha256(repr(load_source_gap_registry()).encode("utf-8")).hexdigest()
+    return (
+        request.source_start.isoformat(),
+        request.evaluation_end.isoformat(),
+        str(root),
+        settlement_digest,
+        gap_digest,
+        halt_digest,
+    )
+
+
+def load_strategy_source(request: StrategyBacktestRequest) -> LoadedStrategySource:
+    """Read the complete historical 1h census and derive daily and funding planes."""
+    budget = resolve_mhs_memory_budget(request.memory_budget)
+    initial_swap_bytes = _current_tree_swap_bytes()
+    _admit_source_stage(budget, initial_swap_bytes)
+    daily_close, daily_quote_volume, hourly_panels, hourly_available_at, census, funding_by_symbol, funding_failures, root = _load_strategy_source(
+        request, budget, initial_swap_bytes
+    )
+    fingerprint = _strategy_source_fingerprint(request, root)
+    return LoadedStrategySource(
+        fingerprint=fingerprint,
+        daily_close=daily_close,
+        daily_quote_volume=daily_quote_volume,
+        hourly_panels=dict(hourly_panels),
+        hourly_available_at=hourly_available_at,
+        census=tuple(census),
+        funding_by_symbol=dict(funding_by_symbol),
+        funding_failures=dict(funding_failures),
+        root=str(root),
+        budget=budget,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -510,17 +567,30 @@ def _strategy_window_stream(
 
 def build_request_targets(
     request: StrategyBacktestRequest,
+    *,
+    source: LoadedStrategySource | None = None,
+    snapshot_cache: MemberSnapshotCache | None = None,
 ) -> tuple[StrategyTargets, StrategySourceContext]:
     """Build the scored candidate exactly as ``run_strategy_backtest`` does, without replay.
 
     Returns the candidate plus the loaded source context (census, funding series, OHLCV root,
     resolved memory budget) so an alternative ledger can reuse one source load."""
+    if source is None:
+        source = load_strategy_source(request)
+    else:
+        root_for_request = str(request.data_root) if request.data_root is not None else str(FUTURES_DATA_DIR / "ohlcv")
+        expected = _strategy_source_fingerprint(request, source.root)
+        if tuple(source.fingerprint) != tuple(expected) or str(source.root) != root_for_request:
+            raise DataIntegrityError("loaded strategy source does not match request window, root, or registries")
     budget = resolve_mhs_memory_budget(request.memory_budget)
-    initial_swap_bytes = _current_tree_swap_bytes()
-    _admit_source_stage(budget, initial_swap_bytes)
-    daily_close, daily_quote_volume, hourly_panels, hourly_available_at, census, funding_by_symbol, funding_failures, root = _load_strategy_source(
-        request, budget, initial_swap_bytes
-    )
+    daily_close = source.daily_close
+    daily_quote_volume = source.daily_quote_volume
+    hourly_panels = source.hourly_panels
+    hourly_available_at = source.hourly_available_at
+    census = source.census
+    funding_by_symbol = source.funding_by_symbol
+    funding_failures = source.funding_failures
+    root = source.root
     blocked_decisions = strategy_blocked_decisions(
         pd.DatetimeIndex(daily_close.index), census, strategy=request.strategy, base_spec=request.base_spec,
         settlement_registry=settlement_registry_for_root(root),
@@ -557,8 +627,11 @@ def build_request_targets(
     )
     if not ever_selected:
         raise DataIntegrityError("request strategy selects no historical symbol")
-    selected_panels = {key: frame[ever_selected] for key, frame in hourly_panels.items()}
-    selected_available = hourly_available_at[ever_selected]
+    selected_panels = (
+        {key: frame[ever_selected] for key, frame in hourly_panels.items()}
+        if snapshot_cache is None else hourly_panels
+    )
+    selected_available = hourly_available_at[ever_selected] if snapshot_cache is None else hourly_available_at
     full_candidate = build_strategy_targets(
         selected_panels,
         selected_available,
@@ -568,6 +641,7 @@ def build_request_targets(
         market_close=hourly_panels["close"],
         strategy=request.strategy,
         blocked_decisions=blocked_decisions,
+        snapshot_cache=snapshot_cache,
     )
     labels = full_candidate.target_weights.index
     scored = (labels >= request.evaluation_start) & (labels < request.evaluation_end)
@@ -585,7 +659,12 @@ def build_request_targets(
     return candidate, context
 
 
-def run_strategy_backtest(request: StrategyBacktestRequest) -> StrategyBacktestRun:
+def run_strategy_backtest(
+    request: StrategyBacktestRequest,
+    *,
+    source: LoadedStrategySource | None = None,
+    snapshot_cache: MemberSnapshotCache | None = None,
+) -> StrategyBacktestRun:
     """Build and replay a strategy PIT target plan using the shared 3m inventory ledger.
 
     The runner first reconstructs the full historical universe from Binance
@@ -602,7 +681,7 @@ def run_strategy_backtest(request: StrategyBacktestRequest) -> StrategyBacktestR
             execution evidence is incomplete.
         MhsResourceAdmissionError: A declared memory budget cannot admit work.
     """
-    candidate, context = build_request_targets(request)
+    candidate, context = build_request_targets(request, source=source, snapshot_cache=snapshot_cache)
     budget = context.budget
     root = context.root
     funding_by_symbol = context.funding_by_symbol

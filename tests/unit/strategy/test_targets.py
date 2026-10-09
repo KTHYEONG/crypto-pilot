@@ -625,3 +625,306 @@ def test_renamed_strategy_definitions_unchanged() -> None:
         assert (spec.snapshot_hour_utc, spec.release_hour_utc, spec.entry_hour_utc) == (22, 23, 0)
         assert spec.exposure_multiplier == exposure_multiplier
         assert spec.name_clip == name_clip
+
+
+def _reference_readiness(available: pd.DataFrame, decisions: pd.DatetimeIndex, strategy) -> np.ndarray:
+    hourly_index = available.index
+    utc = available.apply(lambda col: pd.to_datetime(col, utc=True))
+    out = np.zeros((len(decisions), available.shape[1]), dtype=bool)
+    for i, stamp in enumerate(decisions):
+        bar = stamp + pd.Timedelta(hours=int(strategy.snapshot_hour_utc))
+        release = stamp + pd.Timedelta(hours=int(strategy.release_hour_utc))
+        if bar in hourly_index:
+            pos = hourly_index.get_loc(bar)
+            start = max(0, int(pos) - 719)
+            pub = utc.iloc[start : int(pos) + 1]
+            out[i] = pub.le(release).all(axis=0).to_numpy()
+    return out
+
+
+def test_vectorized_readiness_equals_reference() -> None:
+    from src.strategy.targets import compute_source_readiness
+
+    daily_close, _ = _daily()
+    panels = _hourly()
+    decisions = daily_close.index[:-1]
+    delayed = panels["available_at"].copy()
+    rng = np.random.default_rng(11)
+    for j in range(len(delayed.columns)):
+        pick = rng.choice(len(delayed), size=20, replace=False)
+        delayed.iloc[pick, j] = delayed.index[pick] + pd.to_timedelta(rng.integers(0, 48, size=20), unit="h")
+    got = compute_source_readiness(delayed, decisions, FLOW_MOM_TOP20)
+    expected = _reference_readiness(delayed, decisions, FLOW_MOM_TOP20)
+    assert (got.ready == expected).all()
+    assert (got.bar_positions >= 0).all()
+
+
+def test_targets_bit_identical_with_explicit_readiness_and_cache() -> None:
+    import dataclasses
+
+    from src.strategy.targets import MemberSnapshotCache, compute_source_readiness
+
+    daily_close, daily_qv = _daily()
+    panels = _hourly()
+    decisions = daily_close.index[:-1]
+    specs = [FLOW_MOM_TOP20, FLOW_MOM_TOP40_CONTROL, FLOW_MOM_TOP20_GROWTH]
+    specs += [dataclasses.replace(FLOW_MOM_TOP20, members=FLOW_MOM_TOP20.members[:4])]
+    cache = MemberSnapshotCache()
+    for spec in specs:
+        base = build_strategy_targets(
+            panels, panels["available_at"], daily_close, daily_qv, _SYMBOLS,
+            market_close=panels["close"], strategy=spec,
+        )
+        readiness = compute_source_readiness(panels["available_at"], decisions, spec)
+        explicit = build_strategy_targets(
+            panels, panels["available_at"], daily_close, daily_qv, _SYMBOLS,
+            market_close=panels["close"], strategy=spec, readiness=readiness,
+        )
+        pd.testing.assert_frame_equal(explicit.target_weights, base.target_weights)
+        cached = build_strategy_targets(
+            panels, panels["available_at"], daily_close, daily_qv, _SYMBOLS,
+            market_close=panels["close"], strategy=spec, snapshot_cache=cache,
+        )
+        pd.testing.assert_frame_equal(cached.target_weights, base.target_weights)
+
+
+def test_readiness_chunk_boundary_stable(monkeypatch) -> None:
+    import src.strategy.targets as targets_mod
+    from src.strategy.targets import compute_source_readiness
+
+    daily_close, _ = _daily()
+    panels = _hourly()
+    decisions = daily_close.index[:-1]
+    monkeypatch.setattr(targets_mod, "_READINESS_CHUNK_BARS", 37)
+    chunked = compute_source_readiness(panels["available_at"], decisions, FLOW_MOM_TOP20)
+    expected = _reference_readiness(panels["available_at"], decisions, FLOW_MOM_TOP20)
+    assert (chunked.ready == expected).all()
+
+
+def test_cache_reuse_across_members_counts_builders_once(monkeypatch) -> None:
+    import dataclasses
+
+    import src.strategy.targets as targets_mod
+    from src.strategy.targets import MemberSnapshotCache
+
+    daily_close, daily_qv = _daily()
+    panels = _hourly()
+    calls: dict[str, int] = {}
+    real_registry = list(targets_mod.FEATURE_REGISTRY)
+    wrapped = []
+    for spec in real_registry:
+        real_builder = spec.builder
+
+        def _counting(panels_arg, _name=spec.name, _real=real_builder):
+            calls[_name] = calls.get(_name, 0) + 1
+            return _real(panels_arg)
+
+        wrapped.append(dataclasses.replace(spec, builder=_counting))
+    monkeypatch.setattr(targets_mod, "FEATURE_REGISTRY", tuple(wrapped))
+    cache = MemberSnapshotCache()
+    primary = build_strategy_targets(
+        panels, panels["available_at"], daily_close, daily_qv, _SYMBOLS,
+        market_close=panels["close"], strategy=FLOW_MOM_TOP20, snapshot_cache=cache,
+    )
+    neighbor = dataclasses.replace(FLOW_MOM_TOP20, members=FLOW_MOM_TOP20.members[:4])
+    second = build_strategy_targets(
+        panels, panels["available_at"], daily_close, daily_qv, _SYMBOLS,
+        market_close=panels["close"], strategy=neighbor, snapshot_cache=cache,
+    )
+    for member in FLOW_MOM_TOP20.members[:4]:
+        assert calls.get(member.name, 0) == 1
+    independent = build_strategy_targets(
+        panels, panels["available_at"], daily_close, daily_qv, _SYMBOLS,
+        market_close=panels["close"], strategy=neighbor,
+    )
+    pd.testing.assert_frame_equal(second.target_weights, independent.target_weights)
+    assert primary.target_weights.shape == second.target_weights.shape
+
+
+def test_variants_never_share_derived_books() -> None:
+    import dataclasses
+
+    from src.strategy.targets import MemberSnapshotCache
+
+    daily_close, daily_qv = _daily()
+    panels = _hourly()
+    cache = MemberSnapshotCache()
+    narrow = dataclasses.replace(FLOW_MOM_TOP20, strategy_id="narrow", breadth=20)
+    wide = dataclasses.replace(FLOW_MOM_TOP20, strategy_id="wide", breadth=25)
+    got_narrow = build_strategy_targets(
+        panels, panels["available_at"], daily_close, daily_qv, _SYMBOLS,
+        market_close=panels["close"], strategy=narrow, snapshot_cache=cache,
+    )
+    got_wide = build_strategy_targets(
+        panels, panels["available_at"], daily_close, daily_qv, _SYMBOLS,
+        market_close=panels["close"], strategy=wide, snapshot_cache=cache,
+    )
+    pd.testing.assert_frame_equal(
+        got_narrow.target_weights,
+        build_strategy_targets(
+            panels, panels["available_at"], daily_close, daily_qv, _SYMBOLS,
+            market_close=panels["close"], strategy=narrow,
+        ).target_weights,
+    )
+    pd.testing.assert_frame_equal(
+        got_wide.target_weights,
+        build_strategy_targets(
+            panels, panels["available_at"], daily_close, daily_qv, _SYMBOLS,
+            market_close=panels["close"], strategy=wide,
+        ).target_weights,
+    )
+
+
+def test_cache_rejects_foreign_inputs() -> None:
+    from src.strategy.targets import MemberSnapshotCache
+
+    daily_close, daily_qv = _daily()
+    panels = _hourly()
+    cache = MemberSnapshotCache()
+    build_strategy_targets(
+        panels, panels["available_at"], daily_close, daily_qv, _SYMBOLS,
+        market_close=panels["close"], strategy=FLOW_MOM_TOP20, snapshot_cache=cache,
+    )
+    other = {k: v.copy() for k, v in panels.items()}
+    other["close"] = other["close"] * 1.5
+    with pytest.raises(DataIntegrityError, match="different source"):
+        build_strategy_targets(
+            other, panels["available_at"], daily_close, daily_qv, _SYMBOLS,
+            market_close=other["close"], strategy=FLOW_MOM_TOP20, snapshot_cache=cache,
+        )
+
+
+def test_cache_direct_fingerprint_branches() -> None:
+    from src.strategy.targets import FeatureMember, MemberSnapshotCache
+
+    cache = MemberSnapshotCache()
+    member = FeatureMember(name="flow_imb_168h", sign=1)
+    frame = pd.DataFrame(1.0, index=pd.date_range("2021-01-01", periods=2, tz="UTC"), columns=["A"])
+    stored = cache.snapshots(member, lambda: frame, snapshot_hour=22, release_hour=23, fingerprint=("a",))
+    assert stored is frame
+    assert cache.snapshots(member, lambda: frame, snapshot_hour=22, release_hour=23, fingerprint=("a",)) is frame
+    other = FeatureMember(name="xs_mom_336h", sign=1)
+    with pytest.raises(DataIntegrityError, match="different source"):
+        cache.snapshots(other, lambda: frame, snapshot_hour=22, release_hour=23, fingerprint=("b",))
+    with pytest.raises(DataIntegrityError, match="different source"):
+        cache.snapshots(other, lambda: frame, snapshot_hour=22, release_hour=23)
+
+
+def test_readiness_empty_decisions_and_windows() -> None:
+    from src.strategy.targets import _sliding_window_max, compute_source_readiness
+
+    panels = _hourly()
+    empty_decisions = pd.DatetimeIndex([], tz="UTC")
+    got = compute_source_readiness(panels["available_at"], empty_decisions, FLOW_MOM_TOP20)
+    assert got.ready.shape == (0, len(_SYMBOLS))
+    assert _sliding_window_max(np.empty((0, 2), dtype=np.int64), 720).shape == (0, 2)
+
+
+def test_readiness_chunk_without_decision_skips(monkeypatch) -> None:
+    import src.strategy.targets as targets_mod
+    from src.strategy.targets import compute_source_readiness
+
+    panels = _hourly()
+    daily_close, _ = _daily()
+    late = daily_close.index[-2:-1]
+    monkeypatch.setattr(targets_mod, "_READINESS_CHUNK_BARS", 512)
+    got = compute_source_readiness(panels["available_at"], late, FLOW_MOM_TOP20)
+    expected = _reference_readiness(panels["available_at"], late, FLOW_MOM_TOP20)
+    assert (got.ready == expected).all()
+
+
+def test_snapshot_fingerprint_empty_frames() -> None:
+    from src.strategy.targets import _snapshot_inputs_fingerprint
+
+    idx = pd.date_range("2021-01-01", periods=0, freq="h", tz="UTC")
+    empty_close = pd.DataFrame(index=idx, columns=list(_SYMBOLS), dtype="float64")
+    empty_avail = pd.DataFrame(index=idx, columns=list(_SYMBOLS))
+    fingerprint = _snapshot_inputs_fingerprint({"close": empty_close}, empty_avail)
+    assert all(item[1] == (0, len(_SYMBOLS)) for item in fingerprint)
+
+
+@pytest.mark.parametrize("plane", ["quote_vol", "taker_buy_quote", "available_at", "market_close"])
+def test_cache_fingerprint_checks_every_plane(plane) -> None:
+    from src.strategy.targets import MemberSnapshotCache
+
+    close, volume = _daily()
+    panels = _hourly()
+    cache = MemberSnapshotCache()
+    build_strategy_targets(panels, panels["available_at"], close, volume, _SYMBOLS,
+                           market_close=panels["close"], snapshot_cache=cache)
+    changed = {k: v.copy() for k, v in panels.items()}
+    market = panels["close"].copy()
+    if plane == "market_close":
+        market.iloc[-1, 0] *= 2
+    elif plane == "available_at":
+        changed[plane] = changed[plane].astype("datetime64[ns, UTC]")
+        changed[plane].iloc[-1, 0] += pd.Timedelta(nanoseconds=1)
+    else:
+        changed[plane].iloc[-1, 0] *= 2
+    with pytest.raises(DataIntegrityError, match="different source"):
+        build_strategy_targets(changed, changed["available_at"], close, volume, _SYMBOLS,
+                               market_close=market, snapshot_cache=cache)
+
+
+def test_readiness_nanosecond_release_boundary(monkeypatch) -> None:
+    import src.strategy.targets as mod
+
+    index = pd.date_range("2021-01-01", periods=1031, freq="h", tz="UTC")
+    decisions = pd.date_range("2021-01-01", periods=45, tz="UTC")
+    available = pd.DataFrame({"A": index + pd.Timedelta(hours=1), "B": index + pd.Timedelta(hours=1)}, index=index).astype("datetime64[ns, UTC]")
+    release = decisions[30] + pd.Timedelta(hours=23)
+    available.loc[index[719], "A"] = release
+    available.loc[index[719], "B"] = release + pd.Timedelta(nanoseconds=1)
+    monkeypatch.setattr(mod, "_READINESS_CHUNK_BARS", 127)
+    actual = mod.compute_source_readiness(available, decisions, FLOW_MOM_TOP20)
+    np.testing.assert_array_equal(actual.ready, _reference_readiness(available, decisions, FLOW_MOM_TOP20))
+    assert actual.ready[30].tolist() == [True, False]
+    assert actual.bar_positions[-1] == -1
+
+
+def test_foreign_readiness_grid_rejected() -> None:
+    from src.strategy.targets import compute_source_readiness
+
+    close, volume = _daily()
+    panels = _hourly()
+    foreign = compute_source_readiness(panels["available_at"], close.index[1:], FLOW_MOM_TOP20)
+    with pytest.raises(DataIntegrityError, match="source readiness"):
+        build_strategy_targets(panels, panels["available_at"], close, volume, _SYMBOLS,
+                               market_close=panels["close"], readiness=foreign)
+
+
+def test_all_neighbors_equal_legacy_snapshot_reference() -> None:
+    from src.cli.commands.backtest import _neighbor_specs
+    from src.strategy.targets import MemberSnapshotCache
+    from src.strategy.universe import build_pit_roster
+
+    close, volume = _daily()
+    panels = _hourly()
+    decisions = close.index[:-1]
+    features = {m.name: next(f for f in FEATURE_REGISTRY if f.name == m.name).builder(panels)
+                for m in FLOW_MOM_TOP20.members}
+    cache = MemberSnapshotCache()
+    specs = [dataclasses.replace(s, breadth=min(s.breadth, 9), min_rank_symbols=2)
+             for s in [FLOW_MOM_TOP20, *_neighbor_specs(FLOW_MOM_TOP20)]]
+    specs += [dataclasses.replace(specs[0], breadth=5, members=(FeatureMember(_MEMBERS[0], -1),))]
+    for spec in specs:
+        roster = build_pit_roster(close, volume, _SYMBOLS, breadth=spec.breadth).loc[decisions]
+        books = []
+        for member in spec.members:
+            snapshots = pd.DataFrame(np.nan, index=decisions, columns=list(_SYMBOLS))
+            for stamp in decisions:
+                bar = stamp + pd.Timedelta(hours=spec.snapshot_hour_utc)
+                pos = panels["close"].index.get_loc(bar)
+                ready = panels["available_at"].iloc[max(0, int(pos) - 719):int(pos) + 1].le(
+                    stamp + pd.Timedelta(hours=spec.release_hour_utc)).all(axis=0)
+                snapshots.loc[stamp] = features[member.name].loc[bar].where(ready)
+            books.append(rank_weight_book(snapshots, roster & snapshots.notna(), member.sign, spec.min_rank_symbols))
+        expected = books[0]
+        for book in books[1:]:
+            expected = expected.add(book)
+        expected = expected / len(books)
+        actual = build_strategy_targets(panels, panels["available_at"], close, volume, _SYMBOLS,
+                                        market_close=panels["close"], strategy=spec, snapshot_cache=cache)
+        expected.index = actual.target_weights.index
+        pd.testing.assert_frame_equal(actual.target_weights, expected, check_exact=True)
+    assert bool(actual.target_weights.ne(0).any().any())
