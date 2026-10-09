@@ -351,13 +351,14 @@ def _verify_source_gaps(args: argparse.Namespace) -> None:
         plane=args.plane, start=start, end=end, symbols=symbols,
     )
     _logger.info(
-        "verify_source_gaps plane=%s start=%s end=%s resolved=%d narrowed=%d unchanged=%d discovered=%d",
+        "verify_source_gaps plane=%s start=%s end=%s resolved=%d narrowed=%d rescoped=%d unchanged=%d discovered=%d",
         args.plane, start.isoformat(), end.isoformat(),
-        len(report.resolved), len(report.narrowed), len(report.unchanged), len(report.discovered),
+        len(report.resolved), len(report.narrowed), len(report.rescoped), len(report.unchanged), len(report.discovered),
     )
     for group_name, group in (
         ("resolved", report.resolved),
         ("narrowed", report.narrowed),
+        ("rescoped", report.rescoped),
         ("unchanged", report.unchanged),
         ("discovered", report.discovered),
     ):

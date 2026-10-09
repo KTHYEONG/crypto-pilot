@@ -60,12 +60,16 @@ def _row(
     evidence: str = "Vision monthly klines and REST re-query both empty",
     verified_at: str = _VERIFIED,
     resolved_at: str | None = None,
+    extent: str | None = None,
 ) -> dict[str, Any]:
-    return {
+    row: dict[str, Any] = {
         "symbol": symbol, "plane": plane, "start": start, "end": end,
         "reason": reason, "evidence": evidence,
         "verified_at": verified_at, "resolved_at": resolved_at,
     }
+    if extent is not None:
+        row["extent"] = extent
+    return row
 
 
 def _write_registry(path: Path, rows: list[Any]) -> Path:
@@ -263,7 +267,7 @@ def test_audit_unregistered_gap_is_discovered(tmp_path: Path) -> None:
 
 
 def test_audit_confirmed_gap_is_unchanged(tmp_path: Path) -> None:
-    registry = _write_registry(tmp_path / "reg.jsonl", [_row()])
+    registry = _write_registry(tmp_path / "reg.jsonl", [_row(extent="INTERIOR")])
     root = tmp_path / "lake"
     grid = _grid("2022-02-20T00:00:00Z", "2022-03-05T00:00:00Z")
     kept = grid[
@@ -836,3 +840,231 @@ def test_audit_narrowed_legacy_record_is_unscoped_and_written(tmp_path: Path) ->
     assert rows
     assert all(row["extent"] in {"LISTING_EDGE", "OPEN_EDGE", "INTERIOR", "UNSCOPED"} for row in rows)
     assert {iv.extent for iv in load_source_gap_registry(registry) if iv.resolved_at is None} == {"UNSCOPED"}
+
+
+@pytest.mark.parametrize("exact_window", [False, True])
+def test_audit_exact_interior_hole_is_rescoped(tmp_path: Path, exact_window: bool) -> None:
+    registry = _write_registry(tmp_path / "reg.jsonl", [_row()])
+    before = registry.read_bytes()
+    root = tmp_path / "lake"
+    grid = _grid("2022-02-20T00:00:00Z", "2022-03-05T00:00:00Z")
+    kept = grid[
+        (grid < pd.Timestamp("2022-02-26T00:00:00Z")) | (grid >= pd.Timestamp("2022-03-01T00:00:00Z"))
+    ]
+    _write_ohlcv(root, "AAAUSDT", "3m", kept)
+    window_start = pd.Timestamp("2022-02-26T00:00:00Z" if exact_window else "2022-02-20T00:00:00Z")
+    window_end = pd.Timestamp("2022-03-01T00:00:00Z" if exact_window else "2022-03-05T00:00:00Z")
+    report = audit_source_gap_registry(
+        plane="ohlcv_3m",
+        start=window_start, end=window_end,
+        symbols=["AAAUSDT"], registry_path=registry, data_root=root,
+    )
+    assert len(report.rescoped) == 1
+    rescoped = report.rescoped[0]
+    original = load_source_gap_registry(registry)[0]
+    assert rescoped.extent == "INTERIOR"
+    assert rescoped.start.isoformat() == pd.Timestamp("2022-02-26T00:00:00Z").isoformat()
+    assert rescoped.end is not None
+    assert rescoped.end.isoformat() == pd.Timestamp("2022-03-01T00:00:00Z").isoformat()
+    assert rescoped.evidence == (
+        original.evidence + " | Audit rescope: measured as bounded interior absence "
+        "[2022-02-26T00:00:00Z, 2022-03-01T00:00:00Z) in the local lake."
+    )
+    assert rescoped.symbol == original.symbol
+    assert rescoped.plane == original.plane
+    assert rescoped.reason == original.reason
+    assert rescoped.verified_at == window_end.to_pydatetime()
+    assert rescoped.resolved_at is None
+    assert report.unchanged == ()
+    assert report.narrowed == ()
+    assert report.resolved == ()
+    assert report.discovered == ()
+    assert registry.read_bytes() == before
+
+
+def test_audit_mismatched_bounds_stay_narrowed(tmp_path: Path) -> None:
+    registry = _write_registry(tmp_path / "reg.jsonl", [_row()])
+    root = tmp_path / "lake"
+    recovered_until = pd.Timestamp("2022-02-27T12:00:00Z")
+    full = _grid("2022-02-20T00:00:00Z", "2022-03-05T00:00:00Z")
+    kept = full[
+        (full < pd.Timestamp("2022-02-26T00:00:00Z"))
+        | ((full >= pd.Timestamp("2022-02-26T00:00:00Z")) & (full < recovered_until))
+        | (full >= pd.Timestamp("2022-03-01T00:00:00Z"))
+    ]
+    _write_ohlcv(root, "AAAUSDT", "3m", kept)
+    report = audit_source_gap_registry(
+        plane="ohlcv_3m",
+        start=pd.Timestamp("2022-02-20T00:00:00Z"), end=pd.Timestamp("2022-03-05T00:00:00Z"),
+        symbols=["AAAUSDT"], registry_path=registry, data_root=root,
+    )
+    assert len(report.narrowed) == 1
+    assert report.rescoped == ()
+
+
+def test_audit_open_ended_unscoped_is_not_rescoped(tmp_path: Path) -> None:
+    registry = _write_registry(
+        tmp_path / "reg.jsonl",
+        [_row(start="2022-06-05T00:00:00Z", end=None, evidence="legacy open")],
+    )
+    root = tmp_path / "lake"
+    _write_ohlcv(root, "AAAUSDT", "3m", _grid("2022-06-01T00:00:00Z", "2022-06-05T00:00:00Z"))
+    report = audit_source_gap_registry(
+        plane="ohlcv_3m",
+        start=pd.Timestamp("2022-06-01T00:00:00Z"), end=pd.Timestamp("2022-07-01T00:00:00Z"),
+        symbols=["AAAUSDT"], registry_path=registry, data_root=root,
+    )
+    assert report.rescoped == ()
+    assert len(report.unchanged) == 1
+    assert report.narrowed == ()
+
+
+def test_audit_edge_records_untouched(tmp_path: Path) -> None:
+    registry = _write_registry(
+        tmp_path / "reg.jsonl",
+        [
+            _row(symbol="EDGE1USDT", start="2022-06-01T00:00:00Z", end=None, evidence="open edge", extent="OPEN_EDGE"),
+            _row(
+                symbol="EDGE2USDT", start="2022-06-01T00:00:00Z", end="2022-06-05T00:00:00Z",
+                evidence="listing edge", extent="LISTING_EDGE",
+            ),
+        ],
+    )
+    root = tmp_path / "lake"
+    _write_ohlcv(root, "EDGE2USDT", "3m", _grid("2022-06-05T00:00:00Z", "2022-07-01T00:00:00Z"))
+    report = audit_source_gap_registry(
+        plane="ohlcv_3m",
+        start=pd.Timestamp("2022-06-01T00:00:00Z"), end=pd.Timestamp("2022-07-01T00:00:00Z"),
+        symbols=["EDGE1USDT", "EDGE2USDT"], registry_path=registry, data_root=root,
+    )
+    assert report.rescoped == ()
+    assert {iv.symbol: iv.extent for iv in report.unchanged} == {
+        "EDGE1USDT": "OPEN_EDGE", "EDGE2USDT": "LISTING_EDGE",
+    }
+    assert report.resolved == ()
+    assert report.narrowed == ()
+
+
+def test_write_rescoped_preserves_history(tmp_path: Path) -> None:
+    registry = _write_registry(tmp_path / "reg.jsonl", [_row()])
+    root = tmp_path / "lake"
+    grid = _grid("2022-02-20T00:00:00Z", "2022-03-05T00:00:00Z")
+    kept = grid[
+        (grid < pd.Timestamp("2022-02-26T00:00:00Z")) | (grid >= pd.Timestamp("2022-03-01T00:00:00Z"))
+    ]
+    _write_ohlcv(root, "AAAUSDT", "3m", kept)
+    report = audit_source_gap_registry(
+        plane="ohlcv_3m",
+        start=pd.Timestamp("2022-02-20T00:00:00Z"), end=pd.Timestamp("2022-03-05T00:00:00Z"),
+        symbols=["AAAUSDT"], registry_path=registry, data_root=root,
+    )
+    assert len(report.rescoped) == 1
+    verified_at = pd.Timestamp("2022-04-01T00:00:00Z")
+    count = write_audited_registry(report, registry_path=registry, verified_at=verified_at)
+    reloaded = load_source_gap_registry(registry)
+    assert count == 2
+    assert len(reloaded) == 2
+    old = [iv for iv in reloaded if iv.extent == "UNSCOPED"]
+    new = [iv for iv in reloaded if iv.extent == "INTERIOR"]
+    assert len(old) == 1
+    assert old[0].resolved_at == verified_at.to_pydatetime()
+    assert len(new) == 1
+    assert new[0].resolved_at is None
+    assert new[0].start == old[0].start
+    assert new[0].end == old[0].end
+
+
+def test_audit_idempotent_after_rescope(tmp_path: Path) -> None:
+    registry = _write_registry(tmp_path / "reg.jsonl", [_row()])
+    root = tmp_path / "lake"
+    grid = _grid("2022-02-20T00:00:00Z", "2022-03-05T00:00:00Z")
+    kept = grid[
+        (grid < pd.Timestamp("2022-02-26T00:00:00Z")) | (grid >= pd.Timestamp("2022-03-01T00:00:00Z"))
+    ]
+    _write_ohlcv(root, "AAAUSDT", "3m", kept)
+    report = audit_source_gap_registry(
+        plane="ohlcv_3m",
+        start=pd.Timestamp("2022-02-20T00:00:00Z"), end=pd.Timestamp("2022-03-05T00:00:00Z"),
+        symbols=["AAAUSDT"], registry_path=registry, data_root=root,
+    )
+    write_audited_registry(report, registry_path=registry, verified_at=pd.Timestamp("2022-04-01T00:00:00Z"))
+    second = audit_source_gap_registry(
+        plane="ohlcv_3m",
+        start=pd.Timestamp("2022-02-20T00:00:00Z"), end=pd.Timestamp("2022-03-05T00:00:00Z"),
+        symbols=["AAAUSDT"], registry_path=registry, data_root=root,
+    )
+    assert second.rescoped == ()
+    assert len(second.unchanged) == 1
+    assert second.unchanged[0].extent == "INTERIOR"
+
+
+def test_cli_summary_reports_rescoped_count(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import logging
+    from argparse import Namespace
+
+    from src.cli.commands.data import _verify_source_gaps
+    import src.market_data.services.source_gap_audit as audit_mod
+
+    stamp = datetime(2022, 2, 26, tzinfo=UTC)
+    replacement = SourceGapInterval(
+        symbol="AAAUSDT", plane="ohlcv_3m", start=stamp,
+        end=datetime(2022, 3, 1, tzinfo=UTC), reason="SOURCE_ABSENT",
+        evidence="measured interior", verified_at=stamp, resolved_at=None, extent="INTERIOR",
+    )
+    monkeypatch.setattr(
+        audit_mod, "audit_source_gap_registry", lambda **kwargs: SourceGapAuditReport(rescoped=(replacement,)),
+    )
+    def reject_write(*args: Any, **kwargs: Any) -> int:
+        pytest.fail("Read-only verification must not persist a rescope")
+
+    monkeypatch.setattr(audit_mod, "write_audited_registry", reject_write)
+    args = Namespace(
+        plane="ohlcv_3m", start="2022-02-20T00:00:00Z", end="2022-03-05T00:00:00Z",
+        symbol=["AAAUSDT"], write=False,
+    )
+    with caplog.at_level(logging.DEBUG, logger="src.cli.commands.data"):
+        _verify_source_gaps(args)
+    assert any("rescoped=1" in record.message for record in caplog.records)
+    assert any("rescoped symbol=AAAUSDT" in record.message for record in caplog.records)
+
+
+@pytest.mark.parametrize(("extent", "reason"), [
+    ("OPEN_EDGE", "SOURCE_ABSENT"), ("LISTING_EDGE", "SOURCE_ABSENT"),
+    ("UNSCOPED", "DELISTED"), ("UNSCOPED", "SETTLING"),
+])
+def test_exact_interior_measurement_preserves_other_classifications(
+    tmp_path: Path, extent: str, reason: str,
+) -> None:
+    registry = _write_registry(tmp_path / "reg.jsonl", [_row(extent=extent, reason=reason)])
+    root = tmp_path / "lake"
+    grid = _grid("2022-02-20T00:00:00Z", "2022-03-05T00:00:00Z")
+    _write_ohlcv(root, "AAAUSDT", "3m", grid[
+        (grid < pd.Timestamp("2022-02-26T00:00:00Z")) | (grid >= pd.Timestamp("2022-03-01T00:00:00Z"))
+    ])
+    report = audit_source_gap_registry(
+        plane="ohlcv_3m", start=grid[0], end=pd.Timestamp("2022-03-05T00:00:00Z"),
+        registry_path=registry, data_root=root,
+    )
+    assert report.rescoped == ()
+    assert report.unchanged == load_source_gap_registry(registry)
+
+
+@pytest.mark.parametrize("offset", [-3, 0, 3])
+def test_window_clipping_does_not_rescope_a_larger_hole(tmp_path: Path, offset: int) -> None:
+    start = pd.Timestamp("2022-02-26T00:00:00Z")
+    end = pd.Timestamp("2022-03-01T00:00:00Z")
+    registry = _write_registry(tmp_path / "reg.jsonl", [_row()])
+    root = tmp_path / "lake"
+    grid = _grid("2022-02-20T00:00:00Z", "2022-03-05T00:00:00Z")
+    gap_start = start - pd.Timedelta(minutes=3) if offset <= 0 else start
+    gap_end = end + pd.Timedelta(minutes=3) if offset >= 0 else end
+    _write_ohlcv(root, "AAAUSDT", "3m", grid[(grid < gap_start) | (grid >= gap_end)])
+    before = registry.read_bytes()
+    report = audit_source_gap_registry(
+        plane="ohlcv_3m", start=start, end=end, registry_path=registry, data_root=root,
+    )
+    assert report.rescoped == ()
+    assert report.unchanged == load_source_gap_registry(registry)
+    assert registry.read_bytes() == before
