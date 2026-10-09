@@ -37,6 +37,65 @@ def _read_rows(path: Path) -> list[dict[str, object]]:
     return rows
 
 
+def _family_journal_path(strategy_id: str, root: Path | None = None) -> Path:
+    from src.strategy.release import releases_dir
+
+    family = "flow_mom" if strategy_id.startswith("flow_mom") else strategy_id
+    return releases_dir(root) / f"{family}.holdout.jsonl"
+
+
+def read_holdout_looks(strategy_id: str, *, root: Path | None = None) -> tuple[dict[str, object], ...]:
+    """Committed holdout looks for the strategy family in file order."""
+    if not isinstance(strategy_id, str) or not strategy_id:
+        raise DataIntegrityError("strategy_id must be a non-empty string")
+    rows = _read_rows(_family_journal_path(strategy_id, root))
+    for row in rows:
+        _validate_holdout_row(row)
+    return tuple(rows)
+
+
+def _validate_holdout_row(row: dict[str, object]) -> None:
+    if any(not isinstance(row.get(key), str) or not row[key] for key in (
+        "strategy_id", "spec_digest", "window_start", "window_end",
+    )):
+        raise DataIntegrityError("holdout journal corrupt")
+    try:
+        start = _require_utc(pd.Timestamp(str(row["window_start"])), "window_start")
+        end = _require_utc(pd.Timestamp(str(row["window_end"])), "window_end")
+    except (ValueError, TypeError) as exc:
+        raise DataIntegrityError("holdout journal corrupt") from exc
+    if end <= start:
+        raise DataIntegrityError("holdout journal corrupt")
+
+
+def holdout_look_recorded(
+    strategy_id: str,
+    spec_digest: str,
+    window: tuple[pd.Timestamp, pd.Timestamp],
+    *,
+    root: Path | None = None,
+) -> bool:
+    """Whether the exact spec digest and window look is journaled."""
+    if not isinstance(strategy_id, str) or not strategy_id:
+        raise DataIntegrityError("strategy_id must be a non-empty string")
+    if not isinstance(spec_digest, str) or not spec_digest:
+        raise DataIntegrityError("spec_digest must be a non-empty string")
+    if not isinstance(window, tuple) or len(window) != 2:
+        raise DataIntegrityError("window must be a (start, end) tuple")
+    start = _require_utc(window[0], "window_start")
+    end = _require_utc(window[1], "window_end")
+    if end <= start:
+        raise DataIntegrityError("window_end must be after window_start")
+    start_iso = window[0].isoformat()
+    end_iso = window[1].isoformat()
+    return any(
+        row.get("spec_digest") == spec_digest
+        and row.get("window_start") == start_iso
+        and row.get("window_end") == end_iso
+        for row in read_holdout_looks(strategy_id, root=root)
+    )
+
+
 def _overlaps(start: pd.Timestamp, end: pd.Timestamp, row: dict[str, object]) -> bool:
     try:
         row_start = pd.Timestamp(str(row["window_start"])).tz_convert("UTC")
