@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC
+from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -136,19 +137,45 @@ def test_open_edge_on_never_selected_symbol_is_ignored(monkeypatch: pytest.Monke
     assert not bool(frame.to_numpy().any())
 
 
-def test_interior_gap_withdraws_and_is_disclosed(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_interior_gap_withdraws_and_is_disclosed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
     """INTERIOR gaps withdraw the seat and surface in the disclosure list and limitation."""
     from src.engine.backtest_evidence import StrategyReportPeriod, evaluate_strategy_backtest
     from src.engine.backtest_persist import strategy_backtest_payload
     from src.engine.strategy_backtest import StrategyBacktestRequest
     from src.strategy.targets import StrategyTargets
+    from src.core.source_gaps import active_intervals
+    from src.market_data.services.source_gap_audit import (
+        _record_to_row, audit_source_gap_registry, write_audited_registry,
+    )
+    import json
 
     base, stress = _specs()
+    original = _interval("AAA", "UNSCOPED", "2021-04-03T12:00:00Z", "2021-04-04T00:00:00Z")
+    registry = tmp_path / "reg.jsonl"
+    registry.write_text(json.dumps(_record_to_row(original)) + "\n", encoding="utf-8")
+    root = tmp_path / "lake"
+    directory = root / "ohlcv" / "3m"
+    directory.mkdir(parents=True)
+    observed = pd.DatetimeIndex(["2021-04-03T11:57:00Z", "2021-04-04T00:00:00Z"])
+    pd.DataFrame({"datetime": observed}).to_parquet(directory / "AAA.parquet", index=False)
+    report = audit_source_gap_registry(
+        plane="ohlcv_3m", start=observed[0], end=observed[-1] + pd.Timedelta(minutes=3),
+        registry_path=registry, data_root=root,
+    )
+    assert len(report.rescoped) == 1
+    write_audited_registry(report, registry_path=registry, verified_at=pd.Timestamp("2026-01-01T00:00:00Z"))
     monkeypatch.setattr(
         run_mod, "active_intervals",
-        lambda **kwargs: (_interval("AAA", "INTERIOR", "2021-04-03T12:00:00Z", "2021-04-04T00:00:00Z"),),
+        lambda **kwargs: active_intervals(path=registry, **kwargs),
     )
     days = pd.date_range("2021-04-01", periods=5, freq="D", tz="UTC")
+    assert_lake_coverage(
+        days, _roster(days, _SYMBOLS, "AAA"), strategy=FLOW_MOM_TOP20, base_spec=base,
+        settlement_registry=EMPTY_SETTLEMENT_REGISTRY,
+        evaluation_start=days[0], evaluation_end=days[-1] + pd.Timedelta(days=1),
+    )
     frame = strategy_blocked_decisions(
         days, ("AAA", "BBB"), strategy=FLOW_MOM_TOP20, base_spec=base,
         settlement_registry=EMPTY_SETTLEMENT_REGISTRY,

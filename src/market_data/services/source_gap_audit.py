@@ -36,23 +36,13 @@ _PLANE_TIMEFRAME: dict[str, str | None] = {
 
 @dataclass(frozen=True, slots=True)
 class SourceGapAuditReport:
-    """Difference between the committed registry and what the local lake now holds.
-
-    The report is advisory evidence, never an automatic policy change: narrowing or
-    resolving an exclusion alters which history a certified backtest may trade, so an
-    operator commits the result deliberately.
-
-    Attributes:
-        resolved: Committed records whose interval is now fully present locally.
-        narrowed: Committed records replaced by the exact measured intervals.
-        unchanged: Committed records confirmed still absent with identical bounds.
-        discovered: Measured intervals absent from the registry entirely.
-    """
+    """Advisory differences between the committed registry and measured local gaps."""
 
     resolved: tuple[SourceGapInterval, ...] = ()
     narrowed: tuple[SourceGapInterval, ...] = ()
     unchanged: tuple[SourceGapInterval, ...] = ()
     discovered: tuple[SourceGapInterval, ...] = ()
+    rescoped: tuple[SourceGapInterval, ...] = ()
 
 
 def _plane_step(plane: SourceGapPlane) -> timedelta:
@@ -413,6 +403,7 @@ def audit_source_gap_registry(
     narrowed: list[SourceGapInterval] = []
     unchanged: list[SourceGapInterval] = []
     discovered: list[SourceGapInterval] = []
+    rescoped: list[SourceGapInterval] = []
     committed_by_symbol: dict[str, list[SourceGapInterval]] = {}
     for iv in active:
         if wanted is not None and iv.symbol not in wanted:
@@ -434,6 +425,48 @@ def audit_source_gap_registry(
                     pieces.append(clipped)
             merged = _merge_clipped(pieces)
             if len(merged) == 1 and merged[0][0] == commit.start and merged[0][1] == commit.end:
+                if (
+                    commit.extent == "UNSCOPED"
+                    and commit.reason == "SOURCE_ABSENT"
+                    and commit.end is not None
+                    and len(overlapping) == 1
+                    and overlapping[0].extent == "INTERIOR"
+                    and overlapping[0].start == commit.start
+                    and overlapping[0].end == commit.end
+                    and (
+                        (commit.start > window_start_dt and commit.end < window_end_dt)
+                        or any(
+                            gap.extent == "INTERIOR"
+                            and gap.start == commit.start
+                            and gap.end == commit.end
+                            for gap in _measure_one_symbol(
+                                commit.symbol,
+                                plane,
+                                pd.Timestamp(commit.start) - _plane_step(plane),
+                                pd.Timestamp(commit.end) + _plane_step(plane),
+                                data_root,
+                            )
+                        )
+                    )
+                ):
+                    rescoped.append(
+                        SourceGapInterval(
+                            symbol=commit.symbol,
+                            plane=commit.plane,
+                            start=commit.start,
+                            end=commit.end,
+                            reason=commit.reason,
+                            evidence=(
+                                f"{commit.evidence} | Audit rescope: measured as bounded "
+                                f"interior absence [{_iso_z(commit.start)}, "
+                                f"{_iso_z(commit.end)}) in the local lake."
+                            ),
+                            verified_at=end.to_pydatetime(),
+                            resolved_at=None,
+                            extent="INTERIOR",
+                        )
+                    )
+                    continue
                 unchanged.append(commit)
                 continue
             c_start = max(commit.start, window_start_dt)
@@ -480,6 +513,7 @@ def audit_source_gap_registry(
         narrowed=tuple(sorted(narrowed, key=_sort_key)),
         unchanged=tuple(sorted(unchanged, key=_sort_key)),
         discovered=tuple(sorted(discovered, key=_sort_key)),
+        rescoped=tuple(sorted(rescoped, key=_sort_key)),
     )
 
 
@@ -533,9 +567,11 @@ def write_audited_registry(
 
     resolved_keys = {_key(iv) for iv in report.resolved}
     unchanged_keys = {_key(iv) for iv in report.unchanged}
+    rescoped_keys = {_key(iv) for iv in report.rescoped}
     narrowed_new = list(report.narrowed)
     discovered_new = list(report.discovered)
-    for iv in (*narrowed_new, *discovered_new):
+    rescoped_new = list(report.rescoped)
+    for iv in (*narrowed_new, *discovered_new, *rescoped_new):
         if not iv.evidence.strip():
             raise DataIntegrityError("audited record evidence must not be blank")
         if iv.resolved_at is not None:
@@ -547,7 +583,7 @@ def write_audited_registry(
             rebuilt.append(iv)
             continue
         key = _key(iv)
-        if key in resolved_keys:
+        if key in resolved_keys or key in rescoped_keys:
             rebuilt.append(
                 SourceGapInterval(
                     symbol=iv.symbol,
@@ -607,7 +643,7 @@ def write_audited_registry(
             extent=iv.extent,
         )
 
-    rebuilt.extend(_stamped(iv) for iv in (*narrowed_new, *discovered_new))
+    rebuilt.extend(_stamped(iv) for iv in (*narrowed_new, *discovered_new, *rescoped_new))
     rebuilt.sort(key=lambda iv: (iv.symbol, iv.plane, iv.start))
     payload = "".join(json.dumps(_record_to_row(iv), sort_keys=True) + "\n" for iv in rebuilt)
     from src.core.source_gaps import _parse_registry_bytes
