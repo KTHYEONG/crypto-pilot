@@ -14,7 +14,6 @@ import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
 from decimal import Decimal
-from itertools import pairwise
 from pathlib import Path
 from typing import Final
 
@@ -67,26 +66,18 @@ def settlement_evidence_from_bars(
     delivery_time: pd.Timestamp,
     min_flat_bars: int,
     price_rtol: float,
+    frame: pd.DataFrame | None = None,
 ) -> SettlementEvidence | None:
-    """Settlement price read from the venue's post-delivery flat 1h klines, or None when not yet evidenced.
-
-    After delivery the venue publishes zero-volume bars with open == high == low == close at the
-    settlement price. Only a contiguous run of at least ``min_flat_bars`` such bars, starting at or
-    after ``delivery_time`` and agreeing on close within ``price_rtol``, counts as evidence. Any
-    traded bar after delivery, a non-flat bar, or disagreement returns None. The price is
-    therefore never synthesized from the last traded close, a mark candle, or zero.
-
-    Raises:
-        DataIntegrityError: file unreadable or lacks timestamp/open/high/low/close/volume columns.
-    """
+    """Return settlement evidence from contiguous post-delivery flat hourly bars, or None."""
     delivery = _require_utc(delivery_time, "delivery_time")
     if min_flat_bars < 1:
         raise DataIntegrityError("min_flat_bars must be >= 1")
     path = Path(hourly_path)
-    try:
-        frame = pd.read_parquet(path)
-    except (OSError, ValueError) as exc:
-        raise DataIntegrityError(f"settlement bars unreadable: {path.name}") from exc
+    if frame is None:
+        try:
+            frame = pd.read_parquet(path)
+        except (OSError, ValueError) as exc:
+            raise DataIntegrityError(f"settlement bars unreadable: {path.name}") from exc
     if not all(col in frame.columns for col in _REQUIRED_BAR_COLUMNS):
         raise DataIntegrityError(f"settlement bars lack required columns: {path.name}")
     if frame.empty:
@@ -109,22 +100,27 @@ def settlement_evidence_from_bars(
     post = work.loc[work["timestamp"] >= delivery_ms]
     if len(post) < min_flat_bars:
         return None
-    post_times = [int(v) for v in post["timestamp"].tolist()]
-    for prev_ms, cur_ms in pairwise(post_times):
-        if cur_ms - prev_ms != _MS_PER_HOUR:
-            return None
-    for _, row in post.iterrows():
-        if float(row["volume"]) != 0.0:
-            return None
-        o, h, low, c = float(row["open"]), float(row["high"]), float(row["low"]), float(row["close"])
-        if not (o == h == low == c):
-            return None
-    closes = [float(v) for v in post["close"].tolist()]
-    ref = closes[0]
+    post_ts = post["timestamp"].to_numpy()
+    if np.all((post_ts >= -(2**63)) & (post_ts < 2**63)):
+        post_ts_int = post_ts.astype("int64")
+    else:
+        post_ts_int = np.asarray([int(v) for v in post_ts.tolist()], dtype=object)
+    if bool((np.diff(post_ts_int) != _MS_PER_HOUR).any()):
+        return None
+    post_vol = post["volume"].to_numpy(dtype="float64")
+    if bool((post_vol != 0.0).any()):
+        return None
+    post_open = post["open"].to_numpy(dtype="float64")
+    post_high = post["high"].to_numpy(dtype="float64")
+    post_low = post["low"].to_numpy(dtype="float64")
+    post_close = post["close"].to_numpy(dtype="float64")
+    if bool((post_open != post_high).any() or (post_high != post_low).any() or (post_low != post_close).any()):
+        return None
+    ref = float(post_close[0])
     if ref == 0.0:
-        if any(c != 0.0 for c in closes):
+        if bool((post_close != 0.0).any()):
             return None
-    elif max(abs(c - ref) for c in closes) / abs(ref) > price_rtol:
+    elif float(np.max(np.abs(post_close - ref))) / abs(ref) > price_rtol:
         return None
     return SettlementEvidence(
         symbol=str(symbol),
@@ -344,29 +340,24 @@ def _ceil_hour(value: pd.Timestamp) -> pd.Timestamp:
 
 def derive_settlement_price(
     ohlcv_root: Path, symbol: str, last_trade_at: pd.Timestamp,
+    *,
+    minute_frame: pd.DataFrame | None = None,
+    hourly_frame: pd.DataFrame | None = None,
 ) -> SettlementPriceEvidence | None:
-    """Apply the price-source priority (flat_1h_klines, then twap30_proxy) to the lake.
-
-    flat_1h_klines reuses the live rule with ``delivery_time = ceil_hour(last_trade_at)``,
-    ``SETTLEMENT_EVIDENCE_MIN_FLAT_BARS`` and ``SETTLEMENT_EVIDENCE_PRICE_RTOL``.
-    twap30_proxy averages liquid 3m closes in float64, requiring at least
-    ``SETTLEMENT_PROXY_MIN_BARS`` liquid bars. Returns None when neither class
-    applies (operator must curate); never synthesizes a price from zero, a mark, or the last close
-    alone.
-
-    Raises:
-        DataIntegrityError: a required archive is unreadable or malformed.
-    """
+    """Derive flat hourly settlement evidence, falling back to a liquid 30-minute TWAP."""
     last_trade = _require_utc_moment(last_trade_at, "last_trade_at")
     root = Path(ohlcv_root)
     minute_path = root / "3m" / f"{symbol}.parquet"
-    if not minute_path.exists():
-        raise DataIntegrityError(f"settlement bars unreadable: {minute_path.name}")
-    minute = _read_required_frame(minute_path, _REQUIRED_3M_COLUMNS)
-    minute = _coerce_bars(minute, minute_path.name)
+    if minute_frame is None:
+        if not minute_path.exists():
+            raise DataIntegrityError(f"settlement bars unreadable: {minute_path.name}")
+        minute = _read_required_frame(minute_path, _REQUIRED_3M_COLUMNS)
+        minute = _coerce_bars(minute, minute_path.name)
+    else:
+        minute = minute_frame
     last_trade_ms = int(last_trade.value // 1_000_000)
     hourly_path = root / "1h" / f"{symbol}.parquet"
-    if hourly_path.exists():
+    if hourly_frame is not None or hourly_path.exists():
         delivery = _ceil_hour(last_trade)
         evidence = settlement_evidence_from_bars(
             hourly_path,
@@ -374,17 +365,23 @@ def derive_settlement_price(
             delivery_time=delivery,
             min_flat_bars=SETTLEMENT_EVIDENCE_MIN_FLAT_BARS,
             price_rtol=SETTLEMENT_EVIDENCE_PRICE_RTOL,
+            frame=hourly_frame,
         )
         if evidence is not None:
             price = float(evidence.price)
-            hourly = _read_required_frame(hourly_path, _REQUIRED_1H_COLUMNS)
+            if hourly_frame is None:
+                hourly = _read_required_frame(hourly_path, _REQUIRED_1H_COLUMNS)
+            else:
+                if any(col not in hourly_frame.columns for col in _REQUIRED_1H_COLUMNS):
+                    raise DataIntegrityError(f"settlement bars unreadable: {hourly_path.name}")
+                hourly = hourly_frame
             hourly = _coerce_bars(hourly, hourly_path.name)
             delivery_ms = int(delivery.value // 1_000_000)
             post = hourly.loc[hourly["timestamp"] >= delivery_ms].head(SETTLEMENT_EVIDENCE_MIN_FLAT_BARS)
             bars = [_bar_row(hourly, int(index)) for index in post.index.tolist()]
             liquid_mask = minute["quote_vol"].to_numpy(dtype="float64", na_value=float("nan")) > 0.0
-            liquid_positions = [index for index, value in enumerate(liquid_mask.tolist()) if value]
-            if not liquid_positions:
+            liquid_positions = np.flatnonzero(liquid_mask)
+            if liquid_positions.size == 0:
                 raise DataIntegrityError(f"settlement bars have no liquid bar: {minute_path.name}")
             bars.append(_bar_row(minute, int(liquid_positions[-1])))
             description = (
@@ -401,7 +398,7 @@ def derive_settlement_price(
     stamps = minute["timestamp"].to_numpy(dtype="int64")
     quote_volumes = minute["quote_vol"].to_numpy(dtype="float64", na_value=float("nan"))
     in_window = (stamps >= last_trade_ms - window_ms) & (stamps < last_trade_ms) & (quote_volumes > 0.0)
-    positions = [index for index, value in enumerate(in_window.tolist()) if value]
+    positions = np.flatnonzero(in_window)
     if len(positions) < SETTLEMENT_PROXY_MIN_BARS:
         return None
     closes = minute["close"].iloc[positions].astype("float64")
@@ -420,12 +417,14 @@ def derive_settlement_price(
     )
 
 
-def settlement_price_within_envelope(ohlcv_root: Path, record: InstrumentSettlementRecord) -> bool:
-    """True iff the price lies in the liquid 3m [min low, max high] over
-    ``[last_trade_at - SETTLEMENT_PRICE_ENVELOPE_LOOKBACK, last_trade_at)``."""
+def settlement_price_within_envelope(
+    ohlcv_root: Path, record: InstrumentSettlementRecord, *, frame: pd.DataFrame | None = None,
+) -> bool:
+    """Return whether the settlement price lies within the preceding liquid 24-hour envelope."""
     root = Path(ohlcv_root)
     path = root / "3m" / f"{record.symbol}.parquet"
-    frame = _read_required_frame(path, ("timestamp", "low", "high", "quote_vol"))
+    if frame is None:
+        frame = _read_required_frame(path, ("timestamp", "low", "high", "quote_vol"))
     stamps = pd.to_numeric(frame["timestamp"], errors="coerce")
     lookback_ms = int(SETTLEMENT_PRICE_ENVELOPE_LOOKBACK.value // 1_000_000)
     last_ms = int(record.last_trade_at.value // 1_000_000)
@@ -552,6 +551,7 @@ def _audit_symbol_records(
     stale: list[tuple[str, str]],
 ) -> None:
     frame: pd.DataFrame | None = None
+    hourly_cache: dict[str, pd.DataFrame | None] = {}
     for record in records:
         if record.last_trade_at >= end:
             continue
@@ -560,7 +560,7 @@ def _audit_symbol_records(
                 _read_required_frame(root / "3m" / f"{symbol}.parquet", _REQUIRED_3M_COLUMNS),
                 f"{symbol}.parquet",
             )
-        reason = _record_is_stale(root, symbol, frame, record)
+        reason = _record_is_stale(root, symbol, frame, record, hourly_cache=hourly_cache)
         if reason is not None:
             stale.append((record.event_id, reason))
     del frame
@@ -568,26 +568,40 @@ def _audit_symbol_records(
 
 def _record_is_stale(
     root: Path, symbol: str, frame: pd.DataFrame, record: InstrumentSettlementRecord,
+    hourly_cache: dict[str, pd.DataFrame | None] | None = None,
 ) -> str | None:
     stamps = frame["timestamp"].to_numpy(dtype="int64")
     quote_vol = frame["quote_vol"].to_numpy(dtype="float64", na_value=float("nan"))
     last_ms = int(record.last_trade_at.value // 1_000_000)
     delivery_ms = int(record.delivery_at.value // 1_000_000)
     opening_ms = last_ms - 3 * _MS_PER_MINUTE
-    trade_positions = [
-        index for index, stamp in enumerate(stamps.tolist()) if stamp == opening_ms
-    ]
-    if not trade_positions or not bool(quote_vol[trade_positions[-1]] > 0.0):
+    trade_mask = stamps == opening_ms
+    if not bool(trade_mask.any()):
         return f"last trade bar {_ms_to_utc(opening_ms).isoformat()} absent or illiquid"
-    if any(
-        last_ms <= stamp <= delivery_ms and quote_vol[index] > 0.0
-        for index, stamp in enumerate(stamps.tolist())
-    ):
+    trade_pos = int(np.flatnonzero(trade_mask)[-1])
+    if not bool(quote_vol[trade_pos] > 0.0):
+        return f"last trade bar {_ms_to_utc(opening_ms).isoformat()} absent or illiquid"
+    if bool((((stamps >= last_ms) & (stamps <= delivery_ms)) & (quote_vol > 0.0)).any()):
         return "liquid bar inside [last_trade_at, delivery_at]"
-    if not settlement_price_within_envelope(root, record):
+    if not settlement_price_within_envelope(root, record, frame=frame):
         return "price outside 24h liquid envelope"
     if record.price_source != "curated":
-        fresh = derive_settlement_price(root, symbol, record.last_trade_at)
+        cache = hourly_cache if hourly_cache is not None else {}
+        if "frame" not in cache:
+            hourly_path = root / "1h" / f"{symbol}.parquet"
+            if not hourly_path.exists():
+                cache["frame"] = None
+            else:
+                try:
+                    cache["frame"] = pd.read_parquet(hourly_path)
+                except (OSError, ValueError) as exc:
+                    raise DataIntegrityError(
+                        f"settlement bars unreadable: {hourly_path.name}"
+                    ) from exc
+        fresh = derive_settlement_price(
+            root, symbol, record.last_trade_at,
+            minute_frame=frame, hourly_frame=cache["frame"],
+        )
         if (
             fresh is None
             or fresh.settlement_price != float(record.settlement_price)
