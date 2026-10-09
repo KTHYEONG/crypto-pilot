@@ -18,17 +18,17 @@ from src.core.bootstrap import iter_stationary_bootstrap_index_chunks, stationar
 from src.core.types import DISCOVERY_START, MEASURED_EXECUTION_COST_TIERS_BPS
 from src.engine.execution import mhs_ledger_pnl
 from src.evaluation.statistics import (  # noqa: F401 -- re-exported canonical location
-    _expected_max_trial_sr,
-    _psr_radicand,
     deflated_sharpe_ratio,
+    expected_max_trial_sr,
     probabilistic_sharpe_ratio,
+    psr_radicand,
 )
 
 __all__ = [
-    "_expected_max_trial_sr",
-    "_psr_radicand",
     "deflated_sharpe_ratio",
+    "expected_max_trial_sr",
     "probabilistic_sharpe_ratio",
+    "psr_radicand",
 ]
 from src.lab.mhs.params import DEFAULT_SELECTION_WINDOW, PERIODS_PER_YEAR_1H, PNL_VOL_TARGET_BURN_IN_DAYS
 from src.quant.evaluation.policy import HOLDOUT_CUTOFF
@@ -631,7 +631,7 @@ def deflated_sharpe_decomposition(
         raise ValueError(f"n_obs_effective must be >= 2, got {n_obs_effective}")
     if trial_sr_variance < 0.0:
         raise ValueError(f"trial_sr_variance must be >= 0, got {trial_sr_variance}")
-    benchmark_sr = 0.0 if trial_sr_variance == 0.0 else _expected_max_trial_sr(trial_sr_variance, n_trials)
+    benchmark_sr = 0.0 if trial_sr_variance == 0.0 else expected_max_trial_sr(trial_sr_variance, n_trials)
     margin = observed_sr - benchmark_sr
     return DsrDecomposition(
         observed_sr=observed_sr,
@@ -640,7 +640,7 @@ def deflated_sharpe_decomposition(
         trial_sr_sqrt_variance=math.sqrt(trial_sr_variance),
         n_obs_raw=n_obs_raw,
         n_obs_effective=n_obs_effective,
-        radicand=_psr_radicand(observed_sr, skew, kurtosis),
+        radicand=psr_radicand(observed_sr, skew, kurtosis),
         n_trials=n_trials,
         fold_sharpes=tuple(fold_sharpes),
         trial_sr_source=trial_sr_source,

@@ -18,8 +18,8 @@ from src.quant.evaluation.reliability import derive_block_size
 _EULER_GAMMA = 0.577215664901532860606512090082402431
 
 
-def _psr_radicand(observed_sr: float, skew: float, kurtosis: float) -> float:
-    """PSR variance correction ``1 - skew*SR + ((kurt-1)/4)*SR^2`` (shared form)."""
+def psr_radicand(observed_sr: float, skew: float, kurtosis: float) -> float:
+    """Variance term of the PSR denominator."""
     return 1.0 - skew * observed_sr + ((kurtosis - 1.0) / 4.0) * observed_sr**2
 
 
@@ -41,15 +41,15 @@ def probabilistic_sharpe_ratio(
     """
     if n_obs < 2:
         raise ValueError(f"n_obs must be >= 2, got {n_obs}")
-    radicand = _psr_radicand(observed_sr, skew, kurtosis)
+    radicand = psr_radicand(observed_sr, skew, kurtosis)
     if radicand <= 0.0:
         return float("nan")
     z = (observed_sr - benchmark_sr) * math.sqrt(n_obs - 1.0) / math.sqrt(radicand)
     return float(norm.cdf(z))
 
 
-def _expected_max_trial_sr(trial_sr_variance: float, n_trials: int) -> float:
-    """Expected maximum Sharpe over ``n_trials`` independent zero-edge trials."""
+def expected_max_trial_sr(trial_sr_variance: float, n_trials: int) -> float:
+    """Expected maximum Sharpe over ``n_trials`` zero-edge trials."""
     sd = math.sqrt(trial_sr_variance)
     return float(
         sd
@@ -86,7 +86,7 @@ def deflated_sharpe_ratio(
         raise ValueError(f"trial_sr_variance must be >= 0, got {trial_sr_variance}")
     if trial_sr_variance == 0.0 or n_trials == 1:
         return probabilistic_sharpe_ratio(observed_sr, 0.0, n_obs, skew, kurtosis)
-    benchmark_sr = _expected_max_trial_sr(trial_sr_variance, n_trials)
+    benchmark_sr = expected_max_trial_sr(trial_sr_variance, n_trials)
     return probabilistic_sharpe_ratio(observed_sr, benchmark_sr, n_obs, skew, kurtosis)
 
 
@@ -99,7 +99,7 @@ def sharpe_sampling_variance(sharpe: float, n_obs: int, skew: float, kurtosis: f
             raise DataIntegrityError(f"{name} must be finite, got {value!r}")
     if isinstance(n_obs, bool) or not isinstance(n_obs, (int, np.integer)) or int(n_obs) < 2:
         raise DataIntegrityError(f"n_obs must be an integer >= 2, got {n_obs!r}")
-    radicand = _psr_radicand(float(sharpe), float(skew), float(kurtosis))
+    radicand = psr_radicand(float(sharpe), float(skew), float(kurtosis))
     if radicand <= 0.0:
         raise DataIntegrityError(f"PSR radicand must be positive, got {radicand!r}")
     return float(radicand / (int(n_obs) - 1))
