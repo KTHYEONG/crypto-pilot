@@ -207,14 +207,8 @@ class RetentionResult:
         if not isinstance(self.removed_evidence_ids, tuple) or any(
             not isinstance(v, str) or not v for v in self.removed_evidence_ids
         ):
-            raise ValueError(
-                f"removed_evidence_ids must be a tuple of non-empty strings, got {self.removed_evidence_ids!r}"
-            )
-        if (
-            isinstance(self.reclaimed_bytes, bool)
-            or not isinstance(self.reclaimed_bytes, int)
-            or self.reclaimed_bytes < 0
-        ):
+            raise ValueError(f"removed_evidence_ids must be a tuple of non-empty strings, got {self.removed_evidence_ids!r}")
+        if isinstance(self.reclaimed_bytes, bool) or not isinstance(self.reclaimed_bytes, int) or self.reclaimed_bytes < 0:
             raise ValueError(f"reclaimed_bytes must be a nonnegative integer, got {self.reclaimed_bytes!r}")
         if not isinstance(self.budget_satisfied, bool):
             raise ValueError(f"budget_satisfied must be bool, got {self.budget_satisfied!r}")

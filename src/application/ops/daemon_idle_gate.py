@@ -102,11 +102,7 @@ def decide_deploy(
         status = heartbeat.get("status") if heartbeat is not None else None
         decision_raw = heartbeat.get("decision_time") if heartbeat is not None else None
         decision_ts = _parse_heartbeat_time(decision_raw)
-        if (
-            status == "COMPLETE"
-            and decision_ts is not None
-            and decision_ts.replace(hour=0, minute=0, second=0, microsecond=0) == window_day
-        ):
+        if status == "COMPLETE" and decision_ts is not None and decision_ts.replace(hour=0, minute=0, second=0, microsecond=0) == window_day:
             return GateDecision("proceed", "cycle_complete")
         status_label = str(status) if isinstance(status, str) else "unknown"
         return GateDecision("wait", f"decision_window:{status_label}")

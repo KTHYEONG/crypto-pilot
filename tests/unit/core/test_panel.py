@@ -7,7 +7,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from src.core.panel import build_uniform_grid, liquid_half_eligibility, load_base_panel, partition_symbols
+from src.core.panel import build_uniform_grid, liquid_half_eligibility, load_base_panel, partition_symbols, slice_base_panel
 from src.quant.universe.pit_universe import symbol_partition
 
 
@@ -941,4 +941,23 @@ def test_load_base_panel_zombie_policy_still_quarantines_genuine_missing_tail(tm
     assert list(panel["close"].columns) == ["DDDUSDT"]
     with pytest.raises(DataIntegrityError, match="protected symbol AAAUSDT"):
         _load(PanelQuarantine(protected=frozenset({"AAAUSDT"})))
+
+
+def test_slice_base_panel_keeps_survivors_in_float64() -> None:
+    """In-memory slice retains symbols clearing min_bars with float64 planes."""
+    import numpy as np
+
+    dates = pd.date_range("2021-01-01", periods=300, freq="1h", tz="UTC")
+    close_df = pd.DataFrame(
+        {
+            "AAA": np.linspace(100.0, 200.0, len(dates)),
+            "SHORT": [10.0] * 50 + [np.nan] * (len(dates) - 50),
+        },
+        index=dates,
+    )
+    sliced = slice_base_panel({"close": close_df}, dates[10], dates[250], min_bars=200)
+    assert list(sliced["close"].columns) == ["AAA"]
+    assert sliced["close"].index[0] == dates[10]
+    assert sliced["close"].index[-1] == dates[250]
+    assert sliced["close"].dtypes.iloc[0] == np.dtype("float64")
 

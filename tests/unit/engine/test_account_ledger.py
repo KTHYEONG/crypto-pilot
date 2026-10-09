@@ -485,6 +485,14 @@ def test_replay_account_fixed_replay_unchanged_by_unit_equity() -> None:
     pd.testing.assert_series_equal(with_equity.daily_equity, plain.daily_equity)
 
 
+def test_maker_without_post_anchor_bars_charges_anchor_taker_fee() -> None:
+    """A terminal anchor has no passive window and retains the taker fee calculation."""
+    result = _maker_single_day([100.0], [100.0], [100.0], filters=False)
+    assert result.maker_fill_fraction == 0.0
+    assert result.fee_paid == 6.0 / 1e4 * 1000.0
+    assert result.daily_equity.iloc[0] == 1000.0 - result.fee_paid
+
+
 def _maker_single_day(
     closes: list[float],
     lows: list[float],

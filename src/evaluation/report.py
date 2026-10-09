@@ -139,13 +139,7 @@ def _require_returns(daily_returns: pd.Series) -> np.ndarray:
     if not isinstance(daily_returns.index, pd.DatetimeIndex):
         raise DataIntegrityError("daily_returns must carry a DatetimeIndex")
     index = daily_returns.index
-    if (
-        index.tz is None
-        or str(index.tz) != "UTC"
-        or index.hasnans
-        or not index.is_unique
-        or not index.is_monotonic_increasing
-    ):
+    if index.tz is None or str(index.tz) != "UTC" or index.hasnans or not index.is_unique or not index.is_monotonic_increasing:
         raise DataIntegrityError("daily_returns must have a unique increasing UTC index")
     if bool((values < -1.0).any()):
         raise DataIntegrityError("daily_returns cannot fall below -100%")
@@ -224,13 +218,8 @@ def _bootstrap_distribution(values: np.ndarray, n: int, seed: int, n_paths: int)
     filled = 0
     chunk_size = min(n_paths, 500)
     for chunk in iter_stationary_bootstrap_index_chunks(
-        rng,
-        source_len=n,
-        path_len=n,
-        n_replicates=n_paths,
-        mean_block=mean_block,
-        chunk_size=chunk_size,
-        max_blocks=max_blocks,
+        rng, source_len=n, path_len=n, n_replicates=n_paths,
+        mean_block=mean_block, chunk_size=chunk_size, max_blocks=max_blocks,
     ):
         paths = values[chunk.indices]
         for row in range(paths.shape[0]):

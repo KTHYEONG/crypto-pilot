@@ -261,6 +261,19 @@ def test_terminal_submits_are_excluded_from_recovery(tmp_path) -> None:
     assert [s.client_order_id for s in unresolved] == ["mhB"]
 
 
+def test_terminal_record_survives_reload(tmp_path) -> None:
+    """A persisted terminal marker still suppresses recovery after a reload."""
+    path = tmp_path / "journal.jsonl"
+    journal = OrderJournal(path)
+    attempt = _begin(journal)
+    _submit(journal, "mhA", 0, attempt_seq=attempt.attempt_seq)
+    journal.record_terminal("mhA", "FILLED")
+
+    reloaded = OrderJournal(path)
+    since = pd.Timestamp(datetime(2020, 1, 1, tzinfo=UTC))
+    assert [s.client_order_id for s in reloaded.unresolved_submits(since=since)] == []
+
+
 def test_record_fill_rejects_invalid_inputs(tmp_path) -> None:
     path = tmp_path / "journal.jsonl"
     journal = OrderJournal(path)
