@@ -945,3 +945,148 @@ def test_reconcile_tripwire_still_fires() -> None:
     acc.accounting_state.cash += 1e-6 * 1000.0
     with pytest.raises(DataIntegrityError, match="causal accounting diverged"):
         acc.finalize()
+
+
+def test_min_notional_probe_accumulates_per_intent() -> None:
+    """An enabled probe records every intent notional without touching the ledger."""
+    import dataclasses
+
+    import pandas as pd
+
+    from src.engine.execution import ExecutionSpec
+
+    grid = pd.date_range("2025-01-01 00:00", periods=10, freq="3min", tz="UTC")
+    window = _ledger_window(grid, ["BTCUSDT"], [grid[0]], {"BTCUSDT": [0.1]})
+    spec = dataclasses.replace(ExecutionSpec(), min_notional_probe_usdt=1.0)
+    _result, acc = _replay_with_acc(window, spec=spec)
+    assert acc.min_notional_total_notional > 0.0
+
+
+def test_held_position_outside_roster_fails_closed() -> None:
+    """A window that drops a held symbol is rejected before any state mutation."""
+    import dataclasses
+
+    import pandas as pd
+    import pytest
+
+    from src.common.errors import DataIntegrityError
+    from src.engine.execution import ExecutionSpec, replay_execution_windows
+
+    grid = pd.date_range("2025-01-01 00:00", periods=10, freq="3min", tz="UTC")
+    first = _ledger_window(grid, ["BTCUSDT", "ALTUSDT"], [grid[0]], {"BTCUSDT": [0.5], "ALTUSDT": [0.0]})
+    second = _ledger_window(
+        grid + pd.Timedelta(minutes=30), ["BTCUSDT", "ALTUSDT"],
+        [grid[0] + pd.Timedelta(minutes=30)], {"BTCUSDT": [0.0], "ALTUSDT": [0.0]},
+    )
+    narrowed = dataclasses.replace(second, symbols=("ALTUSDT",))
+    with pytest.raises(DataIntegrityError, match="outside execution window roster"):
+        replay_execution_windows((first, narrowed), 1000.0, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec())
+
+
+def _halted_exit_block(symbol: str, decision_ts, signal_ts):
+    """Known-zero-volume exit gap on a halted bar with valid marks and known funding."""
+    from src.engine.execution.contracts import ExecutionDataGap
+
+    return ExecutionDataGap(
+        code="KNOWN_ZERO_VOLUME", symbol=symbol, timestamp=decision_ts,
+        decision_time=decision_ts, signal_time=signal_ts, execution_bound="OHLCV_IMMEDIATE_TAKER",
+    )
+
+
+def test_blocked_exit_defers_inside_timeout() -> None:
+    """A halted exit with valued marks and known funding refills at the next viable bar."""
+    import numpy as np
+    import pandas as pd
+
+    grid = pd.date_range("2025-01-01 00:00", periods=10, freq="3min", tz="UTC")
+    acc, kwargs, _snapshot = _mid_replay_book_setup()
+    frame = kwargs["frame"]
+    acc._w_halted = np.zeros(len(grid), dtype=bool)
+    acc._w_halted[1] = True
+    acc._w_halt_id = [None] * len(grid)
+    acc._w_halt_id[1] = "halt-1"
+    gap = _halted_exit_block("BTCUSDT", grid[1], grid[0])
+    assert acc._block_fill(
+        gap, prior_units=1.0, net_units=-1.0, frame=frame, col=0, fill_pos=1,
+        timeout_pos=5, submit_pos=1, side=-1, decision_price=100.0, equity=1000.0, weight=0.0,
+    ) is True
+    assert acc.termination_counts.get("VENUE_HALT_DEFERRED_EXIT") == 1
+    (disclosure,) = acc.exit_block_disclosures
+    assert (disclosure.cause, disclosure.outcome, disclosure.halt_id) == ("VENUE_HALT", "deferred_fill", "halt-1")
+
+
+def test_blocked_exit_beyond_episode_age_counts_exceeded() -> None:
+    """An exit blocked past the deferral age falls back to the fail-closed path."""
+    import numpy as np
+    import pandas as pd
+
+    grid = pd.date_range("2025-01-01 00:00", periods=10, freq="3min", tz="UTC")
+    acc, kwargs, _snapshot = _mid_replay_book_setup()
+    frame = kwargs["frame"]
+    acc._w_halted = np.zeros(len(grid), dtype=bool)
+    acc._w_halted[1] = True
+    opened_ns = int(grid[1].value)
+    acc._exit_clock.admit(0, 1.0, opened_ns)
+    late = pd.Timestamp(opened_ns + 25 * 3600 * 10**9, tz="UTC")
+    gap = _halted_exit_block("BTCUSDT", late, grid[0])
+    assert acc._block_fill(
+        gap, prior_units=1.0, net_units=-1.0, frame=frame, col=0, fill_pos=1,
+        timeout_pos=5, submit_pos=1, side=-1, decision_price=100.0, equity=1000.0, weight=0.0,
+    ) is True
+    assert acc.termination_counts.get("EXIT_BLOCK_BOUND_EXCEEDED") == 1
+
+
+def test_blocked_exit_unknown_funding_invalidates() -> None:
+    """An exit into unknown funding records a held-funding block and invalidates."""
+    import pandas as pd
+
+    from src.engine.execution.contracts import ExecutionDataGap
+
+    grid = pd.date_range("2025-01-01 00:00", periods=10, freq="3min", tz="UTC")
+    acc, _kwargs, _snapshot = _mid_replay_book_setup()
+    gap = ExecutionDataGap(
+        code="MISSING_ACTIVE_FUNDING", symbol="BTCUSDT", timestamp=grid[1],
+        decision_time=grid[1], signal_time=grid[0], execution_bound="OHLCV_IMMEDIATE_TAKER",
+    )
+    assert acc._block_fill(gap, prior_units=1.0, net_units=-1.0) is True
+    assert acc.termination_counts.get("BLOCKED_EXIT_UNKNOWN_FUNDING") == 1
+    assert acc.ledger_valid is False
+
+
+def test_ledger_append_fails_closed_on_cratered_cash() -> None:
+    """Ledger cash cratered below notional fails the turnover closed even with healthy sizing."""
+    import pandas as pd
+    import pytest
+
+    from src.common.errors import DataIntegrityError
+    from src.engine.execution import ExecutionSpec
+    from src.engine.execution.accumulator import _BoundExecutionReplayAccumulator
+
+    grid = pd.date_range("2025-01-01 00:00", periods=10, freq="3min", tz="UTC")
+    first = _ledger_window(grid, ["BTCUSDT"], [grid[0]], {"BTCUSDT": [0.5]})
+    acc = _BoundExecutionReplayAccumulator(first, 1000.0, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec(), False)
+    acc.consume(first)
+    acc.ledger_cash = -1e9
+    later = _ledger_window(
+        grid + pd.Timedelta(minutes=30), ["BTCUSDT"], [grid[0] + pd.Timedelta(minutes=30)], {"BTCUSDT": [0.0]}
+    )
+    with pytest.raises(DataIntegrityError, match="pre-trade equity must be positive and finite"):
+        acc.consume(later)
+
+
+def test_finalize_emits_recorded_held_funding_gap() -> None:
+    """A recorded held-funding first occurrence without a gap yet is emitted at finalize."""
+    import pandas as pd
+
+    from src.engine.execution import ExecutionSpec
+    from src.engine.execution.accumulator import _BoundExecutionReplayAccumulator
+
+    grid = pd.date_range("2025-01-01 00:00", periods=10, freq="3min", tz="UTC")
+    window = _ledger_window(grid, ["BTCUSDT"], [grid[0]], {"BTCUSDT": [0.5]})
+    acc = _BoundExecutionReplayAccumulator(window, 1000.0, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec(), False)
+    acc.consume(window)
+    acc._held_funding_first["BTCUSDT"] = grid[3]
+    result = acc.finalize()
+    gaps = [gap for gap in result.ledger.data_gaps if gap.code == "MISSING_HELD_FUNDING"]
+    assert [(gap.symbol, gap.timestamp) for gap in gaps] == [("BTCUSDT", grid[3])]
+    assert result.ledger.primary_valid is False

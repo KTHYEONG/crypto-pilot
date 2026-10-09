@@ -54,6 +54,50 @@ class AccountLedgerResult:
     funding_by_symbol_daily: pd.DataFrame | None = None
 
 
+def _maker_fill_outcome(
+    delta: np.ndarray, price: np.ndarray, anchor: int, window_bars: int, window_limit: int,
+    close_plane: np.ndarray, low_plane: np.ndarray, high_plane: np.ndarray,
+    fee_rate: float, maker_fee_rate: float,
+) -> tuple[np.ndarray, np.ndarray, float]:
+    """Resolve passive fill prices, maker flags, and blended fee for one entry's deltas."""
+    fill_price = price.copy()
+    maker_fill = np.zeros(price.shape[0], dtype=bool)
+    window_start = anchor + 1
+    window_end = min(window_start + window_bars, window_limit)
+    fee = fee_rate * float((np.abs(delta) * price).sum())
+    if window_end > window_start:
+        window_close = close_plane[window_start:window_end].astype(np.float64)
+        window_low = low_plane[window_start:window_end].astype(np.float64)
+        window_high = high_plane[window_start:window_end].astype(np.float64)
+        anchor_raw = close_plane[anchor].astype(np.float64)
+        active = np.abs(delta) > 0.0
+        for position in range(price.shape[0]):
+            if not bool(active[position]):
+                continue
+            anchor_level = float(anchor_raw[position])
+            closes = window_close[:, position]
+            finite_closes = closes[np.isfinite(closes)]
+            if not np.isfinite(anchor_level):
+                if finite_closes.size > 0:
+                    fill_price[position] = float(finite_closes[-1])
+                continue
+            if delta[position] > 0.0:
+                adverse_col = window_low[:, position]
+                filled = bool(np.any(np.isfinite(adverse_col) & (adverse_col < anchor_level)))
+            else:
+                adverse_col = window_high[:, position]
+                filled = bool(np.any(np.isfinite(adverse_col) & (adverse_col > anchor_level)))
+            if filled:
+                maker_fill[position] = True
+                fill_price[position] = price[position]
+            elif finite_closes.size > 0:
+                fill_price[position] = float(finite_closes[-1])
+        maker_notional = np.abs(delta) * fill_price * maker_fill
+        taker_notional = np.abs(delta) * fill_price * (~maker_fill)
+        fee = maker_fee_rate * float(maker_notional.sum()) + fee_rate * float(taker_notional.sum())
+    return fill_price, maker_fill, fee
+
+
 def replay_account(
     unit_weights: pd.DataFrame,
     marks: AccountMarkPanels,
@@ -139,9 +183,7 @@ def replay_account(
             raise DataIntegrityError(f"{name} index misaligned with unit_weights")
     if not (marks.high.index.equals(marks.close.index) and marks.low.index.equals(marks.close.index)):
         raise DataIntegrityError("mark panels carry misaligned indexes")
-    if not (
-        list(marks.high.columns) == list(marks.close.columns) and list(marks.low.columns) == list(marks.close.columns)
-    ):
+    if not (list(marks.high.columns) == list(marks.close.columns) and list(marks.low.columns) == list(marks.close.columns)):
         raise DataIntegrityError("mark panels carry misaligned columns")
     symbols = list(reference_columns)
     absent = [symbol for symbol in symbols if symbol not in marks.close.columns]
@@ -237,20 +279,11 @@ def replay_account(
             total = float(unit_cum[n - 1]) if n > 0 else 0.0
             total_sq = float(unit_cum_sq[n - 1]) if n > 0 else 0.0
             moments = bayesian_unit_moments(
-                n,
-                total,
-                total_sq,
-                prior_days=policy.prior_days,
-                min_moment_days=policy.min_moment_days,
+                n, total, total_sq,
+                prior_days=policy.prior_days, min_moment_days=policy.min_moment_days,
             )
         exposure = choose_exposure(
-            weight_values[day],
-            equity,
-            held,
-            adv_values[day],
-            sigma_values[day],
-            ladders,
-            policy,
+            weight_values[day], equity, held, adv_values[day], sigma_values[day], ladders, policy,
             moments,
         )
         target = exposure * equity * weight_values[day]
@@ -280,40 +313,11 @@ def replay_account(
         fill_price = price
         maker_fill = np.zeros(count, dtype=bool)
         if is_maker:
-            window_start = anchor + 1
             window_limit = int(anchor_pos[day + 1]) if day + 1 < days else n_bars
-            window_end = min(window_start + window_bars, window_limit)
-            fill_price = price.copy()
-            if window_end > window_start:
-                window_close = close_f32[window_start:window_end].astype(np.float64)
-                window_low = low_f32[window_start:window_end].astype(np.float64)
-                window_high = high_f32[window_start:window_end].astype(np.float64)
-                anchor_raw = close_f32[anchor].astype(np.float64)
-                active = np.abs(delta) > 0.0
-                for position in range(count):
-                    if not bool(active[position]):
-                        continue
-                    anchor_level = float(anchor_raw[position])
-                    closes = window_close[:, position]
-                    finite_closes = closes[np.isfinite(closes)]
-                    if not np.isfinite(anchor_level):
-                        if finite_closes.size > 0:
-                            fill_price[position] = float(finite_closes[-1])
-                        continue
-                    if delta[position] > 0.0:
-                        adverse_col = window_low[:, position]
-                        filled = bool(np.any(np.isfinite(adverse_col) & (adverse_col < anchor_level)))
-                    else:
-                        adverse_col = window_high[:, position]
-                        filled = bool(np.any(np.isfinite(adverse_col) & (adverse_col > anchor_level)))
-                    if filled:
-                        maker_fill[position] = True
-                        fill_price[position] = price[position]
-                    elif finite_closes.size > 0:
-                        fill_price[position] = float(finite_closes[-1])
-                maker_notional = np.abs(delta) * fill_price * maker_fill
-                taker_notional = np.abs(delta) * fill_price * (~maker_fill)
-                fee = maker_fee_rate * float(maker_notional.sum()) + fee_rate * float(taker_notional.sum())
+            fill_price, maker_fill, fee = _maker_fill_outcome(
+                delta, price, anchor, window_bars, window_limit,
+                close_f32, low_f32, high_f32, fee_rate, maker_fee_rate,
+            )
             anchor_sent = np.abs(delta) * price
             total_anchor_sent += float(anchor_sent.sum())
             maker_anchor_sent += float(anchor_sent[maker_fill].sum())

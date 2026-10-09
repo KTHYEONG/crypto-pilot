@@ -350,7 +350,7 @@ def test_execution_module_size_budget_with_allowlist() -> None:
     # frozen at measured size; growth fails, shrink requires deleting/lowering the entry.
     # spec 34: causal settlement interleaving and delivery cutoff.
     # spec 34 part 3: announcement intent policy and venue-halt deferral.
-    allowlist = {"src/engine/execution/accumulator.py": 2232,
+    allowlist = {"src/engine/execution/accumulator.py": 2209,
                   # spec 34 part 3: venue-halt registry binding on the window stream.
                   "src/engine/execution/window_stream.py": 704}
 
@@ -376,7 +376,7 @@ def test_source_module_size_budget() -> None:
     allowlist = {
         # spec 34: causal settlement interleaving and delivery cutoff.
         # spec 34 part 3: announcement intent policy and venue-halt deferral.
-        "src/engine/execution/accumulator.py": 2232,
+        "src/engine/execution/accumulator.py": 2209,
         # spec 34 part 3: venue-halt registry binding on the window stream.
         "src/engine/execution/window_stream.py": 704,
         # Cycle phases stay co-located to preserve runtime module-global test seams;
@@ -395,10 +395,6 @@ def test_source_module_size_budget() -> None:
         "src/lab/mhs/deploy_gate.py": 723,
         "src/lab/mhs/scaling.py": 892,
         "src/lab/mhs/app/supervisor.py": 1214,
-        # Account replay/exposure scan services stay co-located: two research workflows share
-        # the catalog seam and unit-ledger helpers; split only with a new service boundary.
-        # spec 34: stress settlement haircut on the strategy stress spec.
-        "src/application/strategy_account.py": 815,
         "src/lab/mhs/reporting/inventory.py": 741,
         "src/lab/mhs/backtest/paths.py": 849,
         "src/lab/mhs/backtest/journal.py": 1081,
@@ -494,9 +490,8 @@ def test_no_function_exceeds_length_budget() -> None:
         # spec 17: mainnet refuse-to-start gate (fail loud before any venue call).
         "src/live/scheduler.py::run_daemon": 354,
         "src/live/strategy_signal.py::run_strategy_signal_step": 312,
-        "src/engine/account_ledger.py::replay_account": 308,
+        "src/engine/account_ledger.py::replay_account": 282,
         "src/lab/mhs/evaluation/windows.py::_book_outcome": 368,
-        "src/engine/execution/accumulator.py::_consume_append_ledger": 252,
         "src/engine/execution/window_stream.py::_iter_mhs_execution_windows": 382,
         "src/lab/mhs/backtest/paths.py::run_process_paths": 261,
         # spec 34 part 1: I6 settlement-registry audit gate before the replay stream.

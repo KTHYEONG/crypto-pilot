@@ -74,21 +74,8 @@ _INDEX_STATEMENTS: tuple[str, ...] = (
 )
 
 _REGISTRY_REQUIRED_COLUMNS: dict[str, frozenset[str]] = {
-    "runs": frozenset(
-        {
-            "run_id",
-            "strategy_id",
-            "registered_at",
-            "request_json",
-            "managed_directory",
-            "pinned",
-            "resolved",
-            "deployment_referenced",
-        }
-    ),
-    "finalizations": frozenset(
-        {"run_id", "finalized_at", "status", "primary_valid", "terminal_certified", "outcome_json"}
-    ),
+    "runs": frozenset({"run_id", "strategy_id", "registered_at", "request_json", "managed_directory", "pinned", "resolved", "deployment_referenced"}),
+    "finalizations": frozenset({"run_id", "finalized_at", "status", "primary_valid", "terminal_certified", "outcome_json"}),
     "artifacts": frozenset({"run_id", "role", "path", "sha256", "byte_count", "managed", "evidence_id", "retained"}),
     "trials": frozenset({"namespace", "identity_key", "first_seen", "provenance_json"}),
     "history_records": frozenset({"source_id", "ordinal", "namespace", "record_json", "admitted", "identity_key"}),
@@ -206,10 +193,7 @@ def finalize_run(path: Path, finalization: RunFinalization, artifacts: tuple[Art
                     (finalization.run_id,),
                 ).fetchall()
                 expected = sorted(
-                    (
-                        (a.role, str(a.path), a.sha256, a.byte_count, 1 if a.managed else 0, a.evidence_id)
-                        for a in artifacts
-                    ),
+                    ((a.role, str(a.path), a.sha256, a.byte_count, 1 if a.managed else 0, a.evidence_id) for a in artifacts),
                     key=lambda item: (item[0], item[1]),
                 )
                 if [tuple(r) for r in stored_artifacts] != expected:
