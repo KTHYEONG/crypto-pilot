@@ -74,6 +74,55 @@ def tax_collection_check(settings: LiveSettings, tax_dir: Path) -> PreflightChec
     )
 
 
+def release_gate_check(settings: Any, *, root: Path | None = None) -> PreflightCheck:
+    """Real-money start gate: LIVE_MAINNET needs an ACCEPTed release matching the daemon book.
+
+    SHADOW/PAPER/LIVE_TESTNET pass unconditionally (detail line only) — paper mode is an
+    operational check and is never gated or evaluated.
+    """
+    mode = getattr(settings, "mode", None)
+    if mode is not ExecutionMode.LIVE_MAINNET:
+        return PreflightCheck(
+            name="release_gate",
+            passed=True,
+            detail="suppressed mode: paper mode is an operational check and is never gated",
+        )
+    try:
+        from src.core.params import STRATEGY_NAME_CLIP
+        from src.live.runner import _unit_bootstrap_sha256
+        from src.strategy.release import load_release, strategy_spec_digest
+        from src.strategy.targets import FLOW_MOM_TOP20
+
+        release = load_release(FLOW_MOM_TOP20.strategy_id, root=root)
+        if release.verdict != "accept":
+            return PreflightCheck(
+                name="release_gate", passed=False,
+                detail=f"[RISK] strategy {release.strategy_id} has no ACCEPT verdict (verdict={release.verdict})",
+            )
+        bootstrap_digest = _unit_bootstrap_sha256(settings)
+        if bootstrap_digest is None or release.evaluation_digest is None:
+            raise DataIntegrityError("accepted release requires evaluation and unit-bootstrap digests")
+        sizing = {"name_clip": STRATEGY_NAME_CLIP, "execution_policy": settings.execution_policy,
+                  "unit_bootstrap_sha256": bootstrap_digest}
+        expected = strategy_spec_digest(FLOW_MOM_TOP20, sizing)
+        if settings.notional_equity_usdt != release.target_capital_usdt:
+            raise DataIntegrityError("daemon capital differs from evaluated capital")
+        if str(release.sizing.get("execution_policy", "")) != str(getattr(settings, "execution_policy", "")):
+            return PreflightCheck(name="release_gate", passed=False,
+                                  detail="[RISK] daemon execution policy differs from the accepted release")
+        if release.spec_digest != expected:
+            return PreflightCheck(
+                name="release_gate", passed=False,
+                detail="[RISK] running book digest differs from the accepted release",
+            )
+        return PreflightCheck(
+            name="release_gate", passed=True,
+            detail=f"release {release.strategy_id} verdict=accept digest={release.spec_digest[:12]}",
+        )
+    except Exception as exc:
+        return PreflightCheck(name="release_gate", passed=False, detail=f"[RISK] release gate failed closed: {exc}")
+
+
 def _append_tax_collection_check(settings: Any, checks: list[PreflightCheck]) -> None:
     from src.live.tax_ledger import resolve_tax_ledger_dir
 
@@ -81,6 +130,13 @@ def _append_tax_collection_check(settings: Any, checks: list[PreflightCheck]) ->
     if tax_check.detail.startswith("WARNING:"):
         logger.warning("[RISK] preflight %s", tax_check.detail)
     checks.append(tax_check)
+
+
+def _append_release_gate_check(settings: Any, checks: list[PreflightCheck]) -> None:
+    gate = release_gate_check(settings)
+    if not gate.passed:
+        logger.critical("[RISK] preflight %s", gate.detail)
+    checks.append(gate)
 
 
 def run_preflight(
@@ -271,4 +327,5 @@ def run_preflight(
         checks.append(PreflightCheck(name="venue_leverage_plan", passed=False, detail=str(exc)))
 
     _append_tax_collection_check(settings, checks)
+    _append_release_gate_check(settings, checks)
     return PreflightReport(checks=tuple(checks))

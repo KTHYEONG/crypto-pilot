@@ -19,6 +19,7 @@ _EXPECTED_CHECK_NAMES = (
     "position_reconciliation",
     "venue_leverage_plan",
     "tax_collection_ready",
+    "release_gate",
 )
 
 
@@ -136,7 +137,7 @@ def test_SCENARIO_LIVE_39_PREFLIGHT_AGGREGATES_ALL_CHECKS_WITHOUT_RAISING(tmp_pa
     )
 
     assert report.passed is False
-    assert len(report.checks) == 8
+    assert len(report.checks) == 9
     assert tuple(c.name for c in report.checks) == (
         "artifact_readable",
         "artifact_covers_decision_time",
@@ -146,8 +147,9 @@ def test_SCENARIO_LIVE_39_PREFLIGHT_AGGREGATES_ALL_CHECKS_WITHOUT_RAISING(tmp_pa
         "position_reconciliation",
         "venue_leverage_plan",
         "tax_collection_ready",
+        "release_gate",
     )
-    assert all(c.passed is False for c in report.checks if c.name != "tax_collection_ready")
+    assert all(c.passed is False for c in report.checks if c.name not in ("tax_collection_ready", "release_gate"))
     assert {c.name: c for c in report.checks}["tax_collection_ready"].detail == (
         "suppressed mode: simulated tax records"
     )
@@ -309,3 +311,177 @@ def test_preflight_reports_account_scoped_dir(tmp_path, monkeypatch) -> None:
     assert check.detail.endswith(f"tax_dir={venue_root / 'testnet'}")
     assert "runs" not in check.detail
 
+
+
+def test_release_gate_mainnet_refused_without_accepted_release(tmp_path) -> None:
+    """LIVE_MAINNET fails closed before any venue call when no ACCEPT exists."""
+    from src.live.errors import LiveTradingError
+    from src.live.preflight import release_gate_check
+
+    settings = _live_settings_for_tax_gate(tmp_path, "live_mainnet", enabled=True)
+    settings.execution_policy = "strict_passive_repeg"
+    check = release_gate_check(settings)
+    assert check.name == "release_gate"
+    assert check.passed is False
+    assert check.detail.startswith("[RISK]")
+
+    venue_calls: list[str] = []
+
+    class NoVenueClient:
+        def exchange_info(self) -> None:
+            venue_calls.append("exchange_info")
+            raise AssertionError("venue must not be touched")
+
+        def request(self, *args: object, **kwargs: object) -> None:
+            venue_calls.append("request")
+            raise AssertionError("venue must not be touched")
+
+    import pytest
+
+    import src.live.scheduler as sched
+
+    with pytest.raises(LiveTradingError, match="refused to start"):
+        sched.run_daemon(
+            settings, tmp_path / "w.parquet", tmp_path / "state.json",
+            refresh_fn=lambda target: None,
+            signal_step_fn=lambda target: None,
+            venue_fn=lambda target: None,
+            prefetch_fn=lambda target: None,
+            prune_fn=lambda: None,
+            sleep_fn=lambda seconds: None,
+            max_iterations=1,
+        )
+    assert venue_calls == []
+
+
+def test_release_gate_paper_never_gated(tmp_path) -> None:
+    """Paper mode is an operational check: it passes with verdict=null."""
+    from src.live.preflight import release_gate_check
+
+    from src.strategy.release import load_release
+
+    assert load_release("flow_mom_top20").verdict is None
+    for mode in ("shadow", "paper", "live_testnet"):
+        settings = _live_settings_for_tax_gate(tmp_path, mode, enabled=False)
+        check = release_gate_check(settings)
+        assert check.passed is True
+
+
+def _release_root_with_verdict(tmp_path, verdict: str, evaluation_digest=None, execution_policy="strict_passive_repeg"):
+    import json
+    import shutil
+
+    from src.strategy.release import release_path
+
+    root = tmp_path / "root"
+    target = root / "src" / "strategy" / "releases"
+    target.mkdir(parents=True)
+    shutil.copy(release_path("flow_mom_top20"), target / "flow_mom_top20.json")
+    raw = json.loads((target / "flow_mom_top20.json").read_text(encoding="utf-8"))
+    import hashlib
+    from src.strategy.release import strategy_spec_digest
+    from src.strategy.targets import FLOW_MOM_TOP20
+
+    raw["sizing"]["unit_bootstrap_sha256"] = hashlib.sha256(b"bootstrap fixture").hexdigest()
+    raw["spec_digest"] = strategy_spec_digest(FLOW_MOM_TOP20, raw["sizing"])
+    (target / "flow_mom_top20.json").write_text(json.dumps(raw), encoding="utf-8")
+    if verdict != "none":
+        raw = json.loads((target / "flow_mom_top20.json").read_text(encoding="utf-8"))
+        raw["verdict"] = verdict
+        raw["evaluation_digest"] = evaluation_digest
+        if execution_policy != "strict_passive_repeg":
+            raw["sizing"]["execution_policy"] = execution_policy
+        (target / "flow_mom_top20.json").write_text(json.dumps(raw, indent=2, sort_keys=True), encoding="utf-8")
+    return root
+
+
+def test_release_gate_accepts_matching_accepted_release(tmp_path) -> None:
+    """An ACCEPT whose digests match the daemon book passes the mainnet gate."""
+    from src.live.preflight import release_gate_check
+    from src.strategy.release import load_release, record_acceptance
+
+    root = _release_root_with_verdict(tmp_path, "none")
+    release = load_release("flow_mom_top20", root=root)
+    record_acceptance(
+        "flow_mom_top20", spec_digest=release.spec_digest,
+        evaluation_digest="eval-abc", root=root,
+    )
+    settings = _live_settings_for_tax_gate(tmp_path, "live_mainnet", enabled=True)
+    settings.execution_policy = "strict_passive_repeg"
+    bootstrap = tmp_path / "unit.parquet"
+    bootstrap.write_bytes(b"bootstrap fixture")
+    settings.unit_bootstrap_path = str(bootstrap)
+    settings.notional_equity_usdt = 2100
+    check = release_gate_check(settings, root=root)
+    assert check.passed is True
+    assert "verdict=accept" in check.detail
+    settings.notional_equity_usdt = 4200
+    check = release_gate_check(settings, root=root)
+    assert check.passed is False
+    assert "capital" in check.detail
+    settings.notional_equity_usdt = 2100
+    bootstrap.write_bytes(b"changed bootstrap")
+    check = release_gate_check(settings, root=root)
+    assert check.passed is False
+    assert "digest" in check.detail
+
+
+def test_release_gate_rejects_digest_and_policy_mismatch(tmp_path) -> None:
+    """A tampered spec digest or a foreign execution policy fails the gate."""
+    import json
+
+    from src.live.preflight import release_gate_check
+
+    root = _release_root_with_verdict(tmp_path, "accept", evaluation_digest="eval-abc")
+    raw = json.loads((root / "src" / "strategy" / "releases" / "flow_mom_top20.json").read_text(encoding="utf-8"))
+    raw["spec_digest"] = "0" * 64
+    (root / "src" / "strategy" / "releases" / "flow_mom_top20.json").write_text(
+        json.dumps(raw, indent=2, sort_keys=True), encoding="utf-8"
+    )
+    settings = _live_settings_for_tax_gate(tmp_path, "live_mainnet", enabled=True)
+    settings.execution_policy = "strict_passive_repeg"
+    assert release_gate_check(settings, root=root).passed is False
+
+    root2 = _release_root_with_verdict(tmp_path / "other", "accept", evaluation_digest="eval-abc")
+    accepted = root2 / "src" / "strategy" / "releases" / "flow_mom_top20.json"
+    raw = json.loads(accepted.read_text(encoding="utf-8"))
+    raw["sizing"]["execution_policy"] = "taker_parity"
+    accepted.write_text(json.dumps(raw, indent=2, sort_keys=True), encoding="utf-8")
+    from src.strategy.release import load_release, strategy_spec_digest
+    from src.strategy.targets import FLOW_MOM_TOP20
+
+    reloaded = load_release("flow_mom_top20", root=root2)
+    assert reloaded.spec_digest != strategy_spec_digest(FLOW_MOM_TOP20, dict(reloaded.sizing))
+    assert release_gate_check(settings, root=root2).passed is False
+
+
+def test_release_gate_policy_mismatch_with_matching_digest(tmp_path) -> None:
+    """Same accepted digest but a different daemon policy still refuses mainnet."""
+    from src.live.preflight import release_gate_check
+    from src.strategy.release import load_release, record_acceptance
+
+    root = _release_root_with_verdict(tmp_path, "none")
+    release = load_release("flow_mom_top20", root=root)
+    record_acceptance(
+        "flow_mom_top20", spec_digest=release.spec_digest,
+        evaluation_digest="eval-abc", root=root,
+    )
+    settings = _live_settings_for_tax_gate(tmp_path, "live_mainnet", enabled=True)
+    settings.execution_policy = "taker_parity"
+    bootstrap = tmp_path / "unit.parquet"
+    bootstrap.write_bytes(b"bootstrap fixture")
+    settings.unit_bootstrap_path = str(bootstrap)
+    settings.notional_equity_usdt = 2100
+    check = release_gate_check(settings, root=root)
+    assert check.passed is False
+    assert "execution policy" in check.detail
+
+
+def test_release_gate_fails_closed_without_record(tmp_path) -> None:
+    """A missing release record fails closed, never open."""
+    from src.live.preflight import release_gate_check
+
+    settings = _live_settings_for_tax_gate(tmp_path, "live_mainnet", enabled=True)
+    check = release_gate_check(settings, root=tmp_path / "nope")
+    assert check.passed is False
+    assert check.detail.startswith("[RISK] release gate failed closed")
