@@ -109,12 +109,30 @@ def test_pre_delivery_unscoped_still_excludes(monkeypatch) -> None:
     assert "BTCSTUSDT" in source_gap_excluded_symbols()
 
 
-def test_committed_registries_exclude_sixteen_without_luna() -> None:
+def test_committed_registries_exclude_nothing_after_edge_rescope() -> None:
     excluded = source_gap_excluded_symbols()
     assert "LUNAUSDT" not in excluded
-    assert excluded == frozenset(
-        f"{symbol}USDT" for symbol in (
-            "AERGO", "AIA", "BDXN", "BNT", "BNX", "BTCST", "CTK", "CVC",
-            "CVX", "ICP", "LIT", "MANA", "MAVIA", "NEAR", "PUMP", "SLP",
-        )
+    assert excluded == frozenset()
+
+
+def test_edge_scoped_symbols_are_not_excluded(monkeypatch) -> None:
+    intervals = (
+        _interval("EDGEUSDT", "SOURCE_ABSENT", "LISTING_EDGE", "2021-01-01T00:00:00Z", "2022-01-01T00:00:00Z"),
+        _interval("TAILUSDT", "SOURCE_ABSENT", "OPEN_EDGE", "2022-06-01T00:00:00Z"),
     )
+    monkeypatch.setattr(data_policy_mod, "active_intervals", lambda **kwargs: intervals)
+    monkeypatch.setattr(
+        data_policy_mod, "load_instrument_settlement_registry",
+        lambda *a, **k: _settlement_registry(),
+    )
+    assert source_gap_excluded_symbols() == frozenset()
+
+
+def test_delisted_superseded_by_settlement_stays_non_excluding(monkeypatch) -> None:
+    intervals = (_interval("LUNAUSDT", "DELISTED", "UNSCOPED", "2021-01-01T00:00:00Z"),)
+    monkeypatch.setattr(data_policy_mod, "active_intervals", lambda **kwargs: intervals)
+    monkeypatch.setattr(
+        data_policy_mod, "load_instrument_settlement_registry",
+        lambda *a, **k: _settlement_registry(_luna_settlement()),
+    )
+    assert "LUNAUSDT" not in source_gap_excluded_symbols()

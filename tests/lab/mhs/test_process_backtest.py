@@ -2418,7 +2418,7 @@ def test_inventory_observed_gaps_preserve_provenance(monkeypatch) -> None:
     assert report.source_gaps[0].symbol == gap.symbol
     assert report.source_gaps[0].timestamp == gap.timestamp
     assert finalized["called"] is False
-    assert len(report.source_gap_excluded_symbols) > 0
+    assert report.source_gap_excluded_symbols == ()
 
 
 def test_inventory_telemetry_failure_preserves_original_cause(monkeypatch) -> None:

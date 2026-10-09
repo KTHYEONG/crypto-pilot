@@ -202,7 +202,7 @@ def test_root_binding(tmp_path) -> None:
     from src.common.paths import FUTURES_DATA_DIR
 
     canonical = settlement_registry_for_root(str(FUTURES_DATA_DIR / "ohlcv"))
-    assert len(canonical.settlements) == 145
+    assert len(canonical.settlements) == 155
     assert settlement_registry_for_root(tmp_path) is EMPTY_SETTLEMENT_REGISTRY
 
 
@@ -231,13 +231,13 @@ def test_committed_registry_loads() -> None:
         registry = load_instrument_settlement_registry()
     finally:
         clear_instrument_settlement_registry_cache()
-    assert len(registry.settlements) == 145
+    assert len(registry.settlements) == 155
     assert len(registry.truncations) == 0
     counts: dict[str, int] = {}
     for record in registry.settlements:
         counts[record.price_source] = counts.get(record.price_source, 0) + 1
         assert record.announcement_source == "proxy_lead"
-    assert counts == {"flat_1h_klines": 137, "twap30_proxy": 8}
+    assert counts == {"flat_1h_klines": 146, "twap30_proxy": 9}
 
 
 @pytest.mark.parametrize(

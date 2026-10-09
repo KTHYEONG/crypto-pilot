@@ -344,8 +344,7 @@ def _verify_source_gaps(args: argparse.Namespace) -> None:
         write_audited_registry,
     )
 
-    start = pd.Timestamp(args.start, tz="UTC")
-    end = pd.Timestamp(args.end, tz="UTC")
+    start, end = pd.Timestamp(args.start, tz="UTC"), pd.Timestamp(args.end, tz="UTC")
     symbols = list(args.symbol) if args.symbol else None
     report = audit_source_gap_registry(
         plane=args.plane, start=start, end=end, symbols=symbols,

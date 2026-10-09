@@ -23,7 +23,7 @@
     "name_clip": 0.05,
     "unit_bootstrap_sha256": "2cc6a4e9c11dd8fc6c509c3233645d38d226702b73f650e1f1f6ac4d0d9e956b"
   },
-  "spec_digest": "cfd8fb54854f458d8ac8398c2c7bbf877962cff7948ab823c90279a6b76b0eeb",
+  "spec_digest": "3cb0d592236eb7d30707333310ff8c167d3635b810bce0175b4513ee5477773f",
   "strategy_id": "flow_mom_top20",
   "target_capital_usdt": 2100.0,
   "verdict": null,

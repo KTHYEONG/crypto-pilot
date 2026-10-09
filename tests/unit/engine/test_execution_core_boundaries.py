@@ -144,16 +144,10 @@ def test_later_fill_classification() -> None:
 
 
 def test_exception_roster_values() -> None:
-    """Exception roster preservation: the single registry holds the fixed set."""
+    """Exception roster preservation: every absence is interval-scoped, so nothing is blanket excluded."""
     from src.core.data_policy import SOURCE_GAP_EXCLUDED_SYMBOLS
 
-    assert set(SOURCE_GAP_EXCLUDED_SYMBOLS) == frozenset(
-        {
-            "AERGOUSDT", "CTKUSDT", "CVCUSDT", "MAVIAUSDT", "LITUSDT", "PUMPUSDT",
-            "CVXUSDT", "SLPUSDT", "BNXUSDT", "AIAUSDT", "ICPUSDT", "BNTUSDT",
-            "BTCSTUSDT", "BDXNUSDT", "MANAUSDT", "NEARUSDT",
-        }
-    )
+    assert set(SOURCE_GAP_EXCLUDED_SYMBOLS) == frozenset()
     # LUNAUSDT is explained by the settlement registry
     # (source_gap_superseded_by_settlement), so it is replayed causally
     # instead of whole-history excluded.
