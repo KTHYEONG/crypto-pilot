@@ -428,7 +428,7 @@ def test_moved_registries_keep_content_digests() -> None:
 
     assert (
         load_instrument_settlement_registry().digest
-        == "sha256:98668d7d99b85a6c702c21bbdc76265ac1d82dee83c0961f4a92e98999162964"
+        == "sha256:4e09a210879043fdd98f5d9e73ec3c04f2251836082f267a8765561e3854a047"
     )
     assert (
         load_venue_halt_registry().digest
@@ -438,5 +438,5 @@ def test_moved_registries_keep_content_digests() -> None:
 
     assert (
         hashlib.sha256(_gaps_path().read_bytes()).hexdigest()
-        == "c77df78a0c79586f4012ed3ace4735c7a88987c54e51814e3395faf846a2ebf6"
+        == "1746d1accca455c52eb5882a6eac4d300ff25279fcccc7d67ea6238bb0aec273"
     )

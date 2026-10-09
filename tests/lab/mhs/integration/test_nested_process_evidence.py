@@ -669,13 +669,15 @@ def test_flat_absent_source_does_not_poison_finance() -> None:
     assert not any(gap.symbol == "BUSDT" for gap in result.ledger.data_gaps)
 
 
-def test_actual_excluded_set_truthful() -> None:
+def test_actual_excluded_set_truthful(monkeypatch: pytest.MonkeyPatch) -> None:
+    import src.lab.mhs.backtest.inventory as inventory_mod
     from src.lab.mhs.backtest.inventory import _actual_excluded_symbols, _to_canonical_ohlcv_gap
     from src.core.data_policy import SOURCE_GAP_EXCLUDED_SYMBOLS
     from src.engine.execution.contracts import ExecutionDataGap
 
-    assert len(SOURCE_GAP_EXCLUDED_SYMBOLS) > 0
-    held = sorted(SOURCE_GAP_EXCLUDED_SYMBOLS)[0]
+    assert len(SOURCE_GAP_EXCLUDED_SYMBOLS) == 0
+    monkeypatch.setattr(inventory_mod, "SOURCE_GAP_EXCLUDED_SYMBOLS", frozenset({"HELDUSDT"}))
+    held = "HELDUSDT"
     assert held not in _actual_excluded_symbols(["AUSDT", held])
     assert held in _actual_excluded_symbols(["AUSDT"])
     assert _actual_excluded_symbols([]) == ()

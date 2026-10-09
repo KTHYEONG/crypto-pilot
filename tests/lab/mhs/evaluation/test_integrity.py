@@ -15,16 +15,32 @@ def test_integrity_module_present() -> None:
 
 
 def test_source_gap_excluded_symbols_covers_2026_09_confirmed_permanent_funding_gaps() -> None:
-    # 2026-09-18 원천 재조회: AIA/ICP의 내부 OHLCV 공백과 BNT/BTCST/BDXN의
-    # 장기 funding 공백은 Vision 월·일별 원천에도 없어 whole-history 배제한다.
-    assert {"AIAUSDT", "ICPUSDT", "BNTUSDT", "BTCSTUSDT", "BDXNUSDT"} <= integrity.SOURCE_GAP_EXCLUDED_SYMBOLS
+    # 실측 리스코프 이후 AIA/ICP의 내부 OHLCV 공백과 BNT/BTCST/BDXN의
+    # 장기 funding 공백은 구간 한정 INTERIOR/LISTING_EDGE/OPEN_EDGE로 확정되어
+    # whole-history 배제에서 해제된다(펀딩 공백은 구간 마스크가 처리).
+    from src.core.source_gaps import active_intervals
+
+    confirmed = {"AIAUSDT", "ICPUSDT", "BNTUSDT", "BTCSTUSDT", "BDXNUSDT"}
+    assert confirmed.isdisjoint(integrity.SOURCE_GAP_EXCLUDED_SYMBOLS)
+    scoped = {
+        iv.symbol: iv.extent
+        for iv in active_intervals()
+        if iv.symbol in confirmed and iv.extent in {"INTERIOR", "LISTING_EDGE", "OPEN_EDGE"}
+    }
+    assert set(scoped) == confirmed
     assert "OMNIUSDT" not in integrity.SOURCE_GAP_EXCLUDED_SYMBOLS
 
 
 def test_source_gap_excluded_symbols_covers_2026_09_confirmed_permanent_ohlcv_gap() -> None:
-    # 2026-09-15 실측: MAVIAUSDT는 2025-03-26 00:00~16:00 구간 3m/1h OHLCV가
-    # Vision 월간 아카이브와 REST klines 양쪽 모두에 없다(진짜 소스 공백).
-    assert "MAVIAUSDT" in integrity.SOURCE_GAP_EXCLUDED_SYMBOLS
+    # 2026-09-15 실측: MAVIAUSDT의 2025-03-26 00:00~16:00 구간 3m/1h OHLCV 공백은
+    # Vision 월간 아카이브와 REST klines 양쪽 모두에 없는 진짜 소스 공백이나,
+    # 구간 한정 INTERIOR로 확정되어 whole-history 배제에서 해제된다.
+    from src.core.source_gaps import active_intervals
+
+    assert "MAVIAUSDT" not in integrity.SOURCE_GAP_EXCLUDED_SYMBOLS
+    assert ("MAVIAUSDT", "INTERIOR") in {
+        (iv.symbol, iv.extent) for iv in active_intervals()
+    }
 
 
 def test_source_gap_excluded_symbols_covers_2026_09_confirmed_bake_delisting() -> None:
@@ -61,16 +77,14 @@ def test_source_gap_excluded_symbols_after_ohlcv_recollection_sweep() -> None:
         "SLERFUSDT", "STRAXUSDT", "TROYUSDT", "UNFIUSDT", "VIDTUSDT", "WAVESUSDT", "XEMUSDT",
     }
     assert recovered.isdisjoint(integrity.SOURCE_GAP_EXCLUDED_SYMBOLS)
-    assert {"CVXUSDT", "SLPUSDT"} <= integrity.SOURCE_GAP_EXCLUDED_SYMBOLS
+    # CVXUSDT/SLPUSDT의 펀딩 공백도 구간 한정 INTERIOR/LISTING_EDGE로 확정되어
+    # whole-history 배제에서 해제된다.
+    assert {"CVXUSDT", "SLPUSDT"}.isdisjoint(integrity.SOURCE_GAP_EXCLUDED_SYMBOLS)
     # LUNAUSDT is explained by the settlement registry
     # (source_gap_superseded_by_settlement), so it is replayed causally
     # instead of whole-history excluded.
     assert "LUNAUSDT" not in integrity.SOURCE_GAP_EXCLUDED_SYMBOLS
-    assert set(integrity.SOURCE_GAP_EXCLUDED_SYMBOLS) == {
-        "AERGOUSDT", "CTKUSDT", "CVCUSDT", "MAVIAUSDT", "LITUSDT", "PUMPUSDT",
-        "CVXUSDT", "SLPUSDT", "BNXUSDT", "AIAUSDT", "ICPUSDT", "BNTUSDT",
-        "BTCSTUSDT", "BDXNUSDT", "MANAUSDT", "NEARUSDT",
-    }
+    assert set(integrity.SOURCE_GAP_EXCLUDED_SYMBOLS) == frozenset()
 
 
 def test_funding_gap_terminal_symbols_accepts_gap_with_no_later_fill() -> None:
@@ -461,13 +475,17 @@ def test_source_gap_excluded_symbols_no_longer_blanket_excludes_resolved_end_of_
         "BAKEUSDT", "HIFIUSDT", "OMNIUSDT", "AGIXUSDT", "ALPACAUSDT", "FTMUSDT",
     }
     assert resolved.isdisjoint(integrity.SOURCE_GAP_EXCLUDED_SYMBOLS)
-    assert {"AIAUSDT", "ICPUSDT", "BNTUSDT", "BTCSTUSDT", "BDXNUSDT"} <= integrity.SOURCE_GAP_EXCLUDED_SYMBOLS
+    assert {"AIAUSDT", "ICPUSDT", "BNTUSDT", "BTCSTUSDT", "BDXNUSDT"}.isdisjoint(
+        integrity.SOURCE_GAP_EXCLUDED_SYMBOLS
+    )
     # LUNAUSDT is explained by the settlement registry
     # (source_gap_superseded_by_settlement), so it is replayed causally
     # instead of whole-history excluded.
     assert "LUNAUSDT" not in integrity.SOURCE_GAP_EXCLUDED_SYMBOLS
-    assert len(integrity.SOURCE_GAP_EXCLUDED_SYMBOLS) == 16
-    assert {"LITUSDT", "PUMPUSDT", "BNXUSDT", "MAVIAUSDT"} <= integrity.SOURCE_GAP_EXCLUDED_SYMBOLS
+    assert len(integrity.SOURCE_GAP_EXCLUDED_SYMBOLS) == 0
+    assert {"LITUSDT", "PUMPUSDT", "BNXUSDT", "MAVIAUSDT"}.isdisjoint(
+        integrity.SOURCE_GAP_EXCLUDED_SYMBOLS
+    )
 
 
 def test_replay_ledger_certified_accepts_valid_ledger() -> None:

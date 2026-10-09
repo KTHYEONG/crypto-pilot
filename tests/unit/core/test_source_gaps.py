@@ -215,19 +215,28 @@ def test_packaged_registry_loads_probe_confirmed_intervals() -> None:
     for symbol in ("LUNAUSDT", "MANAUSDT", "NEARUSDT"):
         assert symbol in by_symbol
     luna = [iv for iv in intervals if iv.symbol == "LUNAUSDT"]
-    assert len(luna) == 1
-    assert luna[0].end is None
-    assert luna[0].reason == "DELISTED"
+    assert len(luna) == 4
+    active_luna = [iv for iv in luna if iv.resolved_at is None]
+    assert len(active_luna) == 1
+    assert active_luna[0].end is None
+    assert active_luna[0].reason == "DELISTED"
+    assert sum(iv.reason == "SOURCE_ABSENT" and iv.resolved_at is not None for iv in luna) == 2
     mana = [
-        (iv.start.isoformat(), iv.end.isoformat() if iv.end else None)
+        (iv.start.isoformat(), iv.end.isoformat() if iv.end else None, iv.extent, iv.resolved_at is None)
         for iv in intervals
         if iv.symbol == "MANAUSDT" and "Binance Vision" in iv.evidence
     ]
     assert mana == [
-        ("2022-02-26T00:00:00+00:00", "2022-03-01T00:00:00+00:00"),
-        ("2022-04-01T00:00:00+00:00", "2022-04-03T00:00:00+00:00"),
+        ("2022-02-26T00:00:00+00:00", "2022-03-01T00:00:00+00:00", "UNSCOPED", False),
+        ("2022-02-26T00:00:00+00:00", "2022-03-01T00:00:00+00:00", "INTERIOR", True),
+        ("2022-04-01T00:00:00+00:00", "2022-04-03T00:00:00+00:00", "UNSCOPED", False),
+        ("2022-04-01T00:00:00+00:00", "2022-04-03T00:00:00+00:00", "INTERIOR", True),
     ]
-    near = [(iv.start.isoformat(), iv.end.isoformat() if iv.end else None) for iv in intervals if iv.symbol == "NEARUSDT"]
+    near = [
+        (iv.start.isoformat(), iv.end.isoformat() if iv.end else None, iv.extent, iv.resolved_at is None)
+        for iv in intervals
+        if iv.symbol == "NEARUSDT"
+    ]
     assert near == mana
 
 
