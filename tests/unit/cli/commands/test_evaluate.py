@@ -367,6 +367,26 @@ def test_neighbor_exclusion_and_withdrawal_are_included(tmp_path) -> None:
     assert inputs.withdrawn_seat_fraction == pytest.approx(0.00025)
 
 
+def test_i2_identical_withdrawals_across_neighbors_are_not_double_counted(tmp_path) -> None:
+    """The same 10 withdrawn seat-days repeated in every neighbor run stay at the single-run fraction."""
+    unit, account = tmp_path / "unit", tmp_path / "account"
+    _write_unit_run(unit)
+    _write_account_run(account)
+    withdrawals = [{"symbol": "MANAUSDT", "extent": "INTERIOR", "days": 10}]
+    _rewrite_unit_payload(unit, data_availability_withdrawals=withdrawals)
+    neighbors = []
+    for position in range(7):
+        neighbor = tmp_path / f"neighbor{position}"
+        _write_unit_run(neighbor)
+        _rewrite_unit_payload(neighbor, data_availability_withdrawals=withdrawals)
+        neighbors.append(neighbor)
+    inputs = evaluate_mod.build_evaluation_inputs(
+        strategy_id="flow_mom_top20", unit_run=unit, account_run=account, neighbor_runs=tuple(neighbors),
+    )
+    assert inputs.lake_coverage_ok is True
+    assert inputs.withdrawn_seat_fraction == pytest.approx(10 / 40000)
+
+
 def test_i2_disclosed_tiny_withdrawal_passes(tmp_path) -> None:
     """Ten withdrawn seat-days of 40 000 pass I2 with value 0.00025."""
     unit, account = tmp_path / "unit", tmp_path / "acct"

@@ -170,6 +170,11 @@ def _validate_inputs(inputs: EvaluationInputs) -> None:
         _require_returns(neighbor, f"neighbors[{position}]")
     if inputs.holdout_returns is not None:
         _require_returns(inputs.holdout_returns, "holdout_returns")
+    _validate_participation(inputs)
+    _validate_funding_and_leverage(inputs)
+
+
+def _validate_participation(inputs: EvaluationInputs) -> None:
     participation = np.asarray(inputs.participation.to_numpy(dtype="float64"), dtype="float64")
     if participation.size and not inputs.participation.index.equals(inputs.base_returns.index):
         raise DataIntegrityError("participation must align with base_returns")
@@ -177,6 +182,9 @@ def _validate_inputs(inputs: EvaluationInputs) -> None:
         raise DataIntegrityError("participation must be finite and align with base_returns")
     if bool((participation < 0.0).any()):
         raise DataIntegrityError("participation cannot be negative")
+
+
+def _validate_funding_and_leverage(inputs: EvaluationInputs) -> None:
     if not isinstance(inputs.funding_by_symbol, Mapping):
         raise DataIntegrityError("funding_by_symbol must be a mapping")
     for symbol, amount in inputs.funding_by_symbol.items():

@@ -13,12 +13,12 @@ import pandas as pd
 import pyarrow.parquet as pq
 
 from src.common.paths import funding_path
-from src.market_data.storage.loaders import load_funding_rates
 from src.core.params import (
     EXECUTION_ROSTER_EXIT_MULTIPLIER,
     UNIVERSE_ELIGIBILITY_LOOKBACK_BARS,
     UNIVERSE_ELIGIBILITY_MIN_HISTORY_BARS,
 )
+from src.market_data.storage.loaders import load_funding_rates
 
 _logger = logging.getLogger("MhsHorizonDiagnostic")
 
