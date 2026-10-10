@@ -336,8 +336,9 @@ EXPOSURE_SCAN_PLATEAU_TOLERANCE: float = 0.05
 EXPOSURE_SCAN_SEED: int = 20260921
 
 # --- account-scale research ledger -------------------------------------------------
-# 선언 최소 소매 시작금 ₩3,000,000(₩1,430/USD 환산).
-ACCOUNT_DEFAULT_CAPITAL_USDT: float = 2100.0
+# Declared retail seed 1,000 USDT (~KRW 1.43M at KRW 1,430/USD), chosen from the
+# order-filter efficiency plateau, not from capacity.
+ACCOUNT_DEFAULT_CAPITAL_USDT: float = 1000.0
 # 사전 "엣지 없음(μ=0)"에 2년 표본만큼의 가중을 둔다. 결과를 보고 고른 값이 아니라
 # 선언값이며, 2년 이상 쌓인 실적이 있어야 사후 μ가 표본평균의 절반을 넘는다.
 ACCOUNT_PRIOR_DAYS: float = 730.0

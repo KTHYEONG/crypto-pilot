@@ -508,7 +508,7 @@ def test_real_account_stress_replay_compares_same_account(tmp_path: Path, monkey
     assert base["in_sample_days"] == stress["in_sample_days"] == 3
     assert report.payload["statistics_limitations"] == []
     assert report.payload["stress_execution"]["taker_fee_bps"] == 18.0
-    assert report.stress_result.capital == report.result.capital == 2100.0
+    assert report.stress_result.capital == report.result.capital == 1000.0
     assert (report.run_dir / "account_stress_daily.parquet").exists()
     persisted = json.loads((report.run_dir / "account.json").read_text())
     assert persisted["statistics"]["stress"] == stress

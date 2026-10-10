@@ -411,7 +411,7 @@ def test_release_gate_accepts_matching_accepted_release(tmp_path) -> None:
     bootstrap = tmp_path / "unit.parquet"
     bootstrap.write_bytes(b"bootstrap fixture")
     settings.unit_bootstrap_path = str(bootstrap)
-    settings.notional_equity_usdt = 2100
+    settings.notional_equity_usdt = 1000
     check = release_gate_check(settings, root=root)
     assert check.passed is True
     assert "verdict=accept" in check.detail
@@ -419,7 +419,7 @@ def test_release_gate_accepts_matching_accepted_release(tmp_path) -> None:
     check = release_gate_check(settings, root=root)
     assert check.passed is False
     assert "capital" in check.detail
-    settings.notional_equity_usdt = 2100
+    settings.notional_equity_usdt = 1000
     bootstrap.write_bytes(b"changed bootstrap")
     check = release_gate_check(settings, root=root)
     assert check.passed is False
@@ -471,7 +471,7 @@ def test_release_gate_policy_mismatch_with_matching_digest(tmp_path) -> None:
     bootstrap = tmp_path / "unit.parquet"
     bootstrap.write_bytes(b"bootstrap fixture")
     settings.unit_bootstrap_path = str(bootstrap)
-    settings.notional_equity_usdt = 2100
+    settings.notional_equity_usdt = 1000
     check = release_gate_check(settings, root=root)
     assert check.passed is False
     assert "execution policy" in check.detail

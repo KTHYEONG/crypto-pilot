@@ -68,6 +68,7 @@ def test_account_command_defaults_to_growth_at_retail_capital(tmp_path: Path, mo
     assert unit_replay["unit_equity"] is None
     policy = main["policy"]
     assert policy.kind == "growth"
+    assert ACCOUNT_DEFAULT_CAPITAL_USDT == 1000.0
     assert main["capital"] == ACCOUNT_DEFAULT_CAPITAL_USDT
     assert policy.mean_haircut == ACCOUNT_MEAN_HAIRCUT
     assert (policy.exposure_max, policy.exposure_step) == (ACCOUNT_EXPOSURE_CAP, ACCOUNT_EXPOSURE_STEP)
@@ -126,13 +127,13 @@ def test_account_artifacts_and_disclosures(tmp_path: Path, monkeypatch: pytest.M
         backtest_mod.run_account_replay_command(_parse(_account_argv()))
     assert "[EVAL] account-replay" in caplog.text
     (run_dir,) = _run_dirs(tmp_path)
-    assert run_dir.name.startswith("20250101_20250201_top20_account_growth_2100_")
+    assert run_dir.name.startswith("20250101_20250201_top20_account_growth_1000_")
     payload = json.loads((run_dir / "account.json").read_text(encoding="utf-8"))
     assert "in_sample_moments" not in payload
     assert payload["moment_source"] == "bayesian_causal_unit_ledger"
     assert payload["venue_rules_applied_retroactively"] is True
     assert payload["entry_anchor"] == "submit_bar"
-    assert payload["capital"] == 2100.0
+    assert payload["capital"] == 1000.0
     assert payload["policy"]["kind"] == "growth"
     assert payload["policy"]["prior_days"] == ACCOUNT_PRIOR_DAYS
     assert payload["policy"]["min_moment_days"] == ACCOUNT_MIN_MOMENT_DAYS
@@ -141,9 +142,9 @@ def test_account_artifacts_and_disclosures(tmp_path: Path, monkeypatch: pytest.M
     assert payload["unit_reference"]["cagr"] == pytest.approx(unit_cagr)
     assert payload["unit_reference"]["mdd"] == pytest.approx(-0.05)
     assert payload["unit_reference"]["daily_mdd"] == pytest.approx(105000.0 / 110000.0 - 1.0)
-    assert payload["cagr"] == pytest.approx((2205.0 / 2100.0) ** (365.0 / 3.0) - 1.0)
+    assert payload["cagr"] == pytest.approx((1050.0 / 1000.0) ** (365.0 / 3.0) - 1.0)
     assert payload["mdd"] == pytest.approx(-0.05)
-    assert payload["daily_mdd"] == pytest.approx(2205.0 / 2310.0 - 1.0)
+    assert payload["daily_mdd"] == pytest.approx(1050.0 / 1100.0 - 1.0)
     assert payload["liquidated_at"] is None
     assert (payload["mean_exposure"], payload["min_exposure"], payload["last_exposure"]) == (1.5, 1.0, 1.5)
     recon = payload["reconciliation"]
