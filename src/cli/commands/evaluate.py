@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 from pathlib import Path
 from typing import Any
 
@@ -212,10 +213,39 @@ def build_evaluation_inputs(
         candidate_skew=skew if skew == skew else 0.0,
         candidate_kurtosis=kurtosis if kurtosis == kurtosis else 3.0,
     )
-    limitations = unit_payload.get("limitations", [])
+    def _withdrawal_days(payload: dict[str, Any]) -> int:
+        if "roster_seat_days" not in payload:
+            raise DataIntegrityError("run predates seat accounting")
+        entries = payload.get("data_availability_withdrawals", [])
+        if not isinstance(entries, list):
+            raise DataIntegrityError("withdrawal accounting invalid")
+        total = 0
+        for entry in entries:
+            if not isinstance(entry, dict) or type(entry.get("days")) is not int or entry["days"] < 0:
+                raise DataIntegrityError("withdrawal accounting invalid")
+            total += entry["days"]
+        return total
+
+    if "roster_seat_days" not in unit_payload:
+        raise DataIntegrityError("run predates seat accounting")
+    seats = unit_payload["roster_seat_days"]
+    if type(seats) is not int or seats <= 0:
+        raise DataIntegrityError("roster seat accounting invalid")
+    withdrawn = _withdrawal_days(unit_payload)
+    payloads = [unit_payload]
+    for path in neighbor_runs:
+        neighbor_payload = json.loads((path / "result.json").read_text(encoding="utf-8"))
+        withdrawn += _withdrawal_days(neighbor_payload)
+        payloads.append(neighbor_payload)
+    if holdout_run is not None:
+        withdrawn += _withdrawal_days(holdout_payload)
+        payloads.append(holdout_payload)
+    withdrawn_fraction = withdrawn / seats
     lake_ok = bool(
-        int(unit_payload.get("source_gap_excluded_count", 0)) == 0
-        and "DATA_AVAILABILITY_SELECTION" not in limitations
+        all(payload.get("source_gap_excluded_count") == 0
+            and payload.get("base_source_gaps", 0) == 0 and payload.get("stress_source_gaps", 0) == 0
+            for payload in payloads)
+        and withdrawn_fraction <= float(release.criteria.max_withdrawn_seat_fraction)
     )
     ledger_ok = unit_payload.get("ledger_certified") is True
     identity_ok = (
@@ -233,6 +263,7 @@ def build_evaluation_inputs(
     if holdout_run is not None:
         identity_ok = identity_ok and _declared_book(holdout_payload, release.strategy_id) and holdout_payload.get("ledger_certified") is True
     from src.cli.commands.backtest import _neighbor_specs
+    from src.core.params import ACCOUNT_EXPOSURE_CAP, ACCOUNT_UNIT_REFERENCE_CAPITAL
     expected = _neighbor_specs(FLOW_MOM_TOP20)
     observed = []
     for path in neighbor_runs:
@@ -242,6 +273,12 @@ def build_evaluation_inputs(
     declared = [(neighbor.breadth, [{"name": m.name, "sign": m.sign} for m in neighbor.members]) for neighbor in expected]
     if len(observed) != len(declared) or any(observed.count(item) != 1 for item in declared):
         identity_ok = False
+    raw_scale = unit_payload.get("participation_scale")
+    if raw_scale is None and not participation.empty:
+        raise DataIntegrityError("participation scale not recorded")
+    participation_scale = float(raw_scale) if raw_scale is not None else ACCOUNT_UNIT_REFERENCE_CAPITAL
+    if not math.isfinite(participation_scale) or participation_scale <= 0.0:
+        raise DataIntegrityError("participation scale must be a positive finite capital")
     return EvaluationInputs(
         strategy_id=release.strategy_id,
         spec_digest=release.spec_digest,
@@ -257,6 +294,8 @@ def build_evaluation_inputs(
         causality_ok=_causality_ok(release.strategy_id),
         deployed_returns=deployed,
         deployed_max_leverage=leverage,
+        participation_scale_to_deployed=release.target_capital_usdt * ACCOUNT_EXPOSURE_CAP / participation_scale,
+        withdrawn_seat_fraction=withdrawn_fraction,
         neighbors=neighbors,
         trial_population=population,
         holdout_returns=holdout_returns,

@@ -15,6 +15,7 @@ import pandas as pd
 
 from src.common.errors import DataIntegrityError
 from src.core.types import JsonValue
+from src.engine.backtest_evidence import daily_fill_participation
 from src.engine.execution.integrity import replay_ledger_certified
 from src.engine.strategy_backtest import StrategyBacktestRun
 
@@ -122,6 +123,8 @@ def strategy_backtest_payload(
         "source_symbols": cast(JsonValue, list(run.source_symbols)),
         "source_gap_excluded_symbols": cast(JsonValue, sorted(run.source_gap_excluded_symbols)),
         "source_gap_excluded_count": len(run.source_gap_excluded_symbols),
+        "roster_seat_days": int(getattr(run, "roster_seat_days", 0)),
+        "participation_scale": _jsonable(float(request.initial_equity)),
         "source_gap_blocked_decisions": run.source_gap_blocked_decisions,
         "delisting_blocked_decisions": run.delisting_blocked_decisions,
         "delisting_announcement_policy": (
@@ -214,6 +217,8 @@ def strategy_daily_frame(run: StrategyBacktestRun) -> pd.DataFrame:
     frame["target_gross"] = gross.reindex(days, fill_value=0.0)
     max_name = run.candidate.target_weights.abs().max(axis=1)
     frame["max_name_weight"] = max_name.reindex(days, fill_value=0.0)
+    frame["fill_participation"] = daily_fill_participation(run.evidence.base.simulated_fills).reindex(
+        days, fill_value=0.0).astype("float64")
     funding_columns = [column for column in frame if column.startswith("stress_funding_income_")]
     frame = frame[
         [
@@ -222,6 +227,7 @@ def strategy_daily_frame(run: StrategyBacktestRun) -> pd.DataFrame:
             "base_equity_low", "stress_equity_low",
             "base_turnover", "stress_turnover",
             "base_funding", "stress_funding", "target_gross", "max_name_weight",
+            "fill_participation",
             *funding_columns,
         ]
     ].astype("float64")

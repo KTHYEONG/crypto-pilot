@@ -51,6 +51,9 @@ def _write_unit_run(
         "base_valid": True,
         "stress_valid": True,
         "source_gap_excluded_count": 0,
+        "roster_seat_days": 40000,
+        "participation_scale": 100000.0,
+        "data_availability_withdrawals": [],
         "limitations": [],
         "report_periods": {"evaluation": evaluation},
         **(
@@ -311,4 +314,152 @@ def test_evaluate_accept_refused_on_digest_mismatch(tmp_path, monkeypatch) -> No
     with pytest.raises(SystemExit, match="digest mismatch"):
         evaluate_mod.run_evaluate_strategy_command(
             _args(unit_run=str(unit), account_run=str(account), accept=True)
+        )
+
+
+def _rewrite_unit_payload(unit: Path, **overrides: object) -> None:
+    raw = json.loads((unit / "result.json").read_text(encoding="utf-8"))
+    raw.update(overrides)
+    (unit / "result.json").write_text(json.dumps(raw), encoding="utf-8")
+
+
+def test_neighbor_run_predating_seat_accounting_fails_closed(tmp_path) -> None:
+    from src.common.errors import DataIntegrityError
+
+    unit, account, neighbor = tmp_path / "unit", tmp_path / "account", tmp_path / "neighbor"
+    _write_unit_run(unit)
+    _write_unit_run(neighbor)
+    _write_account_run(account)
+    payload = json.loads((neighbor / "result.json").read_text())
+    del payload["roster_seat_days"]
+    (neighbor / "result.json").write_text(json.dumps(payload))
+    with pytest.raises(DataIntegrityError, match="run predates seat accounting"):
+        evaluate_mod.build_evaluation_inputs(
+            strategy_id="flow_mom_top20", unit_run=unit, account_run=account, neighbor_runs=(neighbor,),
+        )
+
+
+def test_recorded_participation_requires_recorded_scale(tmp_path) -> None:
+    from src.common.errors import DataIntegrityError
+
+    unit, account = tmp_path / "unit", tmp_path / "account"
+    _write_unit_run(unit)
+    _write_account_run(account)
+    daily = pd.read_parquet(unit / "daily.parquet")
+    daily["fill_participation"] = 0.0002
+    daily.to_parquet(unit / "daily.parquet")
+    _rewrite_unit_payload(unit, participation_scale=None)
+    with pytest.raises(DataIntegrityError, match="participation scale not recorded"):
+        evaluate_mod.build_evaluation_inputs(strategy_id="flow_mom_top20", unit_run=unit, account_run=account)
+
+
+def test_neighbor_exclusion_and_withdrawal_are_included(tmp_path) -> None:
+    unit, account, neighbor = tmp_path / "unit", tmp_path / "account", tmp_path / "neighbor"
+    _write_unit_run(unit)
+    _write_unit_run(neighbor)
+    _write_account_run(account)
+    _rewrite_unit_payload(neighbor, source_gap_excluded_count=1,
+                          data_availability_withdrawals=[{"days": 10}])
+    inputs = evaluate_mod.build_evaluation_inputs(
+        strategy_id="flow_mom_top20", unit_run=unit, account_run=account, neighbor_runs=(neighbor,),
+    )
+    assert inputs.lake_coverage_ok is False
+    assert inputs.withdrawn_seat_fraction == pytest.approx(0.00025)
+
+
+def test_i2_disclosed_tiny_withdrawal_passes(tmp_path) -> None:
+    """Ten withdrawn seat-days of 40 000 pass I2 with value 0.00025."""
+    unit, account = tmp_path / "unit", tmp_path / "acct"
+    _write_unit_run(unit)
+    _rewrite_unit_payload(
+        unit,
+        data_availability_withdrawals=[
+            {"symbol": "MANAUSDT", "extent": "INTERIOR", "days": 5},
+            {"symbol": "NEARUSDT", "extent": "INTERIOR", "days": 5},
+        ],
+        limitations=["DATA_AVAILABILITY_SELECTION"],
+    )
+    _write_account_run(account)
+    inputs = evaluate_mod.build_evaluation_inputs(
+        strategy_id="flow_mom_top20", unit_run=unit, account_run=account,
+    )
+    assert inputs.lake_coverage_ok is True
+    assert inputs.withdrawn_seat_fraction == pytest.approx(10 / 40000)
+
+
+def test_i2_material_withdrawal_fails(tmp_path) -> None:
+    """Withdrawals of 0.2 % of seats fail I2 while staying disclosed."""
+    unit, account = tmp_path / "unit", tmp_path / "acct"
+    _write_unit_run(unit)
+    _rewrite_unit_payload(
+        unit,
+        data_availability_withdrawals=[{"symbol": "XRPUSDT", "extent": "INTERIOR", "days": 80}],
+        limitations=["DATA_AVAILABILITY_SELECTION"],
+    )
+    _write_account_run(account)
+    inputs = evaluate_mod.build_evaluation_inputs(
+        strategy_id="flow_mom_top20", unit_run=unit, account_run=account,
+    )
+    assert inputs.lake_coverage_ok is False
+    assert inputs.withdrawn_seat_fraction == pytest.approx(0.002)
+
+
+def test_i2_excluded_symbols_still_fail(tmp_path) -> None:
+    """Any source-gap exclusion fails I2 regardless of the withdrawal fraction."""
+    unit, account = tmp_path / "unit", tmp_path / "acct"
+    _write_unit_run(unit)
+    _rewrite_unit_payload(unit, source_gap_excluded_count=1)
+    _write_account_run(account)
+    inputs = evaluate_mod.build_evaluation_inputs(
+        strategy_id="flow_mom_top20", unit_run=unit, account_run=account,
+    )
+    assert inputs.lake_coverage_ok is False
+
+
+def test_i2_old_run_without_seat_accounting_fails_closed(tmp_path) -> None:
+    """A result lacking roster_seat_days raises instead of guessing coverage."""
+    from src.common.errors import DataIntegrityError
+
+    unit, account = tmp_path / "unit", tmp_path / "acct"
+    _write_unit_run(unit)
+    raw = json.loads((unit / "result.json").read_text(encoding="utf-8"))
+    del raw["roster_seat_days"]
+    (unit / "result.json").write_text(json.dumps(raw), encoding="utf-8")
+    _write_account_run(account)
+    with pytest.raises(DataIntegrityError, match="seat accounting"):
+        evaluate_mod.build_evaluation_inputs(
+            strategy_id="flow_mom_top20", unit_run=unit, account_run=account,
+        )
+
+
+def test_i2_degenerate_seat_and_scale_accounting_fails_closed(tmp_path) -> None:
+    """Zero seats or a non-positive participation scale raise instead of dividing."""
+    from src.common.errors import DataIntegrityError
+
+    unit, account = tmp_path / "unit", tmp_path / "acct"
+    _write_unit_run(unit)
+    _write_account_run(account)
+    _rewrite_unit_payload(unit, roster_seat_days=0)
+    with pytest.raises(DataIntegrityError, match="seat accounting invalid"):
+        evaluate_mod.build_evaluation_inputs(
+            strategy_id="flow_mom_top20", unit_run=unit, account_run=account,
+        )
+    _rewrite_unit_payload(unit, roster_seat_days=40000, participation_scale=0.0)
+    with pytest.raises(DataIntegrityError, match="participation scale"):
+        evaluate_mod.build_evaluation_inputs(
+            strategy_id="flow_mom_top20", unit_run=unit, account_run=account,
+        )
+
+
+@pytest.mark.parametrize("withdrawals", [{}, [{"days": -1}], [{"days": 0.5}], [{"days": True}]])
+def test_i2_malformed_withdrawal_fails_closed(tmp_path, withdrawals) -> None:
+    """Malformed withdrawal accounting cannot certify coverage."""
+    from src.common.errors import DataIntegrityError
+    unit, account = tmp_path / "unit", tmp_path / "acct"
+    _write_unit_run(unit)
+    _rewrite_unit_payload(unit, data_availability_withdrawals=withdrawals)
+    _write_account_run(account)
+    with pytest.raises(DataIntegrityError, match="withdrawal accounting"):
+        evaluate_mod.build_evaluation_inputs(
+            strategy_id="flow_mom_top20", unit_run=unit, account_run=account,
         )

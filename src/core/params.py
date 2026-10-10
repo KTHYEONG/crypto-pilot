@@ -221,6 +221,10 @@ GROWTH_RISK_ENVELOPES: dict[str, GrowthRiskEnvelope] = {
 
 GROWTH_ENVELOPE_DEFAULT: str = "conservative"
 
+STRATEGY_RISK_ENVELOPE: str = "growth_extreme_budgeted"
+
+ACCOUNT_EXPOSURE_CAP: float = GROWTH_RISK_ENVELOPES[STRATEGY_RISK_ENVELOPE].leverage_ceiling
+
 CLI_GROWTH_ENVELOPE_DEFAULT: str = "growth_extreme_budgeted"
 
 

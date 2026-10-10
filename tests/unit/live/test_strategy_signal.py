@@ -351,6 +351,21 @@ def test_exposure_respects_margin_cap(layout: dict[str, Path], tmp_path: Path) -
     assert report.exposure == pytest.approx(ACCOUNT_EXPOSURE_STEP)
 
 
+def test_live_step_caps_at_envelope_ceiling(layout: dict[str, Path]) -> None:
+    """Unit moments implying exposure 5.0 still lever to at most 3.0 gross."""
+    import numpy as np
+
+    from src.core.params import ACCOUNT_EXPOSURE_CAP
+
+    boot_idx = pd.date_range(_START, _BOOT_END, freq="1D", tz="UTC")
+    _write_unit(layout["boot"], boot_idx, _bootstrap_vals(seed=9, mean=0.05))
+    report = _run(_DAY, layout)
+    assert report.exposure <= ACCOUNT_EXPOSURE_CAP
+    assert report.exposure == pytest.approx(ACCOUNT_EXPOSURE_CAP)
+    stored = pd.read_parquet(layout["weights"]).loc[_DAY]
+    assert float(np.abs(stored.to_numpy(dtype="float64")).sum()) <= ACCOUNT_EXPOSURE_CAP + 1e-9
+
+
 def test_no_book_row_fails_closed(
     layout: dict[str, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

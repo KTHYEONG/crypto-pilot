@@ -50,6 +50,26 @@ def in_sample_limitation(cutoff: pd.Timestamp) -> str:
     return f"IN_SAMPLE_THROUGH_{pd.Timestamp(cutoff).tz_convert('UTC').date().isoformat()}"
 
 
+def daily_fill_participation(fills: pd.DataFrame) -> pd.Series:
+    """Per UTC day, the maximum of fill notional divided by the fill bar's quote volume (unit-book scale); NaN fills are ignored, days without fills are 0.0."""
+    if fills.empty:
+        return pd.Series(dtype="float64")
+    if "bar_quote_volume" not in fills.columns:
+        raise DataIntegrityError("fill bar quote volume not recorded")
+    quantity = pd.to_numeric(fills["quantity_delta"], errors="coerce").to_numpy(dtype="float64")
+    price = pd.to_numeric(fills["fill_price"], errors="coerce").to_numpy(dtype="float64")
+    quote = pd.to_numeric(fills["bar_quote_volume"], errors="coerce").to_numpy(dtype="float64")
+    notional = np.abs(quantity) * price
+    valid = np.isfinite(notional) & np.isfinite(quote) & (quote > 0.0)
+    days = pd.DatetimeIndex(pd.to_datetime(fills["timestamp"], utc=True)).normalize().tz_convert("UTC")
+    parts = pd.Series(np.where(valid, notional / np.where(valid, quote, 1.0), np.nan), index=days, dtype="float64")
+    if days.hasnans or bool((parts.dropna() < 0).any()) or bool(np.isinf(parts.to_numpy()).any()):
+        raise DataIntegrityError("fill participation must be finite and non-negative on valid UTC days")
+    grouped = parts.dropna().groupby(level=0).max()
+    full = pd.date_range(start=days.min(), end=days.max(), freq="D", tz="UTC")
+    return grouped.reindex(full, fill_value=0.0).astype("float64")
+
+
 def _funding_by_symbol_for_period(
     ledger: object, start: pd.Timestamp, end: pd.Timestamp,
 ) -> dict[str, float]:

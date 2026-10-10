@@ -6,12 +6,13 @@
     "holdout_growth_min_quantile": 0.05,
     "max_participation_p95": 0.01,
     "max_top5_funding_dependence": true,
+    "max_withdrawn_seat_fraction": 0.001,
     "min_discovery_days": 730,
     "min_holdout_days": 60,
     "plateau_min_fraction": 0.5,
     "risk_envelope": "growth_extreme_budgeted"
   },
-  "criteria_digest": "d1b7a0e7d18822b891175e959442e0445fca600c293e1d908aaadc2fbd63458e",
+  "criteria_digest": "81fa22ce787dff15687db489a30f8b52d7c6f9259cceda39eea5f592c82ab79f",
   "design_data_cutoff": "2026-07-01T00:00:00+00:00",
   "evaluation_digest": null,
   "legacy_ids": [
@@ -20,10 +21,11 @@
   "risk_envelope": "growth_extreme_budgeted",
   "sizing": {
     "execution_policy": "strict_passive_repeg",
+    "exposure_cap": 3.0,
     "name_clip": 0.05,
     "unit_bootstrap_sha256": "2cc6a4e9c11dd8fc6c509c3233645d38d226702b73f650e1f1f6ac4d0d9e956b"
   },
-  "spec_digest": "3cb0d592236eb7d30707333310ff8c167d3635b810bce0175b4513ee5477773f",
+  "spec_digest": "366490a3b2de79fcd298f8945d4573e88f062889bc7da1f66d3f5f24131ed4d5",
   "strategy_id": "flow_mom_top20",
   "target_capital_usdt": 2100.0,
   "verdict": null,
