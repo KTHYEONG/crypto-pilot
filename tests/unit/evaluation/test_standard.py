@@ -222,7 +222,7 @@ def test_unknown_capacity_and_funding_are_inconclusive() -> None:
     inputs = dataclasses.replace(_good_inputs(), participation=pd.Series(dtype=float), funding_income_daily=None)
     result = evaluate_strategy(inputs, EvaluationCriteria())
     assert result.verdict == Verdict.INCONCLUSIVE
-    assert _code(result, "R4_CAPACITY").passed is None
+    assert _code(result, "R4_CAPACITY").passed is False
     assert _code(result, "R2_FUNDING_DEPENDENCE").passed is None
     result = evaluate_strategy(inputs, dataclasses.replace(EvaluationCriteria(), max_top5_funding_dependence=False))
     assert _code(result, "R2_FUNDING_DEPENDENCE").passed is True
@@ -371,6 +371,8 @@ def test_input_guards_reject_malformed_inputs() -> None:
         dataclasses.replace(good, funding_by_symbol={"": 0.1}),
         dataclasses.replace(good, funding_by_symbol={"A": float("nan")}),
         dataclasses.replace(good, deployed_max_leverage=float("inf")),
+        dataclasses.replace(good, withdrawn_seat_fraction=-0.001),
+        dataclasses.replace(good, participation_scale_to_deployed=0.0),
         dataclasses.replace(
             good, base_returns=pd.Series([0.01, 0.02], index=[0, 1], dtype="float64")
         ),
@@ -395,3 +397,54 @@ def test_input_guards_reject_malformed_inputs() -> None:
     for inputs in cases:
         with pytest.raises(DataIntegrityError, match=r".+"):
             evaluate_strategy(inputs, EvaluationCriteria())
+
+
+def test_i2_reports_measured_fraction_against_criteria() -> None:
+    """I2 carries the withdrawn-seat fraction as value and the criteria cap as threshold."""
+    result = evaluate_strategy(
+        _good_inputs(lake_coverage_ok=True, withdrawn_seat_fraction=0.00025),
+        EvaluationCriteria(),
+    )
+    check = _code(result, "I2_LAKE_COVERAGE")
+    assert check.passed is True
+    assert check.value == pytest.approx(0.00025)
+    assert check.threshold == f"<= {EvaluationCriteria().max_withdrawn_seat_fraction}"
+
+
+def test_i2_material_withdrawal_invalidates() -> None:
+    """A 0.2 % withdrawal fails I2 and forces verdict INVALID."""
+    result = evaluate_strategy(
+        _good_inputs(lake_coverage_ok=True, withdrawn_seat_fraction=0.002),
+        EvaluationCriteria(),
+    )
+    assert _code(result, "I2_LAKE_COVERAGE").passed is False
+    assert result.verdict == Verdict.INVALID
+
+
+def test_r4_scales_unit_participation_to_deployed_capital() -> None:
+    """R4 values p95 x scale; 0.0002 x 2100x3/100000 passes the 0.01 line."""
+    import dataclasses
+
+    base = _good_inputs()
+    participation = pd.Series(np.full(N_DISCOVERY, 0.0002), index=base.base_returns.index, dtype="float64")
+    scale = 2100.0 * 3.0 / 100000.0
+    result = evaluate_strategy(
+        dataclasses.replace(base, participation=participation, participation_scale_to_deployed=scale),
+        EvaluationCriteria(),
+    )
+    check = _code(result, "R4_CAPACITY")
+    assert check.passed is True
+    assert check.value == pytest.approx(0.0002 * scale)
+
+
+def test_r4_missing_participation_fails_closed() -> None:
+    """An empty participation series fails R4 instead of skipping it."""
+    import dataclasses
+
+    result = evaluate_strategy(
+        dataclasses.replace(_good_inputs(), participation=pd.Series(dtype="float64")),
+        EvaluationCriteria(),
+    )
+    check = _code(result, "R4_CAPACITY")
+    assert check.passed is False
+    assert "participation not recorded" in check.reason

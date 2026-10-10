@@ -10,6 +10,23 @@ from . import _ExecutionBound
 from .microstructure import passive_fill_shortfall_bps
 
 
+def book_fill_quote_volume(
+    track: list[float], local_cols: list[str], quote_volumes: np.ndarray, bar_pos: int, symbol: str,
+    recorded_symbols: frozenset[str] | None = None,
+) -> None:
+    """Append the fill bar's quote volume; NaN when unknown or non-positive."""
+    if recorded_symbols is not None and symbol not in recorded_symbols:
+        track.append(float("nan"))
+        return
+    try:
+        local = local_cols.index(symbol)
+        volume = float(quote_volumes[int(bar_pos), int(local)])
+    except (IndexError, ValueError):
+        track.append(float("nan"))
+        return
+    track.append(volume if np.isfinite(volume) and volume > 0.0 else float("nan"))
+
+
 def resolve_single_fill_terms(
     *,
     execution_bound: _ExecutionBound,

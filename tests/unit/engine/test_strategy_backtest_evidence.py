@@ -430,3 +430,29 @@ def test_strategy_evidence_guard_tolerates_haircut_only() -> None:
     assert dataclasses.replace(stress, taker_fee_bps=base.taker_fee_bps, taker_slippage_bps=base.taker_slippage_bps, settlement_price_haircut_bps=base.settlement_price_haircut_bps) == base
     bad = dataclasses.replace(stress, passive_timeout_minutes=60)
     assert dataclasses.replace(bad, taker_fee_bps=base.taker_fee_bps, taker_slippage_bps=base.taker_slippage_bps, settlement_price_haircut_bps=base.settlement_price_haircut_bps) != base
+
+
+def test_daily_fill_participation_takes_utc_day_maximum() -> None:
+    """Two fills one day at 0.001/0.004 read 0.004; a fill-free day reads 0.0."""
+    from src.engine.backtest_evidence import daily_fill_participation
+
+    day1 = pd.Timestamp("2025-01-01", tz="UTC")
+    day3 = pd.Timestamp("2025-01-03", tz="UTC")
+    fills = pd.DataFrame(
+        {
+            "timestamp": [day1 + pd.Timedelta(minutes=3), day1 + pd.Timedelta(minutes=6), day3],
+            "symbol": ["AAA", "AAA", "AAA"],
+            "quantity_delta": [1.0, 2.0, 1.0],
+            "fill_price": [100.0, 100.0, 100.0],
+            "fee_bps": [2.0, 2.0, 2.0],
+            "reason": ["timeout_taker", "timeout_taker", "timeout_taker"],
+            "pre_trade_equity": [100000.0, 100000.0, 100000.0],
+            "bar_quote_volume": [100000.0, 50000.0, 100000.0],
+        }
+    )
+    out = daily_fill_participation(fills)
+    assert out.loc[day1] == 0.004
+    assert out.loc[day1 + pd.Timedelta(days=1)] == 0.0
+    assert out.loc[day3] == 0.001
+    assert bool(np.isfinite(out.to_numpy(dtype="float64")).all())
+    assert bool((out.to_numpy(dtype="float64") >= 0.0).all())

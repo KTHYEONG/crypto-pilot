@@ -336,3 +336,37 @@ def test_choose_exposure_fixed_ignores_moments() -> None:
 
     assert choose_exposure(*args, policy, None) == 7.5
     assert choose_exposure(*args, policy, _moments()) == 7.5
+
+
+def test_registered_growth_policy_rungs_end_at_envelope_ceiling() -> None:
+    """The deployed growth policy caps at the envelope ceiling, never above."""
+    import dataclasses
+
+    from src.core.params import ACCOUNT_EXPOSURE_CAP
+    from src.strategy.sizing import account_growth_policy
+
+    policy = account_growth_policy()
+    assert policy.exposure_max == ACCOUNT_EXPOSURE_CAP == 3.0
+    ladder = _ladder([0.0], [0.004], [0.0], [20.0])
+    weights = np.array([1.0])
+    hot = dataclasses.replace(_moments(), mean=0.05, sigma=0.01)
+    chosen = choose_exposure(
+        weights, 1000.0, np.zeros(1), np.array([np.inf]), np.array([0.01]),
+        (ladder,), policy, hot,
+    )
+    assert chosen <= 3.0
+
+
+def test_fixed_diagnostic_still_reaches_ten() -> None:
+    """Diagnostic fixed exposures up to the venue grid ceiling stay accepted."""
+    import dataclasses
+
+    from src.strategy.sizing import account_growth_policy
+
+    base = account_growth_policy()
+    policy = dataclasses.replace(base, kind="fixed", exposure_max=6.0)
+    ladder = _ladder([0.0], [0.01], [0.0], [10.0])
+    assert choose_exposure(
+        np.array([1.0]), 1000.0, np.zeros(1), np.array([np.inf]), np.array([0.02]),
+        (ladder,), policy, _moments(),
+    ) == 6.0

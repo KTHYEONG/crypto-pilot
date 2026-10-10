@@ -97,6 +97,8 @@ class EvaluationInputs:
     holdout_returns: pd.Series | None
     funding_income_daily: pd.DataFrame | None = None
     book_identity_ok: bool = True
+    withdrawn_seat_fraction: float = 0.0
+    participation_scale_to_deployed: float = 1.0
 
 
 def _require_window(window: tuple[pd.Timestamp, pd.Timestamp], label: str) -> None:
@@ -139,6 +141,12 @@ def _validate_evidence_metadata(inputs: EvaluationInputs) -> None:
         funding = inputs.funding_income_daily
         if not funding.index.equals(inputs.stress_returns.index) or not np.isfinite(funding.to_numpy(dtype=float)).all():
             raise DataIntegrityError("daily funding must be finite and align with stress returns")
+    fraction = inputs.withdrawn_seat_fraction
+    if isinstance(fraction, bool) or not math.isfinite(float(fraction)) or float(fraction) < 0.0:
+        raise DataIntegrityError("withdrawn_seat_fraction must be finite and >= 0")
+    scale = inputs.participation_scale_to_deployed
+    if isinstance(scale, bool) or not math.isfinite(float(scale)) or float(scale) <= 0.0:
+        raise DataIntegrityError("participation_scale_to_deployed must be finite and > 0")
 
 
 def _validate_inputs(inputs: EvaluationInputs) -> None:
@@ -163,6 +171,8 @@ def _validate_inputs(inputs: EvaluationInputs) -> None:
     if inputs.holdout_returns is not None:
         _require_returns(inputs.holdout_returns, "holdout_returns")
     participation = np.asarray(inputs.participation.to_numpy(dtype="float64"), dtype="float64")
+    if participation.size and not inputs.participation.index.equals(inputs.base_returns.index):
+        raise DataIntegrityError("participation must align with base_returns")
     if not bool(np.isfinite(participation).all()):
         raise DataIntegrityError("participation must be finite and align with base_returns")
     if bool((participation < 0.0).any()):
@@ -204,7 +214,7 @@ def _max_drawdown(values: np.ndarray) -> float:
     return float(drawdown.max())
 
 
-def _integrity_checks(inputs: EvaluationInputs) -> list[CheckResult]:
+def _integrity_checks(inputs: EvaluationInputs, criteria: EvaluationCriteria) -> list[CheckResult]:
     cutoff = pd.Timestamp(inputs.design_data_cutoff).tz_convert("UTC")
     discovery_end = pd.Timestamp(inputs.discovery[1]).tz_convert("UTC")
     results = [
@@ -219,10 +229,10 @@ def _integrity_checks(inputs: EvaluationInputs) -> list[CheckResult]:
         CheckResult(
             "I2_LAKE_COVERAGE",
             "integrity",
-            bool(inputs.lake_coverage_ok),
-            None,
-            "no LakeCoverageError, no unresolved held-data gaps",
-            "A universe trimmed by missing data is a different strategy.",
+            bool(inputs.lake_coverage_ok and inputs.withdrawn_seat_fraction <= criteria.max_withdrawn_seat_fraction),
+            float(inputs.withdrawn_seat_fraction),
+            f"<= {criteria.max_withdrawn_seat_fraction}",
+            "Source holes that cannot be repaired may withdraw at most the registered fraction of roster seats; each withdrawal is disclosed.",
         ),
         CheckResult(
             "I3_CAUSALITY",
@@ -349,8 +359,14 @@ def _robustness_checks(inputs: EvaluationInputs, criteria: EvaluationCriteria) -
         r2_passed, r2_value = True, candidate
     r3_passed, r3_value = _plateau_result(inputs, criteria, candidate)
     participation = inputs.participation.to_numpy(dtype="float64")
-    p95 = float(np.quantile(participation, 0.95)) if participation.size else None
-    r4_passed = bool(p95 <= criteria.max_participation_p95) if p95 is not None else None
+    if participation.size:
+        p95 = float(np.quantile(participation, 0.95)) * float(inputs.participation_scale_to_deployed)
+        r4_passed: bool | None = bool(p95 <= criteria.max_participation_p95)
+        r4_reason = "Fills must be plausible at the capital that will trade."
+    else:
+        p95 = None
+        r4_passed = False
+        r4_reason = "participation not recorded"
     return [
         CheckResult(
             "R1_LEAVE_ONE_YEAR_OUT",
@@ -382,7 +398,7 @@ def _robustness_checks(inputs: EvaluationInputs, criteria: EvaluationCriteria) -
             r4_passed,
             p95,
             f"<= {criteria.max_participation_p95}",
-            "Fills must be plausible at the capital that will trade.",
+            r4_reason,
         ),
     ]
 
@@ -502,7 +518,7 @@ def _not_evaluated(check: CheckResult, reason: str) -> CheckResult:
 def evaluate_strategy(inputs: EvaluationInputs, criteria: EvaluationCriteria) -> StrategyEvaluation:
     """Pure verdict over fixed inputs; deterministic for fixed seeds."""
     _validate_inputs(inputs)
-    integrity = _integrity_checks(inputs)
+    integrity = _integrity_checks(inputs, criteria)
     if any(check.passed is not True for check in integrity):
         skipped = [
             _not_evaluated(c, "not evaluated: integrity invalid")

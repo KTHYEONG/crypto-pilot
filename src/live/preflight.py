@@ -88,7 +88,7 @@ def release_gate_check(settings: Any, *, root: Path | None = None) -> PreflightC
             detail="suppressed mode: paper mode is an operational check and is never gated",
         )
     try:
-        from src.core.params import STRATEGY_NAME_CLIP
+        from src.core.params import ACCOUNT_EXPOSURE_CAP, STRATEGY_NAME_CLIP
         from src.live.runner import _unit_bootstrap_sha256
         from src.strategy.release import load_release, strategy_spec_digest
         from src.strategy.targets import FLOW_MOM_TOP20
@@ -103,7 +103,7 @@ def release_gate_check(settings: Any, *, root: Path | None = None) -> PreflightC
         if bootstrap_digest is None or release.evaluation_digest is None:
             raise DataIntegrityError("accepted release requires evaluation and unit-bootstrap digests")
         sizing = {"name_clip": STRATEGY_NAME_CLIP, "execution_policy": settings.execution_policy,
-                  "unit_bootstrap_sha256": bootstrap_digest}
+                  "unit_bootstrap_sha256": bootstrap_digest, "exposure_cap": ACCOUNT_EXPOSURE_CAP}
         expected = strategy_spec_digest(FLOW_MOM_TOP20, sizing)
         if settings.notional_equity_usdt != release.target_capital_usdt:
             raise DataIntegrityError("daemon capital differs from evaluated capital")

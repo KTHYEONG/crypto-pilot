@@ -32,6 +32,7 @@ class EvaluationCriteria:
     plateau_min_fraction: float = 0.5
     max_top5_funding_dependence: bool = True
     max_participation_p95: float = 0.01
+    max_withdrawn_seat_fraction: float = 0.001
     risk_envelope: str = "growth_extreme_budgeted"
     min_holdout_days: int = 60
     holdout_growth_min_quantile: float = 0.05
@@ -49,6 +50,9 @@ class EvaluationCriteria:
             value = getattr(self, name)
             if isinstance(value, bool) or not math.isfinite(value) or not 0 < value <= 1:
                 raise DataIntegrityError(f"{name} must be finite and in (0, 1]")
+        fraction = self.max_withdrawn_seat_fraction
+        if isinstance(fraction, bool) or not math.isfinite(fraction) or not 0 <= fraction < 0.05:
+            raise DataIntegrityError("max_withdrawn_seat_fraction must be finite and in [0, 0.05)")
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,6 +82,7 @@ def criteria_digest(criteria: EvaluationCriteria) -> str:
         "plateau_min_fraction": criteria.plateau_min_fraction,
         "max_top5_funding_dependence": criteria.max_top5_funding_dependence,
         "max_participation_p95": criteria.max_participation_p95,
+        "max_withdrawn_seat_fraction": criteria.max_withdrawn_seat_fraction,
         "risk_envelope": criteria.risk_envelope,
         "min_holdout_days": criteria.min_holdout_days,
         "holdout_growth_min_quantile": criteria.holdout_growth_min_quantile,
@@ -88,7 +93,11 @@ def criteria_digest(criteria: EvaluationCriteria) -> str:
 
 def strategy_spec_digest(spec: StrategySpec, sizing: Mapping[str, str | float | None]) -> str:
     """Content digest of the strategy definition plus the sizing that trades it."""
+    from src.core.params import ACCOUNT_EXPOSURE_CAP
+
     members = [(str(m.name), int(m.sign)) for m in spec.members]
+    sized = {str(k): v for k, v in dict(sizing).items()}
+    sized.setdefault("exposure_cap", ACCOUNT_EXPOSURE_CAP)
     payload = {
         "strategy_id": spec.strategy_id,
         "breadth": spec.breadth,
@@ -100,7 +109,7 @@ def strategy_spec_digest(spec: StrategySpec, sizing: Mapping[str, str | float | 
         "design_data_cutoff": pd.Timestamp(spec.design_data_cutoff).tz_convert("UTC").isoformat(),
         "exposure_multiplier": float(spec.exposure_multiplier),
         "name_clip": spec.name_clip,
-        "sizing": {str(k): v for k, v in dict(sizing).items()},
+        "sizing": sized,
         "implementation": {
             name: hashlib.sha256((Path(__file__).parent / name).read_bytes()).hexdigest()
             for name in ("features.py", "targets.py", "books.py", "universe.py", "sizing.py")
@@ -126,6 +135,8 @@ def release_path(strategy_id: str, *, root: Path | None = None) -> Path:
 def _parse_criteria(raw: Any) -> EvaluationCriteria:
     if not isinstance(raw, dict):
         raise DataIntegrityError("release criteria must be a mapping")
+    if "max_withdrawn_seat_fraction" not in raw:
+        raise DataIntegrityError("release criteria missing max_withdrawn_seat_fraction")
     try:
         return EvaluationCriteria(**raw)
     except (TypeError, ValueError) as exc:
@@ -160,6 +171,11 @@ def load_release(strategy_id: str, *, root: Path | None = None) -> StrategyRelea
     if verdict is not None and verdict not in ("accept", "reject", "inconclusive", "invalid"):
         raise DataIntegrityError(f"release verdict invalid: {path}")
     sizing = dict(raw.get("sizing", {}))
+    from src.core.params import STRATEGY_RISK_ENVELOPE
+
+    envelope = str(raw.get("risk_envelope", criteria.risk_envelope))
+    if envelope != STRATEGY_RISK_ENVELOPE or criteria.risk_envelope != envelope:
+        raise DataIntegrityError(f"release risk envelope differs from the registered sizing cap: {path}")
     return StrategyRelease(
         strategy_id=str(raw.get("strategy_id", canonical)),
         legacy_ids=tuple(raw.get("legacy_ids", ())),
@@ -167,7 +183,7 @@ def load_release(strategy_id: str, *, root: Path | None = None) -> StrategyRelea
         sizing=sizing,
         design_data_cutoff=cutoff,
         target_capital_usdt=float(raw.get("target_capital_usdt", 0.0)),
-        risk_envelope=str(raw.get("risk_envelope", criteria.risk_envelope)),
+        risk_envelope=envelope,
         criteria=criteria,
         criteria_digest=stored_digest,
         evaluation_digest=None if evaluation_digest is None else str(evaluation_digest),

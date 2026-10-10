@@ -303,6 +303,7 @@ def test_daily_frame_matches_ledger_aggregates() -> None:
         "base_equity_low", "stress_equity_low",
         "base_turnover", "stress_turnover",
         "base_funding", "stress_funding", "target_gross", "max_name_weight",
+        "fill_participation",
         "stress_funding_income_AAA", "stress_funding_income_BBB",
     ]
     assert all(str(dtype) == "float64" for dtype in frame.dtypes)
@@ -349,6 +350,7 @@ def test_persist_writes_daily_artifact_with_envelope(tmp_path: Path) -> None:
         "base_equity_low", "stress_equity_low",
         "base_turnover", "stress_turnover",
         "base_funding", "stress_funding", "target_gross", "max_name_weight",
+        "fill_participation",
         "stress_funding_income_AAA", "stress_funding_income_BBB",
     ]
     assert json.loads(output.read_text(encoding="utf-8"))["daily_artifact"] == "daily.parquet"

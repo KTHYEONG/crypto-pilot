@@ -145,3 +145,48 @@ def test_criteria_reject_nonfinite_and_coerced_thresholds() -> None:
                       {"max_top5_funding_dependence": "false"}):
         with pytest.raises(DataIntegrityError):
             dataclasses.replace(EvaluationCriteria(), **overrides)
+
+
+def test_criteria_digest_covers_withdrawn_seat_fraction() -> None:
+    """The same criteria with a different fraction digests differently."""
+    import dataclasses
+
+    assert criteria_digest(EvaluationCriteria()) != criteria_digest(
+        dataclasses.replace(EvaluationCriteria(), max_withdrawn_seat_fraction=0.002)
+    )
+    for bad in (float("nan"), -0.001, 0.05, True):
+        with pytest.raises(DataIntegrityError):
+            dataclasses.replace(EvaluationCriteria(), max_withdrawn_seat_fraction=bad)
+
+
+def test_release_without_seat_fraction_key_fails_closed(tmp_path) -> None:
+    """A release lacking the fraction key raises instead of taking a silent default."""
+    raw = json.loads(release_path("flow_mom_top20").read_text(encoding="utf-8"))
+    del raw["criteria"]["max_withdrawn_seat_fraction"]
+    target = tmp_path / "root" / "src" / "strategy" / "releases"
+    target.mkdir(parents=True)
+    (target / "flow_mom_top20.json").write_text(json.dumps(raw), encoding="utf-8")
+    with pytest.raises(DataIntegrityError, match="max_withdrawn_seat_fraction"):
+        load_release("flow_mom_top20", root=tmp_path / "root")
+
+
+def test_release_envelope_mismatch_fails_closed(tmp_path) -> None:
+    """A release whose envelope differs from the registered sizing cap fails to load."""
+    raw = json.loads(release_path("flow_mom_top20").read_text(encoding="utf-8"))
+    raw["risk_envelope"] = "growth"
+    target = tmp_path / "root" / "src" / "strategy" / "releases"
+    target.mkdir(parents=True)
+    (target / "flow_mom_top20.json").write_text(json.dumps(raw), encoding="utf-8")
+    with pytest.raises(DataIntegrityError, match="risk envelope"):
+        load_release("flow_mom_top20", root=tmp_path / "root")
+
+
+def test_spec_digest_covers_exposure_cap() -> None:
+    """The sizing exposure cap participates in the spec digest."""
+    from src.core.params import ACCOUNT_EXPOSURE_CAP
+
+    release = load_release("flow_mom_top20")
+    assert release.sizing.get("exposure_cap") == ACCOUNT_EXPOSURE_CAP
+    altered = dict(release.sizing)
+    altered["exposure_cap"] = 10.0
+    assert strategy_spec_digest(FLOW_MOM_TOP20, altered) != release.spec_digest
