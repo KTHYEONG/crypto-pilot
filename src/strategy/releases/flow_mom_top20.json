@@ -15,7 +15,7 @@
   },
   "criteria_digest": "8710bb6600649ff7aa706b6d0e56be0d9720493bf406fa682fdd5ba99e11c0db",
   "design_data_cutoff": "2026-07-01T00:00:00+00:00",
-  "evaluation_digest": null,
+  "evaluation_digest": "47bef61c6e68e9556a0799728abc3bbeae07f3983483ea635fcb2e6000e78b7a",
   "legacy_ids": [
     "frozen_mhs_top20_v2"
   ],
@@ -32,5 +32,5 @@
     "host": "or-vps",
     "manifest": "/home/ubuntu/crypto-pilot/data/state/runs/frozen_top20_v2_repeg_fillcap_20261002/run_manifest.json"
   },
-  "verdict": null
+  "verdict": "accept"
 }
