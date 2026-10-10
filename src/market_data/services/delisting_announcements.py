@@ -63,7 +63,7 @@ def _detail_text(body: object) -> str:
                 if node.strip():
                     parts.append(node)
             elif isinstance(node, dict):
-                for key in ("text", "children"):
+                for key in ("text", "child", "children"):
                     if key in node:
                         _walk(node[key])
             elif isinstance(node, list):
@@ -161,6 +161,54 @@ def _fetch_body(
 def _iso_z(moment: pd.Timestamp) -> str:
     as_utc: datetime = moment.tz_convert("UTC").to_pydatetime().astimezone(UTC)
     return as_utc.isoformat().replace("+00:00", "Z")
+
+
+@dataclass(frozen=True, slots=True)
+class ReextractReport:
+    reextracted: tuple[str, ...] = ()
+    replaced: tuple[str, ...] = ()
+    unfetched: tuple[str, ...] = ()
+
+
+def reextract_delisting_notices(
+    *,
+    existing: Sequence[DelistingNotice],
+    fetch_detail: Callable[[str], dict[str, Any]],
+    sleep: Callable[[float], None],
+    now: pd.Timestamp,
+) -> tuple[list[dict[str, Any]], ReextractReport]:
+    """Re-derive symbols for committed ``delist`` rows from live bodies; replace only on symbol change."""
+    if pd.isna(now) or now.tzinfo is None:
+        raise DataIntegrityError("now must be a timezone-aware timestamp")
+    replacements: list[dict[str, Any]] = []
+    reextracted: list[str] = []
+    replaced: list[str] = []
+    unfetched: list[str] = []
+    for notice in existing:
+        if notice.kind != "delist":
+            continue
+        text = _fetch_body(notice.code, fetch_detail, sleep)
+        if text is None:
+            unfetched.append(notice.code)
+            continue
+        reextracted.append(notice.code)
+        symbols = list(extract_contract_symbols(notice.title, text))
+        if symbols != list(notice.symbols):
+            replacements.append({
+                "code": notice.code,
+                "title": notice.title,
+                "release_ms": notice.release_ms if notice.release_ms is not None else int(notice.release_at.value // 1_000_000),
+                "kind": notice.kind,
+                "symbols": symbols,
+                "collected_at": _iso_z(now),
+            })
+            replaced.append(notice.code)
+    replacements.sort(key=lambda row: (row["release_ms"], row["code"]))
+    return replacements, ReextractReport(
+        reextracted=tuple(reextracted),
+        replaced=tuple(replaced),
+        unfetched=tuple(unfetched),
+    )
 
 
 def collect_delisting_notices(

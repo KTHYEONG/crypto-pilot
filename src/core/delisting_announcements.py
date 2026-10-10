@@ -23,16 +23,40 @@ _RESOLVE_WINDOW: Final[pd.Timedelta] = pd.Timedelta(days=21)
 _ACTION_PATTERN: Final[re.Pattern[str]] = re.compile(r"delist|remov|settl|terminat", re.IGNORECASE)
 _CONTEXT_PATTERN: Final[re.Pattern[str]] = re.compile(r"perpetual|futures?|contract|coin-m|usd[\s\-s\u24c8]*-m", re.IGNORECASE)
 _DIRECT_SYMBOL_PATTERN: Final[re.Pattern[str]] = re.compile(r"\b([A-Z0-9]{2,15}USD[TC])\b")
-_SPACED_SYMBOL_PATTERN: Final[re.Pattern[str]] = re.compile(r"\b([A-Z0-9]{2,15})\s+USDT\b")
-_MARGIN_PREFIX_PATTERN: Final[re.Pattern[str]] = re.compile(r"USD[S\u24c8]-M\s+([A-Z0-9]{2,15})\b")
+_SPACED_SYMBOL_PATTERN: Final[re.Pattern[str]] = re.compile(r"\b([A-Z0-9]{2,15})\s+USDT\b(?!-)")
+_AND: Final[str] = r"[Aa][Nn][Dd]"
+_PERP: Final[str] = r"[Pp][Ee][Rr][Pp][Ee][Tt][Uu][Aa][Ll]"
+_CONTRACT_WORD: Final[str] = r"[Cc][Oo][Nn][Tt][Rr][Aa][Cc][Tt][Ss]?"
+_MARG_SUFFIX: Final[str] = r"[Mm](?:[Aa][Rr][Gg][Ii][Nn][Ee][Dd])?"
+_MARGIN_TAG: Final[str] = rf"(?:USDT-{_MARG_SUFFIX}|USD[S\u24c8]-{_MARG_SUFFIX})"
+_TICK: Final[str] = r"(?:[A-Z0-9]{2,15}USD[TC]|[A-Z0-9]{2,15})"
+_SEP: Final[str] = rf"(?:\s*,\s*(?:{_AND}\s+)?|\s*&\s*|\s+{_AND}\s+)"
+_TICKER_LIST: Final[str] = rf"{_TICK}(?:{_SEP}{_TICK})*"
+_TICKER_LIST_BEFORE_PATTERN: Final[re.Pattern[str]] = re.compile(
+    rf"\b({_TICKER_LIST})\s+{_MARGIN_TAG}\s+(?:{_PERP}\s+)?{_CONTRACT_WORD}\b"
+)
+_TICKER_LIST_AFTER_PATTERN: Final[re.Pattern[str]] = re.compile(
+    rf"\b{_MARGIN_TAG}\s+({_TICKER_LIST})\s+{_PERP}\s+{_CONTRACT_WORD}\b"
+)
+_TICKER_LIST_SPLIT_PATTERN: Final[re.Pattern[str]] = re.compile(
+    _SEP
+)
+_FULL_SYMBOL_RE: Final[re.Pattern[str]] = re.compile(r"[A-Z0-9]{2,15}USD[TC]\Z")
+_TICKER_STOP_WORDS: Final[frozenset[str]] = frozenset({
+    "USDT", "USDC", "USD", "BUSD", "USD\u24c8", "M", "MARGINED",
+    "PERPETUAL", "CONTRACT", "CONTRACTS", "FUTURES", "BINANCE",
+    "WILL", "DELIST", "AND", "THE", "ON", "OF", "COIN",
+})
+_SENTENCE_SPLIT_PATTERN: Final[re.Pattern[str]] = re.compile(r"[.!?;]+")
 _NON_TICKER_WORDS: Final[frozenset[str]] = frozenset({
     "A", "AN", "THE", "AND", "FOR", "ALL", "ANY", "ARE", "BUT", "NOT", "YOU", "YOUR",
     "WILL", "WITH", "FROM", "THIS", "THAT", "HAVE", "HAS", "PLEASE", "NOTE", "TIME",
-    "DATE", "MARGIN", "SETTLEMENT", "SETTLE", "FUTURES", "FUTURE", "PERPETUAL",
+    "DATE", "MARGIN", "MARGINED", "SETTLEMENT", "SETTLE", "FUTURES", "FUTURE", "PERPETUAL",
     "CONTRACT", "CONTRACTS", "BINANCE", "DELIST", "DELISTING", "REMOVAL", "TRADING",
     "OPEN", "CLOSE", "AFTER", "BEFORE", "DURING", "UNTIL", "WHEN", "THEN", "THAN",
     "INTO", "OVER", "SUCH", "EACH", "OTHER", "MORE", "ONLY", "ALSO", "MAY", "USD",
-    "USDT", "USDC", "IN", "ON", "OF", "TO", "BY", "AS", "AT", "OR", "SO", "UP",
+    "USDT", "USDC", "BUSD", "USDⓈ", "M", "COIN",
+    "IN", "ON", "OF", "TO", "BY", "AS", "AT", "OR", "SO", "UP",
     "OUT", "OFF", "PER", "VIA", "NEW", "END",
 })
 
@@ -164,10 +188,21 @@ def _base_tickers(text: str) -> list[str]:
         ticker = match.group(1)
         if ticker not in _NON_TICKER_WORDS:
             found.append(f"{ticker}USDT")
-    for match in _MARGIN_PREFIX_PATTERN.finditer(text):
-        ticker = match.group(1)
-        if ticker not in _NON_TICKER_WORDS and not ticker.endswith(("USDT", "USDC", "USD")):
-            found.append(f"{ticker}USDT")
+    return found
+
+
+def _ticker_list_symbols(text: str) -> list[str]:
+    found: list[str] = []
+    for pattern in (_TICKER_LIST_BEFORE_PATTERN, _TICKER_LIST_AFTER_PATTERN):
+        for match in pattern.finditer(text):
+            for raw in _TICKER_LIST_SPLIT_PATTERN.split(match.group(1)):
+                ticker = raw.strip().strip(",& ")
+                if not ticker or ticker in _TICKER_STOP_WORDS:
+                    continue
+                if _FULL_SYMBOL_RE.match(ticker):
+                    found.append(ticker)
+                    continue
+                found.append(f"{ticker}USDT")
     return found
 
 
@@ -176,7 +211,13 @@ def extract_contract_symbols(title: str, body_text: str) -> tuple[str, ...]:
     combined = f"{title}\n{body_text}"
     symbols = set(_DIRECT_SYMBOL_PATTERN.findall(combined))
     if classify_notice(title, body_text) == "delist":
-        symbols.update(_base_tickers(combined))
+        symbols.update(_base_tickers(title))
+        symbols.update(_ticker_list_symbols(title))
+        for sentence in _SENTENCE_SPLIT_PATTERN.split(body_text):
+            lowered = sentence.lower()
+            if ("settle" in lowered or "delist" in lowered) and "contract" in lowered:
+                symbols.update(_base_tickers(sentence))
+                symbols.update(_ticker_list_symbols(sentence))
     symbols.discard("USDT")
     symbols.discard("USDC")
     return tuple(sorted(symbols))
