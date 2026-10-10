@@ -40,7 +40,7 @@ def test_account_command_defaults_to_growth_at_retail_capital(tmp_path: Path, mo
     """No policy/capital flags select growth at the declared minimum retail start."""
     from src.core.params import (
         ACCOUNT_DEFAULT_CAPITAL_USDT,
-        ACCOUNT_EXPOSURE_MAX,
+        ACCOUNT_EXPOSURE_CAP,
         ACCOUNT_EXPOSURE_STEP,
         ACCOUNT_IMPACT_Y,
         ACCOUNT_INITIAL_MARGIN_CAP,
@@ -70,7 +70,7 @@ def test_account_command_defaults_to_growth_at_retail_capital(tmp_path: Path, mo
     assert policy.kind == "growth"
     assert main["capital"] == ACCOUNT_DEFAULT_CAPITAL_USDT
     assert policy.mean_haircut == ACCOUNT_MEAN_HAIRCUT
-    assert (policy.exposure_max, policy.exposure_step) == (ACCOUNT_EXPOSURE_MAX, ACCOUNT_EXPOSURE_STEP)
+    assert (policy.exposure_max, policy.exposure_step) == (ACCOUNT_EXPOSURE_CAP, ACCOUNT_EXPOSURE_STEP)
     assert (policy.prior_days, policy.min_moment_days) == (ACCOUNT_PRIOR_DAYS, ACCOUNT_MIN_MOMENT_DAYS)
     assert not hasattr(policy, "unit_daily_mean")
     assert (policy.shock_per_unit, policy.margin_reserve, policy.initial_margin_cap) == (

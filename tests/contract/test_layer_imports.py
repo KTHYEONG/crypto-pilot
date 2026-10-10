@@ -428,7 +428,7 @@ def test_moved_registries_keep_content_digests() -> None:
 
     assert (
         load_instrument_settlement_registry().digest
-        == "sha256:4e09a210879043fdd98f5d9e73ec3c04f2251836082f267a8765561e3854a047"
+        == "sha256:9832902381e85e9ebf6d693f2e7571ff2ebc5c8556ccf4240393859b71aac8b9"
     )
     assert (
         load_venue_halt_registry().digest

@@ -233,11 +233,13 @@ def test_committed_registry_loads() -> None:
         clear_instrument_settlement_registry_cache()
     assert len(registry.settlements) == 155
     assert len(registry.truncations) == 0
-    counts: dict[str, int] = {}
+    price_counts: dict[str, int] = {}
+    announcement_counts: dict[str, int] = {}
     for record in registry.settlements:
-        counts[record.price_source] = counts.get(record.price_source, 0) + 1
-        assert record.announcement_source == "proxy_lead"
-    assert counts == {"flat_1h_klines": 146, "twap30_proxy": 9}
+        price_counts[record.price_source] = price_counts.get(record.price_source, 0) + 1
+        announcement_counts[record.announcement_source] = announcement_counts.get(record.announcement_source, 0) + 1
+    assert price_counts == {"flat_1h_klines": 146, "twap30_proxy": 9}
+    assert announcement_counts == {"binance_cms": 85, "proxy_lead": 70}
 
 
 @pytest.mark.parametrize(
