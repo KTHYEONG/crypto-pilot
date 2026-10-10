@@ -1019,3 +1019,221 @@ def test_report_internal_gaps_resolves_moved_panel_import(monkeypatch) -> None:
     assert _report_internal_gaps(args) is None
     assert seen["interval"] == "3m"
     assert seen["columns"] == ("open", "high", "low", "close", "quote_vol")
+
+
+def _delisting_evidence_row(code="c1", release_ms=1_714_521_600_000):
+    import json
+
+    return json.dumps({
+        "code": code, "title": f"title {code}", "release_ms": release_ms,
+        "kind": "delist", "symbols": ["AAAUSDT"], "collected_at": "2024-05-02T00:00:00Z",
+    }, sort_keys=True) + "\n"
+
+
+def _stub_delisting_collection(monkeypatch, rows):
+    import src.market_data.services.delisting_announcements as svc_mod
+
+    def _fake(**kwargs):
+        report = svc_mod.CollectionReport(
+            fetched=tuple(row["code"] for row in rows),
+            skipped_existing=(), unfetched=(), total_remote=len(rows),
+        )
+        return rows, report
+
+    monkeypatch.setattr(svc_mod, "collect_delisting_notices", _fake)
+
+
+def test_collect_delisting_announcements_dry_run_writes_nothing(tmp_path, monkeypatch, capsys, caplog) -> None:
+    import src.core.delisting_announcements as core_mod
+
+    target = tmp_path / "evidence.jsonl"
+    target.write_text(_delisting_evidence_row(), encoding="utf-8")
+    monkeypatch.setattr(core_mod, "default_delisting_evidence_path", lambda: target)
+    _stub_delisting_collection(monkeypatch, [])
+    with caplog.at_level("INFO", logger="src.cli.commands.data"):
+        args = _mhs_parser().parse_args(["data", "collect-delisting-announcements"])
+        args.handler(args)
+    assert target.read_text(encoding="utf-8") == _delisting_evidence_row()
+    assert '"fetched": []' in capsys.readouterr().out
+    assert "stage=collect_delisting_announcements" in caplog.text
+
+
+def test_collect_delisting_announcements_write_merges_atomically(tmp_path, monkeypatch) -> None:
+    import src.core.delisting_announcements as core_mod
+    from src.core.delisting_announcements import load_delisting_notices
+
+    target = tmp_path / "evidence.jsonl"
+    target.write_text(_delisting_evidence_row("c1", 1_714_521_600_000), encoding="utf-8")
+    monkeypatch.setattr(core_mod, "default_delisting_evidence_path", lambda: target)
+    import json
+
+    new_row = json.loads(_delisting_evidence_row("c9", 1_714_521_500_000))
+    _stub_delisting_collection(monkeypatch, [new_row])
+    args = _mhs_parser().parse_args(["data", "collect-delisting-announcements", "--write"])
+    args.handler(args)
+    assert [notice.code for notice in load_delisting_notices(target)] == ["c9", "c1"]
+
+
+def test_collect_delisting_announcements_bootstraps_without_committed(tmp_path, monkeypatch, caplog) -> None:
+    import src.core.delisting_announcements as core_mod
+
+    monkeypatch.setattr(core_mod, "default_delisting_evidence_path", lambda: tmp_path / "absent.jsonl")
+    _stub_delisting_collection(monkeypatch, [])
+    with caplog.at_level("INFO", logger="src.cli.commands.data"):
+        args = _mhs_parser().parse_args(["data", "collect-delisting-announcements"])
+        args.handler(args)
+    assert "NO_COMMITTED_EVIDENCE" in caplog.text
+    assert not (tmp_path / "absent.jsonl").exists()
+
+
+def test_collect_delisting_announcements_refuses_corrupt_committed(tmp_path, monkeypatch) -> None:
+    import pytest
+
+    import src.core.delisting_announcements as core_mod
+    from src.common.errors import DataIntegrityError
+
+    corrupt = tmp_path / "corrupt.jsonl"
+    corrupt.write_bytes(b"{oops")
+    monkeypatch.setattr(core_mod, "default_delisting_evidence_path", lambda: corrupt)
+    args = _mhs_parser().parse_args(["data", "collect-delisting-announcements"])
+    with pytest.raises(DataIntegrityError):
+        args.handler(args)
+
+
+def test_collect_delisting_announcements_write_rejects_duplicate(tmp_path, monkeypatch) -> None:
+    import pytest
+
+    import src.core.delisting_announcements as core_mod
+    from src.common.errors import DataIntegrityError
+
+    target = tmp_path / "evidence.jsonl"
+    target.write_text(_delisting_evidence_row("c1"), encoding="utf-8")
+    monkeypatch.setattr(core_mod, "default_delisting_evidence_path", lambda: target)
+    import json
+
+    _stub_delisting_collection(monkeypatch, [json.loads(_delisting_evidence_row("c1"))])
+    args = _mhs_parser().parse_args(["data", "collect-delisting-announcements", "--write"])
+    with pytest.raises(DataIntegrityError):
+        args.handler(args)
+
+
+def _delisting_urlopen_stub(monkeypatch, list_payload, detail_payload=None, detail_error=None):
+    import json
+    import urllib.request
+
+    calls: list[str] = []
+
+    class _FakeResponse:
+        def __init__(self, payload):
+            self._raw = json.dumps(payload).encode("utf-8")
+
+        def read(self):
+            return self._raw
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def _fake_urlopen(request, timeout=30):
+        calls.append(request.full_url)
+        if "detail/query" in request.full_url:
+            if detail_error is not None:
+                raise detail_error
+            return _FakeResponse(detail_payload)
+        return _FakeResponse(list_payload)
+
+    monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen)
+    monkeypatch.setattr("time.sleep", lambda seconds: None)
+    return calls
+
+
+def _delisting_list_payload(*articles):
+    return {"data": {"catalogs": [{"articles": list(articles), "total": len(articles)}]}}
+
+
+def test_collect_delisting_announcements_uses_stdlib_transport(tmp_path, monkeypatch) -> None:
+    import src.core.delisting_announcements as core_mod
+
+    target = tmp_path / "evidence.jsonl"
+    target.write_bytes(b"")
+    monkeypatch.setattr(core_mod, "default_delisting_evidence_path", lambda: target)
+    calls = _delisting_urlopen_stub(
+        monkeypatch,
+        _delisting_list_payload({
+            "code": "c1", "title": "Binance Futures Will Delist AAAUSDT",
+            "releaseDate": 1_714_521_600_000,
+        }),
+        {"data": {"body": "The AAAUSDT perpetual contract will be settled and removed."}},
+    )
+    args = _mhs_parser().parse_args(["data", "collect-delisting-announcements", "--write"])
+    args.handler(args)
+    assert any("article/list/query" in url for url in calls)
+    assert any("article/detail/query" in url for url in calls)
+    assert [(n.code, n.symbols) for n in core_mod.load_delisting_notices(target)] == [("c1", ("AAAUSDT",))]
+
+
+def test_collect_delisting_announcements_maps_http_error_to_unfetched(tmp_path, monkeypatch, caplog) -> None:
+    import urllib.error
+
+    import src.core.delisting_announcements as core_mod
+
+    target = tmp_path / "evidence.jsonl"
+    target.write_bytes(b"")
+    monkeypatch.setattr(core_mod, "default_delisting_evidence_path", lambda: target)
+    _delisting_urlopen_stub(
+        monkeypatch,
+        _delisting_list_payload({
+            "code": "c1", "title": "Binance Futures Will Delist AAAUSDT",
+            "releaseDate": 1_714_521_600_000,
+        }),
+        detail_error=urllib.error.HTTPError("http://x", 429, "Too Many Requests", {}, None),
+    )
+    with caplog.at_level("INFO", logger="src.cli.commands.data"):
+        args = _mhs_parser().parse_args(["data", "collect-delisting-announcements", "--write"])
+        args.handler(args)
+    assert "unfetched=1" in caplog.text
+    assert core_mod.load_delisting_notices(target) == ()
+
+
+def test_collect_delisting_announcements_maps_unreachable_to_unfetched(tmp_path, monkeypatch) -> None:
+    import urllib.error
+
+    import src.core.delisting_announcements as core_mod
+
+    target = tmp_path / "evidence.jsonl"
+    target.write_bytes(b"")
+    monkeypatch.setattr(core_mod, "default_delisting_evidence_path", lambda: target)
+    _delisting_urlopen_stub(
+        monkeypatch,
+        _delisting_list_payload({
+            "code": "c1", "title": "Binance Futures Will Delist AAAUSDT",
+            "releaseDate": 1_714_521_600_000,
+        }),
+        detail_error=urllib.error.URLError("unreachable"),
+    )
+    args = _mhs_parser().parse_args(["data", "collect-delisting-announcements"])
+    args.handler(args)
+    assert core_mod.load_delisting_notices(target) == ()
+
+
+def test_collect_delisting_announcements_cleans_tmp_on_invalid_rows(tmp_path, monkeypatch) -> None:
+    import json
+
+    import pytest
+
+    import src.core.delisting_announcements as core_mod
+    from src.common.errors import DataIntegrityError
+
+    target = tmp_path / "evidence.jsonl"
+    target.write_bytes(b"")
+    monkeypatch.setattr(core_mod, "default_delisting_evidence_path", lambda: target)
+    bad = json.loads(_delisting_evidence_row("c1"))
+    bad["symbols"] = ["BBBUSDT", "AAAUSDT"]
+    _stub_delisting_collection(monkeypatch, [bad])
+    args = _mhs_parser().parse_args(["data", "collect-delisting-announcements", "--write"])
+    with pytest.raises(DataIntegrityError):
+        args.handler(args)
+    assert list(tmp_path.glob(".delisting_*")) == []
+    assert target.read_bytes() == b""

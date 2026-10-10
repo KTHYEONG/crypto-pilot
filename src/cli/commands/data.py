@@ -538,6 +538,95 @@ def _seal_mhs_inputs(args: argparse.Namespace) -> None:
     _logger.info("[DATA] stage=seal_mhs_inputs files=%d digest=%s path=%s", len(paths), digest, args.output)
 
 
+def _collect_delisting_announcements(args: argparse.Namespace) -> None:
+    import json
+    import tempfile
+    import time
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+    from dataclasses import asdict
+    from pathlib import Path
+    from typing import Any
+
+    from src.common.errors import DataIntegrityError
+    from src.core.delisting_announcements import (
+        default_delisting_evidence_path,
+        load_delisting_notices,
+    )
+    from src.market_data.services.delisting_announcements import (
+        CmsHttpError,
+        collect_delisting_notices,
+    )
+
+    committed_path = default_delisting_evidence_path()
+    try:
+        existing = load_delisting_notices()
+    except DataIntegrityError:
+        if committed_path.exists():
+            raise
+        _logger.warning(
+            "[DATA] stage=collect_delisting_announcements status=NO_COMMITTED_EVIDENCE bootstrapping from empty",
+        )
+        existing = ()
+
+    def _get_json(url: str, *, label: str) -> dict[str, Any]:
+        request = urllib.request.Request(url, headers={"User-Agent": "crypto-pilot/1.0"})  # noqa: S310 - fixed Binance CMS host
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:  # noqa: S310 - fixed Binance CMS host
+                payload: dict[str, Any] = json.loads(response.read().decode("utf-8"))
+                return payload
+        except urllib.error.HTTPError as exc:
+            raise CmsHttpError(int(exc.code), f"CMS {label} failed with status {exc.code}") from exc
+        except OSError as exc:
+            raise CmsHttpError(-1, f"CMS {label} unreachable: {exc}") from exc
+
+    def _fetch_page(page_no: int) -> dict[str, Any]:
+        query = urllib.parse.urlencode({"type": 1, "catalogId": 161, "pageNo": page_no, "pageSize": 50})
+        return _get_json(f"https://www.binance.com/bapi/composite/v1/public/cms/article/list/query?{query}", label=f"list:{page_no}")
+
+    def _fetch_detail(code: str) -> dict[str, Any]:
+        query = urllib.parse.urlencode({"articleCode": code})
+        return _get_json(f"https://www.binance.com/bapi/composite/v1/public/cms/article/detail/query?{query}", label=f"detail:{code}")
+
+    rows, report = collect_delisting_notices(
+        existing=existing,
+        fetch_page=_fetch_page,
+        fetch_detail=_fetch_detail,
+        sleep=time.sleep,
+        now=pd.Timestamp.now(tz="UTC"),
+    )
+    _logger.info(
+        "[DATA] stage=collect_delisting_announcements fetched=%d skipped=%d unfetched=%d total_remote=%d",
+        len(report.fetched), len(report.skipped_existing), len(report.unfetched), report.total_remote,
+    )
+    print(json.dumps(asdict(report), sort_keys=True))  # noqa: T201 - report on stdout is the CLI contract
+    if not args.write:
+        return
+    merged: dict[str, dict[str, Any]] = {}
+    if committed_path.exists():
+        for line in committed_path.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                record = json.loads(line)
+                merged[record["code"]] = record
+    for row in rows:
+        if row["code"] in merged:
+            raise DataIntegrityError(f"delisting evidence duplicate code {row['code']!r}")
+        merged[row["code"]] = row
+    ordered = sorted(merged.values(), key=lambda row: (row["release_ms"], row["code"]))
+    payload = "".join(json.dumps(row, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n" for row in ordered)
+    tmp_fd, tmp_name = tempfile.mkstemp(dir=str(committed_path.parent), prefix=".delisting_", suffix=".tmp")
+    try:
+        with open(tmp_fd, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(payload)
+        load_delisting_notices(Path(tmp_name))
+        Path(tmp_name).replace(committed_path)
+    except BaseException:
+        Path(tmp_name).unlink(missing_ok=True)
+        raise
+    _logger.info("[DATA] stage=collect_delisting_announcements status=WRITTEN records=%d", len(ordered))
+
+
 def add_data_commands(data_parser: argparse.ArgumentParser) -> None:
     """Register data commands while fixing MHS execution collection to 3m.
 
@@ -706,3 +795,10 @@ def add_data_commands(data_parser: argparse.ArgumentParser) -> None:
     sync_cov.add_argument("--lookback-days", type=int, default=3)
     sync_cov.add_argument("--execute", action="store_true", default=False)
     sync_cov.set_defaults(handler=_sync_execution_coverage)
+
+    collect_notices = collect.add_parser(
+        "collect-delisting-announcements",
+        help="Fetch Binance delisting CMS notices into committed evidence (dry-run by default)",
+    )
+    collect_notices.add_argument("--write", action="store_true", default=False)
+    collect_notices.set_defaults(handler=_collect_delisting_announcements)

@@ -407,7 +407,8 @@ def test_source_module_size_budget() -> None:
         # Freeze the existing fold lifecycle; further growth requires decomposition.
         "src/lab/mhs/evaluation/folds.py": 1084,
         # spec 34 part 3: build-venue-halts operator command next to build-settlement-registry.
-        "src/cli/commands/data.py": 708,
+        # spec 43 part 1: collect-delisting-announcements operator command and atomic evidence write.
+        "src/cli/commands/data.py": 806,
         # Declare-once request schema: each MHS option is exactly one field plus CLI metadata.
         "src/lab/mhs/contracts.py": 878,
         # Checkpoint advancement, retention and the loop stay co-located for review;
