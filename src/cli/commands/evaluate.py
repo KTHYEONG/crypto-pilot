@@ -69,9 +69,9 @@ def _read_unit_run(run_dir: Path) -> tuple[dict[str, Any], pd.Series, pd.Series,
     daily = pd.read_parquet(run_dir / "daily.parquet")
     base = _utc_series(pd.Series(daily["base_return"].to_numpy(dtype="float64"), index=daily.index), "base_returns")
     stress = _utc_series(pd.Series(daily["stress_return"].to_numpy(dtype="float64"), index=daily.index), "stress_returns")
-    if "fill_participation" in daily.columns:
+    if "fill_adv_participation" in daily.columns:
         participation = _utc_series(
-            pd.Series(daily["fill_participation"].to_numpy(dtype="float64"), index=daily.index), "participation"
+            pd.Series(daily["fill_adv_participation"].to_numpy(dtype="float64"), index=daily.index), "participation"
         )
     else:
         participation = pd.Series(dtype="float64")
@@ -197,6 +197,8 @@ def build_evaluation_inputs(
 
     release = load_release(strategy_id)
     unit_payload, base, stress, participation, funding_by_symbol = _read_unit_run(Path(unit_run))
+    if unit_payload.get("participation_basis") != release.criteria.participation_basis:
+        raise DataIntegrityError("participation basis mismatch")
     deployed, leverage = _read_account_run(Path(account_run))
     account_payload = json.loads((Path(account_run) / "account.json").read_text(encoding="utf-8"))
     daily = pd.read_parquet(Path(unit_run) / "daily.parquet")

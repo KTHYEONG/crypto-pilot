@@ -190,3 +190,12 @@ def test_spec_digest_covers_exposure_cap() -> None:
     altered = dict(release.sizing)
     altered["exposure_cap"] = 10.0
     assert strategy_spec_digest(FLOW_MOM_TOP20, altered) != release.spec_digest
+
+
+def test_digest_covers_participation_basis() -> None:
+    """The committed release carries the ADV basis and a matching digest."""
+    release = load_release("flow_mom_top20")
+    assert release.criteria.participation_basis == "adv30_median_prior_day"
+    assert release.criteria_digest == criteria_digest(release.criteria)
+    with pytest.raises(DataIntegrityError):
+        EvaluationCriteria(participation_basis="trailing_24h")

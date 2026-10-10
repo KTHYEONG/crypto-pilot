@@ -32,6 +32,7 @@ class EvaluationCriteria:
     plateau_min_fraction: float = 0.5
     max_top5_funding_dependence: bool = True
     max_participation_p95: float = 0.01
+    participation_basis: str = "adv30_median_prior_day"
     max_withdrawn_seat_fraction: float = 0.001
     risk_envelope: str = "growth_extreme_budgeted"
     min_holdout_days: int = 60
@@ -41,6 +42,8 @@ class EvaluationCriteria:
     def __post_init__(self) -> None:
         if type(self.max_top5_funding_dependence) is not bool:
             raise DataIntegrityError("funding dependence policy must be boolean")
+        if self.participation_basis != "adv30_median_prior_day":
+            raise DataIntegrityError("participation basis must be adv30_median_prior_day")
         for name in ("min_discovery_days", "min_holdout_days"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 2:
@@ -82,6 +85,7 @@ def criteria_digest(criteria: EvaluationCriteria) -> str:
         "plateau_min_fraction": criteria.plateau_min_fraction,
         "max_top5_funding_dependence": criteria.max_top5_funding_dependence,
         "max_participation_p95": criteria.max_participation_p95,
+        "participation_basis": criteria.participation_basis,
         "max_withdrawn_seat_fraction": criteria.max_withdrawn_seat_fraction,
         "risk_envelope": criteria.risk_envelope,
         "min_holdout_days": criteria.min_holdout_days,

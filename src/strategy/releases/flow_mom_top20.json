@@ -9,10 +9,11 @@
     "max_withdrawn_seat_fraction": 0.001,
     "min_discovery_days": 730,
     "min_holdout_days": 60,
+    "participation_basis": "adv30_median_prior_day",
     "plateau_min_fraction": 0.5,
     "risk_envelope": "growth_extreme_budgeted"
   },
-  "criteria_digest": "81fa22ce787dff15687db489a30f8b52d7c6f9259cceda39eea5f592c82ab79f",
+  "criteria_digest": "c61d32cd8a2850491515b1aad812d31a10f4d64e1e18844d8e8eef0f864456c3",
   "design_data_cutoff": "2026-07-01T00:00:00+00:00",
   "evaluation_digest": null,
   "legacy_ids": [
@@ -28,9 +29,9 @@
   "spec_digest": "366490a3b2de79fcd298f8945d4573e88f062889bc7da1f66d3f5f24131ed4d5",
   "strategy_id": "flow_mom_top20",
   "target_capital_usdt": 2100.0,
-  "verdict": null,
   "unit_bootstrap_provenance": {
     "host": "or-vps",
     "manifest": "/home/ubuntu/crypto-pilot/data/state/runs/frozen_top20_v2_repeg_fillcap_20261002/run_manifest.json"
-  }
+  },
+  "verdict": null
 }

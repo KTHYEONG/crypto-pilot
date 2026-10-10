@@ -70,6 +70,48 @@ def daily_fill_participation(fills: pd.DataFrame) -> pd.Series:
     return grouped.reindex(full, fill_value=0.0).astype("float64")
 
 
+def daily_adv_participation(fills: pd.DataFrame, adv: pd.DataFrame) -> tuple[pd.Series, int]:
+    """Per UTC day, max over market fills of |fill notional| / causal ADV; returns (series, unknown_fill_count)."""
+    if fills.empty:
+        return pd.Series(dtype="float64"), 0
+    fill_days = pd.DatetimeIndex(pd.to_datetime(fills["timestamp"], utc=True)).normalize()
+    if fill_days.hasnans:
+        raise DataIntegrityError("fill timestamps must be valid UTC days")
+    full = pd.date_range(start=fill_days.min(), end=fill_days.max(), freq="D", tz="UTC")
+    market = fills[fills["reason"] != "delist_settlement"]
+    if market.empty:
+        return pd.Series(0.0, index=full, dtype="float64"), 0
+    days = pd.DatetimeIndex(pd.to_datetime(market["timestamp"], utc=True)).normalize().tz_convert("UTC")
+    quantity = pd.to_numeric(market["quantity_delta"], errors="coerce").to_numpy(dtype="float64")
+    price = pd.to_numeric(market["fill_price"], errors="coerce").to_numpy(dtype="float64")
+    symbols = market["symbol"].astype(str).to_numpy()
+    notional = np.abs(quantity) * price
+    columns = set(adv.columns.astype(str)) if len(adv.columns) else set()
+    positions = adv.index.get_indexer(days)
+    unknown = 0
+    valid_days: list[pd.Timestamp] = []
+    valid_parts: list[float] = []
+    for i, day in enumerate(days):
+        symbol = str(symbols[i])
+        pos = int(positions[i])
+        if pos < 0 or symbol not in columns:
+            unknown += 1
+            continue
+        adv_value = float(adv.iat[pos, adv.columns.get_loc(symbol)])
+        if not adv_value > 0.0:
+            unknown += 1
+            continue
+        part = float(notional[i] / adv_value)
+        if not np.isfinite(part) or part < 0.0:
+            raise DataIntegrityError("fill ADV participation must be finite and non-negative")
+        valid_days.append(day)
+        valid_parts.append(part)
+    if not valid_days:
+        return pd.Series(0.0, index=full, dtype="float64"), unknown
+    grouped = pd.Series(valid_parts, index=pd.DatetimeIndex(valid_days, tz="UTC"), dtype="float64").groupby(level=0).max()
+    return grouped.reindex(full, fill_value=0.0).astype("float64"), unknown
+
+
 def _funding_by_symbol_for_period(
     ledger: object, start: pd.Timestamp, end: pd.Timestamp,
 ) -> dict[str, float]:
