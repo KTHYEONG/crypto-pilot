@@ -219,10 +219,8 @@ class _BoundExecutionReplayAccumulator:
         self.last_prices_arr = np.full(self.n_cols, np.nan, dtype="float64")
         self.last_time_ns: int | None = None
 
-        # Causal accounting mirror (P1): shadows the fill track event by
-        # event and is reconciled against the independent ledger in
-        # ``finalize``. Queued fills drain in bar order inside the ledger
-        # append so funding always settles on pre-fill inventory.
+        # Causal accounting mirror (P1): shadows the fill track event by event,
+        # reconciled in ``finalize``; queued fills drain in bar order (funding first).
         self.accounting_state = CausalPortfolioState(
             cash=float(initial_equity),
             units=np.zeros(self.n_cols, dtype="float64"),
@@ -231,6 +229,7 @@ class _BoundExecutionReplayAccumulator:
         )
         self._mirror_pending: list[tuple[int, int, float, float, float]] = []
         self._w_qv = np.zeros((0, 0), dtype="float64")
+        self._w_volume_symbols: frozenset[str] = frozenset()
         self._w_fknown = np.zeros((0, 0), dtype=bool)
         self._w_avail_ns: np.ndarray = np.zeros(0, dtype="int64")
         self._w_avail_explicit = False
@@ -250,7 +249,6 @@ class _BoundExecutionReplayAccumulator:
         self.last_close_ts: dict[str, pd.Timestamp] = {}
         self.last_close_value: dict[str, float] = {}
         self.last_close_mark: dict[str, float] = {}
-
         self.fill_ts: list[pd.Timestamp] = []
         self.fill_symbol: list[str] = []
         self.fill_qty: list[float] = []
@@ -259,6 +257,7 @@ class _BoundExecutionReplayAccumulator:
         self.fill_fee_bps: list[float] = []
         self.fill_reason: list[str] = []
         self.fill_pre_trade_equity: list[float] = []
+        self.fill_bar_qv: list[float] = []
         self.submit_times: list[pd.Timestamp] = []
         self.fill_times: list[pd.Timestamp] = []
         self.shortfalls: list[float] = []
@@ -268,8 +267,7 @@ class _BoundExecutionReplayAccumulator:
         self.fallback_count = 0
         self.residual_count = 0
         self.residual_notional = 0.0
-        # Liquidity-aware taker cost state: one half-spread estimate per
-        # canonical column, nan until a window's bars have been consumed.
+        # Liquidity-aware taker cost state per column, nan until bars are consumed.
         self.half_spread_bps = np.full(self.n_cols, np.nan, dtype="float64")
         # Logical cost-clock observations for the in-progress decision
         # partition: additive Corwin-Schultz sufficient statistics plus the
@@ -455,6 +453,7 @@ class _BoundExecutionReplayAccumulator:
         staged = staging.arrays()
         self.full_grid_end = staged.grid[-1]
         self._w_qv = staged.quote_volumes
+        self._w_volume_symbols = frozenset(w.quote_volumes.columns) if w.quote_volumes is not None else frozenset()
         self._w_last_liquid_idx = staged.last_liquid_idx
         self._w_fknown = staged.funding_known
         self._w_avail_ns = staged.avail_ns
@@ -866,10 +865,7 @@ class _BoundExecutionReplayAccumulator:
     ) -> None:
         """Book one executed fill into the fill track, the mirror queue, and every fill column at once.
 
-        The fill track keeps twelve parallel per-fill lists that downstream code indexes positionally
-        (span back-out, ledger chunking, the causal mirror, ``finalize``). Appending them from one
-        place, after all validation, is what keeps them the same length: a rejected fill mutates
-        nothing, and an accepted fill appends to all of them.
+        Parallel fill lists append together after validation; rejected fills mutate nothing.
 
         Cash moves in two roundings (notional, then fee) because the fill-track cash feeds the next
         decision's sizing equity and therefore every downstream fill quantity; the ledger and the
@@ -942,6 +938,8 @@ class _BoundExecutionReplayAccumulator:
         self.fill_fee_bps.append(fee_bps)
         self.fill_reason.append(reason)
         self.fill_pre_trade_equity.append(pre_trade_equity)
+        _fill_terms.book_fill_quote_volume(
+            self.fill_bar_qv, frame.local_cols, self._w_qv, bar_pos, symbol, self._w_volume_symbols)
         self.fill_times.append(fill_time)
         self.submit_times.append(submit_time)
         if self.retain_event_snapshots:
@@ -2060,16 +2058,18 @@ class _BoundExecutionReplayAccumulator:
                 "fee_bps": self.fill_fee_bps,
                 "reason": self.fill_reason,
                 "pre_trade_equity": self.fill_pre_trade_equity,
+                "bar_quote_volume": self.fill_bar_qv,
             }
         )[
             [
                 "timestamp", "symbol", "quantity_delta", "fill_price",
-                "fee_bps", "reason", "pre_trade_equity",
+                "fee_bps", "reason", "pre_trade_equity", "bar_quote_volume",
             ]
         ]
         if simulated_fills.empty:
             simulated_fills = simulated_fills.astype(
-                {"quantity_delta": "float64", "fill_price": "float64", "fee_bps": "float64"}
+                {"quantity_delta": "float64", "fill_price": "float64",
+                 "fee_bps": "float64", "bar_quote_volume": "float64"}
             )
 
         ledger_available_at: pd.DatetimeIndex | None = None

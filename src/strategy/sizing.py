@@ -11,7 +11,7 @@ import numpy as np
 
 from src.common.errors import DataIntegrityError
 from src.core.params import (
-    ACCOUNT_EXPOSURE_MAX,
+    ACCOUNT_EXPOSURE_CAP,
     ACCOUNT_EXPOSURE_STEP,
     ACCOUNT_IMPACT_Y,
     ACCOUNT_INITIAL_MARGIN_CAP,
@@ -67,7 +67,7 @@ def account_growth_policy(*, impact_y: float = ACCOUNT_IMPACT_Y) -> ExposurePoli
     """Registered growth exposure policy shared by the account backtest and the live strategy step."""
     return ExposurePolicy(
         kind="growth",
-        exposure_max=ACCOUNT_EXPOSURE_MAX,
+        exposure_max=ACCOUNT_EXPOSURE_CAP,
         exposure_step=ACCOUNT_EXPOSURE_STEP,
         mean_haircut=ACCOUNT_MEAN_HAIRCUT,
         prior_days=ACCOUNT_PRIOR_DAYS,

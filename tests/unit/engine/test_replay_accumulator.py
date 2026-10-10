@@ -333,7 +333,7 @@ class TestColumnarFillAccumulator:
 
     FILL_COLUMNS = (
         "timestamp", "symbol", "quantity_delta", "fill_price", "fee_bps",
-        "reason", "pre_trade_equity",
+        "reason", "pre_trade_equity", "bar_quote_volume",
     )
 
     def _workload(self, days: int = 40, n_symbols: int = 8) -> dict[str, object]:
@@ -402,13 +402,15 @@ class TestColumnarFillAccumulator:
                 "fee_bps": acc.fill_fee_bps[i],
                 "reason": acc.fill_reason[i],
                 "pre_trade_equity": acc.fill_pre_trade_equity[i],
+                "bar_quote_volume": acc.fill_bar_qv[i],
             }
             for i in range(len(acc.fill_ts))
         ]
         legacy_df = pd.DataFrame(legacy_records, columns=self.FILL_COLUMNS)
         if legacy_df.empty:
             legacy_df = legacy_df.astype(
-                {"quantity_delta": "float64", "fill_price": "float64", "fee_bps": "float64"}
+                {"quantity_delta": "float64", "fill_price": "float64", "fee_bps": "float64",
+                 "bar_quote_volume": "float64"}
             )
         pd.testing.assert_frame_equal(
             columnar_df, legacy_df, check_dtype=True, check_exact=True,
@@ -420,7 +422,7 @@ class TestColumnarFillAccumulator:
         assert not fills.empty
         assert list(fills.columns) == list(self.FILL_COLUMNS)
         assert fills.dtypes["timestamp"] == pd.DatetimeTZDtype(tz="UTC", unit="ns")
-        for col in ("quantity_delta", "fill_price", "fee_bps", "pre_trade_equity"):
+        for col in ("quantity_delta", "fill_price", "fee_bps", "pre_trade_equity", "bar_quote_volume"):
             assert fills.dtypes[col] == np.dtype("float64"), col
         for col in ("symbol", "reason"):
             assert fills.dtypes[col] == pd.StringDtype(na_value=np.nan), col

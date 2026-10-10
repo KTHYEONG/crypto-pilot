@@ -198,6 +198,7 @@ class StrategyBacktestRun:
     source_gap_blocked_decisions: int = 0
     delisting_blocked_decisions: int = 0
     data_availability_withdrawals: tuple[Mapping[str, object], ...] = ()
+    roster_seat_days: int = 0
 
 
 class LakeCoverageError(DataIntegrityError):
@@ -680,11 +681,15 @@ def run_strategy_backtest(
         {"symbol": sym, "extent": "INTERIOR", "days": int(days)}
         for sym, days in sorted(interior_counts.items())
     )
+    seats = int(no_gap_roster.to_numpy(dtype=bool)[np.asarray(scored, dtype=bool)].sum())
     return StrategyBacktestRun(
         request=request, candidate=candidate, evidence=evidence,
         execution_start=execution_start, execution_end=execution_end, source_symbols=census,
-        source_gap_excluded_symbols=tuple(sorted(sym for sym in census if bool(blocked_decisions[sym].any()))),
+        source_gap_excluded_symbols=tuple(sorted(sym for sym in census
+            if bool(no_gap_roster.loc[scored, sym].any())
+            and bool(interior_frame.loc[scored, sym][no_gap_roster.loc[scored, sym]].all()))),
         source_gap_blocked_decisions=int(blocked_decisions.to_numpy(dtype=bool).sum()),
         delisting_blocked_decisions=int(delisting_only.sum()),
         data_availability_withdrawals=withdrawals,
+        roster_seat_days=seats,
     )

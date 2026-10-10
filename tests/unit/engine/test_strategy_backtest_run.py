@@ -477,6 +477,25 @@ def test_runner_threads_reviewed_exclusion_set(monkeypatch: pytest.MonkeyPatch) 
     assert list(run.candidate.target_weights.columns) == list(_GAP_SYMBOLS)
     assert bool((run.candidate.target_weights["PUMPUSDT"].to_numpy() == 0.0).all())
     assert "PUMPUSDT" in run.source_symbols
+
+
+def test_partial_withdrawal_is_disclosed_without_full_symbol_exclusion(monkeypatch) -> None:
+    from src.core.source_gaps import SourceGapInterval
+
+    _gap_source(monkeypatch, {})
+    gap = SourceGapInterval(
+        symbol="PUMPUSDT", plane="ohlcv_3m",
+        start=pd.Timestamp("2021-04-05", tz="UTC").to_pydatetime(),
+        end=pd.Timestamp("2021-04-06", tz="UTC").to_pydatetime(),
+        reason="SOURCE_ABSENT", evidence="bounded withdrawal",
+        verified_at=pd.Timestamp("2026-01-01", tz="UTC").to_pydatetime(),
+        resolved_at=None, extent="INTERIOR",
+    )
+    monkeypatch.setattr(run_mod, "active_intervals", lambda **kwargs: (gap,))
+    run = run_strategy_backtest(_request())
+    assert run.source_gap_excluded_symbols == ()
+    assert run.roster_seat_days > 0
+    assert sum(int(entry["days"]) for entry in run.data_availability_withdrawals) > 0
     assert "LUNAUSDT" in run.source_symbols
 
 
