@@ -1239,6 +1239,69 @@ def test_collect_delisting_announcements_cleans_tmp_on_invalid_rows(tmp_path, mo
     assert target.read_bytes() == b""
 
 
+def test_collect_delisting_announcements_reextract_replaces_symbols(tmp_path, monkeypatch, caplog) -> None:
+    import json
+
+    import src.core.delisting_announcements as core_mod
+
+    stale = {
+        "code": "c1",
+        "title": "Binance Futures Will Delist USDT-Margined ANC Perpetual Contract",
+        "release_ms": 1_714_521_600_000,
+        "kind": "delist", "symbols": [],
+        "collected_at": "2024-05-02T00:00:00Z",
+    }
+    target = tmp_path / "evidence.jsonl"
+    target.write_text(json.dumps(stale, sort_keys=True) + "\n", encoding="utf-8")
+    monkeypatch.setattr(core_mod, "default_delisting_evidence_path", lambda: target)
+    calls = _delisting_urlopen_stub(
+        monkeypatch,
+        _delisting_list_payload({
+            "code": "c1",
+            "title": "Binance Futures Will Delist USDT-Margined ANC Perpetual Contract",
+            "releaseDate": 1_714_521_600_000,
+        }),
+        {"data": {"body": "The USDT-Margined ANC perpetual contract will be settled and removed."}},
+    )
+    with caplog.at_level("INFO", logger="src.cli.commands.data"):
+        args = _mhs_parser().parse_args(
+            ["data", "collect-delisting-announcements", "--reextract", "--write"]
+        )
+        args.handler(args)
+    assert [notice.symbols for notice in core_mod.load_delisting_notices(target)] == [("ANCUSDT",)]
+    assert "REEXTRACTED" in caplog.text
+    assert len(calls) == 1
+    assert "detail/query" in calls[0]
+    first = target.read_bytes()
+    args.handler(args)
+    assert target.read_bytes() == first
+
+
+def test_reextract_dry_run_and_failed_body_preserve_evidence(tmp_path, monkeypatch) -> None:
+    import json
+
+    import src.core.delisting_announcements as core_mod
+
+    row = json.loads(_delisting_evidence_row())
+    row["title"] = "Binance Futures Will Delist USDT-Margined ANC Perpetual Contract"
+    row["symbols"] = []
+    target = tmp_path / "evidence.jsonl"
+    target.write_text(json.dumps(row) + "\n", encoding="utf-8")
+    original = target.read_bytes()
+    monkeypatch.setattr(core_mod, "default_delisting_evidence_path", lambda: target)
+    _delisting_urlopen_stub(
+        monkeypatch, {},
+        {"data": {"body": "We will settle USDT-Margined ANC perpetual contracts."}},
+    )
+    args = _mhs_parser().parse_args(["data", "collect-delisting-announcements", "--reextract"])
+    args.handler(args)
+    assert target.read_bytes() == original
+    _delisting_urlopen_stub(monkeypatch, {}, detail_error=OSError("offline"))
+    args.write = True
+    args.handler(args)
+    assert core_mod.load_delisting_notices(target)[0].symbols == ()
+
+
 def test_build_settlement_registry_reports_announcement_provenance(
     tmp_path, monkeypatch, caplog, capsys,
 ) -> None:

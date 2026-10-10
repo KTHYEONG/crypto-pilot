@@ -566,6 +566,7 @@ def _collect_delisting_announcements(args: argparse.Namespace) -> None:
     from src.market_data.services.delisting_announcements import (
         CmsHttpError,
         collect_delisting_notices,
+        reextract_delisting_notices,
     )
 
     committed_path = default_delisting_evidence_path()
@@ -580,7 +581,17 @@ def _collect_delisting_announcements(args: argparse.Namespace) -> None:
         existing = ()
 
     def _get_json(url: str, *, label: str) -> dict[str, Any]:
-        request = urllib.request.Request(url, headers={"User-Agent": "crypto-pilot/1.0"})  # noqa: S310 - fixed Binance CMS host
+        # The CMS edge answers 429 to non-browser agents regardless of request rate.
+        request = urllib.request.Request(  # noqa: S310 - fixed Binance CMS host
+            url,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/91.0.4472.124 Safari/537.36"
+                ),
+            },
+        )
         try:
             with urllib.request.urlopen(request, timeout=30) as response:  # noqa: S310 - fixed Binance CMS host
                 payload: dict[str, Any] = json.loads(response.read().decode("utf-8"))
@@ -598,18 +609,40 @@ def _collect_delisting_announcements(args: argparse.Namespace) -> None:
         query = urllib.parse.urlencode({"articleCode": code})
         return _get_json(f"https://www.binance.com/bapi/composite/v1/public/cms/article/detail/query?{query}", label=f"detail:{code}")
 
-    rows, report = collect_delisting_notices(
-        existing=existing,
-        fetch_page=_fetch_page,
-        fetch_detail=_fetch_detail,
-        sleep=time.sleep,
-        now=pd.Timestamp.now(tz="UTC"),
-    )
-    _logger.info(
-        "[DATA] stage=collect_delisting_announcements fetched=%d skipped=%d unfetched=%d total_remote=%d",
-        len(report.fetched), len(report.skipped_existing), len(report.unfetched), report.total_remote,
-    )
-    print(json.dumps(asdict(report), sort_keys=True))  # noqa: T201 - report on stdout is the CLI contract
+    rows: list[dict[str, Any]] = []
+    if not args.reextract:
+        rows, report = collect_delisting_notices(
+            existing=existing,
+            fetch_page=_fetch_page,
+            fetch_detail=_fetch_detail,
+            sleep=time.sleep,
+            now=pd.Timestamp.now(tz="UTC"),
+        )
+        _logger.info(
+            "[DATA] stage=collect_delisting_announcements fetched=%d skipped=%d unfetched=%d total_remote=%d",
+            len(report.fetched), len(report.skipped_existing), len(report.unfetched), report.total_remote,
+        )
+        print(json.dumps(asdict(report), sort_keys=True))  # noqa: T201 - report on stdout is the CLI contract
+    replacements: list[dict[str, Any]] = []
+    if args.reextract:
+        replacements, reextract_report = reextract_delisting_notices(
+            existing=existing,
+            fetch_detail=_fetch_detail,
+            sleep=time.sleep,
+            now=pd.Timestamp.now(tz="UTC"),
+        )
+        existing_by_code = {notice.code: notice for notice in existing}
+        for row in replacements:
+            old = existing_by_code[row["code"]]
+            _logger.info(
+                "[DATA] stage=collect_delisting_announcements status=REEXTRACTED code=%s old_symbols=%s new_symbols=%s",
+                row["code"], list(old.symbols), row["symbols"],
+            )
+        _logger.info(
+            "[DATA] stage=collect_delisting_announcements reextracted=%d replaced=%d unfetched=%d",
+            len(reextract_report.reextracted), len(reextract_report.replaced), len(reextract_report.unfetched),
+        )
+        print(json.dumps(asdict(reextract_report), sort_keys=True))  # noqa: T201 - reextract report on stdout is the CLI contract
     if not args.write:
         return
     merged: dict[str, dict[str, Any]] = {}
@@ -618,6 +651,8 @@ def _collect_delisting_announcements(args: argparse.Namespace) -> None:
             if line.strip():
                 record = json.loads(line)
                 merged[record["code"]] = record
+    for row in replacements:
+        merged[row["code"]] = row
     for row in rows:
         if row["code"] in merged:
             raise DataIntegrityError(f"delisting evidence duplicate code {row['code']!r}")
@@ -810,4 +845,5 @@ def add_data_commands(data_parser: argparse.ArgumentParser) -> None:
         help="Fetch Binance delisting CMS notices into committed evidence (dry-run by default)",
     )
     collect_notices.add_argument("--write", action="store_true", default=False)
+    collect_notices.add_argument("--reextract", action="store_true", default=False)
     collect_notices.set_defaults(handler=_collect_delisting_announcements)

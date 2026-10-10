@@ -672,3 +672,44 @@ def test_build_preserves_original_release_milliseconds(monkeypatch, tmp_path) ->
     second = _build(tmp_path, existing=first.registry, verified_at=HORIZON + pd.Timedelta(days=1))
     assert second.changed == ()
     assert settlement_registry_jsonl(first.registry) == settlement_registry_jsonl(second.registry)
+
+
+def test_bare_ticker_notice_resolves(monkeypatch, tmp_path) -> None:
+    from src.core.delisting_announcements import extract_contract_symbols
+
+    stamps = _stamps(T0, 10)
+    _write_3m(tmp_path / "3m" / "ANCUSDT.parquet", stamps,
+              [float(50 + i) for i in range(10)], [10.0] * 10)
+    last_trade = T0 + STEP * 10
+    release = last_trade - pd.Timedelta(days=0.07)
+    title = "Binance Futures Will Delist USDT-Margined ANC Perpetual Contract"
+    body = "The USDT-Margined ANC perpetual contract will be settled and removed."
+    symbols = extract_contract_symbols(title, body)
+    assert symbols == ("ANCUSDT",)
+    _patch_notices(monkeypatch, [_notice("ANC1", release, symbols)])
+    build = _build(tmp_path, symbols=["ANCUSDT"])
+    assert not build.unresolved
+    record = build.registry.settlements_for("ANCUSDT")[0]
+    assert record.announcement_source == "binance_cms"
+    assert record.announced_at == release
+    assert build.announcements.binance_cms == 1
+
+
+def test_spot_only_symbol_stays_proxy(monkeypatch, tmp_path) -> None:
+    from src.core.delisting_announcements import DelistingNotice, classify_notice, extract_contract_symbols
+
+    stamps = _stamps(T0, 10)
+    _write_3m(tmp_path / "3m" / "AERGOUSDT.parquet", stamps,
+              [float(50 + i) for i in range(10)], [10.0] * 10)
+    title = "Binance Will Delist AERGO, AST, BURGER, COMBO, LINA on 2025-03-28"
+    body = "Spot trading of AERGO ends."
+    symbols = extract_contract_symbols(title, body)
+    assert symbols == ()
+    _patch_notices(monkeypatch, [DelistingNotice(
+        code="spot", title=title, release_at=T0 - pd.Timedelta(days=1),
+        kind=classify_notice(title, body), symbols=symbols,
+    )])
+    build = _build(tmp_path, symbols=["AERGOUSDT"])
+    record = build.registry.settlements_for("AERGOUSDT")[0]
+    assert record.announcement_source == "proxy_lead"
+    assert build.announcements.proxy_lead == 1

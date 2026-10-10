@@ -226,3 +226,79 @@ def test_invalid_collection_time_rejected(now: pd.Timestamp) -> None:
 def test_invalid_article_metadata_rejected(overrides: dict[str, Any]) -> None:
     with pytest.raises(DataIntegrityError):
         _collect([{**_article("c1"), **overrides}], {"c1": _BODY})
+
+
+def test_detail_text_reads_cms_child_tree() -> None:
+    from src.market_data.services.delisting_announcements import _detail_text
+
+    body = (
+        '{"node":"root","child":[{"node":"element","tag":"p","child":'
+        '[{"node":"text","text":"Binance Futures will delist XYZUSDT"}]}]}'
+    )
+    assert _detail_text(body) == "Binance Futures will delist XYZUSDT"
+
+
+def test_reextract_replaces_only_on_symbol_change() -> None:
+    from src.market_data.services.delisting_announcements import reextract_delisting_notices
+
+    stale = DelistingNotice(
+        code="c1",
+        title="Binance Futures Will Delist USDT-Margined ANC Perpetual Contract",
+        release_at=pd.Timestamp("2024-05-01T00:00:00Z"),
+        kind="delist", symbols=(),
+        release_ms=1_714_598_400_000,
+    )
+    steady = DelistingNotice(
+        code="c2", title=_TITLE, release_at=pd.Timestamp("2024-05-01T00:00:00Z"),
+        kind="delist", symbols=("AAAUSDT",), release_ms=1_714_598_400_001,
+    )
+    spot = DelistingNotice(
+        code="c3", title="Binance Will Delist AERGO on Spot",
+        release_at=pd.Timestamp("2024-05-01T00:00:00Z"),
+        kind="other", symbols=(), release_ms=1_714_598_400_002,
+    )
+    bodies = {
+        "c1": "The USDT-Margined ANC perpetual contract will be settled and removed.",
+        "c2": _BODY,
+    }
+    calls: list[str] = []
+    rows, report = reextract_delisting_notices(
+        existing=(stale, steady, spot),
+        fetch_detail=lambda code: {"data": {"body": bodies[code]}},
+        sleep=lambda seconds: calls.append("sleep") or None,
+        now=_NOW,
+    )
+    assert [row["code"] for row in rows] == ["c1"]
+    assert rows[0]["symbols"] == ["ANCUSDT"]
+    assert report.replaced == ("c1",)
+    assert report.reextracted == ("c1", "c2")
+    assert "c3" not in report.reextracted
+
+
+def test_reextract_marks_unfetched_and_rejects_naive_now() -> None:
+    import pytest
+
+    from src.market_data.services.delisting_announcements import reextract_delisting_notices
+
+    stale = DelistingNotice(
+        code="c1",
+        title="Binance Futures Will Delist USDT-Margined ANC Perpetual Contract",
+        release_at=pd.Timestamp("2024-05-01T00:00:00Z"),
+        kind="delist", symbols=(),
+        release_ms=1_714_598_400_000,
+    )
+    rows, report = reextract_delisting_notices(
+        existing=(stale,),
+        fetch_detail=lambda code: {"data": {}},
+        sleep=lambda seconds: None,
+        now=_NOW,
+    )
+    assert rows == []
+    assert report.unfetched == ("c1",)
+    with pytest.raises(DataIntegrityError):
+        reextract_delisting_notices(
+            existing=(stale,),
+            fetch_detail=lambda code: {"data": {"body": _BODY}},
+            sleep=lambda seconds: None,
+            now=pd.Timestamp("2024-01-01"),
+        )
