@@ -221,10 +221,6 @@ GROWTH_RISK_ENVELOPES: dict[str, GrowthRiskEnvelope] = {
 
 GROWTH_ENVELOPE_DEFAULT: str = "conservative"
 
-STRATEGY_RISK_ENVELOPE: str = "growth_extreme_budgeted"
-
-ACCOUNT_EXPOSURE_CAP: float = GROWTH_RISK_ENVELOPES[STRATEGY_RISK_ENVELOPE].leverage_ceiling
-
 CLI_GROWTH_ENVELOPE_DEFAULT: str = "growth_extreme_budgeted"
 
 
@@ -361,6 +357,9 @@ ACCOUNT_IMPACT_Y: float = 0.6
 ACCOUNT_EXPOSURE_MAX: float = 10.0
 # 노출 rung 격자 간격(0.25 단위에서 margin cap이 자기자본 복리에 반응한다).
 ACCOUNT_EXPOSURE_STEP: float = 0.25
+# Policy ladder bound, not a risk limit; binding limits are margin reserve,
+# shock allowance and impact.
+ACCOUNT_EXPOSURE_CAP: float = ACCOUNT_EXPOSURE_MAX
 # 테이커 수수료 6bp(프로브 실측 기준).
 ACCOUNT_TAKER_FEE_BPS: float = 6.0
 # Binance USD-M 메이커 수수료로, 공식 원장 ExecutionSpec.maker_fee_bps와 같은 값.
