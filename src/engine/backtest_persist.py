@@ -18,6 +18,7 @@ from src.core.types import JsonValue
 from src.engine.backtest_evidence import daily_adv_participation, daily_fill_participation
 from src.engine.execution.integrity import replay_ledger_certified
 from src.engine.strategy_backtest import StrategyBacktestRun
+from src.strategy.release import strategy_signal_digest
 
 _logger = logging.getLogger(__name__)
 
@@ -164,6 +165,7 @@ def strategy_backtest_payload(
             [dict(entry) for entry in getattr(run, "data_availability_withdrawals", ())],
         ),
         "design_data_cutoff": candidate.strategy.design_data_cutoff.isoformat(),
+        "signal_digest": strategy_signal_digest(candidate.strategy),
         "report_periods": cast(JsonValue, periods),
         "research_only": True,
     }

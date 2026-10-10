@@ -41,6 +41,7 @@ def add_evaluate_commands(evaluate_parser: argparse.ArgumentParser) -> None:
     strategy.add_argument("--account-run", required=True, help="Finished `backtest account` run directory.")
     strategy.add_argument("--neighbors", nargs="*", default=[], help="Finished neighbor `backtest strategy` run directories.")
     strategy.add_argument("--holdout-run", default=None, help="Finished holdout `backtest strategy` run directory (one look).")
+    strategy.add_argument("--holdout-account-run", default=None, help="Finished continuous `backtest account` run from discovery start to holdout end (informational leveraged reporting).")
     strategy.add_argument("--accept", action="store_true", default=False)
     strategy.set_defaults(handler=run_evaluate_strategy_command)
 
@@ -283,7 +284,18 @@ def build_evaluation_inputs(
             pd.Timestamp(str(holdout_payload["evaluation_end"])).tz_convert("UTC"),
         )
         from src.evaluation.holdout import holdout_look_recorded
-        if not holdout_look_recorded(release.strategy_id, release.spec_digest, holdout_window):
+        from src.strategy.release import strategy_signal_digest
+
+        current_signal = strategy_signal_digest({
+            "flow_mom_top20": FLOW_MOM_TOP20,
+            "flow_mom_top20_growth": FLOW_MOM_TOP20_GROWTH,
+            "flow_mom_top40_control": FLOW_MOM_TOP40_CONTROL,
+        }[release.strategy_id])
+        if holdout_payload.get("signal_digest") != current_signal:
+            raise DataIntegrityError("signal digest mismatch")
+        if unit_payload.get("signal_digest") != current_signal:
+            raise DataIntegrityError("signal digest mismatch")
+        if not holdout_look_recorded(release.strategy_id, current_signal, holdout_window):
             raise DataIntegrityError("holdout run has no matching one-look journal entry")
         holdout_daily = pd.read_parquet(Path(holdout_run) / "daily.parquet")
         holdout_returns = _utc_series(
@@ -379,6 +391,83 @@ def build_evaluation_inputs(
     )
 
 
+def _slice_deployed_metrics(
+    frame: pd.DataFrame, stress_frame: pd.DataFrame, capital: float,
+    start: pd.Timestamp, end: pd.Timestamp,
+) -> dict[str, float]:
+    index = frame.index
+    if not isinstance(index, pd.DatetimeIndex):
+        raise DataIntegrityError("account run lacks a daily index")
+    if not index.equals(stress_frame.index):
+        raise DataIntegrityError("account base/stress daily indexes differ")
+    mask = (index >= start) & (index < end)
+    positions = np.flatnonzero(np.asarray(mask))
+    if positions.size == 0:
+        raise DataIntegrityError("holdout account run has no days in slice")
+    equity = frame["equity"].to_numpy(dtype="float64")
+    stress_equity = stress_frame["equity"].to_numpy(dtype="float64")
+    exposure = frame["exposure"].to_numpy(dtype="float64")
+    if not np.isfinite(equity).all() or not np.isfinite(stress_equity).all() or not np.isfinite(exposure).all():
+        raise DataIntegrityError("account equity and exposure must be finite")
+    _deployed_from_equity(frame, capital, "account_slice_returns")
+    _deployed_from_equity(stress_frame, capital, "account_slice_stress_returns")
+    _account_max_leverage(frame)
+    first = int(positions[0])
+    last = int(positions[-1])
+    before = float(capital) if first == 0 else float(equity[first - 1])
+    stress_before = float(capital) if first == 0 else float(stress_equity[first - 1])
+    if not math.isfinite(before) or before <= 0 or not math.isfinite(stress_before) or stress_before <= 0:
+        raise DataIntegrityError("account slice start equity must be positive")
+    deployed_return = float(equity[last] / before - 1.0)
+    stress_return = float(stress_equity[last] / stress_before - 1.0)
+    path = np.concatenate(([before], equity[first:last + 1]))
+    running = np.maximum.accumulate(path)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        relative = np.where(running > 0, path / running, 1.0)
+    mdd = float((relative - 1.0).min())
+    return {
+        "deployed_return": deployed_return,
+        "deployed_mdd": mdd,
+        "deployed_stress_return": stress_return,
+        "mean_exposure": float(exposure[first:last + 1].mean()),
+        "days": float(positions.size),
+    }
+
+
+def _holdout_account_informational(
+    run_dir: Path,
+    discovery: tuple[pd.Timestamp, pd.Timestamp],
+    holdout: tuple[pd.Timestamp, pd.Timestamp],
+    target_capital: float,
+    signal_digest: str,
+) -> dict[str, float]:
+    payload = json.loads((Path(run_dir) / "account.json").read_text(encoding="utf-8"))
+    if float(payload.get("capital", float("nan"))) != float(target_capital):
+        raise DataIntegrityError("holdout account capital mismatch")
+    if payload.get("signal_digest") != signal_digest:
+        raise DataIntegrityError("signal digest mismatch")
+    if str(payload.get("evaluation_start")) != discovery[0].isoformat():
+        raise DataIntegrityError("holdout account run must start at the discovery start")
+    if str(payload.get("evaluation_end")) != holdout[1].isoformat():
+        raise DataIntegrityError("holdout account run must end at the holdout end")
+    frame = pd.read_parquet(Path(run_dir) / "account_daily.parquet")
+    stress_frame = pd.read_parquet(Path(run_dir) / "account_stress_daily.parquet")
+    expected = pd.date_range(discovery[0], holdout[1], freq="D", inclusive="left")
+    if not frame.index.equals(expected) or not stress_frame.index.equals(expected):
+        raise DataIntegrityError("holdout account run must have continuous paired daily evidence")
+    _survival_flags(payload)
+    capital = float(payload["capital"])
+    out: dict[str, float] = {}
+    for prefix, window in (("holdout", holdout), ("discovery", discovery)):
+        metrics = _slice_deployed_metrics(frame, stress_frame, capital, window[0], window[1])
+        out[f"{prefix}_deployed_return"] = metrics["deployed_return"]
+        out[f"{prefix}_deployed_mdd"] = metrics["deployed_mdd"]
+        out[f"{prefix}_deployed_stress_return"] = metrics["deployed_stress_return"]
+        out[f"{prefix}_mean_exposure"] = metrics["mean_exposure"]
+        out[f"{prefix}_days"] = metrics["days"]
+    return out
+
+
 def run_evaluate_strategy_command(args: argparse.Namespace) -> None:
     """Print the verdict table, persist the evaluation envelope, and map verdicts to exits."""
     from src.evaluation.standard import evaluate_strategy
@@ -398,6 +487,20 @@ def run_evaluate_strategy_command(args: argparse.Namespace) -> None:
         print(f"{check.group:10s} {check.code:24s} value={check.value} threshold={check.threshold} " f"passed={check.passed} :: {check.reason}")  # noqa: T201
     print(f"verdict={evaluation.verdict} digest={evaluation.digest}")  # noqa: T201
     informational = _account_informational(Path(args.account_run))
+    holdout_account_run = getattr(args, "holdout_account_run", None)
+    if holdout_account_run:
+        if inputs.holdout is None:
+            raise DataIntegrityError("holdout account run requires a holdout run")
+        from src.strategy.release import strategy_signal_digest
+
+        informational.update(_holdout_account_informational(
+            Path(holdout_account_run), inputs.discovery, inputs.holdout,
+            release.target_capital_usdt, strategy_signal_digest({
+                "flow_mom_top20": FLOW_MOM_TOP20,
+                "flow_mom_top20_growth": FLOW_MOM_TOP20_GROWTH,
+                "flow_mom_top40_control": FLOW_MOM_TOP40_CONTROL,
+            }[release.strategy_id]),
+        ))
     out_dir = BACKTESTS_DIR / "evaluation"
     out_dir.mkdir(parents=True, exist_ok=True)
     stamp = pd.Timestamp.now(tz="UTC").strftime("%Y%m%dT%H%M%SZ")

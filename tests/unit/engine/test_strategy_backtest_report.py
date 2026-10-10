@@ -11,6 +11,7 @@ import pytest
 
 from src.common.errors import DataIntegrityError
 from src.engine.execution import ExecutionReplayWindow
+from src.strategy.release import strategy_signal_digest
 from src.strategy.targets import FLOW_MOM_TOP20, StrategyTargets
 from src.engine.backtest_evidence import StrategyReportPeriod, evaluate_strategy_backtest
 from src.engine.strategy_backtest import StrategyBacktestRequest, StrategyBacktestRun
@@ -145,7 +146,8 @@ def test_payload_has_no_deployment_verdict() -> None:
     payload = strategy_backtest_payload(run)
     assert "go" not in payload
     assert not any("deploy" in key or "live" in key for key in payload)
-    assert not any("signal" in key or "fills" in key for key in payload)
+    assert not any(("signal" in key and key != "signal_digest") or "fills" in key for key in payload)
+    assert payload["signal_digest"] == strategy_signal_digest(run.candidate.strategy)
 
 
 def test_fresh_atomic_output_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

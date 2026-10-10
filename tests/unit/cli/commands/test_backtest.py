@@ -440,6 +440,8 @@ def test_strategy_exposure_solver_rejection_fails(tmp_path: Path, monkeypatch: p
 
 def test_holdout_gate_refuses_consumed_window(tmp_path, monkeypatch) -> None:
     from src.evaluation.holdout import consume_holdout_look
+    from src.strategy.release import strategy_signal_digest
+    from src.strategy.targets import FLOW_MOM_TOP20
 
     root = _patch_releases_root(monkeypatch, tmp_path)
     window = (pd.Timestamp("2026-07-01", tz="UTC"), pd.Timestamp("2026-10-01", tz="UTC"))
@@ -450,14 +452,16 @@ def test_holdout_gate_refuses_consumed_window(tmp_path, monkeypatch) -> None:
     assert (root / "flow_mom.holdout.jsonl").exists() is True
     with pytest.raises(SystemExit, match="post-design"):
         backtest_mod._holdout_gate("flow_mom_top20", *window, False)
-    with pytest.raises(SystemExit):
-        backtest_mod._holdout_gate("flow_mom_top20", *window, True)
+    before = (root / "flow_mom.holdout.jsonl").read_bytes()
+    backtest_mod._holdout_gate("flow_mom_top20", *window, True)
+    assert (root / "flow_mom.holdout.jsonl").read_bytes() == before
     with pytest.raises(SystemExit, match="design cutoff"):
         backtest_mod._holdout_gate("flow_mom_top20", pd.Timestamp("2026-06-01", tz="UTC"),
                                   pd.Timestamp("2026-06-20", tz="UTC"), True)
     consume_holdout_look("flow_mom_top20", "legacy", (pd.Timestamp("2026-06-01", tz="UTC"),
                                                     pd.Timestamp("2026-06-20", tz="UTC")),
-                         path=root / "flow_mom.holdout.jsonl")
+                         path=root / "flow_mom.holdout.jsonl",
+                         signal_digest=strategy_signal_digest(FLOW_MOM_TOP20))
     with pytest.raises(SystemExit, match="consumed holdout"):
         backtest_mod._holdout_gate("flow_mom_top20", pd.Timestamp("2026-06-01", tz="UTC"),
                                   pd.Timestamp("2026-06-20", tz="UTC"), False)
@@ -470,6 +474,26 @@ def test_neighbor_specs_cover_drops_and_breadths() -> None:
     assert len(neighbors) == 7
     assert sorted(n.breadth for n in neighbors if len(n.members) == 5) == [15, 25]
     assert sorted(len(n.members) for n in neighbors) == [4, 4, 4, 4, 4, 5, 5]
+
+
+def test_holdout_control_cannot_reuse_primary_look(tmp_path, monkeypatch) -> None:
+    _patch_releases_root(monkeypatch, tmp_path)
+    window = (pd.Timestamp("2026-07-01", tz="UTC"), pd.Timestamp("2026-10-01", tz="UTC"))
+    backtest_mod._holdout_gate("flow_mom_top20", *window, True)
+    with pytest.raises(SystemExit, match="already consumed"):
+        backtest_mod._holdout_gate("flow_mom_top40_control", *window, True)
+
+
+def test_holdout_neighbors_refused_before_consuming_look(tmp_path, monkeypatch) -> None:
+    root = _patch_releases_root(monkeypatch, tmp_path)
+    seen = _install_strategy(monkeypatch)
+    with pytest.raises(SystemExit, match="discovery neighbors"):
+        backtest_mod.run_strategy_backtest_command(_parse([
+            "backtest", "strategy", "--source-start", "2024-01-01",
+            "--start", "2026-07-01", "--end", "2026-10-01", "--evaluate-holdout", "--neighbors",
+        ]))
+    assert "request" not in seen
+    assert not (root / "flow_mom.holdout.jsonl").exists()
 
 def test_holdout_gate_converts_journal_race_to_exit(tmp_path, monkeypatch) -> None:
     """A journal that appears between check and record maps to SystemExit, not a traceback."""
@@ -595,3 +619,72 @@ def test_neighbor_set_shares_one_source(tmp_path, monkeypatch) -> None:
     assert all(source is seen_sources[0] for source in seen_sources)
     assert all(cache is seen_caches[0] for cache in seen_caches)
     assert seen_caches[0] is not None
+
+
+def test_account_replay_past_cutoff_needs_look(tmp_path, monkeypatch) -> None:
+    """Account replay ending after the cutoff exits without a journaled look; a covering look runs."""
+    from tests.unit.cli.commands._backtest_helpers import _install_account, _run_dirs
+
+    _patch_releases_root(monkeypatch, tmp_path)
+    _install_account(monkeypatch, tmp_path)
+    argv = [
+        "backtest", "account",
+        "--source-start", "2024-01-01", "--start", "2026-07-01", "--end", "2026-08-01",
+    ]
+    with pytest.raises(SystemExit, match="journaled holdout look"):
+        backtest_mod.run_account_replay_command(_parse(argv))
+    assert _run_dirs(tmp_path) == []
+    from src.evaluation.holdout import consume_holdout_look
+    from src.strategy.release import load_release, strategy_signal_digest
+    from src.strategy.targets import FLOW_MOM_TOP20
+
+    release = load_release("flow_mom_top20")
+    root = tmp_path / "releases"
+    consume_holdout_look(
+        "flow_mom_top20", release.spec_digest,
+        (pd.Timestamp("2026-07-01", tz="UTC"), pd.Timestamp("2026-08-01", tz="UTC")),
+        path=root / "flow_mom.holdout.jsonl",
+        signal_digest=strategy_signal_digest(FLOW_MOM_TOP20),
+    )
+    journal_before = (root / "flow_mom.holdout.jsonl").read_bytes()
+    backtest_mod.run_account_replay_command(_parse(argv))
+    assert (root / "flow_mom.holdout.jsonl").read_bytes() == journal_before
+
+
+def test_holdout_run_does_not_prune_discovery_runs(tmp_path, monkeypatch) -> None:
+    """A holdout run keeps earlier run directories on disk."""
+    import src.engine.backtest_persist as persist_mod
+    import src.engine.strategy_backtest as run_mod
+
+    strategy_root = tmp_path / "backtests" / "strategy" / "runs"
+    strategy_root.mkdir(parents=True)
+    for name in ("discovery_unit", "discovery_account"):
+        (strategy_root / name).mkdir()
+        (strategy_root / name / "result.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(backtest_mod, "STRATEGY_BACKTESTS_DIR", strategy_root)
+    monkeypatch.setattr(backtest_mod, "DEFAULT_DETAIL_RETENTION_MAX_RUNS", 1)
+    root = _patch_releases_root(monkeypatch, tmp_path)
+
+    def _fake_run(request, *args, **kwargs):
+        index = pd.date_range("2026-07-01", periods=3, freq="D", tz="UTC")
+        returns = pd.Series(np.zeros(3), index=index, dtype="float64")
+        return types.SimpleNamespace(
+            request=request,
+            evidence=types.SimpleNamespace(base_daily=types.SimpleNamespace(returns=returns)),
+            source_gap_excluded_symbols=(),
+        )
+
+    monkeypatch.setattr(run_mod, "run_strategy_backtest", _fake_run)
+    monkeypatch.setattr(backtest_mod, "_strategy_run_statistics", lambda run: {})
+    monkeypatch.setattr(
+        persist_mod, "persist_strategy_backtest",
+        lambda run, output, **kwargs: Path(output).write_text("{}", encoding="utf-8"),
+    )
+    backtest_mod.run_strategy_backtest_command(_parse([
+        "backtest", "strategy",
+        "--source-start", "2024-01-01", "--start", "2026-07-01", "--end", "2026-08-01",
+        "--evaluate-holdout",
+    ]))
+    assert (strategy_root / "discovery_unit" / "result.json").exists()
+    assert (strategy_root / "discovery_account" / "result.json").exists()
+    assert (root / "flow_mom.holdout.jsonl").exists()
