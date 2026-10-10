@@ -73,7 +73,7 @@ def test_account_maker_run_directory_suffixed(tmp_path: Path, monkeypatch: pytes
     _install_strategy_account_fakes(monkeypatch, tmp_path)
     run_account_replay(_account_request(tmp_path, execution="maker"))
     (run_dir,) = _run_dirs(tmp_path)
-    assert "_account_growth_2100_maker_" in run_dir.name
+    assert "_account_growth_1000_maker_" in run_dir.name
 
 def test_account_catalog_append_confined_to_runs_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Exactly one account row lands in the catalog derived from runs_root."""
@@ -119,7 +119,7 @@ def test_account_payload_matches_pre_refactor_capture(case: str, tmp_path: Path,
     monkeypatch.setattr(pd.Timestamp, "now", staticmethod(lambda tz=None: _PINNED_NOW))
     if reference is not None:
         _write_same_book_reference(tmp_path, tmp_path / "index.jsonl", run_dir="runs/old", base_cagr=reference[0], base_mdd=reference[1])
-    report = run_account_replay(_account_request(tmp_path, **overrides))
+    report = run_account_replay(_account_request(tmp_path, capital=2100.0, **overrides))
     text = (report.run_dir / "account.json").read_text(encoding="utf-8")
     text = text.replace(f'\n  "created_at": "{_PINNED_NOW.isoformat()}",', "").replace(str(tmp_path), "<TMP>")
     data = json.loads(text)
@@ -208,7 +208,7 @@ def test_account_statistics_uses_observed_funding(tmp_path: Path) -> None:
     dates = pd.date_range("2025-01-01", periods=3, tz="UTC")
     funding = pd.DataFrame({"AAA": [0, -10, -5]}, index=dates)
     ledger = types.SimpleNamespace(daily_equity=pd.Series([2100, 2110, 2115], index=dates), funding_by_symbol_daily=funding)
-    payload = persist_mod._account_path_statistics(unit=ledger, result=ledger, stress=ledger, request=_account_request(tmp_path), strategy=FLOW_MOM_TOP20_ACCOUNT_UNIT)
+    payload = persist_mod._account_path_statistics(unit=ledger, result=ledger, stress=ledger, request=_account_request(tmp_path, capital=2100.0), strategy=FLOW_MOM_TOP20_ACCOUNT_UNIT)
     assert payload["base"]["funding"]["total_contribution"] == pytest.approx(-15 / 2100)
     assert payload["base"]["years"][0]["funding_share"] == pytest.approx(15 / 2100)
     ledger.funding_by_symbol_daily = funding.iloc[1:]

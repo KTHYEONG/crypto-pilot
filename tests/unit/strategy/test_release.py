@@ -199,3 +199,127 @@ def test_digest_covers_participation_basis() -> None:
     assert release.criteria_digest == criteria_digest(release.criteria)
     with pytest.raises(DataIntegrityError):
         EvaluationCriteria(participation_basis="trailing_24h")
+
+
+def test_release_target_equals_default_seed() -> None:
+    """The committed release targets the declared retail seed."""
+    from src.core.params import ACCOUNT_DEFAULT_CAPITAL_USDT
+
+    release = load_release("flow_mom_top20")
+    assert ACCOUNT_DEFAULT_CAPITAL_USDT == 1000.0
+    assert release.target_capital_usdt == ACCOUNT_DEFAULT_CAPITAL_USDT == 1000.0
+
+
+def _write_identity_unit_run(run_dir, *, start: str = "2025-01-01", n: int = 100) -> None:
+    """Unit run satisfying every book-identity clause of the release."""
+    import numpy as np
+    import pandas as pd
+
+    from src.strategy.targets import FLOW_MOM_TOP20
+
+    run_dir.mkdir(parents=True, exist_ok=True)
+    index = pd.date_range(start=start, periods=n, freq="D", tz="UTC")
+    pd.DataFrame(
+        {"base_return": np.full(n, 0.001), "stress_return": np.full(n, 0.0008)},
+        index=index,
+    ).to_parquet(run_dir / "daily.parquet")
+    (run_dir / "result.json").write_text(
+        json.dumps({
+            "strategy_id": "flow_mom_top20",
+            "breadth": FLOW_MOM_TOP20.breadth,
+            "members": [{"name": m.name, "sign": m.sign} for m in FLOW_MOM_TOP20.members],
+            "min_rank_symbols": FLOW_MOM_TOP20.min_rank_symbols,
+            "design_data_cutoff": pd.Timestamp(FLOW_MOM_TOP20.design_data_cutoff).tz_convert("UTC").isoformat(),
+            "name_clip": 0.05,
+            "exposure_multiplier": 1.0,
+            "evaluation_start": index[0].isoformat(),
+            "evaluation_end": (index[-1] + pd.Timedelta(days=1)).isoformat(),
+            "ledger_certified": True,
+            "base_valid": True,
+            "stress_valid": True,
+            "source_gap_excluded_count": 0,
+            "base_source_gaps": 0,
+            "stress_source_gaps": 0,
+            "roster_seat_days": 40000,
+            "participation_scale": 100000.0,
+            "participation_basis": "adv30_median_prior_day",
+            "data_availability_withdrawals": [],
+            "limitations": [],
+            "report_periods": {"evaluation": {"base_cagr": 0.3}},
+        }),
+        encoding="utf-8",
+    )
+
+
+def _write_identity_neighbor(run_dir, *, spec, start: str = "2025-01-01", n: int = 100) -> None:
+    """Neighbor run carrying the declared breadth/members with certified ledger."""
+    import numpy as np
+    import pandas as pd
+
+    run_dir.mkdir(parents=True, exist_ok=True)
+    index = pd.date_range(start=start, periods=n, freq="D", tz="UTC")
+    pd.DataFrame({"stress_return": np.full(n, 0.0008)}, index=index).to_parquet(run_dir / "daily.parquet")
+    (run_dir / "result.json").write_text(
+        json.dumps({
+            "breadth": spec.breadth,
+            "members": [{"name": m.name, "sign": m.sign} for m in spec.members],
+            "ledger_certified": True,
+            "source_gap_excluded_count": 0,
+            "base_source_gaps": 0,
+            "stress_source_gaps": 0,
+            "roster_seat_days": 40000,
+            "data_availability_withdrawals": [],
+        }),
+        encoding="utf-8",
+    )
+
+
+def _write_identity_account(run_dir, *, capital: float, start: str = "2025-01-01", n: int = 100) -> None:
+    """Account run whose window matches the identity unit run."""
+    import numpy as np
+    import pandas as pd
+
+    run_dir.mkdir(parents=True, exist_ok=True)
+    index = pd.date_range(start=start, periods=n, freq="D", tz="UTC")
+    equity = capital * np.cumprod(np.full(n, 1.001))
+    pd.DataFrame({"equity": equity, "exposure": np.full(n, 1.2)}, index=index).to_parquet(
+        run_dir / "account_daily.parquet"
+    )
+    (run_dir / "account.json").write_text(
+        json.dumps({
+            "capital": capital,
+            "execution": {"mode": "maker"},
+            "evaluation_start": index[0].isoformat(),
+            "evaluation_end": (index[-1] + pd.Timedelta(days=1)).isoformat(),
+        }),
+        encoding="utf-8",
+    )
+
+
+def test_account_run_at_other_capital_is_rejected(tmp_path) -> None:
+    """An account run at 2100 USDT fails the 1000 USDT release identity check."""
+    import src.cli.commands.evaluate as evaluate_mod
+    from src.cli.commands.backtest import _neighbor_specs
+    from src.strategy.targets import FLOW_MOM_TOP20
+
+    unit = tmp_path / "unit"
+    _write_identity_unit_run(unit)
+    neighbors = tuple(
+        tmp_path / f"neighbor{position}" for position in range(len(_neighbor_specs(FLOW_MOM_TOP20)))
+    )
+    for path, spec in zip(neighbors, _neighbor_specs(FLOW_MOM_TOP20), strict=True):
+        _write_identity_neighbor(path, spec=spec)
+    matching = tmp_path / "account_1000"
+    _write_identity_account(matching, capital=1000.0)
+    matched = evaluate_mod.build_evaluation_inputs(
+        strategy_id="flow_mom_top20", unit_run=unit, account_run=matching,
+        neighbor_runs=neighbors,
+    )
+    assert matched.book_identity_ok is True
+    other = tmp_path / "account_2100"
+    _write_identity_account(other, capital=2100.0)
+    mismatched = evaluate_mod.build_evaluation_inputs(
+        strategy_id="flow_mom_top20", unit_run=unit, account_run=other,
+        neighbor_runs=neighbors,
+    )
+    assert mismatched.book_identity_ok is False

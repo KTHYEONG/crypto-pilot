@@ -26,9 +26,9 @@
     "name_clip": 0.05,
     "unit_bootstrap_sha256": "2cc6a4e9c11dd8fc6c509c3233645d38d226702b73f650e1f1f6ac4d0d9e956b"
   },
-  "spec_digest": "366490a3b2de79fcd298f8945d4573e88f062889bc7da1f66d3f5f24131ed4d5",
+  "spec_digest": "42fad09c304ec1913e2b93de41ecfbf1bccee933df13650db4ac0493ae27a121",
   "strategy_id": "flow_mom_top20",
-  "target_capital_usdt": 2100.0,
+  "target_capital_usdt": 1000.0,
   "unit_bootstrap_provenance": {
     "host": "or-vps",
     "manifest": "/home/ubuntu/crypto-pilot/data/state/runs/frozen_top20_v2_repeg_fillcap_20261002/run_manifest.json"

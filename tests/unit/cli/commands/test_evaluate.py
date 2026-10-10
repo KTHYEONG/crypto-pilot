@@ -70,12 +70,12 @@ def _write_account_run(run_dir: Path, n: int = 100, start: str = "2025-01-01") -
     run_dir.mkdir(parents=True, exist_ok=True)
     index = pd.date_range(start=start, periods=n, freq="D", tz="UTC")
     rng = np.random.default_rng(0)
-    equity = 2100.0 * np.cumprod(1.0 + 0.001 + 0.002 * rng.standard_normal(n))
+    equity = 1000.0 * np.cumprod(1.0 + 0.001 + 0.002 * rng.standard_normal(n))
     pd.DataFrame(
         {"equity": equity, "exposure": np.full(n, 1.2)},
         index=index,
     ).to_parquet(run_dir / "account_daily.parquet")
-    (run_dir / "account.json").write_text(json.dumps({"capital": 2100.0, "execution": "maker"}), encoding="utf-8")
+    (run_dir / "account.json").write_text(json.dumps({"capital": 1000.0, "execution": "maker"}), encoding="utf-8")
 
 
 def _args(**overrides: object) -> argparse.Namespace:
@@ -372,8 +372,8 @@ def test_r4_reads_adv_column(tmp_path) -> None:
     inputs = dataclasses.replace(inputs, ledger_certified=True, book_identity_ok=True)
     evaluation = standard_mod.evaluate_strategy(inputs, load_release("flow_mom_top20").criteria)
     r4 = next(check for check in evaluation.checks if check.code == "R4_CAPACITY")
-    assert inputs.participation_scale_to_deployed == pytest.approx(2100.0 * 3.0 / 100000.0)
-    assert r4.value == pytest.approx(0.0002 * 2100.0 * 3.0 / 100000.0)
+    assert inputs.participation_scale_to_deployed == pytest.approx(1000.0 * 3.0 / 100000.0)
+    assert r4.value == pytest.approx(0.0002 * 1000.0 * 3.0 / 100000.0)
     assert r4.passed is True
 
 
