@@ -58,8 +58,7 @@ if TYPE_CHECKING:
 class StrategyBacktestRequest:
     """Describe one reproducible historical strategy inventory experiment.
 
-    Source history is distinct from the scored interval so liquidity and feature
-    warm-up are observable rather than manufactured.  The request identifies
+    Source history keeps liquidity and feature warm-up observable. The request identifies
     a target policy, exact execution cost bounds, and report periods without
     allowing the runner to select a better strategy from its results.
 

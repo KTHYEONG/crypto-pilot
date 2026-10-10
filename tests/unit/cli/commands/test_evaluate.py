@@ -71,11 +71,21 @@ def _write_account_run(run_dir: Path, n: int = 100, start: str = "2025-01-01") -
     index = pd.date_range(start=start, periods=n, freq="D", tz="UTC")
     rng = np.random.default_rng(0)
     equity = 1000.0 * np.cumprod(1.0 + 0.001 + 0.002 * rng.standard_normal(n))
+    stress_equity = 1000.0 * np.cumprod(1.0 + 0.0008 + 0.002 * rng.standard_normal(n))
     pd.DataFrame(
         {"equity": equity, "exposure": np.full(n, 1.2)},
         index=index,
     ).to_parquet(run_dir / "account_daily.parquet")
-    (run_dir / "account.json").write_text(json.dumps({"capital": 1000.0, "execution": "maker"}), encoding="utf-8")
+    pd.DataFrame(
+        {"equity": stress_equity, "exposure": np.full(n, 1.1)},
+        index=index,
+    ).to_parquet(run_dir / "account_stress_daily.parquet")
+    (run_dir / "account.json").write_text(json.dumps({
+        "capital": 1000.0, "execution": "maker",
+        "cagr": 0.3, "mdd": -0.1, "mean_exposure": 1.2,
+        "liquidated_at": None, "initial_margin_breaches": 0,
+        "stress_execution": {"liquidated_at": None},
+    }), encoding="utf-8")
 
 
 def _args(**overrides: object) -> argparse.Namespace:
@@ -547,3 +557,152 @@ def test_i2_malformed_withdrawal_fails_closed(tmp_path, withdrawals) -> None:
         evaluate_mod.build_evaluation_inputs(
             strategy_id="flow_mom_top20", unit_run=unit, account_run=account,
         )
+
+
+def test_old_account_run_predates_survival_accounting(tmp_path) -> None:
+    """An account run without stress daily or survival keys fails closed."""
+    from src.common.errors import DataIntegrityError
+
+    unit, account = tmp_path / "unit", tmp_path / "acct"
+    _write_unit_run(unit)
+    _write_account_run(account)
+    (account / "account_stress_daily.parquet").unlink()
+    with pytest.raises(DataIntegrityError, match="survival accounting"):
+        evaluate_mod.build_evaluation_inputs(
+            strategy_id="flow_mom_top20", unit_run=unit, account_run=account,
+        )
+
+
+@pytest.mark.parametrize("payload", [
+    {"liquidated_at": 0},
+    {"stress_execution": {}},
+    {"initial_margin_breaches": True},
+    {"initial_margin_breaches": -1},
+])
+def test_malformed_survival_flags_fail_closed(tmp_path, payload) -> None:
+    """Coerced liquidation or breach types never read as survival evidence."""
+    from src.common.errors import DataIntegrityError
+
+    unit, account = tmp_path / "unit", tmp_path / "acct"
+    _write_unit_run(unit)
+    _write_account_run(account)
+    raw = json.loads((account / "account.json").read_text(encoding="utf-8"))
+    if "stress_execution" in payload:
+        raw["stress_execution"] = payload["stress_execution"]
+    else:
+        raw.update(payload)
+    (account / "account.json").write_text(json.dumps(raw), encoding="utf-8")
+    with pytest.raises(DataIntegrityError, match="survival accounting"):
+        evaluate_mod.build_evaluation_inputs(
+            strategy_id="flow_mom_top20", unit_run=unit, account_run=account,
+        )
+
+
+def test_stress_liquidation_flag_type_fails_closed(tmp_path) -> None:
+    """A non-string stress liquidation stamp fails closed."""
+    from src.common.errors import DataIntegrityError
+
+    unit, account = tmp_path / "unit", tmp_path / "acct"
+    _write_unit_run(unit)
+    _write_account_run(account)
+    raw = json.loads((account / "account.json").read_text(encoding="utf-8"))
+    raw["stress_execution"] = {"liquidated_at": 0}
+    (account / "account.json").write_text(json.dumps(raw), encoding="utf-8")
+    with pytest.raises(DataIntegrityError, match="survival accounting"):
+        evaluate_mod.build_evaluation_inputs(
+            strategy_id="flow_mom_top20", unit_run=unit, account_run=account,
+        )
+
+
+def test_informational_falls_back_to_frame_mean(tmp_path) -> None:
+    """Missing mean_exposure still reports the frame mean outside the digest."""
+    account = tmp_path / "acct"
+    _write_account_run(account)
+    raw = json.loads((account / "account.json").read_text(encoding="utf-8"))
+    del raw["mean_exposure"]
+    (account / "account.json").write_text(json.dumps(raw), encoding="utf-8")
+    info = evaluate_mod._account_informational(account)
+    assert info["deployed_mean_exposure"] == pytest.approx(1.2)
+    assert set(info) == {"deployed_cagr", "deployed_mdd", "deployed_stress_mdd",
+                         "deployed_max_leverage", "deployed_mean_exposure"}
+
+
+def test_liquidated_account_has_finite_returns_and_initial_loss(tmp_path) -> None:
+    account = tmp_path / "acct"
+    _write_account_run(account, n=3)
+    index = pd.date_range("2025-01-01", periods=3, tz="UTC")
+    pd.DataFrame({"equity": [900.0, 0.0, 0.0], "exposure": [1.2, 0.0, 0.0]}, index=index).to_parquet(
+        account / "account_stress_daily.parquet",
+    )
+    raw = json.loads((account / "account.json").read_text())
+    raw["stress_execution"]["liquidated_at"] = index[1].isoformat()
+    (account / "account.json").write_text(json.dumps(raw))
+    _, stress, _, _, liquidated, _ = evaluate_mod._read_account_run(account)
+    assert stress.to_numpy() == pytest.approx([-0.1, -1.0, 0.0])
+    assert liquidated is True
+    assert evaluate_mod._account_informational(account)["deployed_stress_mdd"] == -1.0
+
+
+@pytest.mark.parametrize(("equity", "capital"), [
+    ([1000.0, 0.0, 100.0], 1000.0), ([1000.0, -1.0, 0.0], 1000.0),
+    ([1000.0, float("nan"), 0.0], 1000.0), ([1000.0], 0.0),
+])
+def test_invalid_account_equity_fails_closed(tmp_path, equity, capital) -> None:
+    from src.common.errors import DataIntegrityError
+
+    account = tmp_path / "acct"
+    _write_account_run(account, n=len(equity))
+    index = pd.date_range("2025-01-01", periods=len(equity), tz="UTC")
+    pd.DataFrame({"equity": equity}, index=index).to_parquet(account / "account_stress_daily.parquet")
+    raw = json.loads((account / "account.json").read_text())
+    raw["capital"] = capital
+    (account / "account.json").write_text(json.dumps(raw))
+    with pytest.raises(DataIntegrityError, match=r"equity|capital"):
+        evaluate_mod._read_account_run(account)
+
+
+@pytest.mark.parametrize("missing", ["account.json", "capital", "liquidated_at", "initial_margin_breaches", "stress_execution"])
+def test_missing_account_evidence_fails_closed(tmp_path, missing) -> None:
+    from src.common.errors import DataIntegrityError
+
+    account = tmp_path / "acct"
+    _write_account_run(account)
+    path = account / "account.json"
+    if missing == "account.json":
+        path.unlink()
+    else:
+        raw = json.loads(path.read_text())
+        del raw[missing]
+        path.write_text(json.dumps(raw))
+    with pytest.raises(DataIntegrityError, match="survival accounting"):
+        evaluate_mod._read_account_run(account)
+
+
+def test_stress_drawdown_includes_initial_capital(tmp_path) -> None:
+    account = tmp_path / "acct"
+    _write_account_run(account, n=2)
+    index = pd.date_range("2025-01-01", periods=2, tz="UTC")
+    pd.DataFrame({"equity": [400.0, 600.0]}, index=index).to_parquet(account / "account_stress_daily.parquet")
+    assert evaluate_mod._account_informational(account)["deployed_stress_mdd"] == pytest.approx(-0.6)
+
+
+def test_informational_values_do_not_change_evaluation_digest(tmp_path, monkeypatch) -> None:
+    unit, account = tmp_path / "unit", tmp_path / "acct"
+    _write_unit_run(unit)
+    _write_account_run(account)
+    monkeypatch.setattr(evaluate_mod, "BACKTESTS_DIR", tmp_path / "backtests")
+    args = _args(unit_run=str(unit), account_run=str(account))
+    with pytest.raises(SystemExit):
+        evaluate_mod.run_evaluate_strategy_command(args)
+    output = next((tmp_path / "backtests" / "evaluation").glob("*.json"))
+    first = json.loads(output.read_text())
+    raw = json.loads((account / "account.json").read_text())
+    raw.update(cagr=0.9, mdd=-0.8, mean_exposure=5.0)
+    (account / "account.json").write_text(json.dumps(raw))
+    with pytest.raises(SystemExit):
+        evaluate_mod.run_evaluate_strategy_command(args)
+    outputs = list((tmp_path / "backtests" / "evaluation").glob("*.json"))
+    second = max((json.loads(path.read_text()) for path in outputs), key=lambda item: item["informational"]["deployed_cagr"])
+    assert first["informational"] != second["informational"]
+    assert first["digest"] == second["digest"]
+    assert first["verdict"] == second["verdict"]

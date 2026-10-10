@@ -1,25 +1,24 @@
 {
   "criteria": {
     "dsr_min": 0.95,
+    "growth_horizon_years": 3.0,
     "growth_lcb_alpha": 0.05,
-    "holdout_drawdown_max_quantile": 0.95,
     "holdout_growth_min_quantile": 0.05,
     "max_participation_p95": 0.01,
     "max_top5_funding_dependence": true,
     "max_withdrawn_seat_fraction": 0.001,
     "min_discovery_days": 730,
     "min_holdout_days": 60,
+    "overbet_probe_scale": 0.75,
     "participation_basis": "adv30_median_prior_day",
-    "plateau_min_fraction": 0.5,
-    "risk_envelope": "growth_extreme_budgeted"
+    "plateau_min_fraction": 0.5
   },
-  "criteria_digest": "c61d32cd8a2850491515b1aad812d31a10f4d64e1e18844d8e8eef0f864456c3",
+  "criteria_digest": "8710bb6600649ff7aa706b6d0e56be0d9720493bf406fa682fdd5ba99e11c0db",
   "design_data_cutoff": "2026-07-01T00:00:00+00:00",
   "evaluation_digest": null,
   "legacy_ids": [
     "frozen_mhs_top20_v2"
   ],
-  "risk_envelope": "growth_extreme_budgeted",
   "sizing": {
     "execution_policy": "strict_passive_repeg",
     "exposure_cap": 3.0,

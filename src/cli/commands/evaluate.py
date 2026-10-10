@@ -96,19 +96,80 @@ def _read_neighbor_stress(run_dir: Path) -> pd.Series:
     return _utc_series(pd.Series(daily["stress_return"].to_numpy(dtype="float64"), index=daily.index), "neighbor")
 
 
-def _read_account_run(run_dir: Path) -> tuple[pd.Series, float]:
-    frame = pd.read_parquet(Path(run_dir) / "account_daily.parquet")
-    equity = pd.Series(frame["equity"].to_numpy(dtype="float64"), index=frame.index, dtype="float64")
-    equity.index = equity.index.tz_localize("UTC") if equity.index.tz is None else equity.index.tz_convert("UTC")
-    payload = json.loads((Path(run_dir) / "account.json").read_text(encoding="utf-8"))
-    capital = float(payload["capital"])
-    previous = equity.shift(1).fillna(capital)
-    deployed = equity / previous - 1.0
-    deployed = _utc_series(deployed, "deployed_returns")
+def _deployed_from_equity(frame: pd.DataFrame, capital: float, label: str) -> pd.Series:
+    values = frame["equity"].to_numpy(dtype="float64")
+    if not values.size or not math.isfinite(capital) or capital <= 0 or not np.isfinite(values).all() or (values < 0).any():
+        raise DataIntegrityError("account equity and initial capital must be finite and non-negative with positive capital")
+    previous = np.concatenate(([capital], values[:-1]))
+    if bool(((previous == 0) & (values > 0)).any()):
+        raise DataIntegrityError("account equity resurrects after liquidation")
+    returns = np.divide(values, previous, out=np.ones_like(values), where=previous > 0) - 1.0
+    return _utc_series(pd.Series(returns, index=frame.index), label)
+
+
+def _survival_flags(payload: dict[str, Any]) -> tuple[bool, bool, int]:
+    try:
+        base_raw = payload["liquidated_at"]
+        breaches_raw = payload["initial_margin_breaches"]
+        stress_raw = payload["stress_execution"]["liquidated_at"]
+    except (KeyError, TypeError, AttributeError) as exc:
+        raise DataIntegrityError("account run predates survival accounting") from exc
+    if base_raw is not None and not isinstance(base_raw, str):
+        raise DataIntegrityError("account run predates survival accounting")
+    if stress_raw is not None and not isinstance(stress_raw, str):
+        raise DataIntegrityError("account run predates survival accounting")
+    if type(breaches_raw) is not int or breaches_raw < 0:
+        raise DataIntegrityError("account run predates survival accounting")
+    return base_raw is not None, stress_raw is not None, breaches_raw
+
+
+def _read_account_run(run_dir: Path) -> tuple[pd.Series, pd.Series, float, bool, bool, int]:
+    base = Path(run_dir) / "account_daily.parquet"
+    stress_path = Path(run_dir) / "account_stress_daily.parquet"
+    try:
+        frame = pd.read_parquet(base)
+        stress_frame = pd.read_parquet(stress_path)
+        payload = json.loads((Path(run_dir) / "account.json").read_text(encoding="utf-8"))
+        capital = float(payload["capital"])
+        base_liq, stress_liq, breaches = _survival_flags(payload)
+        deployed = _deployed_from_equity(frame, capital, "deployed_returns")
+        stress_deployed = _deployed_from_equity(stress_frame, capital, "deployed_stress_returns")
+    except DataIntegrityError:
+        raise
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise DataIntegrityError("account run predates survival accounting") from exc
     leverage = 1.0
     if "exposure" in frame.columns:
         leverage = float(pd.Series(frame["exposure"].to_numpy(dtype="float64")).abs().max())
-    return deployed, leverage
+    return deployed, stress_deployed, leverage, base_liq, stress_liq, breaches
+
+
+def _drawdown_min(equity: pd.Series, capital: float) -> float:
+    values = np.concatenate(([capital], equity.to_numpy(dtype="float64")))
+    running = np.maximum.accumulate(values)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        relative = np.where(running > 0, values / running, 1.0)
+    return float((relative - 1.0).min())
+
+
+def _account_informational(account_run: Path) -> dict[str, float]:
+    payload = json.loads((Path(account_run) / "account.json").read_text(encoding="utf-8"))
+    frame = pd.read_parquet(Path(account_run) / "account_daily.parquet")
+    stress_frame = pd.read_parquet(Path(account_run) / "account_stress_daily.parquet")
+    stress_equity = pd.Series(stress_frame["equity"].to_numpy(dtype="float64"), index=stress_frame.index)
+    leverage = 1.0
+    if "exposure" in frame.columns:
+        leverage = float(pd.Series(frame["exposure"].to_numpy(dtype="float64")).abs().max())
+    mean_exposure = payload.get("mean_exposure")
+    if mean_exposure is None and "exposure" in frame.columns:
+        mean_exposure = float(pd.Series(frame["exposure"].to_numpy(dtype="float64")).mean())
+    return {
+        "deployed_cagr": float(payload["cagr"]),
+        "deployed_mdd": float(payload["mdd"]),
+        "deployed_stress_mdd": _drawdown_min(stress_equity, float(payload["capital"])),
+        "deployed_max_leverage": float(leverage),
+        "deployed_mean_exposure": float(mean_exposure),
+    }
 
 
 def _causality_ok(strategy_id: str) -> bool:
@@ -199,7 +260,7 @@ def build_evaluation_inputs(
     unit_payload, base, stress, participation, funding_by_symbol = _read_unit_run(Path(unit_run))
     if unit_payload.get("participation_basis") != release.criteria.participation_basis:
         raise DataIntegrityError("participation basis mismatch")
-    deployed, leverage = _read_account_run(Path(account_run))
+    deployed, stress_deployed, leverage, base_liq, stress_liq, breaches = _read_account_run(Path(account_run))
     account_payload = json.loads((Path(account_run) / "account.json").read_text(encoding="utf-8"))
     daily = pd.read_parquet(Path(unit_run) / "daily.parquet")
     columns = [column for column in daily if column.startswith("stress_funding_income_")]
@@ -295,6 +356,10 @@ def build_evaluation_inputs(
         lake_coverage_ok=lake_ok,
         causality_ok=_causality_ok(release.strategy_id),
         deployed_returns=deployed,
+        deployed_stress_returns=stress_deployed,
+        deployed_liquidated=base_liq,
+        deployed_stress_liquidated=stress_liq,
+        deployed_margin_breaches=breaches,
         deployed_max_leverage=leverage,
         participation_scale_to_deployed=release.target_capital_usdt * ACCOUNT_EXPOSURE_CAP / participation_scale,
         withdrawn_seat_fraction=withdrawn_fraction,
@@ -324,6 +389,7 @@ def run_evaluate_strategy_command(args: argparse.Namespace) -> None:
     for check in evaluation.checks:
         print(f"{check.group:10s} {check.code:24s} value={check.value} threshold={check.threshold} " f"passed={check.passed} :: {check.reason}")  # noqa: T201
     print(f"verdict={evaluation.verdict} digest={evaluation.digest}")  # noqa: T201
+    informational = _account_informational(Path(args.account_run))
     out_dir = BACKTESTS_DIR / "evaluation"
     out_dir.mkdir(parents=True, exist_ok=True)
     stamp = pd.Timestamp.now(tz="UTC").strftime("%Y%m%dT%H%M%SZ")
@@ -337,6 +403,7 @@ def run_evaluate_strategy_command(args: argparse.Namespace) -> None:
                 "verdict": str(evaluation.verdict),
                 "digest": evaluation.digest,
                 "n_trials": evaluation.n_trials,
+                "informational": informational,
                 "checks": [
                     {
                         "code": c.code,
