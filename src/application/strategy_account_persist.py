@@ -109,7 +109,7 @@ def _build_account_payload(
     *, request: AccountReplayRequest, strategy_id: str, policy: Any, result: AccountLedgerResult,
     unit: AccountLedgerResult, unit_headlines: tuple[float, float, float],
     account_headlines: tuple[float, float, float],
-    rules_captured_at: str, venue_path: str, reconciliation: dict[str, Any],
+    rules_captured_at: str, venue_path: str, reconciliation: dict[str, Any], strategy: Any,
 ) -> dict[str, Any]:
     """Assemble the exact `account.json` mapping for one account replay."""
     unit_cagr, unit_daily_mdd, _ = unit_headlines
@@ -117,6 +117,9 @@ def _build_account_payload(
     mdd = -result.intraday_max_drawdown
     moment_source = "bayesian_causal_unit_ledger" if request.policy == "growth" else "none"
     exposures = result.daily_exposure.to_numpy(dtype="float64")
+    from src.strategy.release import strategy_signal_digest
+
+    signal_digest: Any = strategy_signal_digest(strategy)
     return {
         "strategy_id": strategy_id,
         "capital": request.capital,
@@ -169,6 +172,7 @@ def _build_account_payload(
             "maker_fill_fraction": unit.maker_fill_fraction,
         },
         "venue_rules_applied_retroactively": True,
+        "signal_digest": signal_digest,
         "reconciliation": reconciliation,
         "created_at": pd.Timestamp.now(tz="UTC").isoformat(),
     }
@@ -252,6 +256,7 @@ def _persist_account_run(request: AccountReplayRequest, strategy: Any, policy: A
             request=request, strategy_id=strategy.strategy_id, policy=policy, result=result,
             unit=unit, unit_headlines=unit_headlines, account_headlines=account_headlines,
             rules_captured_at=rules_captured_at, venue_path=venue_path, reconciliation=reconciliation,
+            strategy=strategy,
         )
         payload["statistics"] = statistics
         payload["design_data_cutoff"] = strategy.design_data_cutoff.isoformat()

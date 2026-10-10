@@ -13,7 +13,12 @@ import pytest
 
 import src.cli.commands.evaluate as evaluate_mod
 import src.evaluation.standard as standard_mod
-from src.strategy.release import load_release
+from src.strategy.release import load_release, strategy_signal_digest
+from src.strategy.targets import FLOW_MOM_TOP20
+
+
+def _current_signal() -> str:
+    return strategy_signal_digest(FLOW_MOM_TOP20)
 
 @pytest.fixture(autouse=True)
 def _bootstrap_budget(monkeypatch):
@@ -56,6 +61,7 @@ def _write_unit_run(
         "participation_basis": "adv30_median_prior_day",
         "data_availability_withdrawals": [],
         "limitations": [],
+        "signal_digest": _current_signal(),
         "report_periods": {"evaluation": evaluation},
         **(
             {"statistics": {"stress": {"funding_by_symbol": {"CCUSDT": 0.02}}}}
@@ -84,6 +90,9 @@ def _write_account_run(run_dir: Path, n: int = 100, start: str = "2025-01-01") -
         "capital": 1000.0, "execution": "maker",
         "cagr": 0.3, "mdd": -0.1, "mean_exposure": 1.2,
         "liquidated_at": None, "initial_margin_breaches": 0,
+        "signal_digest": _current_signal(),
+        "evaluation_start": pd.Timestamp(start, tz="UTC").isoformat(),
+        "evaluation_end": (pd.Timestamp(start, tz="UTC") + pd.Timedelta(days=n)).isoformat(),
         "stress_execution": {"liquidated_at": None},
     }), encoding="utf-8")
 
@@ -279,7 +288,8 @@ def test_evaluate_builder_guards_and_holdout(tmp_path, monkeypatch) -> None:
     release = load_release("flow_mom_top20")
     look_path = tmp_path / "flow_mom.holdout.jsonl"
     consume_holdout_look("flow_mom_top20", release.spec_digest,
-                         (pd.Timestamp("2026-07-01", tz="UTC"), pd.Timestamp("2026-09-09", tz="UTC")), path=look_path)
+                         (pd.Timestamp("2026-07-01", tz="UTC"), pd.Timestamp("2026-09-09", tz="UTC")), path=look_path,
+                         signal_digest=_current_signal())
     original = release_mod.releases_dir
     import shutil
     shutil.copy(original() / "flow_mom_top20.json", tmp_path / "flow_mom_top20.json")
@@ -291,6 +301,254 @@ def test_evaluate_builder_guards_and_holdout(tmp_path, monkeypatch) -> None:
     assert held.holdout is not None
     assert held.holdout_returns is not None
     assert len(held.holdout_returns) == 70
+
+
+def test_signal_digest_mismatch_fails_closed(tmp_path, monkeypatch) -> None:
+    """A holdout result with another signal_digest raises."""
+    from src.common.errors import DataIntegrityError
+    from src.evaluation.holdout import consume_holdout_look
+
+    import src.strategy.release as release_mod
+
+    unit, account, holdout = tmp_path / "unit", tmp_path / "acct", tmp_path / "hold"
+    _write_unit_run(unit)
+    _write_account_run(account)
+    _write_unit_run(holdout, n=70, start="2026-07-01")
+    raw = json.loads((holdout / "result.json").read_text(encoding="utf-8"))
+    raw["signal_digest"] = "other-signal"
+    (holdout / "result.json").write_text(json.dumps(raw), encoding="utf-8")
+    release = load_release("flow_mom_top20")
+    look_path = tmp_path / "flow_mom.holdout.jsonl"
+    consume_holdout_look("flow_mom_top20", release.spec_digest,
+                         (pd.Timestamp("2026-07-01", tz="UTC"), pd.Timestamp("2026-09-09", tz="UTC")), path=look_path,
+                         signal_digest=_current_signal())
+    import shutil
+    shutil.copy(release_mod.releases_dir() / "flow_mom_top20.json", tmp_path / "flow_mom_top20.json")
+    monkeypatch.setattr(release_mod, "releases_dir", lambda root=None: tmp_path)
+    with pytest.raises(DataIntegrityError, match="signal digest mismatch"):
+        evaluate_mod.build_evaluation_inputs(
+            strategy_id="flow_mom_top20", unit_run=unit, account_run=account, holdout_run=holdout,
+        )
+    raw = json.loads((holdout / "result.json").read_text(encoding="utf-8"))
+    raw["signal_digest"] = _current_signal()
+    (holdout / "result.json").write_text(json.dumps(raw), encoding="utf-8")
+    unit_raw = json.loads((unit / "result.json").read_text(encoding="utf-8"))
+    unit_raw["signal_digest"] = "stale-signal"
+    (unit / "result.json").write_text(json.dumps(unit_raw), encoding="utf-8")
+    with pytest.raises(DataIntegrityError, match="signal digest mismatch"):
+        evaluate_mod.build_evaluation_inputs(
+            strategy_id="flow_mom_top20", unit_run=unit, account_run=account, holdout_run=holdout,
+        )
+
+
+def test_holdout_account_run_is_informational(tmp_path, monkeypatch) -> None:
+    """Leveraged holdout slices land in informational only: verdict and digest are unchanged."""
+    import src.common.paths as paths_mod
+
+    unit, account, holdout = tmp_path / "unit", tmp_path / "acct", tmp_path / "hold"
+    _write_unit_run(unit)
+    _write_account_run(account)
+    _write_unit_run(holdout, n=70, start="2026-07-01")
+    from src.evaluation.holdout import consume_holdout_look
+
+    import src.strategy.release as release_mod
+
+    release = load_release("flow_mom_top20")
+    look_path = tmp_path / "flow_mom.holdout.jsonl"
+    consume_holdout_look("flow_mom_top20", release.spec_digest,
+                         (pd.Timestamp("2026-07-01", tz="UTC"), pd.Timestamp("2026-09-09", tz="UTC")), path=look_path,
+                         signal_digest=_current_signal())
+    import shutil
+    shutil.copy(release_mod.releases_dir() / "flow_mom_top20.json", tmp_path / "flow_mom_top20.json")
+    monkeypatch.setattr(release_mod, "releases_dir", lambda root=None: tmp_path)
+    monkeypatch.setattr(paths_mod, "BACKTESTS_DIR", tmp_path / "backtests")
+    monkeypatch.setattr(evaluate_mod, "BACKTESTS_DIR", tmp_path / "backtests")
+    holdout_account = tmp_path / "hold_acct"
+    holdout_account.mkdir(parents=True)
+    unit_index = pd.read_parquet(unit / "daily.parquet").index
+    discovery_start = pd.Timestamp(str(json.loads((unit / "result.json").read_text())["evaluation_start"])).tz_convert("UTC")
+    holdout_end = pd.Timestamp(str(json.loads((holdout / "result.json").read_text())["evaluation_end"])).tz_convert("UTC")
+    full_index = pd.date_range(start=discovery_start, end=holdout_end - pd.Timedelta(days=1), freq="D", tz="UTC")
+    n_full = len(full_index)
+    equity = 1000.0 * np.cumprod(np.full(n_full, 1.001))
+    pd.DataFrame({"equity": equity, "exposure": np.full(n_full, 1.2)}, index=full_index).to_parquet(
+        holdout_account / "account_daily.parquet")
+    pd.DataFrame({"equity": equity * 0.999, "exposure": np.full(n_full, 1.1)}, index=full_index).to_parquet(
+        holdout_account / "account_stress_daily.parquet")
+    (holdout_account / "account.json").write_text(json.dumps({
+        "capital": 1000.0, "execution": {"mode": "maker"},
+        "signal_digest": _current_signal(),
+        "evaluation_start": discovery_start.isoformat(), "evaluation_end": holdout_end.isoformat(),
+        "cagr": 0.3, "mdd": -0.1, "mean_exposure": 1.2,
+        "liquidated_at": None, "initial_margin_breaches": 0,
+        "stress_execution": {"liquidated_at": None},
+    }), encoding="utf-8")
+    assert unit_index is not None
+    base_args = {"unit_run": str(unit), "account_run": str(account), "holdout_run": str(holdout)}
+    with pytest.raises(SystemExit):
+        evaluate_mod.run_evaluate_strategy_command(_args(**base_args))
+    plain_outputs = list((tmp_path / "backtests" / "evaluation").glob("*.json"))
+    assert len(plain_outputs) == 1
+    plain = json.loads(plain_outputs[0].read_text())
+    assert "holdout_deployed_return" not in plain["informational"]
+    with pytest.raises(SystemExit):
+        evaluate_mod.run_evaluate_strategy_command(_args(**base_args, holdout_account_run=str(holdout_account)))
+    enriched_outputs = list((tmp_path / "backtests" / "evaluation").glob("*.json"))
+    assert len(enriched_outputs) >= 1
+    enriched = max(enriched_outputs, key=lambda path: path.stat().st_mtime_ns)
+    info = json.loads(enriched.read_text())["informational"]
+    assert info["holdout_days"] == 70.0
+    assert info["discovery_days"] == 100.0
+    assert set(info) >= {"holdout_deployed_return", "holdout_deployed_mdd", "holdout_deployed_stress_return",
+                         "holdout_mean_exposure", "discovery_deployed_return", "discovery_deployed_mdd",
+                         "discovery_deployed_stress_return", "discovery_mean_exposure"}
+    assert json.loads(enriched.read_text())["digest"] == plain["digest"]
+    assert json.loads(enriched.read_text())["verdict"] == plain["verdict"]
+
+
+def _write_holdout_account(
+    run_dir: Path, index: pd.DatetimeIndex, *, capital: float = 1000.0,
+    signal: str | None = None, start: str | None = None, end: str | None = None,
+) -> None:
+    run_dir.mkdir(parents=True, exist_ok=True)
+    n = len(index)
+    equity = capital * np.cumprod(np.full(n, 1.001))
+    pd.DataFrame({"equity": equity, "exposure": np.full(n, 1.2)}, index=index).to_parquet(
+        run_dir / "account_daily.parquet")
+    pd.DataFrame({"equity": equity * 0.999, "exposure": np.full(n, 1.1)}, index=index).to_parquet(
+        run_dir / "account_stress_daily.parquet")
+    (run_dir / "account.json").write_text(json.dumps({
+        "capital": capital, "execution": {"mode": "maker"},
+        "signal_digest": _current_signal() if signal is None else signal,
+        "evaluation_start": index[0].isoformat() if start is None else start,
+        "evaluation_end": (index[-1] + pd.Timedelta(days=1)).isoformat() if end is None else end,
+        "cagr": 0.3, "mdd": -0.1, "mean_exposure": 1.2,
+        "liquidated_at": None, "initial_margin_breaches": 0,
+        "stress_execution": {"liquidated_at": None},
+    }), encoding="utf-8")
+
+
+@pytest.mark.parametrize("override", [
+    {"capital": 2100.0}, {"signal": "other"}, {"start": "2025-02-01T00:00:00+00:00"},
+    {"end": "2026-01-01T00:00:00+00:00"},
+])
+def test_holdout_account_identity_mismatch_fails_closed(tmp_path, override) -> None:
+    """A holdout account run with wrong capital, signal, or window raises."""
+    from src.common.errors import DataIntegrityError
+
+    discovery = (pd.Timestamp("2025-01-01", tz="UTC"), pd.Timestamp("2025-04-11", tz="UTC"))
+    holdout = (pd.Timestamp("2026-07-01", tz="UTC"), pd.Timestamp("2026-09-09", tz="UTC"))
+    full = pd.date_range(start=discovery[0], end=holdout[1] - pd.Timedelta(days=1), freq="D", tz="UTC")
+    run_dir = tmp_path / "hold_acct"
+    _write_holdout_account(run_dir, full, **override)  # type: ignore[arg-type]
+    with pytest.raises(DataIntegrityError, match=r"mismatch|must start|must end"):
+        evaluate_mod._holdout_account_informational(
+            run_dir, discovery, holdout, 1000.0, _current_signal())
+
+
+def test_holdout_account_without_holdout_run_fails_closed(tmp_path, monkeypatch) -> None:
+    """--holdout-account-run without --holdout-run raises instead of reporting."""
+    import src.common.paths as paths_mod
+
+    from src.common.errors import DataIntegrityError
+
+    unit, account = tmp_path / "unit", tmp_path / "acct"
+    _write_unit_run(unit)
+    _write_account_run(account)
+    holdout_account = tmp_path / "hold_acct"
+    _write_holdout_account(holdout_account, pd.date_range("2025-01-01", periods=100, freq="D", tz="UTC"))
+    monkeypatch.setattr(paths_mod, "BACKTESTS_DIR", tmp_path / "backtests")
+    monkeypatch.setattr(evaluate_mod, "BACKTESTS_DIR", tmp_path / "backtests")
+    with pytest.raises(DataIntegrityError, match="requires a holdout run"):
+        evaluate_mod.run_evaluate_strategy_command(
+            _args(unit_run=str(unit), account_run=str(account),
+                  holdout_account_run=str(holdout_account))
+        )
+
+
+def test_slice_deployed_metrics_guards(tmp_path) -> None:
+    """Degenerate account slices fail closed."""
+    from src.common.errors import DataIntegrityError
+
+    index = pd.date_range("2025-01-01", periods=5, freq="D", tz="UTC")
+    frame = pd.DataFrame({"equity": [1000.0, 1010.0, 1020.0, 1030.0, 1040.0],
+                          "exposure": np.full(5, 1.2)}, index=index)
+    stress = pd.DataFrame({"equity": [1000.0, 1009.0, 1018.0, 1027.0, 1036.0],
+                           "exposure": np.full(5, 1.1)}, index=index)
+    with pytest.raises(DataIntegrityError, match="daily index"):
+        evaluate_mod._slice_deployed_metrics(
+            pd.DataFrame({"equity": [1.0]}), stress, 1000.0, index[0], index[1])
+    with pytest.raises(DataIntegrityError, match="no days"):
+        evaluate_mod._slice_deployed_metrics(
+            frame, stress, 1000.0, pd.Timestamp("2024-01-01", tz="UTC"),
+            pd.Timestamp("2024-01-05", tz="UTC"))
+    bad = frame.copy()
+    bad.loc[index[0], "equity"] = float("nan")
+    with pytest.raises(DataIntegrityError, match="finite"):
+        evaluate_mod._slice_deployed_metrics(
+            bad, stress, 1000.0, index[0], index[2])
+    zeroed = frame.copy()
+    zeroed.loc[:, "equity"] = 0.0
+    with pytest.raises(DataIntegrityError, match="positive"):
+        evaluate_mod._slice_deployed_metrics(
+            zeroed, stress, 1000.0, index[1], index[3])
+    metrics = evaluate_mod._slice_deployed_metrics(frame, stress, 1000.0, index[0], index[2])
+    assert metrics["days"] == 2.0
+    assert metrics["deployed_return"] == pytest.approx(0.01)
+
+
+@pytest.mark.parametrize("defect", ["gap", "stress_shift", "duplicate", "reversed", "negative_exposure", "negative_equity", "resurrection"])
+def test_holdout_account_evidence_fails_closed(tmp_path, defect) -> None:
+    from src.common.errors import DataIntegrityError
+
+    index = pd.date_range("2026-06-29", periods=4, freq="D", tz="UTC")
+    account = tmp_path / "continuous"
+    _write_holdout_account(account, index)
+    frame = pd.read_parquet(account / "account_daily.parquet")
+    stress = pd.read_parquet(account / "account_stress_daily.parquet")
+    if defect == "gap":
+        frame = frame.drop(index[1])
+    elif defect == "stress_shift":
+        stress.index = stress.index + pd.Timedelta(days=1)
+    elif defect == "duplicate":
+        frame.index = pd.DatetimeIndex([index[0], index[1], index[1], index[3]])
+    elif defect == "reversed":
+        frame = frame.iloc[::-1]
+    elif defect == "negative_exposure":
+        frame.loc[index[2], "exposure"] = -1.0
+    elif defect == "negative_equity":
+        stress.loc[index[2], "equity"] = -1.0
+    else:
+        frame.loc[index[1], "equity"] = 0.0
+    frame.to_parquet(account / "account_daily.parquet")
+    stress.to_parquet(account / "account_stress_daily.parquet")
+    with pytest.raises(DataIntegrityError):
+        evaluate_mod._holdout_account_informational(
+            account, (index[0], index[2]), (index[2], index[-1] + pd.Timedelta(days=1)),
+            1000.0, _current_signal(),
+        )
+
+
+def test_account_slice_stress_index_cannot_be_reinterpreted() -> None:
+    from src.common.errors import DataIntegrityError
+
+    index = pd.date_range("2026-07-01", periods=3, tz="UTC")
+    base = pd.DataFrame({"equity": [1000.0, 900.0, 990.0], "exposure": [1.0, 1.0, 1.0]}, index=index)
+    stress = base.copy()
+    stress.index = index + pd.Timedelta(days=1)
+    with pytest.raises(DataIntegrityError, match="indexes differ"):
+        evaluate_mod._slice_deployed_metrics(base, stress, 1000.0, index[0], index[-1])
+
+
+def test_account_holdout_slice_uses_prior_close_and_local_peak() -> None:
+    index = pd.date_range("2026-06-29", periods=4, tz="UTC")
+    base = pd.DataFrame({"equity": [1500.0, 1200.0, 900.0, 990.0], "exposure": [1.0, 2.0, 3.0, 4.0]}, index=index)
+    stress = pd.DataFrame({"equity": [1400.0, 1000.0, 800.0, 880.0]}, index=index)
+    metrics = evaluate_mod._slice_deployed_metrics(base, stress, 1000.0, index[2], index[-1] + pd.Timedelta(days=1))
+    assert metrics == pytest.approx({
+        "deployed_return": -0.175, "deployed_mdd": -0.25,
+        "deployed_stress_return": -0.12, "mean_exposure": 3.5, "days": 2.0,
+    })
 
 
 def test_evaluate_causality_fails_on_unknown_feature(monkeypatch) -> None:

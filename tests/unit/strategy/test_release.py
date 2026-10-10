@@ -209,6 +209,48 @@ def test_spec_digest_covers_exposure_cap() -> None:
     assert strategy_spec_digest(FLOW_MOM_TOP20, altered) != release.spec_digest
 
 
+def test_signal_digest_ignores_sizing_and_params() -> None:
+    """Two sizings differing only in exposure_cap share the signal digest but not the spec digest."""
+    import dataclasses
+
+    from src.strategy.release import strategy_signal_digest
+    from src.strategy.targets import FLOW_MOM_TOP20_ACCOUNT_UNIT
+
+    assert strategy_signal_digest(FLOW_MOM_TOP20) == strategy_signal_digest(FLOW_MOM_TOP20_ACCOUNT_UNIT)
+    assert strategy_signal_digest(FLOW_MOM_TOP20) == strategy_signal_digest(
+        dataclasses.replace(FLOW_MOM_TOP20, exposure_multiplier=2.5)
+    )
+    assert strategy_spec_digest(FLOW_MOM_TOP20, {"exposure_cap": 1.0}) != strategy_spec_digest(
+        FLOW_MOM_TOP20, {"exposure_cap": 3.0})
+
+
+def test_signal_digest_breaks_on_member_change() -> None:
+    """Flipping one member sign changes the signal digest."""
+    import dataclasses
+
+    from src.strategy.release import strategy_signal_digest
+    from src.strategy.targets import FeatureMember
+
+    flipped = dataclasses.replace(
+        FLOW_MOM_TOP20,
+        members=tuple(
+            FeatureMember(name=m.name, sign=-m.sign) if position == 0 else m
+            for position, m in enumerate(FLOW_MOM_TOP20.members)
+        ),
+    )
+    assert strategy_signal_digest(flipped) != strategy_signal_digest(FLOW_MOM_TOP20)
+
+
+def test_signal_digest_keeps_foreign_strategy_identity() -> None:
+    """A non-flow_mom spec keeps its own id and clip in the signal digest."""
+    import dataclasses
+
+    from src.strategy.release import strategy_signal_digest
+
+    foreign = dataclasses.replace(FLOW_MOM_TOP20, strategy_id="other", name_clip=0.02)
+    assert strategy_signal_digest(foreign) != strategy_signal_digest(FLOW_MOM_TOP20)
+
+
 def test_digest_covers_participation_basis() -> None:
     """The committed release carries the ADV basis and a matching digest."""
     release = load_release("flow_mom_top20")

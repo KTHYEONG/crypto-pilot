@@ -37,7 +37,7 @@ def test_account_payload_golden_schema(tmp_path: Path, monkeypatch: pytest.Monke
     payload = json.loads((run_dir / "account.json").read_text(encoding="utf-8"))
     assert payload.pop("statistics_limitations") == ["ACCOUNT_FUNDING_ATTRIBUTION_UNAVAILABLE"]
     assert payload.pop("stress_execution")["taker_fee_bps"] == 18.0
-    assert set(payload) == {"strategy_id", "capital", "execution", "policy", "venue_captured_at", "venue_path", "evaluation_start", "evaluation_end", "cagr", "mdd", "daily_mdd", "final_equity", "liquidated_at", "mean_exposure", "min_exposure", "last_exposure", "skipped_orders", "untraded_fraction", "initial_margin_breaches", "fee_paid", "impact_paid", "funding_paid", "fallback_ladder_symbols", "missing_filter_symbols", "moment_source", "entry_anchor", "unit_reference", "venue_rules_applied_retroactively", "reconciliation", "created_at", "statistics", "design_data_cutoff"}
+    assert set(payload) == {"strategy_id", "capital", "execution", "policy", "venue_captured_at", "venue_path", "evaluation_start", "evaluation_end", "cagr", "mdd", "daily_mdd", "final_equity", "liquidated_at", "mean_exposure", "min_exposure", "last_exposure", "skipped_orders", "untraded_fraction", "initial_margin_breaches", "fee_paid", "impact_paid", "funding_paid", "fallback_ladder_symbols", "missing_filter_symbols", "moment_source", "entry_anchor", "unit_reference", "venue_rules_applied_retroactively", "signal_digest", "reconciliation", "created_at", "statistics", "design_data_cutoff"}
     assert set(payload["execution"]) == {"mode", "maker_fee_bps", "taker_fee_bps", "passive_window_bars", "maker_fill_fraction"}
     assert set(payload["policy"]) == {"kind", "exposure_max", "exposure_step", "mean_haircut", "prior_days", "min_moment_days", "shock_per_unit", "margin_reserve", "initial_margin_cap", "impact_y"}
     assert set(payload["unit_reference"]) == {"capital", "cagr", "mdd", "daily_mdd", "maker_fill_fraction"}
@@ -130,6 +130,10 @@ def test_account_payload_matches_pre_refactor_capture(case: str, tmp_path: Path,
     assert statistics["stress"]["in_sample_days"] == statistics["base"]["in_sample_days"]
     assert data.pop("statistics_limitations") == ["ACCOUNT_FUNDING_ATTRIBUTION_UNAVAILABLE"]
     assert data.pop("stress_execution")["taker_fee_bps"] == 18.0
+    from src.strategy.release import strategy_signal_digest
+    from src.strategy.targets import FLOW_MOM_TOP20_ACCOUNT_UNIT
+
+    assert data.pop("signal_digest") == strategy_signal_digest(FLOW_MOM_TOP20_ACCOUNT_UNIT)
     assert json.dumps(data, indent=2, sort_keys=True) == _PRE_REFACTOR["account"][case]
     assert "error_type" not in text
 
