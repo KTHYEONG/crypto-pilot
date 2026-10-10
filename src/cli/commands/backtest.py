@@ -354,29 +354,40 @@ def _record_trial_for_window(
     append_trial(record, path=releases_dir() / f"{_trial_family(str(strategy.strategy_id))}.trials.jsonl")
 
 
-def _holdout_gate(strategy_id: str, start: pd.Timestamp, end: pd.Timestamp, evaluate_holdout: bool) -> None:
+def _holdout_gate(
+    strategy_id: str, start: pd.Timestamp, end: pd.Timestamp, evaluate_holdout: bool,
+    *, strategy: StrategySpec | None = None,
+) -> None:
     """Refuse windows overlapping a consumed holdout unless the one look is recorded first."""
     from src.common.errors import DataIntegrityError
     from src.evaluation.holdout import consume_holdout_look, holdout_overlaps
-    from src.strategy.release import load_release, releases_dir
+    from src.strategy.release import load_release, releases_dir, strategy_signal_digest
 
     family = _trial_family(strategy_id)
     path = releases_dir() / f"{family}.holdout.jsonl"
     release = load_release("flow_mom_top20" if family == "flow_mom" else strategy_id)
+    spec = strategy if strategy is not None else _strategy_policy(40 if strategy_id == "flow_mom_top40_control" else 20)
+    signal_digest = strategy_signal_digest(spec)
     if end > release.design_data_cutoff and not evaluate_holdout:
         raise SystemExit("post-design windows require --evaluate-holdout before observing returns")
     if holdout_overlaps(strategy_id, (start, end), path=path):
         if not evaluate_holdout:
             raise SystemExit(f"window overlaps a consumed holdout for {strategy_id}; pass --evaluate-holdout for the one look")
         try:
-            consume_holdout_look(strategy_id, release.spec_digest, (start, end), path=path)
+            rematerialized = consume_holdout_look(
+                strategy_id, release.spec_digest, (start, end), path=path, signal_digest=signal_digest,
+            )
         except DataIntegrityError as exc:
             raise SystemExit(str(exc)) from exc
+        if rematerialized is False:
+            _logger.info("[EVAL] holdout re-materialized window=%s..%s", start.isoformat(), end.isoformat())
     elif evaluate_holdout:
         try:
             if start < release.design_data_cutoff:
                 raise DataIntegrityError("holdout window must start at or after the design cutoff")
-            consume_holdout_look(strategy_id, release.spec_digest, (start, end), path=path)
+            consume_holdout_look(
+                strategy_id, release.spec_digest, (start, end), path=path, signal_digest=signal_digest,
+            )
         except DataIntegrityError as exc:
             raise SystemExit(str(exc)) from exc
 
@@ -492,7 +503,10 @@ def run_strategy_backtest_command(args: argparse.Namespace) -> None:
             raise SystemExit("strategy conflicts with breadth or variant")
         breadth, variant = selected_breadth, selected_variant
     strategy = _strategy_policy(breadth, variant)
-    _holdout_gate(strategy.strategy_id, start, end, bool(getattr(args, "evaluate_holdout", False)))
+    evaluate_holdout = bool(getattr(args, "evaluate_holdout", False))
+    if evaluate_holdout and bool(getattr(args, "neighbors", False)):
+        raise SystemExit("holdout evaluation cannot run discovery neighbors")
+    _holdout_gate(strategy.strategy_id, start, end, evaluate_holdout, strategy=strategy)
     execution = getattr(args, "execution", "taker")
     if execution not in ("taker", "maker"):
         raise SystemExit(f"execution must be 'taker' or 'maker', got {execution!r}")
@@ -556,7 +570,7 @@ def run_strategy_backtest_command(args: argparse.Namespace) -> None:
             budget=budget, execution_bound=execution_bound, output=output,
             source=shared_source, snapshot_cache=shared_cache,
         )
-    if not getattr(args, "neighbors", False) and output.parent.parent == STRATEGY_BACKTESTS_DIR and DEFAULT_DETAIL_RETENTION_MAX_RUNS is not None:
+    if not getattr(args, "neighbors", False) and not bool(getattr(args, "evaluate_holdout", False)) and output.parent.parent == STRATEGY_BACKTESTS_DIR and DEFAULT_DETAIL_RETENTION_MAX_RUNS is not None:
         _prune_strategy_runs(keep=DEFAULT_DETAIL_RETENTION_MAX_RUNS)
     status = "primary" if breadth == 20 else "research control"
     _logger.info(
@@ -655,6 +669,17 @@ def run_account_replay_command(args: argparse.Namespace) -> None:
         raise SystemExit(f"--fixed-exposure must be a positive finite exposure, got {raw_fixed!r}")
     if not 0 < capital < float("inf"):
         raise SystemExit(f"--capital must be a positive finite capital, got {getattr(args, 'capital', None)!r}")
+    from src.evaluation.holdout import holdout_covered
+    from src.strategy.targets import FLOW_MOM_TOP20
+
+    if end > FLOW_MOM_TOP20.design_data_cutoff:
+        from src.strategy.release import strategy_signal_digest
+
+        _signal = strategy_signal_digest(FLOW_MOM_TOP20)
+        if not holdout_covered(
+            "flow_mom_top20", _signal, (FLOW_MOM_TOP20.design_data_cutoff, end),
+        ):
+            raise SystemExit("account replay past the design cutoff requires a journaled holdout look for this signal")
     from src.application.strategy_account import AccountReplayError, AccountReplayRequest, run_account_replay
 
     raw_venue = getattr(args, "venue_rules", None)

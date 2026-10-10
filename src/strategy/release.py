@@ -128,6 +128,35 @@ def strategy_spec_digest(spec: StrategySpec, sizing: Mapping[str, str | float | 
     return hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()
 
 
+def strategy_signal_digest(spec: StrategySpec) -> str:
+    """Content digest of what decides positions at unit exposure: book definition plus signal implementation."""
+    from src.strategy.targets import FLOW_MOM_TOP20
+
+    if spec.strategy_id.startswith("flow_mom_top20"):
+        strategy_id = FLOW_MOM_TOP20.strategy_id
+        name_clip = FLOW_MOM_TOP20.name_clip
+    else:
+        strategy_id = spec.strategy_id
+        name_clip = spec.name_clip
+    members = [(str(m.name), int(m.sign)) for m in spec.members]
+    payload = {
+        "strategy_id": strategy_id,
+        "breadth": spec.breadth,
+        "members": members,
+        "min_rank_symbols": spec.min_rank_symbols,
+        "snapshot_hour_utc": spec.snapshot_hour_utc,
+        "release_hour_utc": spec.release_hour_utc,
+        "entry_hour_utc": spec.entry_hour_utc,
+        "design_data_cutoff": pd.Timestamp(spec.design_data_cutoff).tz_convert("UTC").isoformat(),
+        "name_clip": name_clip,
+        "implementation": {
+            name: hashlib.sha256((Path(__file__).parent / name).read_bytes()).hexdigest()
+            for name in ("features.py", "targets.py", "books.py", "universe.py")
+        },
+    }
+    return hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()
+
+
 def releases_dir(root: Path | None = None) -> Path:
     base = Path(root) if root is not None else Path(__file__).resolve().parents[1]
     if root is not None:
