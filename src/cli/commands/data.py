@@ -411,6 +411,15 @@ def _build_settlement_registry(args: argparse.Namespace) -> None:
         len(build.registry.settlements) + len(build.registry.truncations),
         len(build.unresolved), len(build.changed), horizon.isoformat(),
     )
+    report = build.announcements
+    print(  # noqa: T201 - announcement provenance on stdout is the CLI contract
+        f"announcements binance_cms={report.binance_cms} curated={report.curated}"
+        f" proxy_lead={report.proxy_lead} after_last_trade={len(report.after_last_trade)}"
+    )
+    for symbol, _reason in report.after_last_trade:
+        _logger.info("[DATA] stage=build_settlement_registry after_last_trade symbol=%s", symbol)
+    for symbol in report.unmatched:
+        _logger.info("[DATA] stage=build_settlement_registry unmatched symbol=%s", symbol)
     for symbol, reason in build.unresolved:
         _logger.warning("[DATA] stage=build_settlement_registry unresolved symbol=%s reason=%s", symbol, reason)
     if args.write:

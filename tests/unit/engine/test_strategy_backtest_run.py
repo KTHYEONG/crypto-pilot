@@ -1102,6 +1102,7 @@ def test_runner_counts_delisting_cause_once(monkeypatch) -> None:
     result = run_strategy_backtest(_request())
     assert result.delisting_blocked_decisions == 9
     assert result.source_gap_blocked_decisions == 10
+    assert result.settlement_registry is registry
 
 
 def _write_audit_3m(ohlcv_root, symbol: str, last_bar: pd.Timestamp) -> None:

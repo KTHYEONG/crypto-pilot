@@ -28,10 +28,13 @@ if TYPE_CHECKING:
     from src.core.source_gaps import SourceGapInterval
 
 SettlementPriceSource = Literal["flat_1h_klines", "twap30_proxy", "curated"]
-AnnouncementSource = Literal["proxy_lead", "curated"]
+AnnouncementSource = Literal["proxy_lead", "curated", "binance_cms"]
 
 _VALID_PRICE_SOURCES: Final[tuple[str, ...]] = ("flat_1h_klines", "twap30_proxy", "curated")
-_VALID_ANNOUNCEMENT_SOURCES: Final[tuple[str, ...]] = ("proxy_lead", "curated")
+_VALID_ANNOUNCEMENT_SOURCES: Final[tuple[str, ...]] = ("proxy_lead", "curated", "binance_cms")
+
+_BINANCE_CMS_EVIDENCE_PREFIX: Final[str] = "binance-cms:"
+_ANNOUNCEMENT_EVIDENCE_WINDOW: Final[pd.Timedelta] = pd.Timedelta(days=21)
 
 _SETTLEMENT_FIELDS: Final[tuple[str, ...]] = (
     "kind", "symbol", "event_id", "announced_at", "announcement_source",
@@ -56,8 +59,9 @@ class InstrumentSettlementRecord:
         symbol: Upper-case exchange symbol.
         event_id: ``f"{symbol}:{delivery_at epoch ms}"``; unique and stable.
         announced_at: UTC instant the delisting became public (see announcement_source).
-        announcement_source: ``proxy_lead`` (last_trade_at minus DELIST_ANNOUNCEMENT_LEAD) or
-            ``curated`` (real announcement with evidence).
+        announcement_source: ``proxy_lead`` (last_trade_at minus DELIST_ANNOUNCEMENT_LEAD),
+            ``curated`` (real announcement with evidence), or ``binance_cms`` (committed
+            CMS notice with ``binance-cms:<code>|<release_ms>|<title>`` evidence).
         announcement_evidence: Official notice reference; required non-empty when curated.
         last_trade_at: End of the last liquid 3m bar (3m grid).
         delivery_at: Contractual settlement instant (3m grid), >= last_trade_at.
@@ -261,6 +265,59 @@ def _parse_fee(value: object, line_no: int, source: str) -> float:
     return fee
 
 
+def _binance_cms_release_at(release_ms: int) -> pd.Timestamp:
+    try:
+        return pd.Timestamp((int(release_ms) + 999) // 1000, unit="s", tz="UTC")
+    except (ValueError, OverflowError) as exc:
+        raise DataIntegrityError("binance_cms release_ms is outside the supported timestamp range") from exc
+
+
+def split_binance_cms_evidence(value: object) -> tuple[str, int, str] | None:
+    """Split ``binance-cms:<code>|<release_ms>|<title>`` evidence, or None when malformed."""
+    if not isinstance(value, str) or not value.startswith(_BINANCE_CMS_EVIDENCE_PREFIX):
+        return None
+    parts = value[len(_BINANCE_CMS_EVIDENCE_PREFIX):].split("|")
+    if len(parts) < 3:
+        return None
+    try:
+        release_ms = int(parts[1])
+    except (TypeError, ValueError):
+        return None
+    code, title = parts[0], "|".join(parts[2:])
+    if not code.strip() or release_ms < 0 or not title.strip():
+        return None
+    return code, release_ms, title
+
+
+def _parse_binance_cms_evidence(
+    value: str, symbol: str, line_no: int, source: str,
+) -> tuple[str, int, str]:
+    parts = split_binance_cms_evidence(value)
+    if parts is None:
+        raise DataIntegrityError(
+            f"{source} line {line_no}: binance_cms evidence of {symbol} must be"
+            " binance-cms:<code>|<release_ms>|<title>",
+        )
+    return parts
+
+
+def _require_binance_cms_announcement(
+    announced_at: pd.Timestamp, last_trade_at: pd.Timestamp, evidence: str,
+    symbol: str, line_no: int, source: str,
+) -> None:
+    _code, release_ms, _title = _parse_binance_cms_evidence(evidence, symbol, line_no, source)
+    if announced_at != _binance_cms_release_at(release_ms):
+        raise DataIntegrityError(
+            f"{source} line {line_no}: binance_cms announced_at of {symbol} must equal"
+            " the evidence release second; regenerate the registry",
+        )
+    if announced_at < last_trade_at - _ANNOUNCEMENT_EVIDENCE_WINDOW:
+        raise DataIntegrityError(
+            f"{source} line {line_no}: binance_cms announcement of {symbol} more than"
+            " 21 days before last_trade_at",
+        )
+
+
 def _parse_settlement(record: dict[str, Any], line_no: int, source: str) -> InstrumentSettlementRecord:
     extra = sorted(set(record) - set(_SETTLEMENT_FIELDS))
     missing = sorted(set(_SETTLEMENT_FIELDS) - set(record))
@@ -302,6 +359,10 @@ def _parse_settlement(record: dict[str, Any], line_no: int, source: str) -> Inst
         raise DataIntegrityError(
             f"{source} line {line_no}: proxy_lead announced_at of {symbol} must equal"
             " last_trade_at minus DELIST_ANNOUNCEMENT_LEAD; regenerate the registry",
+        )
+    if announcement_source == "binance_cms":
+        _require_binance_cms_announcement(
+            announced_at, last_trade_at, announcement_evidence, symbol, line_no, source,
         )
     event_id = record["event_id"]
     expected = f"{symbol}:{int(delivery_at.value // _MS_PER_UNIT)}"
@@ -454,7 +515,9 @@ def parse_instrument_settlement_registry(raw: bytes, *, source: str) -> Instrume
             field; malformed/naive/non-UTC timestamp; timestamp off the 3m grid; violated
             ordering ``announced_at <= last_trade_at <= delivery_at``; proxy_lead announcement not
             exactly ``last_trade_at - DELIST_ANNOUNCEMENT_LEAD`` (message names the record and says
-            "regenerate the registry"); curated announcement or curated price without evidence;
+            "regenerate the registry"); binance_cms announcement whose evidence is not
+            ``binance-cms:<code>|<release_ms>|<title>``, whose ``announced_at`` is not the evidence
+            release second, or more than 21 days before ``last_trade_at``; curated announcement or curated price without evidence;
             non-finite/non-positive price; negative/non-finite fee; ``event_id`` mismatch; duplicate
             ``event_id``; two settlement records of one symbol whose
             ``[announced_at, delivery_at]`` intervals overlap; more than one truncation record per

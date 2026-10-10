@@ -103,6 +103,13 @@ def strategy_backtest_payload(
     limitations = list(evidence.limitations)
     if getattr(run, "data_availability_withdrawals", ()) and "DATA_AVAILABILITY_SELECTION" not in limitations:
         limitations.append("DATA_AVAILABILITY_SELECTION")
+    census = set(run.source_symbols)
+    announcement_sources: dict[str, int] = {}
+    for record in run.settlement_registry.settlements:
+        if record.symbol in census:
+            announcement_sources[record.announcement_source] = (
+                announcement_sources.get(record.announcement_source, 0) + 1
+            )
     payload: dict[str, JsonValue] = {
         "strategy_id": candidate.strategy.strategy_id,
         "breadth": candidate.strategy.breadth,
@@ -129,8 +136,10 @@ def strategy_backtest_payload(
         "delisting_blocked_decisions": run.delisting_blocked_decisions,
         "delisting_announcement_policy": (
             "Registry announced_at controls roster withdrawal; proxy_lead announcements are "
-            "last_trade_at minus the registered lead, not evidenced public announcement times."
+            "last_trade_at minus the registered lead, not evidenced public announcement times, "
+            "and cover only the proxy_lead fraction in announcement_sources."
         ),
+        "announcement_sources": cast(JsonValue, dict(announcement_sources)),
         "base_one_way_taker_bps": request.base_spec.one_way_taker_bps(),
         "stress_one_way_taker_bps": request.stress_spec.one_way_taker_bps(),
         "execution_bound": request.execution_bound,

@@ -366,3 +366,72 @@ def test_interior_never_superseded() -> None:
         _gap_interval("AAAUSDT", "SOURCE_ABSENT", "INTERIOR", "2022-01-02T00:00:00Z", "2022-01-03T00:00:00Z"),
         registry,
     ) is False
+
+
+_CMS_RELEASE = "2021-12-30T00:00:01Z"
+_CMS_RELEASE_MS = int(pd.Timestamp("2021-12-30T00:00:00Z").value // 1_000_000) + 500
+
+
+def _cms_settlement(**overrides: object) -> dict:
+    payload = {
+        "announcement_source": "binance_cms",
+        "announcement_evidence": f"binance-cms:CODE123|{_CMS_RELEASE_MS}|Binance will delist AAAUSDT",
+        "announced_at": _CMS_RELEASE,
+    }
+    payload.update(overrides)
+    return _settlement(**payload)
+
+
+def test_binance_cms_record_loads() -> None:
+    registry = _parse_many(_cms_settlement())
+    record = registry.settlements_for("AAAUSDT")[0]
+    assert record.announcement_source == "binance_cms"
+    assert record.announced_at == pd.Timestamp(_CMS_RELEASE)
+    assert record.announcement_evidence.startswith("binance-cms:CODE123|")
+
+
+def test_binance_cms_mismatched_announced_at_rejected() -> None:
+    with pytest.raises(DataIntegrityError):
+        _parse_many(_cms_settlement(announced_at="2021-12-29T00:00:01Z"))
+
+
+def test_binance_cms_blank_evidence_rejected() -> None:
+    with pytest.raises(DataIntegrityError):
+        _parse_many(_cms_settlement(announcement_evidence=""))
+    with pytest.raises(DataIntegrityError):
+        _parse_many(_cms_settlement(announcement_evidence="Binance notice: real announcement"))
+    for malformed in (
+        "binance-cms:ONLYCODE",
+        "binance-cms:C1|notanint|Title",
+        "binance-cms:|1640995200000|Title",
+        "binance-cms:C1|-5|Title",
+        "binance-cms:C1|1640995200000|   ",
+    ):
+        with pytest.raises(DataIntegrityError):
+            _parse_many(_cms_settlement(announcement_evidence=malformed))
+
+
+def test_split_binance_cms_evidence_rejects_non_string() -> None:
+    from src.core.instrument_settlements import split_binance_cms_evidence
+
+    assert split_binance_cms_evidence(123) is None
+    assert split_binance_cms_evidence(None) is None
+    code, release_ms, title = split_binance_cms_evidence(
+        f"binance-cms:CODE123|{_CMS_RELEASE_MS}|A|B",
+    )
+    assert (code, release_ms, title) == ("CODE123", _CMS_RELEASE_MS, "A|B")
+
+
+def test_binance_cms_lead_beyond_21_days_rejected() -> None:
+    announced = pd.Timestamp(_LAST) - pd.Timedelta(days=22)
+    release_ms = int(announced.value // 1_000_000)
+    with pytest.raises(DataIntegrityError):
+        _parse_many(_cms_settlement(
+            announced_at=announced.isoformat().replace("+00:00", "Z"),
+            announcement_evidence=f"binance-cms:CODE123|{release_ms}|Binance will delist AAAUSDT",
+        ))
+
+
+def test_binance_cms_release_overflow_fails_closed() -> None:
+    with pytest.raises(DataIntegrityError, match="supported timestamp range"):
+        _parse_many(_cms_settlement(announcement_evidence=f"binance-cms:C1|{10**100}|Title"))

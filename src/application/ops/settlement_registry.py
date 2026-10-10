@@ -19,6 +19,11 @@ import numpy as np
 import pandas as pd
 
 from src.common.errors import DataIntegrityError
+from src.core.delisting_announcements import (
+    DelistingNotice,
+    load_delisting_notices,
+    resolve_announcement,
+)
 from src.core.instrument_settlements import (
     DataTruncationRecord,
     InstrumentSettlementRecord,
@@ -51,6 +56,17 @@ class _UnresolvedLifecycleError(Exception):
 
 
 @dataclass(frozen=True, slots=True)
+class AnnouncementSourceReport:
+    """Announcement provenance counts and operator review findings for a registry build."""
+
+    binance_cms: int
+    curated: int
+    proxy_lead: int
+    after_last_trade: tuple[tuple[str, str], ...] = ()
+    unmatched: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class SettlementRegistryBuild:
     """Candidate registry plus findings an operator must resolve before committing.
 
@@ -58,11 +74,15 @@ class SettlementRegistryBuild:
         registry: Candidate registry (curated fields of the existing registry preserved).
         unresolved: ``(symbol, reason)`` lifecycles with no derivable price (curation required).
         changed: event_ids whose generated content differs from the committed record.
+        announcements: Provenance counts and review lists of the announcement assignment.
     """
 
     registry: InstrumentSettlementRegistry
     unresolved: tuple[tuple[str, str], ...] = ()
     changed: tuple[str, ...] = ()
+    announcements: AnnouncementSourceReport = AnnouncementSourceReport(
+        binance_cms=0, curated=0, proxy_lead=0,
+    )
 
 
 def _require_utc_moment(value: pd.Timestamp, label: str) -> pd.Timestamp:
@@ -90,19 +110,44 @@ def _content_equal(generated: InstrumentSettlementRecord, committed: InstrumentS
     )
 
 
+def _evidence_string(notice: DelistingNotice) -> str:
+    release_ms = notice.release_ms if notice.release_ms is not None else int(notice.release_at.value // 1_000_000)
+    return f"binance-cms:{notice.code}|{release_ms}|{notice.title}"
+
+
+def _late_notice_entries(
+    symbol: str, last_trade_at: pd.Timestamp, notices: Sequence[DelistingNotice],
+) -> list[tuple[str, str]]:
+    return [
+        (
+            symbol,
+            f"notice {notice.code} released {notice.release_at.isoformat()}"
+            f" after last trade {last_trade_at.isoformat()}",
+        )
+        for notice in notices
+        if notice.kind == "delist"
+        and symbol in notice.symbols
+        and notice.release_at > last_trade_at
+    ]
+
+
 def _carry_curated_announcement(
     symbol: str, last_trade_at: pd.Timestamp,
     prior: InstrumentSettlementRecord | None,
+    notices: Sequence[DelistingNotice],
 ) -> tuple[pd.Timestamp, str, str]:
-    if prior is None or prior.announcement_source != "curated":
-        return last_trade_at - DELIST_ANNOUNCEMENT_LEAD, "proxy_lead", ""
-    if not prior.announcement_evidence.strip():
-        raise DataIntegrityError(f"committed curated announcement of {symbol} without evidence")
-    if not prior.announced_at <= last_trade_at:
-        raise DataIntegrityError(
-            f"committed curated announcement of {symbol} no longer precedes last_trade_at",
-        )
-    return prior.announced_at, "curated", prior.announcement_evidence
+    if prior is not None and prior.announcement_source == "curated":
+        if not prior.announcement_evidence.strip():
+            raise DataIntegrityError(f"committed curated announcement of {symbol} without evidence")
+        if not prior.announced_at <= last_trade_at:
+            raise DataIntegrityError(
+                f"committed curated announcement of {symbol} no longer precedes last_trade_at",
+            )
+        return prior.announced_at, "curated", prior.announcement_evidence
+    notice = resolve_announcement(symbol, last_trade_at, notices)
+    if notice is not None:
+        return notice.release_at, "binance_cms", _evidence_string(notice)
+    return last_trade_at - DELIST_ANNOUNCEMENT_LEAD, "proxy_lead", ""
 
 
 def _carry_curated_price(
@@ -128,6 +173,9 @@ def _derive_candidate_record(
     stamped: pd.Timestamp,
     committed_by_event: dict[str, InstrumentSettlementRecord],
     changed: list[str],
+    notices: Sequence[DelistingNotice],
+    late_entries: list[tuple[str, str]],
+    unmatched: list[str],
 ) -> InstrumentSettlementRecord | None:
     """Derive one candidate record, None when the lifecycle needs no record.
 
@@ -151,11 +199,15 @@ def _derive_candidate_record(
     prior = committed_by_event.get(event_id)
     evidence = derive_settlement_price(root, symbol, last_trade_at)
     announced_at, announcement_source, announcement_evidence = _carry_curated_announcement(
-        symbol, last_trade_at, prior,
+        symbol, last_trade_at, prior, notices,
     )
     settlement_price, price_source, price_evidence, evidence_digest = _carry_curated_price(
         symbol, evidence, prior,
     )
+    if resolve_announcement(symbol, last_trade_at, notices) is None:
+        late_entries.extend(_late_notice_entries(symbol, last_trade_at, notices))
+    if announcement_source == "proxy_lead":
+        unmatched.append(symbol)
     candidate = InstrumentSettlementRecord(
         symbol=symbol,
         event_id=event_id,
@@ -201,15 +253,18 @@ def build_settlement_registry(
     Uses the audit rules (a)/(b) of ``audit_settlement_registry`` with ``audit_end = horizon`` over
     every 3m archive (or ``symbols``). For each required symbol: ``last_trade_at`` from the tail
     profile, ``delivery_at = last_trade_at``, price via ``derive_settlement_price``, fee
-    ``DELIST_SETTLEMENT_FEE_BPS``, proxy_lead announcement. When ``existing`` holds the same
-    ``event_id``, curated announcement fields and curated price fields are carried over unchanged
-    and re-validated. Existing truncation records are carried over when still consistent.
+    ``DELIST_SETTLEMENT_FEE_BPS``. The announcement is the committed curated record when present,
+    else the earliest qualifying committed CMS notice, else the proxy lead. When ``existing`` holds
+    the same ``event_id``, curated announcement fields and curated price fields are carried over
+    unchanged and re-validated. Existing truncation records are carried over when still consistent.
 
     Raises:
-        DataIntegrityError: horizon naive/non-UTC; an archive unreadable.
+        DataIntegrityError: horizon naive/non-UTC; an archive unreadable; committed
+            announcement evidence unreadable.
     """
     end = _require_utc_moment(horizon, "horizon")
     stamped = _require_utc_moment(verified_at, "verified_at")
+    notices = load_delisting_notices()
     root = Path(ohlcv_root)
     three_dir = root / "3m"
     if not three_dir.is_dir():
@@ -225,6 +280,8 @@ def build_settlement_registry(
     records: list[InstrumentSettlementRecord] = []
     unresolved: list[tuple[str, str]] = []
     changed: list[str] = []
+    late_entries: list[tuple[str, str]] = []
+    unmatched: list[str] = []
     flat_count = 0
     twap_count = 0
     curated_count = 0
@@ -243,6 +300,7 @@ def build_settlement_registry(
         try:
             candidate = _derive_candidate_record(
                 root, symbol, tail, end, stamped, committed_by_event, changed,
+                notices, late_entries, unmatched,
             )
         except _UnresolvedLifecycleError as exc:
             unresolved.append((symbol, str(exc)))
@@ -273,8 +331,18 @@ def build_settlement_registry(
         len(records) + len(unresolved), flat_count, twap_count, curated_count,
         len(unresolved), len(changed),
     )
+    source_counts: dict[str, int] = {}
+    for record in registry.settlements:
+        source_counts[record.announcement_source] = source_counts.get(record.announcement_source, 0) + 1
     return SettlementRegistryBuild(
         registry=registry, unresolved=tuple(unresolved), changed=tuple(changed),
+        announcements=AnnouncementSourceReport(
+            binance_cms=source_counts.get("binance_cms", 0),
+            curated=source_counts.get("curated", 0),
+            proxy_lead=source_counts.get("proxy_lead", 0),
+            after_last_trade=tuple(sorted(set(late_entries))),
+            unmatched=tuple(sorted(set(unmatched))),
+        ),
     )
 
 
