@@ -13,6 +13,7 @@ import pandas as pd
 
 from src.application.strategy_account import strategy_execution_specs
 from src.backtests.catalog import append_backtest_index
+from src.cli.commands.backtest_holdout import enforce_holdout_gate, require_journaled_holdout
 from src.common.paths import STRATEGY_BACKTESTS_DIR, VENUE_RULES_DIR
 from src.core.params import (
     ACCOUNT_DEFAULT_CAPITAL_USDT,
@@ -359,37 +360,8 @@ def _holdout_gate(
     *, strategy: StrategySpec | None = None,
 ) -> None:
     """Refuse windows overlapping a consumed holdout unless the one look is recorded first."""
-    from src.common.errors import DataIntegrityError
-    from src.evaluation.holdout import consume_holdout_look, holdout_overlaps
-    from src.strategy.release import load_release, releases_dir, strategy_signal_digest
-
-    family = _trial_family(strategy_id)
-    path = releases_dir() / f"{family}.holdout.jsonl"
-    release = load_release("flow_mom_top20" if family == "flow_mom" else strategy_id)
     spec = strategy if strategy is not None else _strategy_policy(40 if strategy_id == "flow_mom_top40_control" else 20)
-    signal_digest = strategy_signal_digest(spec)
-    if end > release.design_data_cutoff and not evaluate_holdout:
-        raise SystemExit("post-design windows require --evaluate-holdout before observing returns")
-    if holdout_overlaps(strategy_id, (start, end), path=path):
-        if not evaluate_holdout:
-            raise SystemExit(f"window overlaps a consumed holdout for {strategy_id}; pass --evaluate-holdout for the one look")
-        try:
-            rematerialized = consume_holdout_look(
-                strategy_id, release.spec_digest, (start, end), path=path, signal_digest=signal_digest,
-            )
-        except DataIntegrityError as exc:
-            raise SystemExit(str(exc)) from exc
-        if rematerialized is False:
-            _logger.info("[EVAL] holdout re-materialized window=%s..%s", start.isoformat(), end.isoformat())
-    elif evaluate_holdout:
-        try:
-            if start < release.design_data_cutoff:
-                raise DataIntegrityError("holdout window must start at or after the design cutoff")
-            consume_holdout_look(
-                strategy_id, release.spec_digest, (start, end), path=path, signal_digest=signal_digest,
-            )
-        except DataIntegrityError as exc:
-            raise SystemExit(str(exc)) from exc
+    enforce_holdout_gate(strategy_id, _trial_family(strategy_id), spec, start, end, evaluate_holdout)
 
 
 def _neighbor_specs(strategy: Any) -> list[Any]:
@@ -454,6 +426,19 @@ def _run_neighbor_set(
             with contextlib.suppress(Exception):
                 _record_trial_for_window(neighbor, start, end, None, 2)
             raise SystemExit(f"neighbor backtest failed: {exc}") from exc
+
+
+def _append_trial_from_run(strategy: Any, run: Any, start: pd.Timestamp, end: pd.Timestamp) -> None:
+    """Append the window's base-return Sharpe to the trial ledger; ledger failures are logged, not fatal."""
+    import numpy as np
+
+    try:
+        base_values = run.evidence.base_daily.returns.to_numpy(dtype="float64")
+        std = float(np.std(base_values, ddof=1)) if base_values.size >= 2 else 0.0
+        sharpe = float(base_values.mean() / std) if std > 1e-12 else None
+        _record_trial_for_window(strategy, start, end, sharpe, int(base_values.size))
+    except Exception:
+        _logger.exception("[EVAL] trial ledger append failed")
 
 
 def run_strategy_backtest_command(args: argparse.Namespace) -> None:
@@ -545,15 +530,7 @@ def run_strategy_backtest_command(args: argparse.Namespace) -> None:
         statistics = _strategy_run_statistics(run)
         persist_strategy_backtest(run, output, statistics=statistics)
         _write_strategy_manifest(output, request=request, breadth=breadth)
-        try:
-            import numpy as np
-
-            base_values = run.evidence.base_daily.returns.to_numpy(dtype="float64")
-            std = float(np.std(base_values, ddof=1)) if base_values.size >= 2 else 0.0
-            sharpe = float(base_values.mean() / std) if std > 1e-12 else None
-            _record_trial_for_window(strategy, start, end, sharpe, int(base_values.size))
-        except Exception:
-            _logger.exception("[EVAL] trial ledger append failed")
+        _append_trial_from_run(strategy, run, start, end)
         _logger.info(
             "[EVAL] backtest strategy source_gap_excluded=%s",
             list(getattr(run, "source_gap_excluded_symbols", ())),
@@ -669,17 +646,7 @@ def run_account_replay_command(args: argparse.Namespace) -> None:
         raise SystemExit(f"--fixed-exposure must be a positive finite exposure, got {raw_fixed!r}")
     if not 0 < capital < float("inf"):
         raise SystemExit(f"--capital must be a positive finite capital, got {getattr(args, 'capital', None)!r}")
-    from src.evaluation.holdout import holdout_covered
-    from src.strategy.targets import FLOW_MOM_TOP20
-
-    if end > FLOW_MOM_TOP20.design_data_cutoff:
-        from src.strategy.release import strategy_signal_digest
-
-        _signal = strategy_signal_digest(FLOW_MOM_TOP20)
-        if not holdout_covered(
-            "flow_mom_top20", _signal, (FLOW_MOM_TOP20.design_data_cutoff, end),
-        ):
-            raise SystemExit("account replay past the design cutoff requires a journaled holdout look for this signal")
+    require_journaled_holdout(end)
     from src.application.strategy_account import AccountReplayError, AccountReplayRequest, run_account_replay
 
     raw_venue = getattr(args, "venue_rules", None)
