@@ -1237,3 +1237,39 @@ def test_collect_delisting_announcements_cleans_tmp_on_invalid_rows(tmp_path, mo
         args.handler(args)
     assert list(tmp_path.glob(".delisting_*")) == []
     assert target.read_bytes() == b""
+
+
+def test_build_settlement_registry_reports_announcement_provenance(
+    tmp_path, monkeypatch, caplog, capsys,
+) -> None:
+    import pandas as pd
+
+    from src.common import paths as cfg
+    from src.core.delisting_announcements import DelistingNotice
+    from src.core.instrument_settlements import EMPTY_SETTLEMENT_REGISTRY
+
+    _settlement_cli_lake(tmp_path)
+    monkeypatch.setattr(cfg, "FUTURES_DATA_DIR", tmp_path, raising=False)
+    monkeypatch.setattr(
+        "src.core.instrument_settlements.load_instrument_settlement_registry",
+        lambda path=None: EMPTY_SETTLEMENT_REGISTRY,
+    )
+    late = DelistingNotice(
+        code="C9", title="Binance will delist C9",
+        release_at=pd.Timestamp("2025-01-01T02:00:00Z"),
+        kind="delist", symbols=("FLATUSDT",),
+    )
+    monkeypatch.setattr(
+        "src.application.ops.settlement_registry.load_delisting_notices", lambda: (late,),
+    )
+    with caplog.at_level("INFO", logger="src.cli.commands.data"):
+        args = _mhs_parser().parse_args(
+            ["data", "build-settlement-registry", "--horizon", "2025-01-02T00:00:00Z"]
+        )
+        args.handler(args)
+    assert "after_last_trade symbol=FLATUSDT" in caplog.text
+    assert "unmatched symbol=FLATUSDT" in caplog.text
+    assert (
+        "announcements binance_cms=0 curated=0 proxy_lead=1 after_last_trade=1"
+        in capsys.readouterr().out
+    )

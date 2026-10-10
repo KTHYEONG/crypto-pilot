@@ -14,6 +14,7 @@ from src.common.errors import DataIntegrityError
 from src.common.paths import FUTURES_DATA_DIR
 from src.core.data_provenance import resolve_mhs_input_layout
 from src.core.instrument_settlements import (
+    EMPTY_SETTLEMENT_REGISTRY,
     InstrumentSettlementRegistry,
     settlement_registry_for_root,
     source_gap_superseded_by_settlement,
@@ -199,6 +200,7 @@ class StrategyBacktestRun:
     delisting_blocked_decisions: int = 0
     data_availability_withdrawals: tuple[Mapping[str, object], ...] = ()
     roster_seat_days: int = 0
+    settlement_registry: InstrumentSettlementRegistry = EMPTY_SETTLEMENT_REGISTRY
 
 
 class LakeCoverageError(DataIntegrityError):
@@ -692,4 +694,5 @@ def run_strategy_backtest(
         delisting_blocked_decisions=int(delisting_only.sum()),
         data_availability_withdrawals=withdrawals,
         roster_seat_days=seats,
+        settlement_registry=settlement_registry,
     )

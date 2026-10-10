@@ -22,9 +22,15 @@ import pandas as pd
 import pyarrow.parquet as pq
 
 from src.common.errors import DataIntegrityError
+from src.core.delisting_announcements import (
+    DelistingNotice,
+    load_delisting_notices,
+    resolve_announcement,
+)
 from src.core.instrument_settlements import (
     InstrumentSettlementRecord,
     InstrumentSettlementRegistry,
+    split_binance_cms_evidence,
 )
 from src.core.params import (
     SETTLEMENT_AUDIT_MIN_TRAILING_FLAT_BARS,
@@ -473,14 +479,20 @@ def audit_settlement_registry(
     ``last_trade_at - 3m`` exists and is liquid; no liquid bar has a label in
     ``[last_trade_at, delivery_at]``; the price is inside the envelope; a non-curated record's
     ``evidence_digest`` and ``settlement_price`` equal a fresh ``derive_settlement_price``.
-    Symbols without a 3m archive are skipped (existing missing-source checks own them).
+    Announcement provenance reconciles against the committed CMS evidence: a ``binance_cms``
+    record whose notice is missing or whose ``release_at`` differs from ``announced_at`` is stale,
+    as is a ``proxy_lead`` record for which a qualifying notice now exists. Symbols without a 3m
+    archive are skipped (existing missing-source checks own them).
 
     Raises:
-        DataIntegrityError: ``audit_end`` naive/non-UTC, or an archive unreadable.
+        DataIntegrityError: ``audit_end`` naive/non-UTC, an archive unreadable, or the committed
+            announcement evidence unreadable.
     """
     end = _require_utc_moment(audit_end, "audit_end")
     root = Path(ohlcv_root)
     names = list(symbols)
+    notices = load_delisting_notices()
+    notices_by_code = {notice.code: notice for notice in notices}
     by_symbol: dict[str, list[InstrumentSettlementRecord]] = {}
     for record in registry.settlements:
         by_symbol.setdefault(record.symbol, []).append(record)
@@ -498,7 +510,7 @@ def audit_settlement_registry(
         records = by_symbol.get(symbol, [])
         if _audit_symbol_coverage(symbol, tail, end, records, registry, missing):
             required += 1
-        _audit_symbol_records(root, symbol, end, records, stale)
+        _audit_symbol_records(root, symbol, end, records, stale, notices, notices_by_code)
     _logger.info(
         "[DATA] stage=settlement_registry_audit symbols=%d required=%d missing=%d stale=%d audit_end=%s",
         len(names), required, len(missing), len(stale), end.isoformat(),
@@ -545,16 +557,49 @@ def _audit_symbol_coverage(
     return True
 
 
+def _announcement_is_stale(
+    record: InstrumentSettlementRecord,
+    notices: Sequence[DelistingNotice],
+    notices_by_code: dict[str, DelistingNotice],
+) -> str | None:
+    if record.announcement_source == "binance_cms":
+        parts = split_binance_cms_evidence(record.announcement_evidence)
+        notice = notices_by_code.get(parts[0]) if parts is not None else None
+        if (
+            notice is None
+            or notice.release_at != record.announced_at
+            or notice.kind != "delist"
+            or record.symbol not in notice.symbols
+            or parts is None
+            or parts[2] != notice.title
+            or (notice.release_ms is not None and parts[1] != notice.release_ms)
+        ):
+            return "announcement evidence mismatch"
+        return None
+    if (
+        record.announcement_source == "proxy_lead"
+        and resolve_announcement(record.symbol, record.last_trade_at, notices) is not None
+    ):
+        return "announcement evidence available"
+    return None
+
+
 def _audit_symbol_records(
     root: Path, symbol: str, end: pd.Timestamp,
     records: list[InstrumentSettlementRecord],
     stale: list[tuple[str, str]],
+    notices: Sequence[DelistingNotice] = (),
+    notices_by_code: dict[str, DelistingNotice] | None = None,
 ) -> None:
     frame: pd.DataFrame | None = None
     hourly_cache: dict[str, pd.DataFrame | None] = {}
+    by_code = notices_by_code if notices_by_code is not None else {}
     for record in records:
         if record.last_trade_at >= end:
             continue
+        announcement_reason = _announcement_is_stale(record, notices, by_code)
+        if announcement_reason is not None:
+            stale.append((record.event_id, announcement_reason))
         if frame is None:
             frame = _coerce_bars(
                 _read_required_frame(root / "3m" / f"{symbol}.parquet", _REQUIRED_3M_COLUMNS),
