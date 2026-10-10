@@ -34,10 +34,10 @@ class EvaluationCriteria:
     max_participation_p95: float = 0.01
     participation_basis: str = "adv30_median_prior_day"
     max_withdrawn_seat_fraction: float = 0.001
-    risk_envelope: str = "growth_extreme_budgeted"
+    growth_horizon_years: float = 3.0
+    overbet_probe_scale: float = 0.75
     min_holdout_days: int = 60
     holdout_growth_min_quantile: float = 0.05
-    holdout_drawdown_max_quantile: float = 0.95
 
     def __post_init__(self) -> None:
         if type(self.max_top5_funding_dependence) is not bool:
@@ -49,13 +49,19 @@ class EvaluationCriteria:
             if isinstance(value, bool) or not isinstance(value, int) or value < 2:
                 raise DataIntegrityError(f"{name} must be an integer >= 2")
         for name in ("dsr_min", "growth_lcb_alpha", "plateau_min_fraction", "max_participation_p95",
-                     "holdout_growth_min_quantile", "holdout_drawdown_max_quantile"):
+                     "holdout_growth_min_quantile"):
             value = getattr(self, name)
             if isinstance(value, bool) or not math.isfinite(value) or not 0 < value <= 1:
                 raise DataIntegrityError(f"{name} must be finite and in (0, 1]")
         fraction = self.max_withdrawn_seat_fraction
         if isinstance(fraction, bool) or not math.isfinite(fraction) or not 0 <= fraction < 0.05:
             raise DataIntegrityError("max_withdrawn_seat_fraction must be finite and in [0, 0.05)")
+        horizon = self.growth_horizon_years
+        if isinstance(horizon, bool) or not math.isfinite(horizon) or not 1 <= horizon <= 10:
+            raise DataIntegrityError("growth_horizon_years must be finite and in [1, 10]")
+        probe = self.overbet_probe_scale
+        if isinstance(probe, bool) or not math.isfinite(probe) or not 0 < probe < 1:
+            raise DataIntegrityError("overbet_probe_scale must be finite and in (0, 1)")
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,7 +72,6 @@ class StrategyRelease:
     sizing: Mapping[str, str | float | None]
     design_data_cutoff: pd.Timestamp
     target_capital_usdt: float
-    risk_envelope: str
     criteria: EvaluationCriteria
     criteria_digest: str
     evaluation_digest: str | None
@@ -87,10 +92,10 @@ def criteria_digest(criteria: EvaluationCriteria) -> str:
         "max_participation_p95": criteria.max_participation_p95,
         "participation_basis": criteria.participation_basis,
         "max_withdrawn_seat_fraction": criteria.max_withdrawn_seat_fraction,
-        "risk_envelope": criteria.risk_envelope,
+        "growth_horizon_years": criteria.growth_horizon_years,
+        "overbet_probe_scale": criteria.overbet_probe_scale,
         "min_holdout_days": criteria.min_holdout_days,
         "holdout_growth_min_quantile": criteria.holdout_growth_min_quantile,
-        "holdout_drawdown_max_quantile": criteria.holdout_drawdown_max_quantile,
     }
     return hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()
 
@@ -139,6 +144,8 @@ def release_path(strategy_id: str, *, root: Path | None = None) -> Path:
 def _parse_criteria(raw: Any) -> EvaluationCriteria:
     if not isinstance(raw, dict):
         raise DataIntegrityError("release criteria must be a mapping")
+    if "risk_envelope" in raw or "holdout_drawdown_max_quantile" in raw:
+        raise DataIntegrityError("release criteria carries retired key")
     if "max_withdrawn_seat_fraction" not in raw:
         raise DataIntegrityError("release criteria missing max_withdrawn_seat_fraction")
     try:
@@ -161,6 +168,8 @@ def load_release(strategy_id: str, *, root: Path | None = None) -> StrategyRelea
         raise DataIntegrityError(f"release record corrupt: {path}") from exc
     if not isinstance(raw, dict):
         raise DataIntegrityError(f"release record corrupt: {path}")
+    if "risk_envelope" in raw:
+        raise DataIntegrityError("release criteria carries retired key")
     try:
         cutoff = pd.Timestamp(str(raw["design_data_cutoff"])).tz_convert("UTC")
         criteria = _parse_criteria(raw.get("criteria"))
@@ -175,11 +184,6 @@ def load_release(strategy_id: str, *, root: Path | None = None) -> StrategyRelea
     if verdict is not None and verdict not in ("accept", "reject", "inconclusive", "invalid"):
         raise DataIntegrityError(f"release verdict invalid: {path}")
     sizing = dict(raw.get("sizing", {}))
-    from src.core.params import STRATEGY_RISK_ENVELOPE
-
-    envelope = str(raw.get("risk_envelope", criteria.risk_envelope))
-    if envelope != STRATEGY_RISK_ENVELOPE or criteria.risk_envelope != envelope:
-        raise DataIntegrityError(f"release risk envelope differs from the registered sizing cap: {path}")
     return StrategyRelease(
         strategy_id=str(raw.get("strategy_id", canonical)),
         legacy_ids=tuple(raw.get("legacy_ids", ())),
@@ -187,7 +191,6 @@ def load_release(strategy_id: str, *, root: Path | None = None) -> StrategyRelea
         sizing=sizing,
         design_data_cutoff=cutoff,
         target_capital_usdt=float(raw.get("target_capital_usdt", 0.0)),
-        risk_envelope=envelope,
         criteria=criteria,
         criteria_digest=stored_digest,
         evaluation_digest=None if evaluation_digest is None else str(evaluation_digest),

@@ -21,11 +21,7 @@ from src.core.bootstrap import (
     iter_stationary_bootstrap_index_chunks,
     stationary_bootstrap_max_blocks,
 )
-from src.core.params import (
-    GROWTH_RISK_ENVELOPES,
-    REPORT_BOOTSTRAP_PATHS,
-    REPORT_BOOTSTRAP_SEED,
-)
+from src.core.params import REPORT_BOOTSTRAP_PATHS, REPORT_BOOTSTRAP_SEED
 from src.evaluation.statistics import deflated_sharpe_ratio, log_growth_lcb, sharpe_sampling_variance
 from src.evaluation.trials import TrialPopulation
 from src.quant.evaluation.reliability import derive_block_size
@@ -91,6 +87,10 @@ class EvaluationInputs:
     lake_coverage_ok: bool
     causality_ok: bool
     deployed_returns: pd.Series
+    deployed_stress_returns: pd.Series
+    deployed_liquidated: bool
+    deployed_stress_liquidated: bool
+    deployed_margin_breaches: int
     deployed_max_leverage: float
     neighbors: tuple[pd.Series, ...]
     trial_population: TrialPopulation
@@ -166,12 +166,24 @@ def _validate_inputs(inputs: EvaluationInputs) -> None:
     if len(base) != len(stress) or not inputs.base_returns.index.equals(inputs.stress_returns.index):
         raise DataIntegrityError("base_returns and stress_returns must share one index")
     _require_returns(inputs.deployed_returns, "deployed_returns")
+    _validate_survival(inputs)
     for position, neighbor in enumerate(inputs.neighbors):
         _require_returns(neighbor, f"neighbors[{position}]")
     if inputs.holdout_returns is not None:
         _require_returns(inputs.holdout_returns, "holdout_returns")
     _validate_participation(inputs)
     _validate_funding_and_leverage(inputs)
+
+
+def _validate_survival(inputs: EvaluationInputs) -> None:
+    _require_returns(inputs.deployed_stress_returns, "deployed_stress_returns")
+    if not inputs.deployed_returns.index.equals(inputs.deployed_stress_returns.index):
+        raise DataIntegrityError("deployed_returns and deployed_stress_returns must share one index")
+    if type(inputs.deployed_liquidated) is not bool or type(inputs.deployed_stress_liquidated) is not bool:
+        raise DataIntegrityError("liquidation flags must be booleans")
+    breaches = inputs.deployed_margin_breaches
+    if isinstance(breaches, bool) or not isinstance(breaches, int) or breaches < 0:
+        raise DataIntegrityError("deployed_margin_breaches must be a non-negative int")
 
 
 def _validate_participation(inputs: EvaluationInputs) -> None:
@@ -212,14 +224,6 @@ def _log_growth(values: np.ndarray) -> float:
     if bool((values <= -1.0).any()):
         return float("-inf")
     return float(np.log1p(values).sum())
-
-
-def _max_drawdown(values: np.ndarray) -> float:
-    path = np.concatenate(([1.0], np.cumprod(1.0 + values)))
-    peak = np.maximum.accumulate(path)
-    with np.errstate(divide="ignore", invalid="ignore"):
-        drawdown = np.where(peak > 0, (peak - path) / peak, 0.0)
-    return float(drawdown.max())
 
 
 def _integrity_checks(inputs: EvaluationInputs, criteria: EvaluationCriteria) -> list[CheckResult]:
@@ -434,32 +438,40 @@ def _bootstrap_paths(values: np.ndarray, path_len: int, n_paths: int, seed: int)
     return out
 
 
-def _risk_check(inputs: EvaluationInputs, criteria: EvaluationCriteria) -> CheckResult:
-    try:
-        envelope = GROWTH_RISK_ENVELOPES[criteria.risk_envelope]
-    except KeyError as exc:
-        raise DataIntegrityError(f"unknown risk envelope: {criteria.risk_envelope!r}") from exc
-    deployed = inputs.deployed_returns.to_numpy(dtype="float64")
-    horizon_days = max(1, round(envelope.horizon_years * 365.0))
-    paths = _bootstrap_paths(deployed, horizon_days, REPORT_BOOTSTRAP_PATHS, REPORT_BOOTSTRAP_SEED)
-    equity = np.cumprod(1.0 + paths, axis=1)
-    peak = np.maximum.accumulate(np.maximum(equity, 1.0), axis=1)
+def _annualized_log_growth(paths: np.ndarray, horizon_years: float) -> np.ndarray:
     with np.errstate(divide="ignore", invalid="ignore"):
-        drawdown = np.where(peak > 0, (peak - equity) / peak, 0.0)
-    mdd = drawdown.max(axis=1)
-    ruined = equity.min(axis=1) <= envelope.ruin_fraction
-    p_mdd = float(np.mean(mdd > envelope.max_drawdown))
-    p_ruin = float(np.mean(ruined))
-    leverage_ok = bool(float(inputs.deployed_max_leverage) <= envelope.leverage_ceiling)
-    passed = bool(p_mdd <= envelope.max_drawdown_prob and p_ruin <= envelope.max_ruin_prob and leverage_ok)
-    value = max(p_mdd, p_ruin)
-    threshold = (
-        f"P(MDD>{envelope.max_drawdown})<={envelope.max_drawdown_prob}, "
-        f"P(ruin)<={envelope.max_ruin_prob}, lev<={envelope.leverage_ceiling}"
+        result: np.ndarray = np.log1p(paths).sum(axis=1) / float(horizon_years)
+    return result
+
+
+def _growth_paths(inputs: EvaluationInputs, criteria: EvaluationCriteria) -> tuple[np.ndarray, float]:
+    horizon = float(criteria.growth_horizon_years)
+    path_len = max(1, round(horizon * 365.0))
+    values = inputs.deployed_stress_returns.to_numpy(dtype="float64")
+    paths = _bootstrap_paths(values, path_len, REPORT_BOOTSTRAP_PATHS, REPORT_BOOTSTRAP_SEED)
+    return paths, horizon
+
+
+def _growth_checks(inputs: EvaluationInputs, criteria: EvaluationCriteria) -> list[CheckResult]:
+    paths, horizon = _growth_paths(inputs, criteria)
+    full = _annualized_log_growth(paths, horizon)
+    lcb_full = float(np.quantile(full, float(criteria.growth_lcb_alpha), method="inverted_cdf"))
+    scaled = _annualized_log_growth(paths * float(criteria.overbet_probe_scale), horizon)
+    lcb_scaled = float(np.quantile(scaled, float(criteria.growth_lcb_alpha), method="inverted_cdf"))
+    gap = float(lcb_full - lcb_scaled)
+    return [
+        CheckResult("G1_GROWTH_LCB", "growth", bool(lcb_full > 0.0), lcb_full, "> 0", "Compound growth must clear zero at the lower quantile."),
+        CheckResult("G2_NOT_OVERBET", "growth", bool(gap >= 0.0), gap, ">= 0", "A smaller size must not raise the growth floor."),
+    ]
+
+
+def _survival_check(inputs: EvaluationInputs) -> CheckResult:
+    passed = bool(
+        inputs.deployed_liquidated is False
+        and inputs.deployed_stress_liquidated is False
+        and inputs.deployed_margin_breaches == 0
     )
-    return CheckResult(
-        "K1_ENVELOPE", "risk", passed, value, threshold, "Growth sizing must stay inside the ruin budget."
-    )
+    return CheckResult("S1_SURVIVAL", "survival", passed, float(inputs.deployed_margin_breaches), "== 0", "Liquidation is the only irreversible event.")
 
 
 def _holdout_checks(inputs: EvaluationInputs, criteria: EvaluationCriteria) -> list[CheckResult]:
@@ -474,31 +486,15 @@ def _holdout_checks(inputs: EvaluationInputs, criteria: EvaluationCriteria) -> l
                 f">= {criteria.holdout_growth_min_quantile} quantile",
                 skipped,
             ),
-            CheckResult(
-                "H2_HOLDOUT_DRAWDOWN",
-                "holdout",
-                None,
-                None,
-                f"<= {criteria.holdout_drawdown_max_quantile} quantile",
-                skipped,
-            ),
         ]
     holdout = inputs.holdout_returns.to_numpy(dtype="float64")
     stress = inputs.stress_returns.to_numpy(dtype="float64")
     holdout_growth = _log_growth(holdout)
-    holdout_mdd = _max_drawdown(holdout)
     paths = _bootstrap_paths(stress, len(holdout), REPORT_BOOTSTRAP_PATHS, REPORT_BOOTSTRAP_SEED + 1)
     with np.errstate(divide="ignore"):
         growth_dist = np.log1p(paths).sum(axis=1)
-    equity_paths = np.cumprod(1.0 + paths, axis=1)
-    peak = np.maximum.accumulate(np.maximum(equity_paths, 1.0), axis=1)
-    with np.errstate(divide="ignore", invalid="ignore"):
-        drawdown = np.where(peak > 0, (peak - equity_paths) / peak, 0.0)
-    mdd_dist = drawdown.max(axis=1)
     growth_floor = float(np.quantile(growth_dist, criteria.holdout_growth_min_quantile, method="inverted_cdf"))
-    mdd_cap = float(np.quantile(mdd_dist, criteria.holdout_drawdown_max_quantile))
     h1 = bool(holdout_growth >= growth_floor)
-    h2 = bool(holdout_mdd <= mdd_cap)
     return [
         CheckResult(
             "H1_HOLDOUT_GROWTH",
@@ -506,14 +502,6 @@ def _holdout_checks(inputs: EvaluationInputs, criteria: EvaluationCriteria) -> l
             h1,
             holdout_growth,
             f">= {growth_floor:.6f}",
-            "A short holdout cannot prove edge; it can show the strategy did not break after design.",
-        ),
-        CheckResult(
-            "H2_HOLDOUT_DRAWDOWN",
-            "holdout",
-            h2,
-            holdout_mdd,
-            f"<= {mdd_cap:.6f}",
             "A short holdout cannot prove edge; it can show the strategy did not break after design.",
         ),
     ]
@@ -537,9 +525,10 @@ def evaluate_strategy(inputs: EvaluationInputs, criteria: EvaluationCriteria) ->
                 CheckResult("R2_FUNDING_DEPENDENCE", "robustness", None, None, "> 0", ""),
                 CheckResult("R3_PLATEAU", "robustness", None, None, "plateau", ""),
                 CheckResult("R4_CAPACITY", "robustness", None, None, f"<= {criteria.max_participation_p95}", ""),
-                CheckResult("K1_ENVELOPE", "risk", None, None, "envelope", ""),
+                CheckResult("G1_GROWTH_LCB", "growth", None, None, "> 0", ""),
+                CheckResult("G2_NOT_OVERBET", "growth", None, None, ">= 0", ""),
+                CheckResult("S1_SURVIVAL", "survival", None, None, "== 0", ""),
                 CheckResult("H1_HOLDOUT_GROWTH", "holdout", None, None, "holdout", ""),
-                CheckResult("H2_HOLDOUT_DRAWDOWN", "holdout", None, None, "holdout", ""),
             )
         ]
         return StrategyEvaluation(
@@ -554,9 +543,10 @@ def evaluate_strategy(inputs: EvaluationInputs, criteria: EvaluationCriteria) ->
         )
     edge = _edge_checks(inputs, criteria)
     robustness = _robustness_checks(inputs, criteria)
-    risk = [_risk_check(inputs, criteria)]
+    growth = _growth_checks(inputs, criteria)
+    survival = [_survival_check(inputs)]
     holdout_checks = _holdout_checks(inputs, criteria)
-    checks = integrity + edge + robustness + risk + holdout_checks
+    checks = integrity + edge + robustness + growth + survival + holdout_checks
     discovery_days = int(inputs.base_returns.size)
     holdout_days = 0 if inputs.holdout_returns is None else int(inputs.holdout_returns.size)
     thin_data = (
@@ -568,7 +558,7 @@ def evaluate_strategy(inputs: EvaluationInputs, criteria: EvaluationCriteria) ->
     )
     if thin_data:
         verdict = Verdict.INCONCLUSIVE
-    elif any(check.passed is False for check in edge + robustness + risk + holdout_checks):
+    elif any(check.passed is False for check in edge + robustness + growth + survival + holdout_checks):
         verdict = Verdict.REJECT
     else:
         verdict = Verdict.ACCEPT

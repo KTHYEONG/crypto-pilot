@@ -72,12 +72,18 @@ def _good_inputs(**overrides) -> EvaluationInputs:
         "lake_coverage_ok": True,
         "causality_ok": True,
         "deployed_returns": _series(deployed, DISCOVERY_START),
+        "deployed_stress_returns": _series(deployed - 0.0001, DISCOVERY_START),
+        "deployed_liquidated": False,
+        "deployed_stress_liquidated": False,
+        "deployed_margin_breaches": 0,
         "deployed_max_leverage": 1.0,
         "neighbors": neighbors,
         "trial_population": _population(base),
         "holdout_returns": _series(holdout, HOLDOUT_START),
     }
     params.update(overrides)
+    if "deployed_returns" in overrides and "deployed_stress_returns" not in overrides:
+        params["deployed_stress_returns"] = overrides["deployed_returns"].copy()
     if "funding_by_symbol" in overrides:
         params["funding_income_daily"] = pd.DataFrame({symbol: np.full(len(params["stress_returns"]), income / len(params["stress_returns"])) for symbol, income in overrides["funding_by_symbol"].items()}, index=params["stress_returns"].index)
     else:
@@ -179,7 +185,7 @@ def test_integrity_failure_short_circuits() -> None:
     result = evaluate_strategy(_good_inputs(ledger_certified=False), EvaluationCriteria())
     assert result.verdict == Verdict.INVALID
     assert _code(result, "E1_DSR").passed is None
-    assert _code(result, "K1_ENVELOPE").passed is None
+    assert _code(result, "G1_GROWTH_LCB").passed is None
 
 
 def test_holdout_break_rejected() -> None:
@@ -245,7 +251,7 @@ def test_bootstrap_different_horizon_and_initial_loss() -> None:
     assert paths.shape == (10, 1095)
     assert np.array_equal(paths, np.full((10, 1095), -0.01))
     result = evaluate_strategy(_good_inputs(deployed_returns=_series(values, DISCOVERY_START)), EvaluationCriteria())
-    assert _code(result, "K1_ENVELOPE").passed is False
+    assert _code(result, "G1_GROWTH_LCB").passed is False
 
 
 def test_constant_returns_rejected_without_sharpe() -> None:
@@ -324,12 +330,15 @@ def test_empty_trial_population_raises() -> None:
 
 
 def test_unknown_risk_envelope_raises() -> None:
-    """An unregistered envelope fails closed instead of silently passing risk."""
+    """Retired criteria keys fail closed instead of silently passing risk."""
     import dataclasses
 
-    criteria = dataclasses.replace(EvaluationCriteria(), risk_envelope="nope")
-    with pytest.raises(DataIntegrityError, match="unknown risk envelope"):
-        evaluate_strategy(_good_inputs(), criteria)
+    from src.strategy.release import _parse_criteria
+
+    with pytest.raises(DataIntegrityError, match="retired key"):
+        _parse_criteria({**dataclasses.asdict(EvaluationCriteria()), "risk_envelope": "growth"})
+    with pytest.raises(DataIntegrityError, match="retired key"):
+        _parse_criteria({**dataclasses.asdict(EvaluationCriteria()), "holdout_drawdown_max_quantile": 0.95})
 
 
 def test_input_guards_reject_malformed_inputs() -> None:
@@ -393,6 +402,12 @@ def test_input_guards_reject_malformed_inputs() -> None:
             base_returns=_series(np.append(good.base_returns.to_numpy(dtype="float64"), [-2.0]),
                                  DISCOVERY_START).iloc[: N_DISCOVERY + 1],
         ),
+        dataclasses.replace(good, deployed_stress_returns=good.deployed_stress_returns.iloc[::-1]),
+        dataclasses.replace(good, deployed_stress_returns=good.deployed_returns.iloc[:100]),
+        dataclasses.replace(good, deployed_liquidated=1),  # type: ignore[arg-type]
+        dataclasses.replace(good, deployed_stress_liquidated="false"),  # type: ignore[arg-type]
+        dataclasses.replace(good, deployed_margin_breaches=True),  # type: ignore[arg-type]
+        dataclasses.replace(good, deployed_margin_breaches=-1),
     ]
     for inputs in cases:
         with pytest.raises(DataIntegrityError, match=r".+"):
@@ -448,3 +463,62 @@ def test_r4_missing_participation_fails_closed() -> None:
     check = _code(result, "R4_CAPACITY")
     assert check.passed is False
     assert "participation not recorded" in check.reason
+
+
+@pytest.mark.parametrize(("daily", "passed"), [(0.002, True), (-0.002, False)])
+def test_deployed_growth_floor_and_sizing(daily, passed) -> None:
+    returns = _series(np.full(N_DISCOVERY, daily), DISCOVERY_START)
+    result = evaluate_strategy(_good_inputs(deployed_stress_returns=returns), EvaluationCriteria())
+    growth = _code(result, "G1_GROWTH_LCB")
+    assert growth.value == pytest.approx(365 * np.log1p(daily))
+    assert growth.passed is passed
+    assert _code(result, "G2_NOT_OVERBET").passed is passed
+    assert result.verdict == (Verdict.ACCEPT if passed else Verdict.REJECT)
+
+
+def test_deployed_wipeout_stays_in_growth_distribution() -> None:
+    returns = _series(np.full(N_DISCOVERY, 0.001), DISCOVERY_START)
+    returns.iloc[100] = -1.0
+    result = evaluate_strategy(_good_inputs(deployed_stress_returns=returns), EvaluationCriteria())
+    assert _code(result, "G1_GROWTH_LCB").value == float("-inf")
+    assert _code(result, "G1_GROWTH_LCB").passed is False
+    assert _code(result, "G2_NOT_OVERBET").value == float("-inf")
+    assert result.verdict == Verdict.REJECT
+
+
+def test_high_variance_overbet_fails_growth_comparison() -> None:
+    returns = _series(np.tile([0.32, -0.28], N_DISCOVERY // 2), DISCOVERY_START)
+    result = evaluate_strategy(_good_inputs(deployed_stress_returns=returns), EvaluationCriteria())
+    assert _code(result, "G2_NOT_OVERBET").value < 0
+    assert _code(result, "G2_NOT_OVERBET").passed is False
+    assert result.verdict == Verdict.REJECT
+
+
+@pytest.mark.parametrize("overrides", [
+    {"deployed_liquidated": True}, {"deployed_stress_liquidated": True},
+    {"deployed_margin_breaches": 1},
+])
+def test_survival_fails_despite_positive_growth(overrides) -> None:
+    result = evaluate_strategy(_good_inputs(**overrides), EvaluationCriteria())
+    assert _code(result, "G1_GROWTH_LCB").passed is True
+    assert _code(result, "G2_NOT_OVERBET").passed is True
+    assert _code(result, "S1_SURVIVAL").passed is False
+    assert result.verdict == Verdict.REJECT
+
+
+def test_high_drawdown_and_leverage_are_not_verdict_gates() -> None:
+    returns = _series(np.full(N_DISCOVERY, 0.01), DISCOVERY_START)
+    returns.iloc[100] = -0.65
+    paths = standard._bootstrap_paths(returns.to_numpy(), 1095, 200, standard.REPORT_BOOTSTRAP_SEED)
+    equity = np.cumprod(1 + paths, axis=1)
+    peak = np.maximum.accumulate(np.maximum(equity, 1), axis=1)
+    probability = np.mean((1 - equity / peak).max(axis=1) > 0.6)
+    assert 0.3 < probability < 0.7
+    result = evaluate_strategy(
+        _good_inputs(deployed_stress_returns=returns, deployed_max_leverage=10), EvaluationCriteria(),
+    )
+    assert result.verdict == Verdict.ACCEPT
+    assert {c.code for c in result.checks}.isdisjoint({"K1_ENVELOPE", "H2_HOLDOUT_DRAWDOWN"})
+    invalid = evaluate_strategy(_good_inputs(ledger_certified=False), EvaluationCriteria())
+    for code in ("G1_GROWTH_LCB", "G2_NOT_OVERBET", "S1_SURVIVAL"):
+        assert _code(invalid, code).passed is None

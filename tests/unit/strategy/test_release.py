@@ -142,7 +142,10 @@ def test_criteria_reject_nonfinite_and_coerced_thresholds() -> None:
     import dataclasses
 
     for overrides in ({"dsr_min": float("nan")}, {"min_holdout_days": 1},
-                      {"max_top5_funding_dependence": "false"}):
+                      {"max_top5_funding_dependence": "false"},
+                      {"growth_horizon_years": 0.5}, {"growth_horizon_years": 11.0},
+                      {"growth_horizon_years": float("nan")}, {"overbet_probe_scale": 0.0},
+                      {"overbet_probe_scale": 1.0}, {"overbet_probe_scale": float("inf")}):
         with pytest.raises(DataIntegrityError):
             dataclasses.replace(EvaluationCriteria(), **overrides)
 
@@ -159,6 +162,15 @@ def test_criteria_digest_covers_withdrawn_seat_fraction() -> None:
             dataclasses.replace(EvaluationCriteria(), max_withdrawn_seat_fraction=bad)
 
 
+@pytest.mark.parametrize("overrides", [{"growth_horizon_years": 4.0}, {"overbet_probe_scale": 0.5}])
+def test_criteria_digest_covers_growth_policy(overrides) -> None:
+    import dataclasses
+
+    assert criteria_digest(EvaluationCriteria()) != criteria_digest(
+        dataclasses.replace(EvaluationCriteria(), **overrides)
+    )
+
+
 def test_release_without_seat_fraction_key_fails_closed(tmp_path) -> None:
     """A release lacking the fraction key raises instead of taking a silent default."""
     raw = json.loads(release_path("flow_mom_top20").read_text(encoding="utf-8"))
@@ -170,14 +182,19 @@ def test_release_without_seat_fraction_key_fails_closed(tmp_path) -> None:
         load_release("flow_mom_top20", root=tmp_path / "root")
 
 
-def test_release_envelope_mismatch_fails_closed(tmp_path) -> None:
-    """A release whose envelope differs from the registered sizing cap fails to load."""
+@pytest.mark.parametrize("retired", ["risk_envelope", "criteria.risk_envelope", "criteria.holdout_drawdown_max_quantile"])
+def test_release_envelope_mismatch_fails_closed(tmp_path, retired) -> None:
+    """A release carrying any retired envelope key fails to load."""
     raw = json.loads(release_path("flow_mom_top20").read_text(encoding="utf-8"))
-    raw["risk_envelope"] = "growth"
+    if retired.startswith("criteria."):
+        raw["criteria"][retired.removeprefix("criteria.")] = "growth"
+    else:
+        raw[retired] = "growth"
+    raw["criteria_digest"] = "stale"
     target = tmp_path / "root" / "src" / "strategy" / "releases"
     target.mkdir(parents=True)
     (target / "flow_mom_top20.json").write_text(json.dumps(raw), encoding="utf-8")
-    with pytest.raises(DataIntegrityError, match="risk envelope"):
+    with pytest.raises(DataIntegrityError, match="retired key"):
         load_release("flow_mom_top20", root=tmp_path / "root")
 
 
@@ -285,12 +302,21 @@ def _write_identity_account(run_dir, *, capital: float, start: str = "2025-01-01
     pd.DataFrame({"equity": equity, "exposure": np.full(n, 1.2)}, index=index).to_parquet(
         run_dir / "account_daily.parquet"
     )
+    pd.DataFrame({"equity": equity * 0.999, "exposure": np.full(n, 1.1)}, index=index).to_parquet(
+        run_dir / "account_stress_daily.parquet"
+    )
     (run_dir / "account.json").write_text(
         json.dumps({
             "capital": capital,
             "execution": {"mode": "maker"},
             "evaluation_start": index[0].isoformat(),
             "evaluation_end": (index[-1] + pd.Timedelta(days=1)).isoformat(),
+            "cagr": 0.3,
+            "mdd": -0.1,
+            "mean_exposure": 1.2,
+            "liquidated_at": None,
+            "initial_margin_breaches": 0,
+            "stress_execution": {"liquidated_at": None},
         }),
         encoding="utf-8",
     )
