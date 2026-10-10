@@ -370,7 +370,7 @@ def _robustness_checks(inputs: EvaluationInputs, criteria: EvaluationCriteria) -
     if participation.size:
         p95 = float(np.quantile(participation, 0.95)) * float(inputs.participation_scale_to_deployed)
         r4_passed: bool | None = bool(p95 <= criteria.max_participation_p95)
-        r4_reason = "Fills must be plausible at the capital that will trade."
+        r4_reason = "Orders must be a small share of causal ADV at the capital that will trade."
     else:
         p95 = None
         r4_passed = False
