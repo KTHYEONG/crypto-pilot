@@ -456,3 +456,178 @@ def test_daily_fill_participation_takes_utc_day_maximum() -> None:
     assert out.loc[day3] == 0.001
     assert bool(np.isfinite(out.to_numpy(dtype="float64")).all())
     assert bool((out.to_numpy(dtype="float64") >= 0.0).all())
+
+
+def _adv_fills(day: pd.Timestamp) -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "timestamp": [day + pd.Timedelta(hours=1), day + pd.Timedelta(hours=2), day + pd.Timedelta(hours=3)],
+            "symbol": ["AAA", "AAA", "AAA"],
+            "quantity_delta": [10.0, 40.0, 20.0],
+            "fill_price": [100.0, 100.0, 100.0],
+            "reason": ["rebalance", "rebalance", "rebalance"],
+        }
+    )
+
+
+def test_adv_participation_ignores_same_day_volume() -> None:
+    """Scaling day-D quote volume leaves day-D participation unchanged."""
+    from src.engine.backtest_evidence import daily_adv_participation
+    from src.strategy.liquidity import causal_adv_sigma
+
+    days = pd.date_range("2021-01-01", periods=40, freq="D", tz="UTC")
+    quote = pd.DataFrame({"AAA": np.arange(1, 41) * 1_000_000.0}, index=days)
+    close = pd.DataFrame(100.0, index=days, columns=["AAA"], dtype="float64")
+    day = days[35]
+    quote.loc[day, "AAA"] = 1_000_000.0
+    adv, _ = causal_adv_sigma(quote, close)
+    fills = _adv_fills(day)
+    before, unknown = daily_adv_participation(fills, adv)
+    quote.loc[day, "AAA"] *= 1000.0
+    adv_after, _ = causal_adv_sigma(quote, close)
+    after, unknown_after = daily_adv_participation(fills, adv_after)
+    assert unknown == 0
+    assert unknown_after == 0
+    pd.testing.assert_series_equal(before, after)
+    assert adv.loc[day + pd.Timedelta(days=1), "AAA"] != adv_after.loc[day + pd.Timedelta(days=1), "AAA"]
+
+
+def test_adv_participation_takes_day_maximum() -> None:
+    """Three fills at 0.0001/0.0004/0.0002 read 0.0004; fill-free days read 0.0."""
+    from src.engine.backtest_evidence import daily_adv_participation
+
+    day = pd.Timestamp("2025-01-01", tz="UTC")
+    adv = pd.DataFrame(
+        {"AAA": [10_000_000.0, 10_000_000.0, 10_000_000.0]},
+        index=pd.date_range("2024-12-31", periods=3, freq="D", tz="UTC"),
+        dtype="float64",
+    )
+    fills = pd.concat([_adv_fills(day), _adv_fills(day + pd.Timedelta(days=2))], ignore_index=True)
+    adv = adv.reindex(pd.date_range(day, periods=3, freq="D", tz="UTC"), fill_value=10_000_000.0)
+    series, unknown = daily_adv_participation(fills, adv)
+    assert unknown == 0
+    assert series.loc[day] == pytest.approx(0.0004)
+    assert series.loc[day + pd.Timedelta(days=1)] == 0.0
+    assert series.loc[day + pd.Timedelta(days=2)] == pytest.approx(0.0004)
+    assert series.dtype == "float64"
+
+
+def test_adv_participation_excludes_settlement() -> None:
+    """A huge settlement fill changes neither the series nor the unknown count."""
+    from src.engine.backtest_evidence import daily_adv_participation
+
+    day = pd.Timestamp("2025-01-01", tz="UTC")
+    adv = pd.DataFrame(
+        {"AAA": [10_000_000.0]},
+        index=pd.DatetimeIndex([day], tz="UTC"),
+        dtype="float64",
+    )
+    fills = pd.DataFrame(
+        {
+            "timestamp": [day + pd.Timedelta(hours=1)],
+            "symbol": ["AAA"],
+            "quantity_delta": [1e9],
+            "fill_price": [100.0],
+            "reason": ["delist_settlement"],
+        }
+    )
+    series, unknown = daily_adv_participation(fills, adv)
+    assert unknown == 0
+    assert series.loc[day] == 0.0
+
+
+def test_adv_participation_counts_unknown() -> None:
+    """Absent symbols and NaN ADV count unknown and read 0.0."""
+    from src.engine.backtest_evidence import daily_adv_participation
+
+    day = pd.Timestamp("2025-01-01", tz="UTC")
+    adv = pd.DataFrame(
+        {"AAA": [float("nan")]},
+        index=pd.DatetimeIndex([day], tz="UTC"),
+        dtype="float64",
+    )
+    fills = pd.DataFrame(
+        {
+            "timestamp": [day + pd.Timedelta(hours=1), day + pd.Timedelta(hours=2)],
+            "symbol": ["BBB", "AAA"],
+            "quantity_delta": [1.0, 1.0],
+            "fill_price": [100.0, 100.0],
+            "reason": ["rebalance", "rebalance"],
+        }
+    )
+    series, unknown = daily_adv_participation(fills, adv)
+    assert unknown == 2
+    assert float(series.loc[day]) == 0.0
+
+
+def test_adv_participation_treats_nonpositive_adv_as_unknown() -> None:
+    """Zero ADV counts unknown without dividing by zero."""
+    from src.engine.backtest_evidence import daily_adv_participation
+
+    day = pd.Timestamp("2025-01-01", tz="UTC")
+    adv = pd.DataFrame(
+        {"AAA": [0.0]},
+        index=pd.DatetimeIndex([day], tz="UTC"),
+        dtype="float64",
+    )
+    fills = pd.DataFrame(
+        {
+            "timestamp": [day + pd.Timedelta(hours=1)],
+            "symbol": ["AAA"],
+            "quantity_delta": [5.0],
+            "fill_price": [100.0],
+            "reason": ["rebalance"],
+        }
+    )
+    series, unknown = daily_adv_participation(fills, adv)
+    assert unknown == 1
+    assert bool(np.isfinite(series.to_numpy(dtype="float64")).all())
+    assert float(series.loc[day]) == 0.0
+
+
+def test_adv_participation_empty_fills() -> None:
+    """Empty fills return an empty series and zero unknown."""
+    from src.engine.backtest_evidence import daily_adv_participation
+
+    series, unknown = daily_adv_participation(
+        pd.DataFrame(), pd.DataFrame(dtype="float64")
+    )
+    assert len(series) == 0
+    assert series.dtype == "float64"
+    assert unknown == 0
+
+
+@pytest.mark.parametrize("price", [-100.0, float("nan"), float("inf")])
+def test_adv_participation_rejects_invalid_notional(price: float) -> None:
+    day = pd.Timestamp("2025-01-01", tz="UTC")
+    fills = _adv_fills(day)
+    fills.loc[0, "fill_price"] = price
+    adv = pd.DataFrame({"AAA": [1_000_000.0]}, index=[day])
+    with pytest.raises(DataIntegrityError, match="finite and non-negative"):
+        evidence_mod.daily_adv_participation(fills, adv)
+
+
+def test_adv_participation_counts_absent_day_and_preserves_settlement_span() -> None:
+    day = pd.Timestamp("2025-01-01", tz="UTC")
+    fills = _adv_fills(day)
+    fills.loc[0, "timestamp"] = day - pd.Timedelta(days=2)
+    fills.loc[0, "reason"] = "delist_settlement"
+    fills.loc[0, "symbol"] = "UNKNOWN"
+    fills.loc[2, "timestamp"] = day + pd.Timedelta(days=2)
+    adv = pd.DataFrame({"AAA": [10_000_000.0]}, index=[day])
+    series, unknown = evidence_mod.daily_adv_participation(fills, adv)
+    assert unknown == 1
+    assert series.index.equals(pd.date_range(day - pd.Timedelta(days=2), periods=5, tz="UTC"))
+    assert series.tolist() == pytest.approx([0.0, 0.0, 0.0004, 0.0, 0.0])
+
+
+def test_adv_participation_normalizes_timezone_and_rejects_nat() -> None:
+    day = pd.Timestamp("2025-01-01", tz="UTC")
+    fills = _adv_fills(day.tz_convert("Asia/Seoul"))
+    adv = pd.DataFrame({"AAA": [10_000_000.0]}, index=[day])
+    series, unknown = evidence_mod.daily_adv_participation(fills, adv)
+    assert unknown == 0
+    assert series.loc[day] == pytest.approx(0.0004)
+    fills.loc[0, "timestamp"] = pd.NaT
+    with pytest.raises(DataIntegrityError, match="valid UTC days"):
+        evidence_mod.daily_adv_participation(fills, adv)

@@ -405,6 +405,41 @@ def test_daily_frame_reports_max_name_weight() -> None:
     assert bool(np.allclose(frame["max_name_weight"].to_numpy(), 0.05))
 
 
+def test_adv_column_persisted_beside_single_bar_column(tmp_path: Path) -> None:
+    """A run with daily ADV writes both participation columns and the basis."""
+    import numpy as np
+
+    run = _run()
+    days = run.evidence.base_daily.returns.index
+    adv = pd.DataFrame(10_000_000.0, index=days, columns=list(_SYMBOLS), dtype="float64")
+    tagged = dataclasses.replace(run, daily_adv=adv)
+    frame = strategy_daily_frame(tagged)
+    assert "fill_adv_participation" in frame.columns
+    assert frame.columns.get_loc("fill_adv_participation") == frame.columns.get_loc("fill_participation") + 1
+    assert str(frame["fill_adv_participation"].dtype) == "float64"
+    assert bool(np.isfinite(frame["fill_adv_participation"].to_numpy(dtype="float64")).all())
+    payload = strategy_backtest_payload(tagged)
+    assert payload["participation_basis"] == "adv30_median_prior_day"
+    assert type(payload["participation_adv_unknown_fills"]) is int
+    json.dumps(payload)
+    persist_strategy_backtest(tagged, tmp_path / "result.json")
+    pd.testing.assert_frame_equal(pd.read_parquet(tmp_path / "daily.parquet"), frame)
+    stored = json.loads((tmp_path / "result.json").read_text(encoding="utf-8"))
+    assert stored["participation_basis"] == "adv30_median_prior_day"
+    assert stored["participation_adv_unknown_fills"] == payload["participation_adv_unknown_fills"]
+
+
+def test_missing_adv_leaves_column_absent() -> None:
+    """A hand-built run without ADV has no ADV column and no basis key."""
+    run = _run()
+    assert run.daily_adv is None
+    frame = strategy_daily_frame(run)
+    assert "fill_adv_participation" not in frame.columns
+    payload = strategy_backtest_payload(run)
+    assert "fill_adv_participation" not in frame.columns
+    assert "participation_basis" not in payload
+
+
 def test_payload_counts_announcement_sources_for_census() -> None:
     """Replayed census records are counted by announcement source; others are ignored."""
     from src.core.instrument_settlements import (

@@ -15,7 +15,7 @@ import pandas as pd
 
 from src.common.errors import DataIntegrityError
 from src.core.types import JsonValue
-from src.engine.backtest_evidence import daily_fill_participation
+from src.engine.backtest_evidence import daily_adv_participation, daily_fill_participation
 from src.engine.execution.integrity import replay_ledger_certified
 from src.engine.strategy_backtest import StrategyBacktestRun
 
@@ -167,6 +167,11 @@ def strategy_backtest_payload(
         "report_periods": cast(JsonValue, periods),
         "research_only": True,
     }
+    daily_adv = run.daily_adv
+    if daily_adv is not None:
+        _, unknown_fills = daily_adv_participation(evidence.base.simulated_fills, daily_adv)
+        payload["participation_basis"] = "adv30_median_prior_day"
+        payload["participation_adv_unknown_fills"] = int(unknown_fills)
     if statistics is not None:
         payload["statistics"] = cast(JsonValue, dict(statistics))
     json.dumps(payload)
@@ -228,6 +233,12 @@ def strategy_daily_frame(run: StrategyBacktestRun) -> pd.DataFrame:
     frame["max_name_weight"] = max_name.reindex(days, fill_value=0.0)
     frame["fill_participation"] = daily_fill_participation(run.evidence.base.simulated_fills).reindex(
         days, fill_value=0.0).astype("float64")
+    adv_columns: list[str] = []
+    daily_adv = run.daily_adv
+    if daily_adv is not None:
+        adv_series, _ = daily_adv_participation(run.evidence.base.simulated_fills, daily_adv)
+        frame["fill_adv_participation"] = adv_series.reindex(days, fill_value=0.0).astype("float64")
+        adv_columns = ["fill_adv_participation"]
     funding_columns = [column for column in frame if column.startswith("stress_funding_income_")]
     frame = frame[
         [
@@ -237,6 +248,7 @@ def strategy_daily_frame(run: StrategyBacktestRun) -> pd.DataFrame:
             "base_turnover", "stress_turnover",
             "base_funding", "stress_funding", "target_gross", "max_name_weight",
             "fill_participation",
+            *adv_columns,
             *funding_columns,
         ]
     ].astype("float64")

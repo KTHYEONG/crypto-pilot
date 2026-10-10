@@ -41,6 +41,7 @@ from src.engine.backtest_evidence import (
 from src.engine.execution import ExecutionReplayWindow, live_required_symbols
 from src.engine.execution.batch import _LiveAccumulatorSets
 from src.engine.execution.window_stream import _iter_mhs_execution_windows
+from src.strategy.liquidity import causal_adv_sigma
 from src.strategy.targets import (
     MemberSnapshotCache,
     StrategySpec,
@@ -201,6 +202,7 @@ class StrategyBacktestRun:
     data_availability_withdrawals: tuple[Mapping[str, object], ...] = ()
     roster_seat_days: int = 0
     settlement_registry: InstrumentSettlementRegistry = EMPTY_SETTLEMENT_REGISTRY
+    daily_adv: pd.DataFrame | None = None
 
 
 class LakeCoverageError(DataIntegrityError):
@@ -695,4 +697,5 @@ def run_strategy_backtest(
         data_availability_withdrawals=withdrawals,
         roster_seat_days=seats,
         settlement_registry=settlement_registry,
+        daily_adv=causal_adv_sigma(context.daily_quote_volume, context.daily_close)[0],
     )

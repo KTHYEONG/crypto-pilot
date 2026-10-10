@@ -53,6 +53,7 @@ def _write_unit_run(
         "source_gap_excluded_count": 0,
         "roster_seat_days": 40000,
         "participation_scale": 100000.0,
+        "participation_basis": "adv30_median_prior_day",
         "data_availability_withdrawals": [],
         "limitations": [],
         "report_periods": {"evaluation": evaluation},
@@ -92,7 +93,7 @@ def test_build_inputs_from_run_directories(tmp_path) -> None:
     unit, account, neighbor = tmp_path / "unit", tmp_path / "acct", tmp_path / "nb0"
     _write_unit_run(unit)
     daily = pd.read_parquet(unit / "daily.parquet")
-    daily["fill_participation"] = 0.004
+    daily["fill_adv_participation"] = 0.004
     daily.to_parquet(unit / "daily.parquet")
     _write_account_run(account)
     _write_unit_run(neighbor, n=100)
@@ -346,11 +347,74 @@ def test_recorded_participation_requires_recorded_scale(tmp_path) -> None:
     _write_unit_run(unit)
     _write_account_run(account)
     daily = pd.read_parquet(unit / "daily.parquet")
-    daily["fill_participation"] = 0.0002
+    daily["fill_adv_participation"] = 0.0002
     daily.to_parquet(unit / "daily.parquet")
     _rewrite_unit_payload(unit, participation_scale=None)
     with pytest.raises(DataIntegrityError, match="participation scale not recorded"):
         evaluate_mod.build_evaluation_inputs(strategy_id="flow_mom_top20", unit_run=unit, account_run=account)
+
+
+def test_r4_reads_adv_column(tmp_path) -> None:
+    """R4 scales the ADV column p95, ignoring the single-bar column."""
+    unit, account = tmp_path / "unit", tmp_path / "account"
+    _write_unit_run(unit, n=800, start="2023-01-01")
+    _write_account_run(account, n=800, start="2023-01-01")
+    daily = pd.read_parquet(unit / "daily.parquet")
+    daily["fill_adv_participation"] = 0.0002
+    daily["fill_participation"] = 0.2
+    daily.to_parquet(unit / "daily.parquet")
+    inputs = evaluate_mod.build_evaluation_inputs(
+        strategy_id="flow_mom_top20", unit_run=unit, account_run=account,
+    )
+    assert float(inputs.participation.max()) == pytest.approx(0.0002)
+    import dataclasses
+
+    inputs = dataclasses.replace(inputs, ledger_certified=True, book_identity_ok=True)
+    evaluation = standard_mod.evaluate_strategy(inputs, load_release("flow_mom_top20").criteria)
+    r4 = next(check for check in evaluation.checks if check.code == "R4_CAPACITY")
+    assert inputs.participation_scale_to_deployed == pytest.approx(2100.0 * 3.0 / 100000.0)
+    assert r4.value == pytest.approx(0.0002 * 2100.0 * 3.0 / 100000.0)
+    assert r4.passed is True
+
+
+def test_old_run_without_adv_column_fails_closed(tmp_path) -> None:
+    """A unit run without the ADV column records no participation."""
+    unit, account = tmp_path / "unit", tmp_path / "account"
+    _write_unit_run(unit, n=800, start="2023-01-01")
+    _write_account_run(account, n=800, start="2023-01-01")
+    daily = pd.read_parquet(unit / "daily.parquet")
+    daily["fill_participation"] = 0.2
+    daily.to_parquet(unit / "daily.parquet")
+    inputs = evaluate_mod.build_evaluation_inputs(
+        strategy_id="flow_mom_top20", unit_run=unit, account_run=account,
+    )
+    assert inputs.participation.empty
+    import dataclasses
+
+    inputs = dataclasses.replace(inputs, ledger_certified=True, book_identity_ok=True)
+    evaluation = standard_mod.evaluate_strategy(inputs, load_release("flow_mom_top20").criteria)
+    r4 = next(check for check in evaluation.checks if check.code == "R4_CAPACITY")
+    assert r4.passed is False
+    assert r4.reason == "participation not recorded"
+
+
+@pytest.mark.parametrize("basis", [None, "trailing_24h"])
+def test_basis_mismatch_rejected(tmp_path, basis) -> None:
+    """A unit result without the recorded basis cannot be evaluated."""
+    from src.common.errors import DataIntegrityError
+
+    unit, account = tmp_path / "unit", tmp_path / "account"
+    _write_unit_run(unit)
+    _write_account_run(account)
+    raw = json.loads((unit / "result.json").read_text(encoding="utf-8"))
+    del raw["participation_basis"]
+    if basis is not None:
+        raw["participation_basis"] = basis
+    (unit / "result.json").write_text(json.dumps(raw), encoding="utf-8")
+    with pytest.raises(DataIntegrityError, match="participation basis mismatch"):
+        evaluate_mod.build_evaluation_inputs(
+            strategy_id="flow_mom_top20", unit_run=unit, account_run=account,
+        )
 
 
 def test_neighbor_exclusion_and_withdrawal_are_included(tmp_path) -> None:
