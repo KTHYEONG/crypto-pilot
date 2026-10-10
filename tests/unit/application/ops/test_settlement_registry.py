@@ -532,3 +532,143 @@ def test_halt_writer_creates_parents_and_cleans_failed_replace(tmp_path, monkeyp
     with pytest.raises(OSError, match="boom"):
         write_venue_halt_registry(registry, tmp_path / "other.jsonl")
     assert not (tmp_path / "other.jsonl").exists()
+
+
+def _patch_notices(monkeypatch, notices) -> None:
+    import src.application.ops.settlement_registry as reg_mod
+
+    monkeypatch.setattr(reg_mod, "load_delisting_notices", lambda: tuple(notices))
+
+
+def _notice(code: str, release_at: pd.Timestamp, symbols: tuple[str, ...]) -> object:
+    from src.core.delisting_announcements import DelistingNotice
+
+    return DelistingNotice(
+        code=code, title=f"Binance will delist {code}", release_at=release_at,
+        kind="delist", symbols=symbols,
+    )
+
+
+_ABRUPT_LAST_TRADE = T0 + STEP * 10
+
+
+def test_evidence_beats_proxy(monkeypatch) -> None:
+    import tempfile
+    from pathlib import Path
+
+    release = _ABRUPT_LAST_TRADE - pd.Timedelta(days=5)
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        _lake(root)
+        _patch_notices(monkeypatch, [_notice("C7", release, ("ABRUPTUSDT",))])
+        build = _build(root)
+    assert not build.unresolved
+    record = build.registry.settlements_for("ABRUPTUSDT")[0]
+    assert record.announcement_source == "binance_cms"
+    assert record.announced_at == release
+    assert record.announcement_evidence.startswith("binance-cms:C7|")
+    assert build.announcements.binance_cms == 1
+
+
+def test_curated_override_wins_over_evidence(monkeypatch, tmp_path) -> None:
+    import dataclasses
+
+    _patch_notices(monkeypatch, ())
+    _lake(tmp_path)
+    first = _build(tmp_path)
+    victim = first.registry.settlements_for("ABRUPTUSDT")[0]
+    curated = dataclasses.replace(
+        victim,
+        announcement_source="curated",
+        announced_at=victim.last_trade_at - pd.Timedelta(days=2),
+        announcement_evidence="Binance notice: real announcement",
+    )
+    existing = assemble_instrument_settlement_registry(
+        [r for r in first.registry.settlements if r.symbol != "ABRUPTUSDT"] + [curated], [],
+    )
+    release = _ABRUPT_LAST_TRADE - pd.Timedelta(days=5)
+    _patch_notices(monkeypatch, [_notice("C7", release, ("ABRUPTUSDT",))])
+    second = _build(tmp_path, existing=existing)
+    kept = second.registry.settlements_for("ABRUPTUSDT")[0]
+    assert kept.announcement_source == "curated"
+    assert kept.announced_at == curated.announced_at
+    assert kept.announcement_evidence == "Binance notice: real announcement"
+
+
+def test_no_notice_falls_back_to_proxy(monkeypatch, tmp_path) -> None:
+    _patch_notices(monkeypatch, ())
+    _lake(tmp_path)
+    build = _build(tmp_path)
+    assert not build.unresolved
+    for record in build.registry.settlements:
+        assert record.announcement_source == "proxy_lead"
+        assert record.announced_at == record.last_trade_at - pd.Timedelta(days=7)
+    assert build.announcements.proxy_lead == 2
+    assert build.announcements.unmatched == ("ABRUPTUSDT", "FLATUSDT")
+
+
+def test_post_last_trade_notice_is_reported(monkeypatch, tmp_path) -> None:
+    release = _ABRUPT_LAST_TRADE + pd.Timedelta(hours=1)
+    _patch_notices(monkeypatch, [_notice("C9", release, ("ABRUPTUSDT",))])
+    _lake(tmp_path)
+    build = _build(tmp_path)
+    record = build.registry.settlements_for("ABRUPTUSDT")[0]
+    assert record.announcement_source == "proxy_lead"
+    flagged = [symbol for symbol, _reason in build.announcements.after_last_trade]
+    assert "ABRUPTUSDT" in flagged
+    assert "ABRUPTUSDT" in build.announcements.unmatched
+
+
+def test_announcement_build_is_idempotent(monkeypatch, tmp_path) -> None:
+    from src.core.instrument_settlements import settlement_registry_jsonl
+
+    release = _ABRUPT_LAST_TRADE - pd.Timedelta(days=5)
+    _patch_notices(monkeypatch, [_notice("C7", release, ("ABRUPTUSDT",))])
+    _lake(tmp_path)
+    first = _build(tmp_path)
+    second = _build(tmp_path, existing=first.registry)
+    assert second.changed == ()
+    assert settlement_registry_jsonl(second.registry) == settlement_registry_jsonl(first.registry)
+
+
+def test_price_fields_untouched_by_announcements(monkeypatch, tmp_path) -> None:
+    _patch_notices(monkeypatch, ())
+    _lake(tmp_path)
+    before = _build(tmp_path)
+    release = _ABRUPT_LAST_TRADE - pd.Timedelta(days=5)
+    _patch_notices(monkeypatch, [_notice("C7", release, ("ABRUPTUSDT",))])
+    after = _build(tmp_path, existing=before.registry)
+    event_ms = int(_ABRUPT_LAST_TRADE.value // 1_000_000)
+    assert after.changed == (f"ABRUPTUSDT:{event_ms}",)
+    for symbol in ("ABRUPTUSDT", "FLATUSDT"):
+        old = before.registry.settlements_for(symbol)[0]
+        new = after.registry.settlements_for(symbol)[0]
+        assert new.last_trade_at == old.last_trade_at
+        assert new.delivery_at == old.delivery_at
+        assert new.event_id == old.event_id
+        assert new.settlement_price == old.settlement_price
+        assert new.price_source == old.price_source
+        assert new.price_evidence == old.price_evidence
+        assert new.evidence_digest == old.evidence_digest
+        assert new.fee_bps == old.fee_bps
+
+
+def test_build_preserves_original_release_milliseconds(monkeypatch, tmp_path) -> None:
+    from src.core.delisting_announcements import parse_delisting_evidence
+    from src.core.instrument_settlements import settlement_registry_jsonl
+
+    release_ms = int((_ABRUPT_LAST_TRADE - pd.Timedelta(days=5)).value // 1_000_000) + 501
+    raw = json.dumps({
+        "code": "C1", "title": "Delist ABRUPTUSDT", "release_ms": release_ms,
+        "kind": "delist", "symbols": ["ABRUPTUSDT"], "collected_at": HORIZON.isoformat(),
+    }).encode()
+    notices = parse_delisting_evidence(raw, source="test")
+    _patch_notices(monkeypatch, notices)
+    _lake(tmp_path)
+    first = _build(tmp_path)
+    record = first.registry.settlements_for("ABRUPTUSDT")[0]
+    assert record.announcement_evidence == f"binance-cms:C1|{release_ms}|Delist ABRUPTUSDT"
+    assert record.announced_at == pd.Timestamp((release_ms + 999) // 1000, unit="s", tz="UTC")
+    second = _build(tmp_path, existing=first.registry, verified_at=HORIZON + pd.Timedelta(days=1))
+    assert second.changed == ()
+    assert settlement_registry_jsonl(first.registry) == settlement_registry_jsonl(second.registry)

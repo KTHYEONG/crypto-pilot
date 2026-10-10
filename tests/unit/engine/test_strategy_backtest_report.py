@@ -403,3 +403,43 @@ def test_daily_frame_reports_max_name_weight() -> None:
     assert bool((frame["max_name_weight"] <= frame["target_gross"]).all())
     assert bool(np.allclose(frame["target_gross"].to_numpy(), 0.1))
     assert bool(np.allclose(frame["max_name_weight"].to_numpy(), 0.05))
+
+
+def test_payload_counts_announcement_sources_for_census() -> None:
+    """Replayed census records are counted by announcement source; others are ignored."""
+    from src.core.instrument_settlements import (
+        InstrumentSettlementRecord,
+        assemble_instrument_settlement_registry,
+    )
+
+    def _record(symbol: str, source: str) -> InstrumentSettlementRecord:
+        stamp = pd.Timestamp("2021-05-10T00:00:00Z")
+        announced = stamp - pd.Timedelta(days=7)
+        announcement_evidence = (
+            f"binance-cms:C1|{int(announced.value // 1_000_000)}|Delist {symbol}"
+            if source == "binance_cms" else "Operator override" if source == "curated" else ""
+        )
+        return InstrumentSettlementRecord(
+            symbol=symbol,
+            event_id=f"{symbol}:{int(stamp.value // 1_000_000)}",
+            announced_at=announced,
+            announcement_source=source,  # type: ignore[arg-type]
+            announcement_evidence=announcement_evidence,
+            last_trade_at=stamp,
+            delivery_at=stamp,
+            settlement_price=100.0,
+            price_source="curated",
+            price_evidence="test",
+            fee_bps=5.0,
+            evidence_digest="sha256:test",
+            verified_at=pd.Timestamp("2026-01-01T00:00:00Z"),
+        )
+
+    registry = assemble_instrument_settlement_registry(
+        [_record("AAA", "binance_cms"), _record("BBB", "proxy_lead"), _record("ZZZ", "curated")],
+        [],
+    )
+    run = dataclasses.replace(_run(), settlement_registry=registry)
+    payload = strategy_backtest_payload(run)
+    assert payload["announcement_sources"] == {"binance_cms": 1, "proxy_lead": 1}
+    assert "proxy_lead" in str(payload["delisting_announcement_policy"])

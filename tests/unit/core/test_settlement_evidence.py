@@ -1055,3 +1055,120 @@ def test_envelope_frame_preserves_fractional_boundary_labels(tmp_path) -> None:
     record = _record("AAAUSDT", last_trade, settlement_price=1.25)
     assert settlement_price_within_envelope(tmp_path, record)
     assert settlement_price_within_envelope(tmp_path, record, frame=frame)
+
+
+def _cms_notice(code: str, release_at: pd.Timestamp, symbols: tuple[str, ...]):
+    from src.core.delisting_announcements import DelistingNotice
+
+    return DelistingNotice(
+        code=code, title=f"Binance will delist {code}", release_at=release_at,
+        kind="delist", symbols=symbols,
+    )
+
+
+def _settled_lake(root, symbol: str = "AAAUSDT") -> pd.Timestamp:
+    (root / "3m").mkdir(parents=True, exist_ok=True)
+    stamps = _stamps(T0, 20)
+    _write_3m(root / "3m" / f"{symbol}.parquet", stamps, [1.0] * 20, [10.0] * 20)
+    return T0 + STEP * 19 + STEP
+
+
+def test_binance_cms_record_without_notice_is_stale(tmp_path, monkeypatch) -> None:
+    import src.core.settlement_evidence as evidence_mod
+
+    last_trade = _settled_lake(tmp_path)
+    release = last_trade - pd.Timedelta(days=5)
+    release_ms = int(release.value // 1_000_000)
+    record = _record(
+        "AAAUSDT", last_trade, announcement_source="binance_cms",
+        announcement_evidence=f"binance-cms:C1|{release_ms}|Binance will delist C1",
+        announced=release, price_source="curated",
+        price_evidence="notice", settlement_price=1.0,
+    )
+    registry = assemble_instrument_settlement_registry([record], [])
+    monkeypatch.setattr(evidence_mod, "load_delisting_notices", lambda: ())
+    report = audit_settlement_registry(
+        tmp_path, ["AAAUSDT"], audit_end=pd.Timestamp("2025-02-01T00:00:00Z"),
+        registry=registry,
+    )
+    assert report.stale == ((record.event_id, "announcement evidence mismatch"),)
+
+
+def test_proxy_lead_with_qualifying_notice_is_stale(tmp_path, monkeypatch) -> None:
+    import src.core.settlement_evidence as evidence_mod
+
+    last_trade = _settled_lake(tmp_path)
+    release = last_trade - pd.Timedelta(days=5)
+    record = _record(
+        "AAAUSDT", last_trade, price_source="curated",
+        price_evidence="notice", settlement_price=1.0,
+    )
+    assert record.announcement_source == "proxy_lead"
+    registry = assemble_instrument_settlement_registry([record], [])
+    monkeypatch.setattr(
+        evidence_mod, "load_delisting_notices",
+        lambda: (_cms_notice("C1", release, ("AAAUSDT",)),),
+    )
+    report = audit_settlement_registry(
+        tmp_path, ["AAAUSDT"], audit_end=pd.Timestamp("2025-02-01T00:00:00Z"),
+        registry=registry,
+    )
+    assert report.stale == ((record.event_id, "announcement evidence available"),)
+
+
+def test_binance_cms_record_with_matching_notice_is_current(tmp_path, monkeypatch) -> None:
+    import src.core.settlement_evidence as evidence_mod
+
+    last_trade = _settled_lake(tmp_path)
+    release = last_trade - pd.Timedelta(days=5)
+    release_ms = int(release.value // 1_000_000)
+    record = _record(
+        "AAAUSDT", last_trade, announcement_source="binance_cms",
+        announcement_evidence=f"binance-cms:C1|{release_ms}|Binance will delist C1",
+        announced=release, price_source="curated",
+        price_evidence="notice", settlement_price=1.0,
+    )
+    registry = assemble_instrument_settlement_registry([record], [])
+    monkeypatch.setattr(
+        evidence_mod, "load_delisting_notices",
+        lambda: (_cms_notice("C1", release, ("AAAUSDT",)),),
+    )
+    report = audit_settlement_registry(
+        tmp_path, ["AAAUSDT"], audit_end=pd.Timestamp("2025-02-01T00:00:00Z"),
+        registry=registry,
+    )
+    assert report.complete
+
+
+@pytest.mark.parametrize("mutation", ["release", "kind", "symbol", "title", "milliseconds"])
+def test_changed_announcement_evidence_is_stale(tmp_path, monkeypatch, mutation) -> None:
+    from dataclasses import replace
+
+    import src.core.settlement_evidence as evidence_mod
+
+    last_trade = _settled_lake(tmp_path)
+    release = last_trade - pd.Timedelta(days=5)
+    release_ms = int(release.value // 1_000_000)
+    notice = replace(_cms_notice("C1", release, ("AAAUSDT",)), release_ms=release_ms)
+    changes = {
+        "release": {"release_at": release + pd.Timedelta(seconds=1)},
+        "kind": {"kind": "other"},
+        "symbol": {"symbols": ("BBBUSDT",)},
+        "title": {"title": "Different announcement"},
+        "milliseconds": {"release_ms": release_ms - 1},
+    }
+    changed = replace(notice, **changes[mutation])
+    monkeypatch.setattr(evidence_mod, "load_delisting_notices", lambda: (changed,))
+    record = _record(
+        "AAAUSDT", last_trade, announcement_source="binance_cms", announced=release,
+        announcement_evidence=f"binance-cms:C1|{release_ms}|{notice.title}",
+        price_source="curated", price_evidence="notice", settlement_price=1000.0,
+    )
+    report = audit_settlement_registry(
+        tmp_path, ["AAAUSDT"], audit_end=last_trade + pd.Timedelta(days=1),
+        registry=assemble_instrument_settlement_registry([record], []),
+    )
+    assert report.stale == (
+        (record.event_id, "announcement evidence mismatch"),
+        (record.event_id, "price outside 24h liquid envelope"),
+    )

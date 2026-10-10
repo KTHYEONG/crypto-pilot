@@ -250,3 +250,61 @@ def test_listing_edge_is_not_disclosed(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_lake_coverage_error_is_data_integrity_error() -> None:
     assert issubclass(LakeCoverageError, DataIntegrityError)
+
+
+def _delisting_record(symbol: str, announced: pd.Timestamp, last_trade: pd.Timestamp):
+    from src.core.instrument_settlements import (
+        InstrumentSettlementRecord,
+        assemble_instrument_settlement_registry,
+    )
+
+    record = InstrumentSettlementRecord(
+        symbol=symbol,
+        event_id=f"{symbol}:{int(last_trade.value // 1_000_000)}",
+        announced_at=announced,
+        announcement_source="curated",
+        announcement_evidence="Binance delisting notice",
+        last_trade_at=last_trade,
+        delivery_at=last_trade,
+        settlement_price=100.0,
+        price_source="curated",
+        price_evidence="test",
+        fee_bps=5.0,
+        evidence_digest="sha256:test",
+        verified_at=pd.Timestamp("2026-01-01T00:00:00Z"),
+    )
+    return assemble_instrument_settlement_registry([record], [])
+
+
+def _delisting_block(days: pd.DatetimeIndex, registry) -> pd.Series:
+    from src.engine.strategy_backtest import _strategy_delisting_block
+
+    values = _strategy_delisting_block(
+        days, ["AAA"], {"AAA": 0}, snapshot_hour=0, settlement_registry=registry,
+    )
+    return pd.Series(values[:, 0], index=days)
+
+
+def test_short_lead_delisting_withdraws_only_after_announcement() -> None:
+    delivery = pd.Timestamp("2021-05-10T00:00:00Z")
+    announced = delivery - pd.Timedelta(days=1.9)
+    days = pd.date_range("2021-05-01", periods=10, freq="D", tz="UTC")
+    blocked = _delisting_block(days, _delisting_record("AAA", announced, delivery))
+    first_announced = days[days >= announced][0]
+    assert not bool(blocked.loc[days < first_announced].any())
+    assert bool(blocked.loc[days >= first_announced].all())
+    assert first_announced == pd.Timestamp("2021-05-09", tz="UTC")
+
+
+def test_long_lead_delisting_matches_proxy_lead_block() -> None:
+    delivery = pd.Timestamp("2021-05-10T00:00:00Z")
+    days = pd.date_range("2021-05-01", periods=10, freq="D", tz="UTC")
+    evidenced = _delisting_block(
+        days, _delisting_record("AAA", delivery - pd.Timedelta(days=6), delivery),
+    )
+    proxy = _delisting_block(
+        days, _delisting_record("AAA", delivery - pd.Timedelta(days=7), delivery),
+    )
+    assert evidenced.equals(proxy)
+    assert evidenced.loc[pd.Timestamp("2021-05-07", tz="UTC")]
+    assert not evidenced.loc[pd.Timestamp("2021-05-06", tz="UTC")]

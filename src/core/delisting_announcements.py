@@ -44,6 +44,7 @@ class DelistingNotice:
     release_at: pd.Timestamp
     kind: NoticeKind
     symbols: tuple[str, ...]
+    release_ms: int | None = None
 
 
 def default_delisting_evidence_path() -> Path:
@@ -104,6 +105,7 @@ def _parse_row(record: object, line_no: int, source: str) -> DelistingNotice:
         release_at=_release_at(release_ms),
         kind=cast(NoticeKind, kind),
         symbols=tuple(symbols),
+        release_ms=release_ms,
     )
 
 
