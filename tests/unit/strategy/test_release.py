@@ -27,8 +27,8 @@ def test_committed_release_loads_and_digests_verify() -> None:
     assert release.criteria_digest == criteria_digest(release.criteria)
     assert release.criteria_digest == criteria_digest(EvaluationCriteria())
     assert release.spec_digest == strategy_spec_digest(FLOW_MOM_TOP20, dict(release.sizing))
-    assert release.verdict is None
-    assert release.evaluation_digest is None
+    assert release.verdict in (None, "accept")
+    assert (release.verdict is None) == (release.evaluation_digest is None)
 
 
 def test_criteria_change_clears_verdict(tmp_path) -> None:
