@@ -382,9 +382,75 @@ def test_r4_reads_adv_column(tmp_path) -> None:
     inputs = dataclasses.replace(inputs, ledger_certified=True, book_identity_ok=True)
     evaluation = standard_mod.evaluate_strategy(inputs, load_release("flow_mom_top20").criteria)
     r4 = next(check for check in evaluation.checks if check.code == "R4_CAPACITY")
-    assert inputs.participation_scale_to_deployed == pytest.approx(1000.0 * 3.0 / 100000.0)
-    assert r4.value == pytest.approx(0.0002 * 1000.0 * 3.0 / 100000.0)
+    assert inputs.participation_scale_to_deployed == pytest.approx(1000.0 * 1.2 / 100000.0)
+    assert r4.value == pytest.approx(0.0002 * 1000.0 * 1.2 / 100000.0)
     assert r4.passed is True
+
+
+def test_r4_scales_by_realized_leverage(tmp_path) -> None:
+    """An account run peaking at 4.25x scales R4 by realized leverage."""
+    unit, account = tmp_path / "unit", tmp_path / "account"
+    _write_unit_run(unit, n=800, start="2023-01-01")
+    _write_account_run(account, n=800, start="2023-01-01")
+    daily = pd.read_parquet(unit / "daily.parquet")
+    daily["fill_adv_participation"] = 0.0002
+    daily.to_parquet(unit / "daily.parquet")
+    index = pd.date_range("2023-01-01", periods=800, freq="D", tz="UTC")
+    frame = pd.read_parquet(account / "account_daily.parquet")
+    frame["exposure"] = np.linspace(1.0, 4.25, 800)
+    frame.index = index
+    frame.to_parquet(account / "account_daily.parquet")
+    inputs = evaluate_mod.build_evaluation_inputs(
+        strategy_id="flow_mom_top20", unit_run=unit, account_run=account,
+    )
+    assert inputs.participation_scale_to_deployed == pytest.approx(1000.0 * 4.25 / 100000.0)
+
+
+def test_missing_exposure_series_fails_closed(tmp_path) -> None:
+    """An account frame without exposure raises instead of defaulting."""
+    from src.common.errors import DataIntegrityError
+
+    unit, account = tmp_path / "unit", tmp_path / "account"
+    _write_unit_run(unit)
+    _write_account_run(account)
+    for name in ("account_daily.parquet", "account_stress_daily.parquet"):
+        frame = pd.read_parquet(account / name)
+        frame = frame.drop(columns=["exposure"])
+        frame.to_parquet(account / name)
+    with pytest.raises(DataIntegrityError, match="account run lacks exposure series"):
+        evaluate_mod.build_evaluation_inputs(
+            strategy_id="flow_mom_top20", unit_run=unit, account_run=account,
+        )
+    with pytest.raises(DataIntegrityError, match="account run lacks exposure series"):
+        evaluate_mod._account_informational(account)
+
+
+@pytest.mark.parametrize("exposure", [[1.0, float("nan")], [1.0, float("inf")],
+                                      [1.0, -0.25], [1.0, "invalid"]])
+def test_invalid_exposure_series_fails_closed(tmp_path, exposure) -> None:
+    from src.common.errors import DataIntegrityError
+
+    account = tmp_path / "account"
+    _write_account_run(account, n=2)
+    frame = pd.read_parquet(account / "account_daily.parquet")
+    frame["exposure"] = exposure
+    if isinstance(exposure[-1], str):
+        frame["exposure"] = frame["exposure"].astype(str)
+    frame.to_parquet(account / "account_daily.parquet")
+    for reader in (evaluate_mod._read_account_run, evaluate_mod._account_informational):
+        with pytest.raises(DataIntegrityError, match="account exposure must be finite and non-negative"):
+            reader(account)
+
+
+def test_empty_exposure_series_fails_closed() -> None:
+    from src.common.errors import DataIntegrityError
+
+    with pytest.raises(DataIntegrityError, match="account exposure must be finite and non-negative"):
+        evaluate_mod._account_max_leverage(pd.DataFrame({"exposure": []}))
+
+
+def test_realized_leverage_allows_zero_exposure_days() -> None:
+    assert evaluate_mod._account_max_leverage(pd.DataFrame({"exposure": [0.0, 4.25, 0.0]})) == 4.25
 
 
 def test_old_run_without_adv_column_fails_closed(tmp_path) -> None:
