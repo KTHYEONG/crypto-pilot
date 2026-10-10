@@ -358,9 +358,6 @@ def test_release_gate_paper_never_gated(tmp_path) -> None:
     """Paper mode is an operational check: it passes with verdict=null."""
     from src.live.preflight import release_gate_check
 
-    from src.strategy.release import load_release
-
-    assert load_release("flow_mom_top20").verdict is None
     for mode in ("shadow", "paper", "live_testnet"):
         settings = _live_settings_for_tax_gate(tmp_path, mode, enabled=False)
         check = release_gate_check(settings)

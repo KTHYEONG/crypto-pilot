@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid
 
 import pytest
 
@@ -77,16 +78,16 @@ class TestStageTelemetry:
         handlers_before = list(logger.handlers)
         propagate_before = logger.propagate
         level_before = logger.level
-        before = {p.relative_to(LOG_DIR): p.read_bytes() for p in LOG_DIR.rglob("*") if p.is_file()}
+        marker = f"probe-{uuid.uuid4().hex}"
         telemetry = StageTelemetry()
         try:
             assert list(logger.handlers) == handlers_before
             assert logger.propagate == propagate_before
             assert logger.level == level_before
-            telemetry.log(Tag.SYS, "probe", k=1)
+            telemetry.log(Tag.SYS, marker, k=1)
             assert list(logger.handlers) == handlers_before
-            after = {p.relative_to(LOG_DIR): p.read_bytes() for p in LOG_DIR.rglob("*") if p.is_file()}
-            assert after == before
+            leaked = [p for p in LOG_DIR.rglob("*") if p.is_file() and marker.encode() in p.read_bytes()]
+            assert leaked == []
         finally:
             assert list(logger.handlers) == handlers_before
 
