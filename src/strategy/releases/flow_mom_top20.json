@@ -21,11 +21,11 @@
   ],
   "sizing": {
     "execution_policy": "strict_passive_repeg",
-    "exposure_cap": 3.0,
+    "exposure_cap": 10.0,
     "name_clip": 0.05,
     "unit_bootstrap_sha256": "2cc6a4e9c11dd8fc6c509c3233645d38d226702b73f650e1f1f6ac4d0d9e956b"
   },
-  "spec_digest": "42fad09c304ec1913e2b93de41ecfbf1bccee933df13650db4ac0493ae27a121",
+  "spec_digest": "853722ab064a12d30c22cf27f399fbfcf27420c485a8413895aa3f90508cbf75",
   "strategy_id": "flow_mom_top20",
   "target_capital_usdt": 1000.0,
   "unit_bootstrap_provenance": {

@@ -338,15 +338,15 @@ def test_choose_exposure_fixed_ignores_moments() -> None:
     assert choose_exposure(*args, policy, _moments()) == 7.5
 
 
-def test_registered_growth_policy_rungs_end_at_envelope_ceiling() -> None:
-    """The deployed growth policy caps at the envelope ceiling, never above."""
+def test_registered_growth_policy_reaches_ladder_top() -> None:
+    """Strong growth evidence can select the full policy ladder."""
     import dataclasses
 
-    from src.core.params import ACCOUNT_EXPOSURE_CAP
+    from src.core.params import ACCOUNT_EXPOSURE_CAP, ACCOUNT_EXPOSURE_MAX
     from src.strategy.sizing import account_growth_policy
 
     policy = account_growth_policy()
-    assert policy.exposure_max == ACCOUNT_EXPOSURE_CAP == 3.0
+    assert policy.exposure_max == ACCOUNT_EXPOSURE_CAP == ACCOUNT_EXPOSURE_MAX == 10.0
     ladder = _ladder([0.0], [0.004], [0.0], [20.0])
     weights = np.array([1.0])
     hot = dataclasses.replace(_moments(), mean=0.05, sigma=0.01)
@@ -354,7 +354,29 @@ def test_registered_growth_policy_rungs_end_at_envelope_ceiling() -> None:
         weights, 1000.0, np.zeros(1), np.array([np.inf]), np.array([0.01]),
         (ladder,), policy, hot,
     )
-    assert chosen <= 3.0
+    assert chosen == 10.0
+
+
+def test_registered_growth_policy_initial_margin_binds_below_ladder_top() -> None:
+    from src.strategy.sizing import account_growth_policy
+
+    policy = account_growth_policy()
+    ladder = _ladder([0.0], [0.001], [0.0], [2.0])
+    weights = np.array([1.0])
+    equity = 1000.0
+    _, top_initial = maintenance_and_initial_margin(
+        policy.exposure_max * equity * np.abs(weights), (ladder,),
+    )
+    assert top_initial.sum() > policy.initial_margin_cap * equity
+    cap = margin_exposure_cap(weights, equity, (ladder,), policy)
+    chosen = choose_exposure(
+        weights, equity, np.zeros(1), np.array([np.inf]), np.array([0.01]),
+        (ladder,), policy, UnitMoments(mean=0.05, sigma=0.01, observations=1000),
+    )
+    assert chosen == cap == 1.75
+    assert chosen < policy.exposure_max
+    _, initial = maintenance_and_initial_margin(chosen * equity * np.abs(weights), (ladder,))
+    assert initial.sum() <= policy.initial_margin_cap * equity
 
 
 def test_fixed_diagnostic_still_reaches_ten() -> None:

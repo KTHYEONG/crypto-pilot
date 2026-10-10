@@ -123,6 +123,18 @@ def _survival_flags(payload: dict[str, Any]) -> tuple[bool, bool, int]:
     return base_raw is not None, stress_raw is not None, breaches_raw
 
 
+def _account_max_leverage(frame: pd.DataFrame) -> float:
+    if "exposure" not in frame.columns:
+        raise DataIntegrityError("account run lacks exposure series")
+    try:
+        exposure = frame["exposure"].to_numpy(dtype="float64")
+    except (TypeError, ValueError) as exc:
+        raise DataIntegrityError("account exposure must be finite and non-negative") from exc
+    if not exposure.size or not np.isfinite(exposure).all() or (exposure < 0).any():
+        raise DataIntegrityError("account exposure must be finite and non-negative")
+    return float(exposure.max())
+
+
 def _read_account_run(run_dir: Path) -> tuple[pd.Series, pd.Series, float, bool, bool, int]:
     base = Path(run_dir) / "account_daily.parquet"
     stress_path = Path(run_dir) / "account_stress_daily.parquet"
@@ -138,9 +150,7 @@ def _read_account_run(run_dir: Path) -> tuple[pd.Series, pd.Series, float, bool,
         raise
     except (OSError, ValueError, KeyError, TypeError) as exc:
         raise DataIntegrityError("account run predates survival accounting") from exc
-    leverage = 1.0
-    if "exposure" in frame.columns:
-        leverage = float(pd.Series(frame["exposure"].to_numpy(dtype="float64")).abs().max())
+    leverage = _account_max_leverage(frame)
     return deployed, stress_deployed, leverage, base_liq, stress_liq, breaches
 
 
@@ -157,11 +167,9 @@ def _account_informational(account_run: Path) -> dict[str, float]:
     frame = pd.read_parquet(Path(account_run) / "account_daily.parquet")
     stress_frame = pd.read_parquet(Path(account_run) / "account_stress_daily.parquet")
     stress_equity = pd.Series(stress_frame["equity"].to_numpy(dtype="float64"), index=stress_frame.index)
-    leverage = 1.0
-    if "exposure" in frame.columns:
-        leverage = float(pd.Series(frame["exposure"].to_numpy(dtype="float64")).abs().max())
+    leverage = _account_max_leverage(frame)
     mean_exposure = payload.get("mean_exposure")
-    if mean_exposure is None and "exposure" in frame.columns:
+    if mean_exposure is None:
         mean_exposure = float(pd.Series(frame["exposure"].to_numpy(dtype="float64")).mean())
     return {
         "deployed_cagr": float(payload["cagr"]),
@@ -326,7 +334,7 @@ def build_evaluation_inputs(
     if holdout_run is not None:
         identity_ok = identity_ok and _declared_book(holdout_payload, release.strategy_id) and holdout_payload.get("ledger_certified") is True
     from src.cli.commands.backtest import _neighbor_specs
-    from src.core.params import ACCOUNT_EXPOSURE_CAP, ACCOUNT_UNIT_REFERENCE_CAPITAL
+    from src.core.params import ACCOUNT_UNIT_REFERENCE_CAPITAL
     expected = _neighbor_specs(FLOW_MOM_TOP20)
     observed = []
     for path in neighbor_runs:
@@ -361,7 +369,7 @@ def build_evaluation_inputs(
         deployed_stress_liquidated=stress_liq,
         deployed_margin_breaches=breaches,
         deployed_max_leverage=leverage,
-        participation_scale_to_deployed=release.target_capital_usdt * ACCOUNT_EXPOSURE_CAP / participation_scale,
+        participation_scale_to_deployed=release.target_capital_usdt * leverage / participation_scale,
         withdrawn_seat_fraction=withdrawn_fraction,
         neighbors=neighbors,
         trial_population=population,

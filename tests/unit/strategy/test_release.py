@@ -205,7 +205,7 @@ def test_spec_digest_covers_exposure_cap() -> None:
     release = load_release("flow_mom_top20")
     assert release.sizing.get("exposure_cap") == ACCOUNT_EXPOSURE_CAP
     altered = dict(release.sizing)
-    altered["exposure_cap"] = 10.0
+    altered["exposure_cap"] = 3.0
     assert strategy_spec_digest(FLOW_MOM_TOP20, altered) != release.spec_digest
 
 
