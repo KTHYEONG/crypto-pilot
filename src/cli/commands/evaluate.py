@@ -159,6 +159,29 @@ def _declared_book(payload: dict[str, Any], release_id: str) -> bool:
                 and payload.get("design_data_cutoff") == spec.design_data_cutoff.isoformat())
 
 
+def _withdrawal_days(payload: dict[str, Any]) -> int:
+    if "roster_seat_days" not in payload:
+        raise DataIntegrityError("run predates seat accounting")
+    entries = payload.get("data_availability_withdrawals", [])
+    if not isinstance(entries, list):
+        raise DataIntegrityError("withdrawal accounting invalid")
+    total = 0
+    for entry in entries:
+        if not isinstance(entry, dict) or type(entry.get("days")) is not int or entry["days"] < 0:
+            raise DataIntegrityError("withdrawal accounting invalid")
+        total += entry["days"]
+    return total
+
+
+def _withdrawn_seat_fraction(payload: dict[str, Any]) -> float:
+    """Withdrawn seat-days over this run's own roster seat-days; fails closed on missing or invalid accounting."""
+    withdrawn = _withdrawal_days(payload)
+    seats = payload["roster_seat_days"]
+    if type(seats) is not int or seats <= 0:
+        raise DataIntegrityError("roster seat accounting invalid")
+    return withdrawn / seats
+
+
 def build_evaluation_inputs(
     *,
     strategy_id: str,
@@ -213,34 +236,11 @@ def build_evaluation_inputs(
         candidate_skew=skew if skew == skew else 0.0,
         candidate_kurtosis=kurtosis if kurtosis == kurtosis else 3.0,
     )
-    def _withdrawal_days(payload: dict[str, Any]) -> int:
-        if "roster_seat_days" not in payload:
-            raise DataIntegrityError("run predates seat accounting")
-        entries = payload.get("data_availability_withdrawals", [])
-        if not isinstance(entries, list):
-            raise DataIntegrityError("withdrawal accounting invalid")
-        total = 0
-        for entry in entries:
-            if not isinstance(entry, dict) or type(entry.get("days")) is not int or entry["days"] < 0:
-                raise DataIntegrityError("withdrawal accounting invalid")
-            total += entry["days"]
-        return total
-
-    if "roster_seat_days" not in unit_payload:
-        raise DataIntegrityError("run predates seat accounting")
-    seats = unit_payload["roster_seat_days"]
-    if type(seats) is not int or seats <= 0:
-        raise DataIntegrityError("roster seat accounting invalid")
-    withdrawn = _withdrawal_days(unit_payload)
     payloads = [unit_payload]
-    for path in neighbor_runs:
-        neighbor_payload = json.loads((path / "result.json").read_text(encoding="utf-8"))
-        withdrawn += _withdrawal_days(neighbor_payload)
-        payloads.append(neighbor_payload)
+    payloads.extend(json.loads((path / "result.json").read_text(encoding="utf-8")) for path in neighbor_runs)
     if holdout_run is not None:
-        withdrawn += _withdrawal_days(holdout_payload)
         payloads.append(holdout_payload)
-    withdrawn_fraction = withdrawn / seats
+    withdrawn_fraction = max(_withdrawn_seat_fraction(payload) for payload in payloads)
     lake_ok = bool(
         all(payload.get("source_gap_excluded_count") == 0
             and payload.get("base_source_gaps", 0) == 0 and payload.get("stress_source_gaps", 0) == 0

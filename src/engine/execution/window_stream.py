@@ -11,7 +11,6 @@ import numpy as np
 import pandas as pd
 
 from src.common.errors import DataIntegrityError
-from src.engine.execution.contracts import ExecutionReplayWindow, align_funding_with_knowledge, funding_coverage_gaps
 from src.core.instrument_settlements import InstrumentSettlementRegistry, settlement_registry_for_root
 from src.core.marks import _build_window_frames, _load_window_minute_frames, _missing_execution_sources
 from src.core.parallel import collect_window_garbage
@@ -22,6 +21,7 @@ from src.core.resources import (
 )
 from src.core.types import ExecutionSpec
 from src.core.venue_halts import VenueHaltRegistry, venue_halt_registry_for_root
+from src.engine.execution.contracts import ExecutionReplayWindow, align_funding_with_knowledge, funding_coverage_gaps
 
 from .settlement import settled_before_piece, settlement_events_for_piece
 

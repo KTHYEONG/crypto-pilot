@@ -12,8 +12,8 @@ from __future__ import annotations
 import pandas as pd
 
 from src.common.errors import DataIntegrityError
-from src.engine.execution.batch import replay_execution_windows
 from src.core.types import ExecutionSpec
+from src.engine.execution.batch import replay_execution_windows
 
 from . import _ExecutionBound
 from .contracts import (
