@@ -1,0 +1,8 @@
+[Unit]
+Description=crypto-pilot public archive incremental mirror (one-shot)
+OnFailure=kca-alert@%n.service
+
+[Service]
+Type=oneshot
+ExecStart=%h/crypto-pilot/deploy/public-archive/run.sh
+TimeoutStartSec=6h

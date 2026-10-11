@@ -157,6 +157,10 @@ jobs:
           ssh $SSH_OPTS "$REMOTE_USER@$HOST" "mkdir -p ~/crypto-pilot/deploy/liveness"
           scp $SSH_OPTS deploy/liveness/crypto-pilot-liveness.sh "$REMOTE_USER@$HOST:~/crypto-pilot/deploy/liveness/crypto-pilot-liveness.sh.new"
           scp $SSH_OPTS deploy/liveness/crypto-pilot-liveness.service deploy/liveness/crypto-pilot-liveness.timer "$REMOTE_USER@$HOST:~/.config/systemd/user/"
+          # 공개 아카이브 일일 미러(호스트 타이머): 증분 수집 전용, Drive 쓰기 없음.
+          ssh $SSH_OPTS "$REMOTE_USER@$HOST" "mkdir -p ~/crypto-pilot/deploy/public-archive"
+          scp $SSH_OPTS deploy/public-archive/run.sh "$REMOTE_USER@$HOST:~/crypto-pilot/deploy/public-archive/run.sh.new"
+          scp $SSH_OPTS deploy/public-archive/crypto-pilot-public-archive.service deploy/public-archive/crypto-pilot-public-archive.timer "$REMOTE_USER@$HOST:~/.config/systemd/user/"
 
           # PAT/USER는 로컬에서 확장해 원격 스크립트에 주입(GitHub PAT 문자셋은 셸 안전).
           STAGE=remote
@@ -173,6 +177,8 @@ jobs:
           chmod +x ~/crypto-pilot/deploy/backup/crypto-pilot-backup.sh
           mv -f ~/crypto-pilot/deploy/liveness/crypto-pilot-liveness.sh.new ~/crypto-pilot/deploy/liveness/crypto-pilot-liveness.sh
           chmod +x ~/crypto-pilot/deploy/liveness/crypto-pilot-liveness.sh
+          mv -f ~/crypto-pilot/deploy/public-archive/run.sh.new ~/crypto-pilot/deploy/public-archive/run.sh
+          chmod +x ~/crypto-pilot/deploy/public-archive/run.sh
           systemctl --user daemon-reload
           systemctl --user enable --now crypto-pilot-backup.timer
           systemctl --user enable --now crypto-pilot-liveness.timer
@@ -184,4 +190,5 @@ jobs:
           bash ~/crypto-pilot/deploy/compose_recreate.sh '$IMAGE:latest'
           vps_stage verify
           vps_verify_stable 45 mhs-live-daemon market-normalizer
+          systemctl --user enable --now crypto-pilot-public-archive.timer
           EOF

@@ -5,10 +5,13 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+ARCHIVE_BACKUP_MOUNT: Path = Path("/app/backup_status/last_success.json")
 
 
 def _root(args: argparse.Namespace) -> Path:
@@ -129,6 +132,7 @@ def _run_collect(args: argparse.Namespace) -> None:
         else:
             symbols[dataset] = list(wanted)
     slice_hours = (int(args.slice_hours[0]), int(args.slice_hours[1]))
+    incremental = 14 if args.start is None and os.environ.get("ARCHIVE_INCREMENTAL") == "1" else None
     plans = service_mod.plan_collection(
         downloader,
         root=root,
@@ -138,6 +142,7 @@ def _run_collect(args: argparse.Namespace) -> None:
         end=end,
         slice_hours=slice_hours,
         slice_symbols=roster_symbols,
+        incremental_window_days=incremental,
     )
     if plans is None:
         print("archive collect status=LISTING_FAILED")  # noqa: T201
@@ -184,8 +189,43 @@ def _run_status(args: argparse.Namespace) -> None:
         print("heartbeat none")  # noqa: T201
 
 
+def _run_prune(args: argparse.Namespace) -> None:
+    import pandas as pd
+
+    from src.common.paths import BASE_DIR
+    from src.market_data.public_archive.retention import prune_backed_up_archive
+    from src.market_data.streams.retention import read_backup_status
+
+    root = _root(args)
+    if getattr(args, "backup_status", None):
+        status_path = Path(args.backup_status)
+    elif ARCHIVE_BACKUP_MOUNT.exists():
+        status_path = ARCHIVE_BACKUP_MOUNT
+    else:
+        status_path = BASE_DIR / "deploy" / "backup" / "status" / "last_success.json"
+    try:
+        status = read_backup_status(status_path)
+        report = prune_backed_up_archive(
+            root, status=status, now=pd.Timestamp.now(tz="UTC"), keep_days=int(args.keep_days)
+        )
+    except OSError as exc:
+        print(json.dumps({"error": type(exc).__name__}))  # noqa: T201
+        raise SystemExit(4) from exc
+    print(  # noqa: T201
+        json.dumps(
+            {
+                "prune_blocked": report.prune_blocked,
+                "blocked_reason": report.blocked_reason,
+                "pruned_files": report.pruned_files,
+                "kept_files": report.kept_files,
+            },
+            sort_keys=True,
+        )
+    )
+
+
 def add_archive_commands(archive_parser: argparse.ArgumentParser) -> None:
-    """Register ``roster``, ``collect`` and ``status`` on the ``archive`` parser."""
+    """Register ``roster``, ``collect``, ``status`` and ``prune`` on the ``archive`` parser."""
     subparsers = archive_parser.add_subparsers(dest="archive_command", required=True)
 
     roster = subparsers.add_parser("roster", help="Rebuild the liquid aggTrades roster")
@@ -209,3 +249,9 @@ def add_archive_commands(archive_parser: argparse.ArgumentParser) -> None:
     status = subparsers.add_parser("status", help="Show archive coverage per dataset")
     status.add_argument("--root", type=str, default=None)
     status.set_defaults(handler=_run_status)
+
+    prune = subparsers.add_parser("prune", help="Prune backup-gated month partitions")
+    prune.add_argument("--keep-days", type=int, default=45)
+    prune.add_argument("--backup-status", type=str, default=None)
+    prune.add_argument("--root", type=str, default=None)
+    prune.set_defaults(handler=_run_prune)

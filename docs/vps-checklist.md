@@ -50,6 +50,7 @@ age() { echo $(( $(date +%s) - $(stat -c %Y "$1") ))s "$1"; }
 | `market-normalizer` | compose service, `mem_limit 768m` | snapshot parquet (`book_ticker/`, `premium_index/`), `data/futures/liquidations/`, `coverage/`, daily compaction to `raw/archive/`, retention prune | `data/live_capture/recorder_heartbeat.json` (schema v3); daemon `RecorderWatch` thread |
 | `crypto-pilot-liveness.timer` | host systemd user timer, every 5 min | runs `live liveness-check` in a one-shot container | `~/logs/crypto-pilot-liveness-<date>.log`, `data/state/live_liveness_state.json` |
 | `crypto-pilot-backup.timer` | host systemd user timer, 00:15 and 12:30 | `rclone copy` to `gdrive:quant-lake/live/crypto-pilot` | `deploy/backup/status/last_success.json`, `~/logs/crypto-pilot-backup-<date>.log` |
+| `crypto-pilot-public-archive.timer` | host systemd user timer, 08:30 | `docker compose --profile archive run` incremental mirror into `data/public_archive/` | `data/public_archive/_status/collect_heartbeat.json`, `~/logs/crypto-pilot-public-archive-<date>.log` |
 | GitHub Actions `deploy.yml` | on push to `main` | arm64 image to GHCR, tests, idle-gated deploy over Tailscale | workflow conclusion; `org.opencontainers.image.revision` label |
 
 Configuration sources:
@@ -71,6 +72,7 @@ Configuration sources:
 | every 30 s | normalizer derive cycle; heartbeat v3 rewrite |
 | 00:05 (+600 s retries) | capture: daily `reference/` snapshots (exchange_info, funding_info, asset_index) |
 | 00:15, 12:30 | Drive backup |
+| 08:30 | public archive incremental |
 | day end + 30 min | normalizer compacts the previous day's hot files into `raw/archive/` |
 | hourly | normalizer retention prune (blocked unless backup succeeded within 72 h) |
 | ~20:15 | daemon funding prefetch for decision day D (best effort) |
@@ -234,6 +236,19 @@ files moved to `_versions/<date>` and kept 30 days, serialized by the shared
 | B6 | Live-only captures | `rclone check data/live_capture/raw/archive gdrive:quant-lake/live/crypto-pilot/data/live_capture/raw/archive --one-way` | no missing archives older than one backup cycle |
 | B7 | Version retention | `rclone lsf gdrive:quant-lake/live/crypto-pilot/_versions --dirs-only` | dated folders only, none older than 30 days |
 | B8 | Not backed up (by design) | n/a | re-downloadable `futures/ohlcv`, `funding` (and retired legacy feed dirs, if any); `raw/hot/`; capture heartbeats; `logs/` other than `live/orders`. Note: `logs/live/daemon.log` and `logs/live/shadow_cycle/` are not backed up (the run-dir `audit/` mirror is) |
+
+## 9b. Public Archive Mirror
+
+Read-only audit only: never run `archive collect --execute` from the audit (it writes
+data); use `status` and read-only checks.
+
+| ID | Check | Command | Pass |
+|---|---|---|---|
+| P1 | Last run | `cat ~/crypto-pilot/data/public_archive/_status/collect_heartbeat.json` | `ts` within 26 h, `failed == 0` |
+| P2 | Log | `grep -h 'rc=' ~/logs/crypto-pilot-public-archive-$(date -u +%F).log` | steps rc 0 |
+| P3 | Coverage lag | `docker compose --profile archive run --rm public-archive /app/.venv/bin/python -m src.cli.main archive status` | last `ok` day per dataset ≤ 3 days behind today |
+| P4 | Drive copy | `rclone lsf gdrive:quant-lake/live/crypto-pilot/data/public_archive --dirs-only` | `metrics/`, `bookDepth/`, `aggTrades/`, `aggTrades_slice/`, `_coverage/`, `_roster/` present |
+| P5 | Prune gate | archive prune JSON | `prune_blocked=false` |
 
 ## 10. Known Risks and Open Items
 
