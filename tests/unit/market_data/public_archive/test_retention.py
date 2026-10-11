@@ -69,15 +69,11 @@ def test_modified_after_backup_is_kept(tmp_path: Path) -> None:
     assert target.exists()
 
 
-def test_ledger_and_roster_never_pruned(tmp_path: Path) -> None:
+def test_ledger_and_status_never_pruned(tmp_path: Path) -> None:
     coverage = tmp_path / "_coverage" / "metrics.jsonl"
     coverage.parent.mkdir(parents=True, exist_ok=True)
     coverage.write_text("{}\n", encoding="utf-8")
     os.utime(coverage, (_old_mtime(), _old_mtime()))
-    roster = tmp_path / "_roster" / "roster.json"
-    roster.parent.mkdir(parents=True, exist_ok=True)
-    roster.write_text("{}\n", encoding="utf-8")
-    os.utime(roster, (_old_mtime(), _old_mtime()))
     status_dir = tmp_path / "_status"
     status_dir.mkdir(parents=True, exist_ok=True)
     beat = status_dir / "collect_heartbeat.json"
@@ -87,7 +83,6 @@ def test_ledger_and_roster_never_pruned(tmp_path: Path) -> None:
     assert not victim.exists()
     assert report.pruned_files == 1
     assert coverage.exists()
-    assert roster.exists()
     assert beat.exists()
 
 

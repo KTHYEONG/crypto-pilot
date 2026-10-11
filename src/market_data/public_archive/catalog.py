@@ -53,6 +53,8 @@ AGG_TRADES_COLUMNS: tuple[str, ...] = (
     "rv_trade",
 )
 
+HISTORY_START: date = date(2021, 1, 1)
+
 
 @dataclass(frozen=True, slots=True)
 class ArchiveDataset:
