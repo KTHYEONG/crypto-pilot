@@ -144,8 +144,17 @@ current settings disagree with the run's manifest.
 | M10 | Retention gate | heartbeat `retention` | `prune_blocked=false`; if blocked, `blocked_reason` is `status_missing|status_invalid|status_stale` and is tied to §8 backup health; `footprint_bytes` < 8 GiB |
 | M11 | Stray partials | `find data -name '*.partial' -mmin +60 -o -name '*.tmp' -mmin +60` | empty |
 | M12 | Unbounded dirs | `du -sh data/live_capture/coverage data/live_capture/reference data/live_capture/exec_depth data/state/live_orderbook` | track growth; these are not pruned by the normalizer |
-| M13 | Execution-window captures | `ls data/live_capture/exec_depth \| tail -3; ls data/state/live_orderbook \| tail -3` | a folder/file for the last decision day; otherwise check audit `exec_depth_skipped reason=` |
+| M13 | Execution-window captures | `ls data/live_capture/exec_depth \| tail -3; ls data/state/live_orderbook \| tail -3` | a folder/file for the last decision day; otherwise check audit `exec_depth_skipped reason=`; manifest `symbols_requested` between the audit `exec_depth_symbols traded=` count and `exec_depth_max_symbols` (60); `symbols_missing` empty or explained |
 | M14 | Recorder alerts | `grep -n 'stage=recorder_watch' logs/live/daemon.log \| tail` | no `UNHEALTHY`, `CHECK_FAILED` or `ALERT_FAILED` without a later recovery |
+
+Expected capture sizing (MB/day, all-symbol REST/WS stay unfiltered; only exec_depth is symbol-restricted):
+
+| Stream | Source | Universe | Raw archive (xz) | Normalized parquet |
+|---|---|---|---|---|
+| book_ticker | REST all-symbol, 60 s | every symbol | 16.8 MB/day | 20.9 MB/day |
+| premium_index | REST all-symbol, 300 s | every symbol | 3.6 MB/day | 6.9 MB/day |
+| force_order | WS `!forceOrder@arr` | every symbol | 1.2 MB/day | (liquidations 77 MB total) |
+| exec_depth | WS partial depth L5, 500 ms, execution window + 30 min | traded + top-ADV candidates (cap 60) | none | ~6.6 MB/day traded only, +3–5 MB/day with candidates |
 
 ## 7. Trade Records Integrity
 

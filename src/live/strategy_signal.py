@@ -22,9 +22,11 @@ from src.core.params import (
 )
 from src.core.settlement_evidence import SettlementEvidence, settlement_evidence_from_bars
 from src.live.deployed_weights import append_weight_row, decision_ohlcv_close_path, load_weights_frame
+from src.live.depth_candidates import DEPTH_CANDIDATES_NAME, write_depth_candidates
 from src.live.errors import ArtifactSealError, CausalityViolation
 from src.live.ledger import load_ledger
 from src.live.strategy_book import (
+    LiveStrategyBook,
     build_live_strategy_book,
     classify_snapshot_gaps,
     crypto_census,
@@ -56,6 +58,36 @@ from src.strategy.targets import FLOW_MOM_TOP20
 STRATEGY_SIGNAL_REPORT_NAME: str = "frozen_signal_report.json"
 
 _logger = logging.getLogger(__name__)
+
+_DEPTH_CANDIDATE_TOP_N: int = 60
+
+
+def _rank_depth_candidates(book: LiveStrategyBook, day: pd.Timestamp) -> list[str]:
+    """Top-ADV symbols with finite positive ADV and finite snapshot close."""
+    adv_row = book.adv.loc[day]
+    snap_row = book.snapshot_closes.loc[day]
+    scored: list[tuple[str, float]] = []
+    for symbol in adv_row.index:
+        name = str(symbol)
+        adv = float(adv_row[symbol])
+        if not math.isfinite(adv) or adv <= 0.0:
+            continue
+        close = float(snap_row[name]) if name in snap_row.index else float("nan")
+        if not math.isfinite(close):
+            continue
+        scored.append((name, adv))
+    scored.sort(key=lambda item: (-item[1], item[0]))
+    return [name for name, _ in scored[:_DEPTH_CANDIDATE_TOP_N]]
+
+
+def _write_depth_candidates_best_effort(book: LiveStrategyBook, day: pd.Timestamp, weights_path: Path) -> None:
+    """Refresh the depth candidate sidecar without failing the step."""
+    try:
+        write_depth_candidates(
+            Path(weights_path).parent / DEPTH_CANDIDATES_NAME, day, _rank_depth_candidates(book, day),
+        )
+    except Exception as exc:
+        _logger.warning("[DATA] stage=exec_depth_candidates status=write_failed error=%s", exc)
 
 
 @dataclass(frozen=True, slots=True)
@@ -433,6 +465,7 @@ def run_strategy_signal_step(
     )
     existing = load_weights_frame(Path(weights_path), artifact_key=artifact_key)
     if not existing.empty and day in existing.index:
+        _write_depth_candidates_best_effort(book, day, Path(weights_path))
         return replace(report, written=False)
     # 행 병합은 컬럼 합집합이라, 오늘 census에 없는 과거 심볼이 NaN으로 남으면 러너 사이징이 깨진다.
     # 오늘 census 밖 = 보유 목표 0이므로 명시적 0.0으로 채운다.
@@ -441,6 +474,7 @@ def run_strategy_signal_step(
     append_weight_row(Path(weights_path), day, levered, artifact_key=artifact_key)
     sizing = snap_row[[symbol for symbol in census_list if float(unit_row[symbol]) != 0.0 or symbol in positions]]
     append_weight_row(decision_ohlcv_close_path(Path(weights_path)), day, sizing, artifact_key=artifact_key)
+    _write_depth_candidates_best_effort(book, day, Path(weights_path))
     report_path = Path(weights_path).parent / STRATEGY_SIGNAL_REPORT_NAME
     payload = {
         "decision_day": report.decision_day.isoformat(),

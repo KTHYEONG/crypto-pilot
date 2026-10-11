@@ -132,6 +132,7 @@ class LiveSettings(BaseSettings):
     exec_depth_update_ms: int = 500
     exec_depth_post_window_s: float = 1800.0
     exec_depth_max_symbols: int = 60
+    exec_depth_candidate_breadth: int = 30
     exec_depth_flush_interval_s: float = 300.0
     exec_depth_max_session_s: float = 7200.0
     fills_dir: str | None = None
@@ -367,6 +368,13 @@ class LiveSettings(BaseSettings):
     def _validate_exec_depth_max_symbols(cls, value: int) -> int:
         if value < 1:
             raise ValueError(f"exec_depth_max_symbols must be >= 1, got {value!r}")
+        return value
+
+    @field_validator("exec_depth_candidate_breadth")
+    @classmethod
+    def _validate_exec_depth_candidate_breadth(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError(f"exec_depth_candidate_breadth must be >= 0, got {value!r}")
         return value
 
     @field_validator("exec_depth_flush_interval_s", "exec_depth_max_session_s")
