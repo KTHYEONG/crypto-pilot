@@ -57,6 +57,22 @@ HISTORY_START: date = date(2021, 1, 1)
 
 
 @dataclass(frozen=True, slots=True)
+class MaskPolicy:
+    breadth: int
+    preroll_days: int
+    start: date
+
+
+MASK_POLICIES: Mapping[str, MaskPolicy] = {
+    "metrics": MaskPolicy(breadth=50, preroll_days=30, start=date(2021, 1, 1)),
+    "bookDepth": MaskPolicy(breadth=30, preroll_days=30, start=date(2023, 1, 1)),
+    "aggTrades": MaskPolicy(breadth=20, preroll_days=30, start=date(2023, 1, 1)),
+}
+
+DEFAULT_DATASETS: tuple[str, ...] = ("metrics", "bookDepth")
+
+
+@dataclass(frozen=True, slots=True)
 class ArchiveDataset:
     name: Literal["metrics", "bookDepth", "aggTrades"]
     first_day: date

@@ -695,3 +695,230 @@ def test_slices_for_every_aggtrades_symbol(tmp_path: Path) -> None:
     for symbol in symbols:
         assert (tmp_path / "aggTrades" / symbol / "202401.parquet").exists()
         assert (tmp_path / "aggTrades_slice" / symbol / "202401.parquet").exists()
+
+
+def test_masked_plan_ignores_unallowed_days(tmp_path: Path) -> None:
+    days = [date(2024, 1, d) for d in range(1, 11)]
+    fake = _metrics_fake(["BTCUSDT"], days)
+    allowed = {"metrics": {"BTCUSDT": frozenset({date(2024, 1, 3), date(2024, 1, 4)})}}
+    plans = plan_collection(
+        fake, root=tmp_path, datasets=["metrics"], symbols={"metrics": ["BTCUSDT"]},
+        start=days[0], end=days[-1], allowed=allowed,
+    )
+    assert plans is not None
+    assert [p.days for p in plans] == [(date(2024, 1, 3), date(2024, 1, 4))]
+
+
+def test_mask_widening_backfills_earlier_days(tmp_path: Path) -> None:
+    from src.market_data.public_archive import store
+
+    days = [date(2024, 1, d) for d in range(1, 7)]
+    fake = _metrics_fake(["BTCUSDT"], days)
+    for day in (date(2024, 1, 5), date(2024, 1, 6)):
+        store.append_coverage(
+            tmp_path,
+            store.CoverageRow(
+                dataset="metrics", symbol="BTCUSDT", day=day, status="ok",
+                raw_sha256="0" * 64, rows=1, recorded_at=_NOW, detail=None,
+            ),
+        )
+    allowed = {"metrics": {"BTCUSDT": frozenset(days[1:])}}
+    plans = plan_collection(
+        fake, root=tmp_path, datasets=["metrics"], symbols={"metrics": ["BTCUSDT"]},
+        start=None, end=days[-1], allowed=allowed,
+    )
+    assert plans is not None
+    assert sorted({d for p in plans for d in p.days}) == [date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 4)]
+
+
+def test_unseated_symbol_makes_no_listing_request(tmp_path: Path) -> None:
+    days = [date(2024, 1, 3)]
+    fake = _metrics_fake(["BTCUSDT"], days)
+    calls: list[str] = []
+    original = fake.list_object_keys
+
+    def counting(*, prefix: str, timeout: int | None = None):
+        calls.append(prefix)
+        return original(prefix=prefix, timeout=timeout)
+
+    fake.list_object_keys = counting  # type: ignore[method-assign]
+    allowed = {"metrics": {"BTCUSDT": frozenset(days)}}
+    plans = plan_collection(
+        fake, root=tmp_path, datasets=["metrics"], symbols={"metrics": ["BTCUSDT", "ETHUSDT"]},
+        start=days[0], end=days[0], allowed=allowed,
+    )
+    assert plans is not None
+    assert len(plans) == 1
+    assert all("ETHUSDT" not in call for call in calls)
+
+
+def test_masked_second_run_is_noop(tmp_path: Path) -> None:
+    days = [date(2024, 1, 15), date(2024, 1, 16)]
+    fake = _metrics_fake(["BTCUSDT"], days)
+    allowed = {"metrics": {"BTCUSDT": frozenset(days)}}
+    kwargs = {"root": tmp_path, "datasets": ["metrics"], "symbols": {"metrics": ["BTCUSDT"]}, "start": days[0], "end": days[-1], "allowed": allowed}
+    plans = plan_collection(fake, **kwargs)  # type: ignore[arg-type]
+    assert plans is not None
+    execute_plan(fake, plans, root=tmp_path, workers=1, now_fn=lambda: _NOW)
+    def unexpected_listing(*, prefix: str, timeout: int | None = None):
+        pytest.fail(f"covered mask requested listing: {prefix}")
+
+    fake.list_object_keys = unexpected_listing  # type: ignore[method-assign]
+    again = plan_collection(fake, **kwargs)  # type: ignore[arg-type]
+    assert again == []
+
+
+def test_masked_listing_failure_fails_closed(tmp_path: Path) -> None:
+    class _Broken(FakeDownloader):
+        def list_object_keys(self, *, prefix: str, timeout: int | None = None):
+            return None
+
+    fake = _Broken()
+    allowed = {"metrics": {"BTCUSDT": frozenset({date(2024, 1, 15)})}}
+    plans = plan_collection(
+        fake, root=tmp_path, datasets=["metrics"], symbols={"metrics": ["BTCUSDT"]},
+        start=date(2024, 1, 15), end=date(2024, 1, 15), allowed=allowed,
+    )
+    assert plans is None
+    assert fake.fetch_calls == []
+
+
+def test_month_grouping_uses_month_prefix_for_few_months(tmp_path: Path) -> None:
+    import re
+
+    days = [date(2024, 1, 15), date(2024, 2, 10)]
+    fake = _metrics_fake(["BTCUSDT"], days)
+    calls: list[str] = []
+    original = fake.list_object_keys
+
+    def counting(*, prefix: str, timeout: int | None = None):
+        calls.append(prefix)
+        return original(prefix=prefix, timeout=timeout)
+
+    fake.list_object_keys = counting  # type: ignore[method-assign]
+    allowed = {"metrics": {"BTCUSDT": frozenset(days)}}
+    plans = plan_collection(
+        fake, root=tmp_path, datasets=["metrics"], symbols={"metrics": ["BTCUSDT"]},
+        start=days[0], end=days[-1], allowed=allowed,
+    )
+    assert plans is not None
+    assert len(calls) == 2
+    assert all(re.search(r"\d{4}-\d{2}$", prefix) for prefix in calls)
+
+
+def test_masked_incremental_window_bounds_candidates(tmp_path: Path) -> None:
+    from datetime import timedelta
+
+    end = date(2024, 1, 31)
+    days = [date(2024, 1, d) for d in range(1, 32)]
+    fake = _metrics_fake(["BTCUSDT"], days)
+    allowed = {"metrics": {"BTCUSDT": frozenset(days)}}
+    plans = plan_collection(
+        fake, root=tmp_path, datasets=["metrics"], symbols={"metrics": ["BTCUSDT"]},
+        start=None, end=end, incremental_window_days=14, allowed=allowed,
+    )
+    assert plans is not None
+    planned = sorted({d for p in plans for d in p.days})
+    assert planned
+    assert min(planned) >= end - timedelta(days=14)
+
+
+def test_masked_symbol_prefix_listing_and_failures(tmp_path: Path) -> None:
+    days = [date(2024, 1, 15), date(2024, 2, 15), date(2024, 3, 15), date(2024, 4, 15), date(2024, 5, 15)]
+    fake = _metrics_fake(["BTCUSDT"], days)
+    calls: list[str] = []
+    original = fake.list_object_keys
+
+    def counting(*, prefix: str, timeout: int | None = None):
+        calls.append(prefix)
+        return original(prefix=prefix, timeout=timeout)
+
+    fake.list_object_keys = counting  # type: ignore[method-assign]
+    allowed = {"metrics": {"BTCUSDT": frozenset(days)}}
+    plans = plan_collection(
+        fake, root=tmp_path, datasets=["metrics"], symbols={"metrics": ["BTCUSDT"]},
+        start=days[0], end=days[-1], allowed=allowed,
+    )
+    assert plans is not None
+    assert calls == ["data/futures/um/daily/metrics/BTCUSDT/BTCUSDT-metrics-"]
+    assert sorted({d for p in plans for d in p.days}) == days
+
+    class _Exc(FakeDownloader):
+        def list_object_keys(self, *, prefix: str, timeout: int | None = None):
+            raise OSError("boom")
+
+    assert (
+        plan_collection(
+            _Exc(), root=tmp_path, datasets=["metrics"], symbols={"metrics": ["BTCUSDT"]},
+            start=days[0], end=days[-1], allowed=allowed,
+        )
+        is None
+    )
+
+    class _None(FakeDownloader):
+        def list_object_keys(self, *, prefix: str, timeout: int | None = None):
+            return None
+
+    assert (
+        plan_collection(
+            _None(), root=tmp_path, datasets=["metrics"], symbols={"metrics": ["BTCUSDT"]},
+            start=days[0], end=days[-1], allowed=allowed,
+        )
+        is None
+    )
+
+
+def test_masked_month_listing_failures_fail_closed(tmp_path: Path) -> None:
+    day = date(2024, 1, 15)
+    allowed = {"metrics": {"BTCUSDT": frozenset({day})}}
+
+    class _Exc(FakeDownloader):
+        def list_object_keys(self, *, prefix: str, timeout: int | None = None):
+            raise OSError("boom")
+
+    assert (
+        plan_collection(
+            _Exc(), root=tmp_path, datasets=["metrics"], symbols={"metrics": ["BTCUSDT"]},
+            start=day, end=day, allowed=allowed,
+        )
+        is None
+    )
+
+    class _None(FakeDownloader):
+        def list_object_keys(self, *, prefix: str, timeout: int | None = None):
+            return None
+
+    assert (
+        plan_collection(
+            _None(), root=tmp_path, datasets=["metrics"], symbols={"metrics": ["BTCUSDT"]},
+            start=day, end=day, allowed=allowed,
+        )
+        is None
+    )
+
+
+def test_masked_unlisted_stale_day_skipped(tmp_path: Path) -> None:
+    fake = FakeDownloader()
+    allowed = {"metrics": {"BTCUSDT": frozenset({date(2024, 1, 5)})}}
+    plans = plan_collection(
+        fake, root=tmp_path, datasets=["metrics"], symbols={"metrics": ["BTCUSDT"]},
+        start=date(2024, 1, 1), end=date(2024, 1, 31), allowed=allowed,
+    )
+    assert plans == []
+
+
+def test_masked_policy_floor_and_explicit_start(tmp_path: Path) -> None:
+    days = [date(2022, 12, 31), date(2023, 1, 1)]
+    fake = FakeDownloader()
+    fake.keys = [daily_key("aggTrades", "BTCUSDT", day) for day in days]
+    kwargs = {
+        "root": tmp_path, "datasets": ["aggTrades"],
+        "symbols": {"aggTrades": ["BTCUSDT"]}, "end": days[-1],
+        "allowed": {"aggTrades": {"BTCUSDT": frozenset(days)}},
+    }
+    default = plan_collection(fake, start=None, **kwargs)  # type: ignore[arg-type]
+    assert default is not None
+    assert [p.days for p in default] == [(days[-1],)]
+    explicit = plan_collection(fake, start=days[0], **kwargs)  # type: ignore[arg-type]
+    assert explicit is not None
+    assert [p.days for p in explicit] == [tuple(days)]
