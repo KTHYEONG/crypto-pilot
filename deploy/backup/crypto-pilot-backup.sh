@@ -13,6 +13,7 @@ REMOTE_ROOT="${REMOTE_ROOT:-gdrive:quant-lake/live/crypto-pilot}"
 QUANT_GDRIVE_LOCK="${QUANT_GDRIVE_LOCK:-/run/user/$(id -u)/quant-gdrive.lock}"
 LOCK_WAIT_SEC="${LOCK_WAIT_SEC:-7200}"
 VERSION_RETENTION_DAYS="${VERSION_RETENTION_DAYS:-30}"
+ARCHIVE_VERSION_RETENTION_DAYS="${ARCHIVE_VERSION_RETENTION_DAYS:-7}"
 BACKUP_TODAY_UTC="${BACKUP_TODAY_UTC:-$(date -u +%F)}"
 LOG_DIR="${LOG_DIR:-$HOME/logs}"
 LOG_FILE="${LOG_DIR}/crypto-pilot-backup-${BACKUP_TODAY_UTC}.log"
@@ -69,41 +70,83 @@ else
   log_line "[SYS] stage=gdrive_backup step=orders status=skipped rc=0 reason=absent"
 fi
 
-# Step: prune (dated folders only, never by modtime).
-LSF_OUT=""
-LSF_RC=0
-LSF_OUT="$("$RCLONE_BIN" lsf --dirs-only "$REMOTE_ROOT/_versions" 2>/dev/null)" || LSF_RC=$?
-if [ "$LSF_RC" -eq 3 ]; then
-  log_line "[SYS] stage=gdrive_backup step=prune status=ok rc=0"
-elif [ "$LSF_RC" -ne 0 ]; then
-  log_line "[SYS] stage=gdrive_backup step=prune status=failed rc=$LSF_RC"
-  FAILED=1
+# Step: public_archive (copy-only, dedicated short-retention versions, own marker).
+# rclone exit code 10 is DurationExceeded (--max-duration reached): partial, not failure.
+ARCHIVE_FAILED=0
+ARCHIVE_SRC="$CRYPTO_PILOT_ROOT/data/public_archive"
+if [ ! -d "$ARCHIVE_SRC" ]; then
+  log_line "[SYS] stage=gdrive_backup step=public_archive status=skipped rc=0 reason=absent"
 else
-  CUTOFF="$(date -u -d "$BACKUP_TODAY_UTC - $VERSION_RETENTION_DAYS days" +%F)"
-  PRUNE_RC=0
-  while IFS= read -r entry; do
-    [ -n "$entry" ] || continue
-    case "$entry" in
-      ????-??-??/)
-        name="${entry%/}"
-        if [ "$name" \< "$CUTOFF" ]; then
-          PURGE_RC=0
-          "$RCLONE_BIN" purge "$REMOTE_ROOT/_versions/$name" || PURGE_RC=$?
-          if [ "$PURGE_RC" -ne 0 ]; then
-            PRUNE_RC="$PURGE_RC"
-          fi
-        fi
-        ;;
-      *) continue ;;
-    esac
-  done <<< "$LSF_OUT"
-  if [ "$PRUNE_RC" -eq 0 ]; then
-    log_line "[SYS] stage=gdrive_backup step=prune status=ok rc=0"
+  ARCHIVE_STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  ARCHIVE_RC=0
+  "$RCLONE_BIN" copy "$ARCHIVE_SRC" "$REMOTE_ROOT/data/public_archive" \
+    --exclude ".archive-*/**" \
+    --exclude "*.tmp" \
+    --exclude "*.tmp-*" \
+    --exclude "*.partial" \
+    --backup-dir "$REMOTE_ROOT/_versions_archive/$BACKUP_TODAY_UTC/public_archive" \
+    --max-duration "${ARCHIVE_MAX_DURATION:-2h}" \
+    --fast-list --transfers 4 -v || ARCHIVE_RC=$?
+  if [ "$ARCHIVE_RC" -eq 0 ]; then
+    log_line "[SYS] stage=gdrive_backup step=public_archive status=ok rc=0"
+    ARCHIVE_STATUS_DIR="$CRYPTO_PILOT_ROOT/deploy/backup/status"
+    ARCHIVE_FINISHED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    ARCHIVE_PARTIAL="$ARCHIVE_STATUS_DIR/last_archive_success.json.partial"
+    if ! { mkdir -p "$ARCHIVE_STATUS_DIR" &&
+      printf '{"started_at": "%s", "finished_at": "%s", "rc": 0}' "$ARCHIVE_STARTED_AT" "$ARCHIVE_FINISHED_AT" > "$ARCHIVE_PARTIAL" &&
+      sync &&
+      mv -f "$ARCHIVE_PARTIAL" "$ARCHIVE_STATUS_DIR/last_archive_success.json"; }; then
+      log_line "[SYS] stage=gdrive_backup step=archive_status status=failed"
+      ARCHIVE_FAILED=1
+    fi
+  elif [ "$ARCHIVE_RC" -eq 10 ]; then
+    log_line "[SYS] stage=gdrive_backup step=public_archive status=partial rc=10"
   else
-    log_line "[SYS] stage=gdrive_backup step=prune status=failed rc=$PRUNE_RC"
-    FAILED=1
+    log_line "[SYS] stage=gdrive_backup step=public_archive status=failed rc=$ARCHIVE_RC"
+    ARCHIVE_FAILED=1
   fi
 fi
+
+prune_versions() {
+  local root="$1" retention="$2" step="$3"
+  local listing="" rc=0 cutoff entry name normalized purge_rc
+  listing="$("$RCLONE_BIN" lsf --dirs-only "$root" 2>/dev/null)" || rc=$?
+  if [ "$rc" -eq 3 ]; then
+    log_line "[SYS] stage=gdrive_backup step=$step status=ok rc=0"
+    return 0
+  elif [ "$rc" -ne 0 ]; then
+    log_line "[SYS] stage=gdrive_backup step=$step status=failed rc=$rc"
+    return 1
+  fi
+  if ! [[ "$retention" =~ ^[0-9]+$ ]] ||
+    ! cutoff="$(date -u -d "$BACKUP_TODAY_UTC - $retention days" +%F)"; then
+    log_line "[SYS] stage=gdrive_backup step=$step status=failed rc=1 reason=invalid_retention"
+    return 1
+  fi
+  while IFS= read -r entry; do
+    [[ "$entry" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}/$ ]] || continue
+    name="${entry%/}"
+    normalized="$(date -u -d "$name" +%F 2>/dev/null)" || continue
+    [ "$normalized" = "$name" ] || continue
+    if [ "$name" \< "$cutoff" ]; then
+      purge_rc=0
+      "$RCLONE_BIN" purge "$root/$name" || purge_rc=$?
+      [ "$purge_rc" -eq 0 ] || rc="$purge_rc"
+    fi
+  done <<< "$listing"
+  if [ "$rc" -eq 0 ]; then
+    log_line "[SYS] stage=gdrive_backup step=$step status=ok rc=0"
+    return 0
+  else
+    log_line "[SYS] stage=gdrive_backup step=$step status=failed rc=$rc"
+    return 1
+  fi
+}
+
+# Step: prune (dated folders only, never by modtime).
+prune_versions "$REMOTE_ROOT/_versions" "$VERSION_RETENTION_DAYS" prune || FAILED=1
+ARCHIVE_PRUNE_FAILED=0
+prune_versions "$REMOTE_ROOT/_versions_archive" "$ARCHIVE_VERSION_RETENTION_DAYS" prune_archive || ARCHIVE_PRUNE_FAILED=1
 
 if [ "$FAILED" -eq 0 ]; then
   STATUS_DIR="$CRYPTO_PILOT_ROOT/deploy/backup/status"
@@ -117,6 +160,10 @@ if [ "$FAILED" -eq 0 ]; then
     exit 1
   fi
   log_line "[SYS] stage=gdrive_backup step=status status=ok"
+  if [ "$ARCHIVE_FAILED" -ne 0 ] || [ "$ARCHIVE_PRUNE_FAILED" -ne 0 ]; then
+    log_line "[SYS] stage=gdrive_backup status=failed reason=archive"
+    exit 1
+  fi
   log_line "[SYS] stage=gdrive_backup status=ok"
   exit 0
 else

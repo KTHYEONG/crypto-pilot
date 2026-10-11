@@ -19,8 +19,8 @@
 - /live_capture/raw/*.json
 + /live_capture/raw/archive/**
 + /live_capture/**
-# Derived public-archive mirror: replaces re-download time, canonical copy lives on Drive.
-+ /public_archive/**
+# Derived public-archive mirror: dedicated 7-day-versioned step, never the data step.
+- /public_archive/**
 # Exclude re-downloadable market data (ohlcv, funding) and any retired legacy feed dirs.
 - /futures/**
 # Exclude everything else by default.

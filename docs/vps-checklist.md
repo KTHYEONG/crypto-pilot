@@ -221,10 +221,14 @@ reason=repeg` audit events per intent.
 
 ## 9. Google Drive Backup
 
-Remote root: `gdrive:quant-lake/live/crypto-pilot` (`data/`, `logs/live/orders/`, `_versions/<date>/`).
+Remote root: `gdrive:quant-lake/live/crypto-pilot` (`data/`, `logs/live/orders/`, `_versions/<date>/`, `_versions_archive/<date>/`).
 Copy-only (no deletes propagate), filtered by `deploy/crypto-pilot.rclone-filter`, overwritten
 files moved to `_versions/<date>` and kept 30 days, serialized by the shared
 `/run/user/<uid>/quant-gdrive.lock`.
+
+The dedicated `public_archive` copy keeps overwritten files in `_versions_archive/<date>`
+for 7 days and writes `last_archive_success.json`. Duration-limited partial copies do
+not refresh that marker; archive failures do not block the live-data success marker.
 
 | ID | Check | Command | Pass |
 |---|---|---|---|
@@ -249,11 +253,14 @@ data); use `status` and read-only checks.
 | P3 | Coverage lag | `docker compose --profile archive run --rm public-archive /app/.venv/bin/python -m src.cli.main archive status` | last `ok` day per dataset ≤ 3 days behind today |
 | P4 | Drive copy | `rclone lsf gdrive:quant-lake/live/crypto-pilot/data/public_archive --dirs-only` | `metrics/`, `bookDepth/`, `aggTrades/`, `aggTrades_slice/`, `_coverage/` present |
 | P5 | Prune gate | archive prune JSON | `prune_blocked=false` |
+| P6 | Archive backup marker | `cat ~/crypto-pilot/deploy/backup/status/last_archive_success.json` | `finished_at` within 36 h |
+| P7 | Archive versions | `rclone lsf gdrive:quant-lake/live/crypto-pilot/_versions_archive --dirs-only` | at most 8 dated folders |
 
-Operator runbook (workstation backfill, then VPS handoff): backfill in dataset
-order `metrics` → `bookDepth` → `aggTrades` on the workstation with
-`--start 2021-01-01` implied (the planner floors an empty ledger at 2021-01-01);
-restore `_coverage/` to the VPS before the timer is enabled.
+Operator runbook (workstation backfill, then VPS handoff): (1) workstation:
+`archive collect --dataset metrics --execute`, then `bookDepth`, then `aggTrades`;
+(2) `rclone copy data/public_archive gdrive:quant-lake/live/crypto-pilot/data/public_archive --exclude ".archive-*/**" --exclude "*.tmp" --transfers 4`
+run manually; (3) restore `_coverage/` to the VPS; (4) only then push so the
+timer and the backup filter go live.
 
 ## 10. Known Risks and Open Items
 
