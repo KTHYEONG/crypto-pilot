@@ -12,6 +12,7 @@ from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
+from typing import Literal
 
 import pandas as pd
 import pyarrow as pa
@@ -83,6 +84,105 @@ def _symbol_prefix(dataset: str, symbol: str) -> str:
     return f"data/futures/um/daily/{dataset}/{symbol}/{symbol}-{dataset}-"
 
 
+def _daily_key_day(key: str) -> date | None:
+    """Day of a daily archive key; None (with a warning) for non-daily names such as ``-unsort.zip``."""
+    try:
+        return catalog.key_day(key)
+    except DataIntegrityError:
+        logger.warning("[DATA] stage=public_archive skipped_non_daily_key key=%s", key)
+        return None
+
+
+class _ListingFailedError(Exception):
+    """A bucket listing failed; the whole plan is abandoned (fail closed)."""
+
+
+def _is_ok(coverage: Mapping[tuple[str, date], store.CoverageRow], symbol: str, day: date) -> bool:
+    row = coverage.get((symbol, day))
+    return row is not None and row.status == "ok"
+
+
+def _unmasked_first_day(
+    dataset: str, symbol: str, coverage: Mapping[tuple[str, date], store.CoverageRow],
+    *, start: date | None, end: date, incremental_window_days: int | None,
+) -> date:
+    if start is not None:
+        return start
+    done = [day for (sym, day), row in coverage.items() if sym == symbol and row.status == "ok"]
+    if done:
+        base = max(done) + timedelta(days=1)
+    elif incremental_window_days is not None:
+        base = max(catalog.DATASETS[dataset].first_day, end - timedelta(days=incremental_window_days))
+    else:
+        base = catalog.DATASETS[dataset].first_day
+    return max(catalog.HISTORY_START, base)
+
+
+def _candidate_days(
+    dataset: str, symbol: str, coverage: Mapping[tuple[str, date], store.CoverageRow],
+    allow_map: Mapping[str, Collection[date]] | None,
+    *, start: date | None, end: date, capped_end: date, incremental_window_days: int | None,
+) -> list[date]:
+    """Days still to collect for a symbol: allowed (or cursor-derived) days not yet ``ok``."""
+    if allow_map is not None:
+        wanted = set(allow_map.get(symbol, ()))
+        floor = start if start is not None else catalog.MASK_POLICIES[dataset].start
+        if incremental_window_days is not None:
+            floor = max(floor, end - timedelta(days=incremental_window_days))
+        pool = [day for day in wanted if floor <= day <= capped_end]
+    else:
+        first = _unmasked_first_day(
+            dataset, symbol, coverage, start=start, end=end, incremental_window_days=incremental_window_days,
+        )
+        span = (capped_end - first).days + 1
+        pool = [first + timedelta(days=offset) for offset in range(max(span, 0))]
+    return sorted(day for day in pool if not _is_ok(coverage, symbol, day))
+
+
+def _list_days(
+    downloader: object, dataset: str, symbol: str, months: Sequence[date], *, whole_symbol: bool,
+) -> set[date]:
+    """Daily keys present in the bucket for the months (or the whole symbol prefix)."""
+    prefixes = (
+        [_symbol_prefix(dataset, symbol)]
+        if whole_symbol
+        else [_month_prefix(dataset, symbol, month) for month in months]
+    )
+    listed: set[date] = set()
+    for prefix in prefixes:
+        try:
+            keys = downloader.list_object_keys(prefix=prefix)  # type: ignore[attr-defined]
+        except Exception as exc:  # noqa: BLE001
+            logger.error("[DATA] stage=public_archive listing_failed detail=%s", _short_detail(exc))
+            raise _ListingFailedError from exc
+        if keys is None:
+            raise _ListingFailedError
+        for key in keys:
+            if not key.endswith(".zip"):
+                continue
+            day = _daily_key_day(key)
+            if day is not None:
+                listed.add(day)
+    return listed
+
+
+def _plan_symbol(
+    downloader: object, dataset: str, symbol: str, candidates: list[date], capped_end: date,
+    window: tuple[int, int] | None,
+) -> CollectionPlan | None:
+    months = sorted({date(day.year, day.month, 1) for day in candidates})
+    listed = _list_days(downloader, dataset, symbol, months, whole_symbol=len(months) > 3)
+    wanted = set(candidates)
+    days = tuple(day for day in candidates if day in listed)
+    pending = tuple(
+        day for offset in range(3)
+        if (day := capped_end - timedelta(days=offset)) in wanted and day not in listed
+    )
+    if not days and not pending:
+        return None
+    return CollectionPlan(dataset=dataset, symbol=symbol, days=days, slice_hours=window, pending_days=pending)
+
+
 def plan_collection(
     downloader: object,
     *,
@@ -107,131 +207,23 @@ def plan_collection(
     capped_end = min(end, _yesterday_utc(pd.Timestamp.now(tz="UTC")))
     slice_set = set(slice_symbols)
     plans: list[CollectionPlan] = []
-    for dataset in datasets:
-        coverage = store.load_coverage(root, dataset)
-        if allowed is not None and dataset in allowed:
-            allow_map = allowed[dataset]
+    try:
+        for dataset in datasets:
+            coverage = store.load_coverage(root, dataset)
+            allow_map = allowed[dataset] if allowed is not None and dataset in allowed else None
             for symbol in sorted(set(symbols.get(dataset, ()))):
-                raw_days = allow_map.get(symbol, ())
-                if not raw_days:
-                    continue
-                eff = start if start is not None else catalog.MASK_POLICIES[dataset].start
-                if incremental_window_days is not None:
-                    win_start = end - timedelta(days=incremental_window_days)
-                    eff = max(eff, win_start)
-                wanted = set(raw_days)
-                candidates = sorted(
-                    day
-                    for day in wanted
-                    if day >= eff
-                    and day <= capped_end
-                    and (coverage.get((symbol, day)) is None or coverage[(symbol, day)].status != "ok")
+                candidates = _candidate_days(
+                    dataset, symbol, coverage, allow_map, start=start, end=end,
+                    capped_end=capped_end, incremental_window_days=incremental_window_days,
                 )
                 if not candidates:
                     continue
-                months = sorted({(day.year, day.month) for day in candidates})
-                seen: set[date] = set()
-                if len(months) > 3:
-                    try:
-                        keys = downloader.list_object_keys(prefix=_symbol_prefix(dataset, symbol))  # type: ignore[attr-defined]
-                    except Exception as exc:  # noqa: BLE001
-                        logger.error("[DATA] stage=public_archive listing_failed detail=%s", _short_detail(exc))
-                        return None
-                    if keys is None:
-                        return None
-                    candidate_set = set(candidates)
-                    for key in keys:
-                        if not key.endswith(".zip"):
-                            continue
-                        day = catalog.key_day(key)
-                        if day in candidate_set:
-                            seen.add(day)
-                else:
-                    failed = False
-                    for year, month_number in months:
-                        try:
-                            keys = downloader.list_object_keys(prefix=_month_prefix(dataset, symbol, date(year, month_number, 1)))  # type: ignore[attr-defined]
-                        except Exception as exc:  # noqa: BLE001
-                            logger.error("[DATA] stage=public_archive listing_failed detail=%s", _short_detail(exc))
-                            return None
-                        if keys is None:
-                            failed = True
-                            break
-                        for key in keys:
-                            if not key.endswith(".zip"):
-                                continue
-                            seen.add(catalog.key_day(key))
-                    if failed:
-                        return None
-                days = tuple(day for day in candidates if day in seen)
-                pending = tuple(
-                    day for offset in range(3)
-                    if (day := capped_end - timedelta(days=offset)) in set(candidates)
-                    and day not in seen
-                )
-                if not days and not pending:
-                    continue
                 window = slice_hours if dataset == "aggTrades" and symbol in slice_set else None
-                plans.append(CollectionPlan(dataset=dataset, symbol=symbol, days=days, slice_hours=window, pending_days=pending))
-            continue
-        for symbol in sorted(set(symbols.get(dataset, ()))):
-            if start is not None:
-                first = start
-            else:
-                done = [day for (sym, day), row in coverage.items() if sym == symbol and row.status == "ok"]
-                if done:
-                    base = max(done) + timedelta(days=1)
-                elif incremental_window_days is not None:
-                    base = max(catalog.DATASETS[dataset].first_day, end - timedelta(days=incremental_window_days))
-                else:
-                    base = catalog.DATASETS[dataset].first_day
-                first = max(catalog.HISTORY_START, base)
-            if first > capped_end:
-                continue
-            listed: set[date] = set()
-            if len(_month_starts(first, capped_end)) > 3:
-                try:
-                    keys = downloader.list_object_keys(prefix=_symbol_prefix(dataset, symbol))  # type: ignore[attr-defined]
-                except Exception as exc:  # noqa: BLE001
-                    logger.error("[DATA] stage=public_archive listing_failed detail=%s", _short_detail(exc))
-                    return None
-                if keys is None:
-                    return None
-                for key in keys:
-                    if not key.endswith(".zip"):
-                        continue
-                    day = catalog.key_day(key)
-                    if first <= day <= capped_end:
-                        listed.add(day)
-            else:
-                for month in _month_starts(first, capped_end):
-                    try:
-                        keys = downloader.list_object_keys(prefix=_month_prefix(dataset, symbol, month))  # type: ignore[attr-defined]
-                    except Exception as exc:  # noqa: BLE001
-                        logger.error("[DATA] stage=public_archive listing_failed detail=%s", _short_detail(exc))
-                        return None
-                    if keys is None:
-                        return None
-                    for key in keys:
-                        if not key.endswith(".zip"):
-                            continue
-                        listed.add(catalog.key_day(key))
-            days = tuple(
-                day
-                for day in sorted(listed)
-                if first <= day <= capped_end
-                and (coverage.get((symbol, day)) is None or coverage[(symbol, day)].status != "ok")
-            )
-            pending = tuple(
-                day for offset in range(3)
-                if (day := capped_end - timedelta(days=offset)) >= first
-                and day not in listed
-                and (coverage.get((symbol, day)) is None or coverage[(symbol, day)].status != "ok")
-            )
-            if not days and not pending:
-                continue
-            window = slice_hours if dataset == "aggTrades" and symbol in slice_set else None
-            plans.append(CollectionPlan(dataset=dataset, symbol=symbol, days=days, slice_hours=window, pending_days=pending))
+                plan = _plan_symbol(downloader, dataset, symbol, candidates, capped_end, window)
+                if plan is not None:
+                    plans.append(plan)
+    except _ListingFailedError:
+        return None
     return plans
 
 
@@ -326,75 +318,78 @@ def _merge_slice_files(root: Path, dataset: str, symbol: str, batch: list[tuple[
             writer.close()
 
 
-def execute_plan(
-    downloader: object,
-    plans: Sequence[CollectionPlan],
-    *,
-    root: Path,
-    workers: int = 4,
-    heartbeat_s: float = 60.0,
-    now_fn: Callable[[], pd.Timestamp] | None = None,
-) -> CollectionReport:
-    """Fetch, derive, merge, and record every planned day with bounded workers."""
-    if workers < 1 or workers > 8:
-        raise ValueError("workers must be between 1 and 8")
-    now = now_fn or (lambda: pd.Timestamp.now(tz="UTC"))
-    started = now()
-    recent_cutoff = _yesterday_utc(started) - timedelta(days=2)
-    total = sum(len(plan.days) for plan in plans)
-    state = {"done": 0, "ok": 0, "failed": 0, "absent": 0, "pending": sum(len(p.pending_days) for p in plans)}
-    guard = threading.Lock()
-    beat_guard = threading.Lock()
-    last_beat = [time.monotonic()]
+_Outcome = tuple[date, str, "str | None", int]
 
-    def _write_beat(force: bool = False) -> None:
+
+class _PlanRunner:
+    """One ``execute_plan`` run: bounded workers share counters, heartbeat and coverage writes."""
+
+    def __init__(
+        self, downloader: object, plans: Sequence[CollectionPlan], *, root: Path,
+        heartbeat_s: float, now_fn: Callable[[], pd.Timestamp],
+    ) -> None:
+        self.downloader = downloader
+        self.plans = plans
+        self.root = root
+        self.heartbeat_s = heartbeat_s
+        self.now = now_fn
+        self.started = now_fn()
+        self.recent_cutoff = _yesterday_utc(self.started) - timedelta(days=2)
+        self.total = sum(len(plan.days) for plan in plans)
+        self.state = {"done": 0, "ok": 0, "failed": 0, "absent": 0, "pending": sum(len(p.pending_days) for p in plans)}
+        self.guard = threading.Lock()
+        self.beat_guard = threading.Lock()
+        self.last_beat = time.monotonic()
+
+    def _write_beat(self, force: bool) -> None:
         beat_now = time.monotonic()
-        if not force and beat_now - last_beat[0] < heartbeat_s:
+        if not force and beat_now - self.last_beat < self.heartbeat_s:
             return
-        last_beat[0] = beat_now
-        with guard:
-            snapshot = dict(state)
-        stamp = now()
-        payload = {
-            "done": snapshot["done"],
-            "failed": snapshot["failed"],
-            "total": total,
-            "ts": stamp.isoformat(),
-        }
-        path = _heartbeat_path(root)
+        self.last_beat = beat_now
+        with self.guard:
+            snapshot = dict(self.state)
+        stamp = self.now()
+        payload = {"done": snapshot["done"], "failed": snapshot["failed"], "total": self.total, "ts": stamp.isoformat()}
+        path = _heartbeat_path(self.root)
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
         tmp.replace(path)
-        elapsed = (stamp - started).total_seconds()
         logger.info(
             "[DATA] stage=public_archive done=%d/%d ok=%d failed=%d elapsed_s=%.1f",
-            snapshot["done"], total, snapshot["ok"], snapshot["failed"], elapsed,
+            snapshot["done"], self.total, snapshot["ok"], snapshot["failed"], (stamp - self.started).total_seconds(),
         )
 
-    def _beat(force: bool = False) -> None:
-        with beat_guard:
-            _write_beat(force)
+    def beat(self, force: bool = False) -> None:
+        with self.beat_guard:
+            self._write_beat(force)
 
-    def _bump(field: str) -> None:
-        with guard:
-            state[field] += 1
-            state["done"] += 1
+    def bump(self, field: str) -> None:
+        with self.guard:
+            self.state[field] += 1
+            self.state["done"] += 1
 
-    def _record(row: store.CoverageRow) -> bool:
+    def record(self, plan: CollectionPlan, day: date, status: Literal["ok", "absent", "failed"], *, sha: str | None, rows: int, detail: str | None) -> bool:
+        row = store.CoverageRow(
+            dataset=plan.dataset, symbol=plan.symbol, day=day, status=status,
+            raw_sha256=sha, rows=rows, recorded_at=self.now(), detail=detail,
+        )
         try:
-            store.append_coverage(root, row)
+            store.append_coverage(self.root, row)
             return True
         except Exception as exc:  # noqa: BLE001
-            logger.error("[DATA] stage=public_archive coverage_failed symbol=%s day=%s detail=%s", row.symbol, row.day, _short_detail(exc))
+            logger.error(
+                "[DATA] stage=public_archive coverage_failed symbol=%s day=%s detail=%s",
+                plan.symbol, day, _short_detail(exc),
+            )
             return False
 
-    def _run_unit(plan: CollectionPlan, day: date) -> _Ready | _Skipped:
+    def run_unit(self, plan: CollectionPlan, day: date) -> _Ready | _Skipped:
         try:
             key = catalog.daily_key(plan.dataset, plan.symbol, day)
-            fetched = fetch.fetch_verified_zip(downloader, key)  # type: ignore[arg-type]
+            fetched = fetch.fetch_verified_zip(self.downloader, key)  # type: ignore[arg-type]
             if fetched is None:
-                return _Skipped(day=day, kind="pending" if day >= recent_cutoff else "absent", detail=None)
+                return _Skipped(day=day, kind="pending" if day >= self.recent_cutoff else "absent", detail=None)
             zip_bytes, sha = fetched
             del fetched
             raw = fetch.read_single_csv(zip_bytes)
@@ -410,136 +405,142 @@ def execute_plan(
         except Exception as exc:  # noqa: BLE001
             return _Skipped(day=day, kind="failed", detail=_short_detail(exc))
 
-    def _run_month(plan: CollectionPlan, days: list[date], staging: Path) -> None:
-            derived_batch: list[tuple[date, pd.DataFrame]] = []
-            slice_batch: list[tuple[date, Path]] = []
-            outcomes: list[tuple[date, str, str | None, int]] = []
-            for day in days:
-                result = _run_unit(plan, day)
-                if isinstance(result, _Skipped):
-                    if result.kind == "failed":
-                        outcomes.append((result.day, "failed", result.detail, 0))
-                    else:
-                        outcomes.append((result.day, result.kind, None, 0))
-                    _bump("failed" if result.kind == "failed" else result.kind)
-                    _beat()
+    def gather_month(
+        self, plan: CollectionPlan, days: list[date], staging: Path,
+    ) -> tuple[list[tuple[date, pd.DataFrame]], list[tuple[date, Path]], list[_Outcome]]:
+        derived: list[tuple[date, pd.DataFrame]] = []
+        slices: list[tuple[date, Path]] = []
+        outcomes: list[_Outcome] = []
+        for day in days:
+            result = self.run_unit(plan, day)
+            if isinstance(result, _Skipped):
+                outcomes.append((result.day, result.kind, result.detail, 0))
+                self.bump("failed" if result.kind == "failed" else result.kind)
+                self.beat()
+                continue
+            derived.append((result.day, result.frame))
+            if result.sliced is not None:
+                source = staging / f"{result.day.isoformat()}.parquet"
+                try:
+                    write_parquet_atomic(result.sliced, source, compression="zstd")
+                except Exception as exc:  # noqa: BLE001
+                    derived.pop()
+                    outcomes.append((result.day, "failed", _short_detail(exc), 0))
+                    self.bump("failed")
                     continue
-                derived_batch.append((result.day, result.frame))
-                if result.sliced is not None:
-                    source = staging / f"{result.day.isoformat()}.parquet"
-                    try:
-                        write_parquet_atomic(result.sliced, source, compression="zstd")
-                    except Exception as exc:  # noqa: BLE001
-                        derived_batch.pop()
-                        outcomes.append((result.day, "failed", _short_detail(exc), 0))
-                        _bump("failed")
-                        del result
-                        continue
-                    slice_batch.append((result.day, source))
-                outcomes.append((result.day, "ok", result.sha, len(result.frame)))
-                del result
-            backups: dict[Path, Path | None] = {}
-            committed: list[Path] = []
-            try:
-                if slice_batch:
-                    for kind in ("derived", "slice"):
-                        path = store.partition_path(root, plan.dataset, plan.symbol, days[0].strftime("%Y%m"), kind=kind)
-                        backup = staging / f"{kind}.backup"
-                        if path.exists():
-                            os.link(path, backup)
-                            backups[path] = backup
-                        else:
-                            backups[path] = None
-                if derived_batch:
-                    _merge_day_batch(root, plan.dataset, plan.symbol, derived_batch)
-                    if slice_batch:
-                        committed.append(store.partition_path(root, plan.dataset, plan.symbol, days[0].strftime("%Y%m")))
-                if slice_batch:
-                    _merge_slice_files(root, plan.dataset, plan.symbol, slice_batch)
-                    committed.append(store.partition_path(root, plan.dataset, plan.symbol, days[0].strftime("%Y%m"), kind="slice"))
-            except Exception as exc:  # noqa: BLE001
-                for path in committed:
-                    original = backups[path]
-                    if original is not None:
-                        original.replace(path)
-                    else:
-                        path.unlink(missing_ok=True)
-                detail = _short_detail(exc)
-                for day_out, status, _sha, _rows in outcomes:
-                    if status == "failed":
-                        _record(store.CoverageRow(
-                            dataset=plan.dataset, symbol=plan.symbol, day=day_out,
-                            status="failed", raw_sha256=None, rows=0,
-                            recorded_at=now(), detail=_sha,
-                        ))
-                    if status == "ok":
-                        _record(store.CoverageRow(
-                            dataset=plan.dataset, symbol=plan.symbol, day=day_out,
-                            status="failed", raw_sha256=None, rows=0,
-                            recorded_at=now(), detail=detail,
-                        ))
-                        _bump("failed")
-                _beat()
-                return
-            for day_out, status, sha, rows in outcomes:
-                if status != "ok":
-                    if status == "failed":
-                        _record(store.CoverageRow(
-                            dataset=plan.dataset, symbol=plan.symbol, day=day_out,
-                            status="failed", raw_sha256=None, rows=0,
-                            recorded_at=now(), detail=str(sha),
-                        ))
-                    continue
-                recorded = _record(store.CoverageRow(
-                    dataset=plan.dataset, symbol=plan.symbol, day=day_out,
-                    status="ok", raw_sha256=str(sha), rows=rows,
-                    recorded_at=now(), detail=None,
-                ))
-                _bump("ok" if recorded else "failed")
-                _beat()
+                slices.append((result.day, source))
+            outcomes.append((result.day, "ok", result.sha, len(result.frame)))
+        return derived, slices, outcomes
 
-    def _run_group(plan: CollectionPlan) -> None:
+    def commit_month(
+        self, plan: CollectionPlan, days: list[date], staging: Path,
+        derived: list[tuple[date, pd.DataFrame]], slices: list[tuple[date, Path]],
+    ) -> str | None:
+        """Write the month partitions; None on success, else the failure detail after rollback."""
+        month = days[0].strftime("%Y%m")
+        backups: dict[Path, Path | None] = {}
+        committed: list[Path] = []
+        derived_path = store.partition_path(self.root, plan.dataset, plan.symbol, month)
+        slice_path = store.partition_path(self.root, plan.dataset, plan.symbol, month, kind="slice")
+        try:
+            if slices:
+                for kind, path in (("derived", derived_path), ("slice", slice_path)):
+                    backup = staging / f"{kind}.backup"
+                    if path.exists():
+                        os.link(path, backup)
+                        backups[path] = backup
+                    else:
+                        backups[path] = None
+            if derived:
+                _merge_day_batch(self.root, plan.dataset, plan.symbol, derived)
+                if slices:
+                    committed.append(derived_path)
+            if slices:
+                _merge_slice_files(self.root, plan.dataset, plan.symbol, slices)
+                committed.append(slice_path)
+        except Exception as exc:  # noqa: BLE001
+            for path in committed:
+                original = backups[path]
+                if original is not None:
+                    original.replace(path)
+                else:
+                    path.unlink(missing_ok=True)
+            return _short_detail(exc)
+        return None
+
+    def run_month(self, plan: CollectionPlan, days: list[date], staging: Path) -> None:
+        derived, slices, outcomes = self.gather_month(plan, days, staging)
+        detail = self.commit_month(plan, days, staging, derived, slices)
+        for day, status, info, rows in outcomes:
+            if status == "failed":
+                self.record(plan, day, "failed", sha=None, rows=0, detail=str(info))
+            elif status == "ok" and detail is not None:
+                self.record(plan, day, "failed", sha=None, rows=0, detail=detail)
+                self.bump("failed")
+            elif status == "ok":
+                recorded = self.record(plan, day, "ok", sha=str(info), rows=rows, detail=None)
+                self.bump("ok" if recorded else "failed")
+                self.beat()
+        if detail is not None:
+            self.beat()
+
+    def run_group(self, plan: CollectionPlan) -> None:
         groups: dict[str, list[date]] = {}
         for day in sorted(set(plan.days)):
             groups.setdefault(day.strftime("%Y%m"), []).append(day)
         for days in groups.values():
-            with tempfile.TemporaryDirectory(prefix=".archive-", dir=root) as directory:
-                _run_month(plan, days, Path(directory))
+            with tempfile.TemporaryDirectory(prefix=".archive-", dir=self.root) as directory:
+                self.run_month(plan, days, Path(directory))
 
-    stop = threading.Event()
+    def run_symbol(self, group: list[CollectionPlan]) -> None:
+        for plan in group:
+            self.run_group(plan)
 
-    def _periodic_beat() -> None:
-        while not stop.wait(max(heartbeat_s, 0.01)):
-            _beat(force=True)
+    def run(self, workers: int) -> CollectionReport:
+        stop = threading.Event()
 
-    _beat(force=True)
-    heartbeat = threading.Thread(target=_periodic_beat, daemon=True)
-    heartbeat.start()
-    try:
-        by_symbol: dict[str, list[CollectionPlan]] = {}
-        for plan in plans:
-            by_symbol.setdefault(plan.symbol, []).append(plan)
+        def periodic() -> None:
+            while not stop.wait(max(self.heartbeat_s, 0.01)):
+                self.beat(force=True)
 
-        def _run_symbol(group: list[CollectionPlan]) -> None:
-            for plan in group:
-                _run_group(plan)
+        self.beat(force=True)
+        heartbeat = threading.Thread(target=periodic, daemon=True)
+        heartbeat.start()
+        try:
+            by_symbol: dict[str, list[CollectionPlan]] = {}
+            for plan in self.plans:
+                by_symbol.setdefault(plan.symbol, []).append(plan)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+                list(pool.map(self.run_symbol, by_symbol.values()))
+        finally:
+            stop.set()
+            heartbeat.join()
+        self.beat(force=True)
+        with self.guard:
+            final = dict(self.state)
+        return CollectionReport(
+            planned_days=self.total, ok=final["ok"], failed=final["failed"], absent=final["absent"],
+            pending=final["pending"], elapsed_s=(self.now() - self.started).total_seconds(),
+        )
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
-            list(pool.map(_run_symbol, by_symbol.values()))
-    finally:
-        stop.set()
-        heartbeat.join()
-    _beat(force=True)
-    with guard:
-        final = dict(state)
-    return CollectionReport(
-        planned_days=total,
-        ok=final["ok"],
-        failed=final["failed"],
-        absent=final["absent"],
-        pending=final["pending"],
-        elapsed_s=(now() - started).total_seconds(),
+
+def execute_plan(
+    downloader: object,
+    plans: Sequence[CollectionPlan],
+    *,
+    root: Path,
+    workers: int = 4,
+    heartbeat_s: float = 60.0,
+    now_fn: Callable[[], pd.Timestamp] | None = None,
+) -> CollectionReport:
+    """Fetch, derive, merge, and record every planned day with bounded workers."""
+    if workers < 1 or workers > 8:
+        raise ValueError("workers must be between 1 and 8")
+    runner = _PlanRunner(
+        downloader, plans, root=root, heartbeat_s=heartbeat_s,
+        now_fn=now_fn or (lambda: pd.Timestamp.now(tz="UTC")),
     )
+    return runner.run(workers)
 
 
 def _short_detail(exc: BaseException) -> str:

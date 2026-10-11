@@ -50,8 +50,7 @@ from src.live.audit import AuditLog, default_audit_log_path
 from src.live.delisting_settlement import DelistingSettlement as DelistingSettlement
 from src.live.delisting_settlement import book_delisting_settlements as book_delisting_settlements
 from src.live.delisting_settlement import delisting_settlement_tax_records as delisting_settlement_tax_records
-from src.live.depth_candidates import DEPTH_CANDIDATES_NAME, read_depth_candidates
-from src.live.depth_capture import DepthCaptureSummary, ExecutionDepthRecorder, select_depth_symbols
+from src.live.depth_capture import DepthCaptureSummary, ExecutionDepthRecorder, resolve_depth_capture_symbols
 from src.live.derisk import UNRESOLVED_ORDERS_REASON, derisk_filter, freeze_unresolved_symbols
 from src.live.errors import CausalityViolation, LiveTradingError, ReconciliationBreach, RiskGateBreach, StaleSignalError
 from src.live.execution_quality import (
@@ -1581,22 +1580,10 @@ def run_shadow_cycle(
         elif not kept:
             audit.record("exec_depth_skipped", reason="empty")
         else:
-            traded = [
-                i.symbol
-                for i in sorted(kept, key=lambda x: abs(x.quantity * marks.get(x.symbol, Decimal(0))), reverse=True)
-            ]
-            candidates = read_depth_candidates(
-                Path(weights_path).parent / DEPTH_CANDIDATES_NAME,
-                decision_time,
-                limit=settings.exec_depth_candidate_breadth,
+            capture_syms = resolve_depth_capture_symbols(
+                kept, marks, weights_path=weights_path, decision_time=decision_time, audit=audit,
+                candidate_breadth=settings.exec_depth_candidate_breadth, max_symbols=settings.exec_depth_max_symbols,
             )
-            capture_syms = select_depth_symbols(traded, candidates, max_symbols=settings.exec_depth_max_symbols)
-            with contextlib.suppress(Exception):
-                audit.record(
-                    "exec_depth_symbols",
-                    traded=len(traded),
-                    candidates=len(capture_syms) - min(len(traded), len(capture_syms)),
-                )
             depth_recorder = ExecutionDepthRecorder(
                 capture_syms,
                 decision_time=decision_time,
