@@ -3,19 +3,22 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import threading
 import time
-from collections.abc import AsyncIterator, Callable, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
 
 from src.common.durable_io import durable_replace, durable_write_text
+from src.live.depth_candidates import DEPTH_CANDIDATES_NAME, read_depth_candidates
 from src.market_data.streams.coverage import CoverageTracker
 
 _logger = logging.getLogger(__name__)
@@ -465,3 +468,28 @@ class ExecutionDepthRecorder:
                 backoff = min(_RECONNECT_BACKOFF_MAX_S, backoff * 2.0)
         if buffer:
             self._flush_rows(buffer, coverage, final=True)
+
+
+def resolve_depth_capture_symbols(
+    kept: Sequence[Any],
+    marks: Mapping[str, Decimal],
+    *,
+    weights_path: Path,
+    decision_time: pd.Timestamp,
+    candidate_breadth: int,
+    max_symbols: int,
+    audit: Any,
+) -> list[str]:
+    """Traded symbols (largest notional first) plus today's ADV candidates, capped at ``max_symbols``."""
+    by_notional = sorted(kept, key=lambda x: abs(x.quantity * marks.get(x.symbol, Decimal(0))), reverse=True)
+    traded = [intent.symbol for intent in by_notional]
+    candidates = read_depth_candidates(
+        Path(weights_path).parent / DEPTH_CANDIDATES_NAME, decision_time, limit=candidate_breadth,
+    )
+    symbols = select_depth_symbols(traded, candidates, max_symbols=max_symbols)
+    with contextlib.suppress(Exception):
+        audit.record(
+            "exec_depth_symbols", traded=len(traded),
+            candidates=len(symbols) - min(len(traded), len(symbols)),
+        )
+    return symbols
