@@ -221,6 +221,58 @@ class BinanceVisionDownloader:
         filename = f"{symbol}-fundingRate-{year}-{month_str}.zip"
         return self._fetch_zip_by_path("monthly", "fundingRate", symbol, filename)
 
+    def fetch_archive_bytes(self, *parts: str) -> bytes | None:
+        """Fetch raw archive bytes for ``BASE_URL/<parts>``."""
+        url = self._vision_path_url(*parts)
+        try:
+            return self._read_url_bytes(url)
+        except urllib.error.HTTPError as http_error:
+            if http_error.code == 404:
+                return None
+            raise
+
+    def list_object_keys(self, *, prefix: str, timeout: int | None = None) -> list[str] | None:
+        """List all object keys, returning None on listing failure."""
+        ns = "{http://s3.amazonaws.com/doc/2006-03-01/}"
+        keys: list[str] = []
+        marker: str | None = None
+        try:
+            while True:
+                params: dict[str, str] = {"prefix": prefix}
+                if marker is not None:
+                    params["marker"] = marker
+                query = urllib.parse.urlencode(params)
+                url = f"{self.S3_LISTING_URL}?{query}"
+                body = self._read_url_bytes(url, timeout=timeout)
+                root = ElementTree.fromstring(body)  # noqa: S314
+                page_keys: list[str] = [
+                    (node.text or "").strip()
+                    for node in root.findall(f".//{ns}Key")
+                    if (node.text or "").strip()
+                ]
+                keys.extend(page_keys)
+                truncated_node = root.find(f".//{ns}IsTruncated")
+                is_truncated = (
+                    truncated_node is not None
+                    and (truncated_node.text or "").strip().lower() == "true"
+                )
+                if not is_truncated:
+                    break
+                next_marker_node = root.find(f".//{ns}NextMarker")
+                next_marker = (
+                    (next_marker_node.text or "").strip()
+                    if next_marker_node is not None and next_marker_node.text
+                    else ""
+                )
+                candidate = next_marker or (page_keys[-1] if page_keys else "")
+                if not candidate or (marker is not None and candidate <= marker):
+                    return None
+                marker = candidate
+            return sorted(set(keys))
+        except (urllib.error.URLError, OSError, ElementTree.ParseError, ValueError) as e:
+            self.logger.warning("Failed to list object keys for prefix %s: %s", prefix, e)
+            return None
+
     def list_symbols_from_s3_xml_listing(
         self,
         *,
