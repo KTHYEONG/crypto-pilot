@@ -570,3 +570,128 @@ def test_ledger_cursor_overrides_window(tmp_path: Path) -> None:
     planned = sorted({day for plan in plans for day in plan.days})
     assert planned
     assert min(planned) == cutoff + timedelta(days=1)
+
+
+def test_history_floor_without_ledger(tmp_path: Path) -> None:
+    from datetime import timedelta
+
+    end = date(2021, 3, 10)
+    first = date(2020, 9, 5)
+    days = [first + timedelta(days=i) for i in range((end - first).days + 1)]
+    fake = _metrics_fake(["BTCUSDT"], days)
+    plans = plan_collection(
+        fake, root=tmp_path, datasets=["metrics"], symbols={"metrics": ["BTCUSDT"]},
+        start=None, end=end,
+    )
+    assert plans is not None
+    planned = sorted({day for plan in plans for day in plan.days})
+    assert planned
+    assert min(planned) >= date(2021, 1, 1)
+
+
+def test_explicit_start_overrides_floor(tmp_path: Path) -> None:
+    from datetime import timedelta
+
+    start = date(2020, 9, 1)
+    end = date(2020, 9, 5)
+    days = [start + timedelta(days=i) for i in range(5)]
+    fake = _metrics_fake(["BTCUSDT"], days)
+    plans = plan_collection(
+        fake, root=tmp_path, datasets=["metrics"], symbols={"metrics": ["BTCUSDT"]},
+        start=start, end=end,
+    )
+    assert plans is not None
+    planned = sorted({day for plan in plans for day in plan.days})
+    assert planned == days
+
+
+def test_long_range_uses_single_symbol_listing(tmp_path: Path) -> None:
+    from datetime import timedelta
+
+    start = date(2022, 1, 10)
+    end = date(2024, 1, 10)
+    days = [start + timedelta(days=i) for i in range((end - start).days + 1)]
+    fake = _metrics_fake(["BTCUSDT"], days)
+    calls: list[str] = []
+    original = fake.list_object_keys
+
+    def counting(*, prefix: str, timeout: int | None = None) -> list[str] | None:
+        calls.append(prefix)
+        return original(prefix=prefix, timeout=timeout)
+
+    fake.list_object_keys = counting  # type: ignore[method-assign]
+    plans = plan_collection(
+        fake, root=tmp_path, datasets=["metrics"], symbols={"metrics": ["BTCUSDT"]},
+        start=start, end=end,
+    )
+    assert plans is not None
+    assert calls == ["data/futures/um/daily/metrics/BTCUSDT/BTCUSDT-metrics-"]
+    planned = sorted({day for plan in plans for day in plan.days})
+    assert planned == days
+
+
+def test_short_range_keeps_month_listing(tmp_path: Path) -> None:
+    import re
+
+    days = [date(2024, 1, 15), date(2024, 2, 10)]
+    fake = _metrics_fake(["BTCUSDT"], days)
+    calls: list[str] = []
+    original = fake.list_object_keys
+
+    def counting(*, prefix: str, timeout: int | None = None) -> list[str] | None:
+        calls.append(prefix)
+        return original(prefix=prefix, timeout=timeout)
+
+    fake.list_object_keys = counting  # type: ignore[method-assign]
+    plans = plan_collection(
+        fake, root=tmp_path, datasets=["metrics"], symbols={"metrics": ["BTCUSDT"]},
+        start=days[0], end=days[-1],
+    )
+    assert plans is not None
+    assert len(calls) == 2
+    assert all(re.search(r"\d{4}-\d{2}$", prefix) for prefix in calls)
+
+
+def test_symbol_listing_failure_fails_closed(tmp_path: Path) -> None:
+    from datetime import timedelta
+
+    start = date(2022, 1, 10)
+    end = date(2024, 1, 10)
+    days = [start + timedelta(days=i) for i in range((end - start).days + 1)]
+
+    class _SymbolBroken(FakeDownloader):
+        def list_object_keys(self, *, prefix: str, timeout: int | None = None) -> list[str] | None:
+            if prefix.endswith("BTCUSDT-metrics-"):
+                raise OSError("symbol listing failed")
+            return super().list_object_keys(prefix=prefix, timeout=timeout)
+
+    fake = _SymbolBroken()
+    for day in days:
+        fake.add_zip(daily_key("metrics", "BTCUSDT", day), _metrics_zip("BTCUSDT", day))
+    plans = plan_collection(
+        fake, root=tmp_path, datasets=["metrics"], symbols={"metrics": ["BTCUSDT"]},
+        start=start, end=end,
+    )
+    assert plans is None
+    assert fake.fetch_calls == []
+
+
+def test_slices_for_every_aggtrades_symbol(tmp_path: Path) -> None:
+    day = date(2024, 1, 15)
+    symbols = ["AAVUSDT", "BTCUSDT", "ETHUSDT"]
+    fake = FakeDownloader()
+    for symbol in symbols:
+        fake.add_zip(daily_key("aggTrades", symbol, day), _agg_zip(symbol, day))
+    plans = plan_collection(
+        fake, root=tmp_path, datasets=["aggTrades"],
+        symbols={"aggTrades": symbols},
+        start=day, end=day, slice_hours=(23, 24), slice_symbols=symbols,
+    )
+    assert plans is not None
+    assert len(plans) == 3
+    assert all(plan.slice_hours == (23, 24) for plan in plans)
+    report = execute_plan(fake, plans, root=tmp_path, workers=1, now_fn=lambda: _NOW)
+    assert (report.ok, report.failed) == (3, 0)
+    for symbol in symbols:
+        assert (tmp_path / "aggTrades" / symbol / "202401.parquet").exists()
+        assert (tmp_path / "aggTrades_slice" / symbol / "202401.parquet").exists()

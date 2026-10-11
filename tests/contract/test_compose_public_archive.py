@@ -24,4 +24,10 @@ def test_archive_service_is_profile_gated() -> None:
     assert 'restart: "no"' in block
     assert "env_file" not in block
     assert "ARCHIVE_INCREMENTAL=1" in block
-    assert '"archive", "collect", "--dataset", "all", "--execute", "--workers", "4"' in block
+    assert '"archive", "collect", "--dataset", "all", "--execute", "--workers", "2"' in block
+
+
+def test_archive_service_resource_budget() -> None:
+    block = "\n".join(_service_block())
+    assert "mem_limit: 3g" in block
+    assert "ohlcv" not in block

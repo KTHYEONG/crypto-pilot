@@ -79,3 +79,104 @@ def test_perpetual_filter() -> None:
     assert is_perpetual_usdt("BTCUSDT_250627") is False
     assert is_perpetual_usdt("币安人生USDT") is True
     assert is_perpetual_usdt("ETHBUSD") is False
+
+
+_AGG_HEADER = (
+    "agg_trade_id,price,quantity,first_trade_id,last_trade_id,"
+    "transact_time,is_buyer_maker"
+)
+
+
+def test_header_and_headerless_equal_dtypes() -> None:
+    import pandas as pd
+
+    row = "7,100.5,2.25,1,2,1705270200000,true\n"
+    headered = _zip_bytes({"a.csv": f"{_AGG_HEADER}\n{row}"})
+    headerless = _zip_bytes({"a.csv": row})
+    first = read_single_csv(headered)
+    second = read_single_csv(headerless)
+    pd.testing.assert_frame_equal(first, second)
+    assert len(first) == 1
+    for dtype in first.dtypes:
+        assert str(dtype) != "object"
+    assert str(first["agg_trade_id"].dtype) == "int64"
+    assert str(first["transact_time"].dtype) == "int64"
+    assert str(first["price"].dtype) == "float64"
+    assert str(first["quantity"].dtype) == "float64"
+    assert str(first["is_buyer_maker"].dtype) == "bool"
+
+
+def test_no_dtype_warning() -> None:
+    import warnings
+
+    row = "7,100.5,2.25,1,2,1705270200000,true\n"
+    payload = _zip_bytes({"a.csv": f"{_AGG_HEADER}\n{row}"})
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        frame = read_single_csv(payload)
+    assert len(frame) == 1
+
+
+def test_maker_int_forms_coerce_to_bool() -> None:
+    body = (
+        f"{_AGG_HEADER}\n"
+        "7,100.5,2.25,1,2,1705270200000,1\n"
+        "8,101.5,3.25,3,4,1705270260000,0\n"
+    )
+    frame = read_single_csv(_zip_bytes({"a.csv": body}))
+    assert str(frame["is_buyer_maker"].dtype) == "bool"
+    assert frame["is_buyer_maker"].tolist() == [True, False]
+
+
+def test_maker_invalid_form_raises() -> None:
+    import pytest
+
+    from src.common.errors import DataIntegrityError
+
+    body = f"{_AGG_HEADER}\n7,100.5,2.25,1,2,1705270200000,maybe\n"
+    with pytest.raises(DataIntegrityError):
+        read_single_csv(_zip_bytes({"a.csv": body}))
+    numeric = f"{_AGG_HEADER}\n7,100.5,2.25,1,2,1705270200000,2\n"
+    with pytest.raises(DataIntegrityError):
+        read_single_csv(_zip_bytes({"a.csv": numeric}))
+
+
+def test_maker_padded_forms_coerce_to_bool() -> None:
+    body = (
+        f"{_AGG_HEADER}\n"
+        "7,100.5,2.25,1,2,1705270200000, true \n"
+        "8,101.5,3.25,3,4,1705270260000, false \n"
+    )
+    frame = read_single_csv(_zip_bytes({"a.csv": body}))
+    assert str(frame["is_buyer_maker"].dtype) == "bool"
+    assert frame["is_buyer_maker"].tolist() == [True, False]
+
+
+@pytest.mark.parametrize("value", ["7.5", "-1", "9223372036854775808", "NaN", "inf"])
+@pytest.mark.parametrize("header", [True, False])
+def test_invalid_integer_fields_are_not_silently_coerced(value: str, header: bool) -> None:
+    body = f"{value},100.5,2.25,1,2,1705270200000,true\n"
+    if header:
+        body = f"{_AGG_HEADER}\n{body}"
+    with pytest.raises(DataIntegrityError, match="integer archive field"):
+        read_single_csv(_zip_bytes({"a.csv": body}))
+
+
+def test_header_only_aggtrades_has_canonical_dtypes() -> None:
+    frame = read_single_csv(_zip_bytes({"a.csv": f"{_AGG_HEADER}\n"}))
+    assert frame.empty
+    assert [str(dtype) for dtype in frame.dtypes] == [
+        "int64", "float64", "float64", "int64", "int64", "int64", "bool",
+    ]
+
+
+def test_csv_member_is_streamed_with_bom_header(monkeypatch: pytest.MonkeyPatch) -> None:
+    payload = _zip_bytes({"a.csv": f"\ufeff{_AGG_HEADER}\n7,100,2,1,2,1705270200000,true\n"})
+
+    def forbid_full_read(*args: object, **kwargs: object) -> bytes:
+        raise AssertionError("CSV member must not be materialized before parsing")
+
+    monkeypatch.setattr(zipfile.ZipFile, "read", forbid_full_read)
+    frame = read_single_csv(payload)
+    assert frame["agg_trade_id"].tolist() == [7]
+    assert frame["price"].tolist() == [100.0]
