@@ -70,7 +70,7 @@ class TestStageTelemetry:
         finally:
             telemetry._logger.removeHandler(handler)
 
-    def test_construction_attaches_no_handler_and_opens_no_file(self):
+    def test_construction_attaches_no_handler_and_opens_no_file(self, monkeypatch):
         from src.common.logging import LOG_DIR
         from src.lab.mhs.telemetry import TELEMETRY_LOGGER_NAME
 
@@ -78,6 +78,8 @@ class TestStageTelemetry:
         handlers_before = list(logger.handlers)
         propagate_before = logger.propagate
         level_before = logger.level
+        # Ambient root file handlers installed by other tests would capture the probe line.
+        monkeypatch.setattr(logging.getLogger(), "handlers", [])
         marker = f"probe-{uuid.uuid4().hex}"
         telemetry = StageTelemetry()
         try:
