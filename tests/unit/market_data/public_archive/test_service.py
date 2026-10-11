@@ -519,3 +519,54 @@ def test_heartbeat_updates_during_blocked_fetch(tmp_path: Path, monkeypatch: pyt
     report = execute_plan(fake, [CollectionPlan("metrics", "BTCUSDT", (day,), None)], root=tmp_path, heartbeat_s=0.01)
     assert report.ok == 1
     assert heartbeat_seen.is_set()
+
+
+def test_missing_ledger_incremental_window(tmp_path: Path) -> None:
+    from datetime import timedelta
+
+    end = date(2024, 1, 31)
+    days = [end - timedelta(days=i) for i in range(30)]
+    fake = _metrics_fake(["BTCUSDT"], days)
+    plans = plan_collection(
+        fake, root=tmp_path, datasets=["metrics"], symbols={"metrics": ["BTCUSDT"]},
+        start=None, end=end, incremental_window_days=14,
+    )
+    assert plans is not None
+    planned = sorted({day for plan in plans for day in plan.days})
+    assert planned
+    assert min(planned) >= end - timedelta(days=14)
+
+
+def test_negative_incremental_window_rejected(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="incremental_window_days"):
+        plan_collection(
+            FakeDownloader(), root=tmp_path, datasets=["metrics"], symbols={},
+            start=None, end=date(2024, 1, 31), incremental_window_days=-1,
+        )
+
+
+def test_ledger_cursor_overrides_window(tmp_path: Path) -> None:
+    from datetime import timedelta
+
+    from src.market_data.public_archive import store
+
+    end = date(2024, 1, 31)
+    days = [end - timedelta(days=i) for i in range(30)]
+    fake = _metrics_fake(["BTCUSDT"], days)
+    cutoff = date(2024, 1, 5)
+    for day in sorted(d for d in days if d <= cutoff):
+        store.append_coverage(
+            tmp_path,
+            store.CoverageRow(
+                dataset="metrics", symbol="BTCUSDT", day=day, status="ok",
+                raw_sha256="0" * 64, rows=1, recorded_at=_NOW, detail=None,
+            ),
+        )
+    plans = plan_collection(
+        fake, root=tmp_path, datasets=["metrics"], symbols={"metrics": ["BTCUSDT"]},
+        start=None, end=end, incremental_window_days=14,
+    )
+    assert plans is not None
+    planned = sorted({day for plan in plans for day in plan.days})
+    assert planned
+    assert min(planned) == cutoff + timedelta(days=1)

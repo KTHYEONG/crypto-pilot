@@ -322,3 +322,116 @@ def test_each_dataset_uses_its_bucket_universe(tmp_path: Path, monkeypatch: pyte
     ns.downloader = _Listed([], [])
     ns.handler(ns)
     assert captured == {"metrics": ["DELISTEDUSDT"], "bookDepth": ["DEPTHUSDT"]}
+
+
+def _prune_ns(tmp_path: Path, argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    add_archive_commands(parser)
+    return parser.parse_args([*argv, "--root", str(tmp_path)])
+
+
+def _write_status(path: Path) -> None:
+    import json
+
+    finished = pd.Timestamp.now(tz="UTC")
+    started = finished - pd.Timedelta(hours=1)
+    path.write_text(
+        json.dumps({"started_at": started.isoformat(), "finished_at": finished.isoformat(), "rc": 0}),
+        encoding="utf-8",
+    )
+
+
+def _old_partition(root: Path) -> Path:
+    import os
+    import time
+
+    target = root / "metrics" / "BTCUSDT" / "202401.parquet"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(b"parquet-stub")
+    old = time.mktime(pd.Timestamp("2024-01-10T00:00:00Z").to_pydatetime().timetuple())
+    os.utime(target, (old, old))
+    return target
+
+
+def test_prune_prunes_and_prints_json(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
+    import json
+
+    target = _old_partition(tmp_path)
+    status_file = tmp_path / "last_success.json"
+    _write_status(status_file)
+    ns = _prune_ns(tmp_path, ["prune", "--backup-status", str(status_file)])
+    ns.handler(ns)
+    payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert payload["prune_blocked"] is False
+    assert payload["pruned_files"] == 1
+    assert not target.exists()
+
+
+def test_prune_blocked_without_status_exits_zero(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
+    import json
+
+    target = _old_partition(tmp_path)
+    ns = _prune_ns(tmp_path, ["prune", "--backup-status", str(tmp_path / "missing.json")])
+    ns.handler(ns)
+    payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert payload["prune_blocked"] is True
+    assert payload["blocked_reason"] == "status_missing"
+    assert target.exists()
+
+
+def test_prune_io_error_exits_four(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def _boom(self: Path, *args: object, **kwargs: object) -> None:
+        raise OSError("injected")
+
+    target = _old_partition(tmp_path)
+    monkeypatch.setattr(Path, "unlink", _boom)
+    status_file = tmp_path / "last_success.json"
+    _write_status(status_file)
+    ns = _prune_ns(tmp_path, ["prune", "--backup-status", str(status_file)])
+    with pytest.raises(SystemExit) as exc:
+        ns.handler(ns)
+    assert exc.value.code == 4
+    assert target.exists()
+
+
+def test_prune_default_mount_status(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from src.cli.commands import archive as archive_mod
+
+    status_file = tmp_path / "last_success.json"
+    _write_status(status_file)
+    monkeypatch.setattr(archive_mod, "ARCHIVE_BACKUP_MOUNT", status_file)
+    target = _old_partition(tmp_path)
+    ns = _prune_ns(tmp_path, ["prune"])
+    ns.handler(ns)
+    assert not target.exists()
+
+
+def test_prune_default_repo_status_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture) -> None:
+    import json
+
+    from src.cli.commands import archive as archive_mod
+
+    monkeypatch.setattr(archive_mod, "ARCHIVE_BACKUP_MOUNT", tmp_path / "absent.json")
+    monkeypatch.setattr("src.common.paths.BASE_DIR", tmp_path / "empty_base")
+    target = _old_partition(tmp_path)
+    ns = _prune_ns(tmp_path, ["prune"])
+    ns.handler(ns)
+    payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert payload["prune_blocked"] is True
+    assert target.exists()
+
+
+@pytest.mark.parametrize(("flag", "start", "days"), [("1", None, 1), ("0", None, 2), ("1", "2024-01-01", 2)])
+def test_collect_incremental_env_and_explicit_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture,
+    flag: str, start: str | None, days: int,
+) -> None:
+    monkeypatch.setenv("ARCHIVE_INCREMENTAL", flag)
+    argv = ["collect", "--dataset", "metrics", "--symbols", "BTCUSDT", "--end", "2024-01-31"]
+    if start is not None:
+        argv.extend(["--start", start])
+    ns = _collect_ns(tmp_path, argv)
+    ns.downloader = FakeDownloader(["BTCUSDT"], [date(2024, 1, 1), date(2024, 1, 20)])
+    ns.handler(ns)
+    assert f"days={days} files={days}" in capsys.readouterr().out
+    assert ns.downloader.fetch_calls == []

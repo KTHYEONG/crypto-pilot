@@ -89,6 +89,7 @@ def plan_collection(
     end: date,
     slice_hours: tuple[int, int] = (23, 24),
     slice_symbols: Collection[str] = (),
+    incremental_window_days: int | None = None,
 ) -> list[CollectionPlan] | None:
     """List missing bucket days per symbol without downloading anything."""
     for dataset in datasets:
@@ -96,6 +97,8 @@ def plan_collection(
             raise DataIntegrityError(f"unknown archive dataset: {dataset!r}")
     if not (0 <= slice_hours[0] < slice_hours[1] <= 24):
         raise ValueError("invalid slice window")
+    if incremental_window_days is not None and incremental_window_days < 0:
+        raise ValueError("incremental_window_days must be non-negative")
     capped_end = min(end, _yesterday_utc(pd.Timestamp.now(tz="UTC")))
     slice_set = set(slice_symbols)
     plans: list[CollectionPlan] = []
@@ -106,7 +109,12 @@ def plan_collection(
                 first = start
             else:
                 done = [day for (sym, day), row in coverage.items() if sym == symbol and row.status == "ok"]
-                first = max(done) + timedelta(days=1) if done else catalog.DATASETS[dataset].first_day
+                if done:
+                    first = max(done) + timedelta(days=1)
+                elif incremental_window_days is not None:
+                    first = max(catalog.DATASETS[dataset].first_day, end - timedelta(days=incremental_window_days))
+                else:
+                    first = catalog.DATASETS[dataset].first_day
             if first > capped_end:
                 continue
             listed: set[date] = set()
