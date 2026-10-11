@@ -112,10 +112,17 @@ def test_timeout_terminates_forked_child_and_releases_pipes(tmp_path: Path) -> N
     assert result.returncode == 124
     assert time.monotonic() - started < 10
     child_pid = int(pid_path.read_text(encoding="utf-8"))
+
+    def _running() -> bool:
+        try:
+            return psutil.Process(child_pid).status() != psutil.STATUS_ZOMBIE
+        except psutil.NoSuchProcess:
+            return False
+
     try:
-        assert not psutil.pid_exists(child_pid) or psutil.Process(child_pid).status() == psutil.STATUS_ZOMBIE
+        assert not _running()
     finally:
-        if psutil.pid_exists(child_pid) and psutil.Process(child_pid).status() != psutil.STATUS_ZOMBIE:
+        if _running():
             os.kill(child_pid, signal.SIGKILL)
 
 
