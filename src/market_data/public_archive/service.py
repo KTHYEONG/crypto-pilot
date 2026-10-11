@@ -79,6 +79,10 @@ def _month_prefix(dataset: str, symbol: str, month: date) -> str:
     )
 
 
+def _symbol_prefix(dataset: str, symbol: str) -> str:
+    return f"data/futures/um/daily/{dataset}/{symbol}/{symbol}-{dataset}-"
+
+
 def plan_collection(
     downloader: object,
     *,
@@ -110,17 +114,18 @@ def plan_collection(
             else:
                 done = [day for (sym, day), row in coverage.items() if sym == symbol and row.status == "ok"]
                 if done:
-                    first = max(done) + timedelta(days=1)
+                    base = max(done) + timedelta(days=1)
                 elif incremental_window_days is not None:
-                    first = max(catalog.DATASETS[dataset].first_day, end - timedelta(days=incremental_window_days))
+                    base = max(catalog.DATASETS[dataset].first_day, end - timedelta(days=incremental_window_days))
                 else:
-                    first = catalog.DATASETS[dataset].first_day
+                    base = catalog.DATASETS[dataset].first_day
+                first = max(catalog.HISTORY_START, base)
             if first > capped_end:
                 continue
             listed: set[date] = set()
-            for month in _month_starts(first, capped_end):
+            if len(_month_starts(first, capped_end)) > 3:
                 try:
-                    keys = downloader.list_object_keys(prefix=_month_prefix(dataset, symbol, month))  # type: ignore[attr-defined]
+                    keys = downloader.list_object_keys(prefix=_symbol_prefix(dataset, symbol))  # type: ignore[attr-defined]
                 except Exception as exc:  # noqa: BLE001
                     logger.error("[DATA] stage=public_archive listing_failed detail=%s", _short_detail(exc))
                     return None
@@ -129,7 +134,22 @@ def plan_collection(
                 for key in keys:
                     if not key.endswith(".zip"):
                         continue
-                    listed.add(catalog.key_day(key))
+                    day = catalog.key_day(key)
+                    if first <= day <= capped_end:
+                        listed.add(day)
+            else:
+                for month in _month_starts(first, capped_end):
+                    try:
+                        keys = downloader.list_object_keys(prefix=_month_prefix(dataset, symbol, month))  # type: ignore[attr-defined]
+                    except Exception as exc:  # noqa: BLE001
+                        logger.error("[DATA] stage=public_archive listing_failed detail=%s", _short_detail(exc))
+                        return None
+                    if keys is None:
+                        return None
+                    for key in keys:
+                        if not key.endswith(".zip"):
+                            continue
+                        listed.add(catalog.key_day(key))
             days = tuple(
                 day
                 for day in sorted(listed)
@@ -313,11 +333,6 @@ def execute_plan(
             del fetched
             raw = fetch.read_single_csv(zip_bytes)
             del zip_bytes
-            if plan.dataset == "aggTrades" and raw.columns.tolist() == list(range(len(raw.columns))):
-                raw.columns = [
-                    "agg_trade_id", "price", "quantity", "first_trade_id",
-                    "last_trade_id", "transact_time", "is_buyer_maker",
-                ]
             frame = _derive_day(plan.dataset, raw, symbol=plan.symbol, day=day)
             sliced = (
                 derive.slice_agg_trades(raw, day=day, start_hour_utc=plan.slice_hours[0], end_hour_utc=plan.slice_hours[1])
