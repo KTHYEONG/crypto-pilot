@@ -120,7 +120,7 @@ def test_aggtrades_uses_bucket_universe(tmp_path: Path, capsys: pytest.CaptureFi
 
     downloader = _Universe(["BTCUSDT", "ETHUSDT", "AAVUSDT"], days)
     ns = _collect_ns(tmp_path, [
-        "collect", "--dataset", "aggTrades", "--symbols", "all",
+        "collect", "--dataset", "aggTrades", "--symbols", "all", "--no-mask",
         "--start", "2024-01-15", "--end", "2024-01-16",
     ])
     ns.downloader = downloader
@@ -155,7 +155,6 @@ def test_explicit_symbols_pass_through(tmp_path: Path, monkeypatch: pytest.Monke
     assert captured == {
         "metrics": ["BTCUSDT", "ETHUSDT"],
         "bookDepth": ["BTCUSDT", "ETHUSDT"],
-        "aggTrades": ["BTCUSDT", "ETHUSDT"],
     }
 
 
@@ -166,7 +165,7 @@ def test_aggtrades_listing_failure_exits_two(tmp_path: Path) -> None:
             return []
 
     ns = _collect_ns(tmp_path, [
-        "collect", "--dataset", "aggTrades", "--symbols", "all",
+        "collect", "--dataset", "aggTrades", "--symbols", "all", "--no-mask",
         "--start", "2024-01-15", "--end", "2024-01-16",
     ])
     ns.downloader = _Empty(["BTCUSDT"], [date(2024, 1, 15)])
@@ -183,7 +182,7 @@ def test_universe_listing_errors_fail_closed(tmp_path: Path, failure: str) -> No
                 raise OSError("listing unavailable")
             return None
 
-    ns = _collect_ns(tmp_path, ["collect", "--dataset", "all", "--execute"])
+    ns = _collect_ns(tmp_path, ["collect", "--dataset", "all", "--no-mask", "--execute"])
     ns.downloader = _Broken([], [])
     with pytest.raises(SystemExit) as exc:
         ns.handler(ns)
@@ -235,7 +234,7 @@ def test_collect_planning_failure_exits_two(tmp_path: Path) -> None:
 
 def test_collect_symbols_all_and_status(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
     ns = _collect_ns(tmp_path, [
-        "collect", "--dataset", "metrics", "--symbols", "all",
+        "collect", "--dataset", "metrics", "--symbols", "all", "--no-mask",
         "--start", "2024-01-15", "--end", "2024-01-15", "--execute",
     ])
     ns.downloader = FakeDownloader(["BTCUSDT"], [date(2024, 1, 15)])
@@ -262,7 +261,7 @@ def test_collect_uses_listing_fallback(tmp_path: Path, capsys: pytest.CaptureFix
             return ["BTCUSDT"]
 
     ns = _collect_ns(tmp_path, [
-        "collect", "--dataset", "metrics", "--symbols", "all",
+        "collect", "--dataset", "metrics", "--symbols", "all", "--no-mask",
         "--start", "2024-01-15", "--end", "2024-01-15",
     ])
     ns.downloader = _Fallback()
@@ -278,7 +277,7 @@ def test_collect_empty_universe_exits_two(tmp_path: Path) -> None:
             return []
 
     ns = _collect_ns(tmp_path, [
-        "collect", "--dataset", "metrics", "--symbols", "all",
+        "collect", "--dataset", "metrics", "--symbols", "all", "--no-mask",
         "--start", "2024-01-15", "--end", "2024-01-15",
     ])
     ns.downloader = _Empty(["BTCUSDT"], [date(2024, 1, 15)])
@@ -302,13 +301,12 @@ def test_each_dataset_uses_its_bucket_universe(tmp_path: Path, monkeypatch: pyte
         return []
 
     monkeypatch.setattr(service, "plan_collection", capture)
-    ns = _collect_ns(tmp_path, ["collect", "--dataset", "all"])
+    ns = _collect_ns(tmp_path, ["collect", "--dataset", "all", "--no-mask"])
     ns.downloader = _Listed([], [])
     ns.handler(ns)
     assert captured == {
         "metrics": ["DELISTEDUSDT"],
         "bookDepth": ["DEPTHUSDT"],
-        "aggTrades": ["DEPTHUSDT"],
     }
 
 
@@ -467,3 +465,185 @@ def test_collect_incremental_env_and_explicit_start(
     ns.handler(ns)
     assert f"days={days} files={days}" in capsys.readouterr().out
     assert ns.downloader.fetch_calls == []
+
+
+def _mask_census(symbols: list[str], periods: int = 120) -> tuple:
+    index = pd.DatetimeIndex(pd.date_range("2021-01-01", periods=periods, freq="D", tz="UTC"), tz="UTC")
+    close = pd.DataFrame(dict.fromkeys(symbols, 100.0), index=index, dtype="float64")
+    qv = pd.DataFrame(dict.fromkeys(symbols, 10_000_000.0), index=index, dtype="float64")
+    return close, qv
+
+
+def _patch_census(monkeypatch: pytest.MonkeyPatch, symbols: list[str]) -> None:
+    close, qv = _mask_census(symbols)
+
+    def fake_census(path):
+        del path
+        return close, qv
+
+    import src.market_data.public_archive.mask as mask_mod
+
+    monkeypatch.setattr(mask_mod, "load_daily_census", fake_census)
+
+
+def test_all_means_default_datasets(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture) -> None:
+    _patch_census(monkeypatch, ["BTCUSDT"])
+    ns = _collect_ns(tmp_path, ["collect", "--dataset", "all", "--end", "2024-01-16"])
+    ns.downloader = FakeDownloader(["BTCUSDT"], [date(2024, 1, 15), date(2024, 1, 16)])
+    ns.handler(ns)
+    out = capsys.readouterr().out
+    assert "plan dataset=metrics" in out
+    assert "plan dataset=bookDepth" in out
+    assert "plan dataset=aggTrades" not in out
+
+
+def test_aggtrades_explicit_uses_breadth_twenty(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from src.market_data.public_archive import service
+
+    symbols = [f"S{i:02d}USDT" for i in range(25)]
+    _patch_census(monkeypatch, symbols)
+    captured: dict[str, object] = {}
+
+    def capture(*args: object, **kwargs: object) -> list:
+        captured.update(kwargs)  # type: ignore[arg-type]
+        return []
+
+    monkeypatch.setattr(service, "plan_collection", capture)
+    ns = _collect_ns(tmp_path, ["collect", "--dataset", "aggTrades", "--end", "2024-01-16"])
+    class _Universe(FakeDownloader):
+        def list_all_symbols(self, **kwargs: object) -> list[str]:
+            return symbols
+
+    ns.downloader = _Universe([], [])
+    ns.handler(ns)
+    allowed = captured["allowed"]
+    assert set(allowed.keys()) == {"aggTrades"}
+    assert captured["symbols"] == {"aggTrades": symbols[:20]}
+    assert set(allowed["aggTrades"]) == set(symbols[:20])
+    for days in allowed["aggTrades"].values():
+        assert min(days) == date(2023, 1, 1)
+
+
+def test_no_mask_reproduces_bucket_universe(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from src.market_data.public_archive import service
+
+    captured: dict[str, list[str]] = {}
+
+    def capture(*args: object, **kwargs: object) -> list:
+        captured.update(kwargs["symbols"])  # type: ignore[arg-type]
+        return []
+
+    monkeypatch.setattr(service, "plan_collection", capture)
+
+    class _Universe(FakeDownloader):
+        def list_all_symbols(self, **kwargs: object) -> list[str]:
+            del kwargs
+            return ["BTCUSDT", "ETHUSDT"]
+
+    ns = _collect_ns(tmp_path, ["collect", "--dataset", "metrics", "--symbols", "all", "--no-mask"])
+    ns.downloader = _Universe(["BTCUSDT"], [date(2024, 1, 15)])
+    ns.handler(ns)
+    assert captured == {"metrics": ["BTCUSDT", "ETHUSDT"]}
+
+
+def test_missing_lake_exits_two(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("src.common.paths.FUTURES_DATA_DIR", tmp_path / "nolake")
+    ns = _collect_ns(tmp_path, ["collect", "--dataset", "metrics", "--end", "2024-01-16"])
+    ns.downloader = FakeDownloader(["BTCUSDT"], [date(2024, 1, 15)])
+    with pytest.raises(SystemExit) as exc:
+        ns.handler(ns)
+    assert exc.value.code == 2
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_explicit_symbols_bypass_mask(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture) -> None:
+    index = pd.DatetimeIndex(pd.date_range("2024-01-01", periods=20, freq="D", tz="UTC"), tz="UTC")
+    close = pd.DataFrame({"BTCUSDT": 100.0}, index=index, dtype="float64")
+    qv = pd.DataFrame({"BTCUSDT": 0.0}, index=index, dtype="float64")
+    import src.market_data.public_archive.mask as mask_mod
+
+    def fake_census(path):
+        del path
+        return close, qv
+
+    monkeypatch.setattr(mask_mod, "load_daily_census", fake_census)
+    ns = _collect_ns(tmp_path, [
+        "collect", "--dataset", "metrics", "--symbols", "BTCUSDT",
+        "--start", "2024-01-15", "--end", "2024-01-16",
+    ])
+    ns.downloader = FakeDownloader(["BTCUSDT"], [date(2024, 1, 15), date(2024, 1, 16)])
+    ns.handler(ns)
+    assert "plan dataset=metrics symbols=1 days=2" in capsys.readouterr().out
+
+
+def test_breadth_override_applies(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from src.market_data.public_archive import service
+
+    symbols = [f"S{i:02d}USDT" for i in range(15)]
+
+    class _Universe(FakeDownloader):
+        def list_all_symbols(self, **kwargs: object) -> list[str]:
+            del kwargs
+            return list(symbols)
+
+    _patch_census(monkeypatch, symbols)
+    seen: dict[str, set[str]] = {}
+
+    def capture(*args: object, **kwargs: object) -> list:
+        syms = kwargs["symbols"]  # type: ignore[index]
+        seen.update({k: set(v) for k, v in syms.items()})
+        return []
+
+    monkeypatch.setattr(service, "plan_collection", capture)
+    downloader = _Universe([], [])
+    ns = _collect_ns(tmp_path, ["collect", "--dataset", "metrics", "--end", "2024-01-16"])
+    ns.downloader = downloader
+    ns.handler(ns)
+    default_set = set(seen.get("metrics", set()))
+    ns2 = _collect_ns(tmp_path, ["collect", "--dataset", "metrics", "--end", "2024-01-16", "--breadth", "10"])
+    ns2.downloader = downloader
+    ns2.handler(ns2)
+    assert seen.get("metrics", set()) <= default_set
+    assert default_set == set(symbols)
+    assert seen["metrics"] == set(symbols[:10])
+
+
+def test_mask_empty_allowed_plans_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture) -> None:
+    _patch_census(monkeypatch, ["BTCUSDT"])
+    ns = _collect_ns(tmp_path, ["collect", "--dataset", "metrics", "--end", "2020-01-05"])
+    ns.downloader = FakeDownloader(["BTCUSDT"], [date(2024, 1, 15)])
+    ns.handler(ns)
+    out = capsys.readouterr().out
+    assert "plan dataset=metrics symbols=0 days=0 files=0" in out
+    assert "mask_symbols=0 allowed_days=0 missing_days=0" in out
+
+
+def test_mask_summary_excludes_symbols_missing_from_bucket(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture,
+) -> None:
+    _patch_census(monkeypatch, ["BTCUSDT", "ETHUSDT"])
+    ns = _collect_ns(tmp_path, [
+        "collect", "--dataset", "metrics", "--start", "2024-01-15", "--end", "2024-01-16",
+    ])
+    ns.downloader = FakeDownloader(["BTCUSDT"], [date(2024, 1, 15), date(2024, 1, 16)])
+    ns.handler(ns)
+    assert "mask_symbols=1 allowed_days=2 missing_days=2" in capsys.readouterr().out
+
+
+def test_masked_bucket_failure_exits_before_writing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture,
+) -> None:
+    _patch_census(monkeypatch, ["BTCUSDT"])
+
+    class _Broken(FakeDownloader):
+        def list_all_symbols(self, **kwargs: object) -> list[str] | None:
+            return None
+
+    ns = _collect_ns(tmp_path, ["collect", "--dataset", "all", "--execute", "--end", "2024-01-16"])
+    ns.downloader = _Broken([], [])
+    with pytest.raises(SystemExit) as exc:
+        ns.handler(ns)
+    assert exc.value.code == 2
+    assert "status=LISTING_FAILED" in capsys.readouterr().out
+    assert ns.downloader.fetch_calls == []
+    assert list(tmp_path.iterdir()) == []

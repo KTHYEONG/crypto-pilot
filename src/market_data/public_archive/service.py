@@ -94,6 +94,7 @@ def plan_collection(
     slice_hours: tuple[int, int] = (23, 24),
     slice_symbols: Collection[str] = (),
     incremental_window_days: int | None = None,
+    allowed: Mapping[str, Mapping[str, Collection[date]]] | None = None,
 ) -> list[CollectionPlan] | None:
     """List missing bucket days per symbol without downloading anything."""
     for dataset in datasets:
@@ -108,6 +109,71 @@ def plan_collection(
     plans: list[CollectionPlan] = []
     for dataset in datasets:
         coverage = store.load_coverage(root, dataset)
+        if allowed is not None and dataset in allowed:
+            allow_map = allowed[dataset]
+            for symbol in sorted(set(symbols.get(dataset, ()))):
+                raw_days = allow_map.get(symbol, ())
+                if not raw_days:
+                    continue
+                eff = start if start is not None else catalog.MASK_POLICIES[dataset].start
+                if incremental_window_days is not None:
+                    win_start = end - timedelta(days=incremental_window_days)
+                    eff = max(eff, win_start)
+                wanted = set(raw_days)
+                candidates = sorted(
+                    day
+                    for day in wanted
+                    if day >= eff
+                    and day <= capped_end
+                    and (coverage.get((symbol, day)) is None or coverage[(symbol, day)].status != "ok")
+                )
+                if not candidates:
+                    continue
+                months = sorted({(day.year, day.month) for day in candidates})
+                seen: set[date] = set()
+                if len(months) > 3:
+                    try:
+                        keys = downloader.list_object_keys(prefix=_symbol_prefix(dataset, symbol))  # type: ignore[attr-defined]
+                    except Exception as exc:  # noqa: BLE001
+                        logger.error("[DATA] stage=public_archive listing_failed detail=%s", _short_detail(exc))
+                        return None
+                    if keys is None:
+                        return None
+                    candidate_set = set(candidates)
+                    for key in keys:
+                        if not key.endswith(".zip"):
+                            continue
+                        day = catalog.key_day(key)
+                        if day in candidate_set:
+                            seen.add(day)
+                else:
+                    failed = False
+                    for year, month_number in months:
+                        try:
+                            keys = downloader.list_object_keys(prefix=_month_prefix(dataset, symbol, date(year, month_number, 1)))  # type: ignore[attr-defined]
+                        except Exception as exc:  # noqa: BLE001
+                            logger.error("[DATA] stage=public_archive listing_failed detail=%s", _short_detail(exc))
+                            return None
+                        if keys is None:
+                            failed = True
+                            break
+                        for key in keys:
+                            if not key.endswith(".zip"):
+                                continue
+                            seen.add(catalog.key_day(key))
+                    if failed:
+                        return None
+                days = tuple(day for day in candidates if day in seen)
+                pending = tuple(
+                    day for offset in range(3)
+                    if (day := capped_end - timedelta(days=offset)) in set(candidates)
+                    and day not in seen
+                )
+                if not days and not pending:
+                    continue
+                window = slice_hours if dataset == "aggTrades" and symbol in slice_set else None
+                plans.append(CollectionPlan(dataset=dataset, symbol=symbol, days=days, slice_hours=window, pending_days=pending))
+            continue
         for symbol in sorted(set(symbols.get(dataset, ()))):
             if start is not None:
                 first = start

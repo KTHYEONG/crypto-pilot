@@ -54,25 +54,58 @@ def _bucket_symbols(downloader: object, dataset: str) -> list[str]:
 
 
 def _run_collect(args: argparse.Namespace) -> None:
+    from src.common.errors import DataIntegrityError
     from src.market_data.public_archive import service as service_mod
-    from src.market_data.public_archive.catalog import DATASETS
+    from src.market_data.public_archive.catalog import DEFAULT_DATASETS, MASK_POLICIES
 
     root = _root(args)
     downloader = _downloader(args)
-    requested_datasets = list(DATASETS) if args.dataset == "all" else [args.dataset]
+    requested_datasets = list(DEFAULT_DATASETS) if args.dataset == "all" else [args.dataset]
     end = _parse_day(args.end, datetime.now(UTC).date() - timedelta(days=1))
     start = date.fromisoformat(args.start) if args.start else None
     wanted = sorted({s.strip() for s in args.symbols.split(",") if s.strip()})
     datasets = list(requested_datasets)
+    mask_mode = args.symbols == "all" and not getattr(args, "no_mask", False)
+    allowed: dict[str, dict[str, frozenset[date]]] | None = None
     symbols: dict[str, list[str]] = {}
-    for dataset in datasets:
-        if args.symbols == "all":
+    if mask_mode:
+        from src.common.paths import FUTURES_DATA_DIR
+        from src.market_data.public_archive.mask import allowed_days, load_daily_census, seat_day_mask
+
+        try:
+            daily_close, daily_quote_volume = load_daily_census(FUTURES_DATA_DIR / "ohlcv" / "1h")
+        except DataIntegrityError as exc:
+            print("archive collect status=LAKE_MISSING")  # noqa: T201
+            raise SystemExit(2) from exc
+        allowed = {}
+        for dataset in datasets:
+            policy = MASK_POLICIES[dataset]
+            breadth = args.breadth if getattr(args, "breadth", None) is not None else policy.breadth
+            preroll = args.preroll_days if getattr(args, "preroll_days", None) is not None else policy.preroll_days
+            mask = seat_day_mask(daily_close, daily_quote_volume, breadth=breadth, preroll_days=preroll)
+            first = start if start is not None else policy.start
+            allowed[dataset] = allowed_days(mask, first=first, last=end)
+        for dataset in datasets:
+            keys = sorted((allowed or {}).get(dataset, {}).keys())
+            if not keys:
+                symbols[dataset] = []
+                continue
+            listed = _bucket_symbols(downloader, dataset)
+            if not listed:
+                print("archive collect status=LISTING_FAILED")  # noqa: T201
+                raise SystemExit(2)
+            keep = set(listed)
+            symbols[dataset] = sorted(s for s in keys if s in keep)
+            allowed[dataset] = {s: allowed[dataset][s] for s in symbols[dataset]}
+    elif args.symbols == "all":
+        for dataset in datasets:
             listed = _bucket_symbols(downloader, dataset)
             if not listed:
                 print("archive collect status=LISTING_FAILED")  # noqa: T201
                 raise SystemExit(2)
             symbols[dataset] = listed
-        else:
+    else:
+        for dataset in datasets:
             symbols[dataset] = list(wanted)
     slice_hours = (int(args.slice_hours[0]), int(args.slice_hours[1]))
     incremental = 14 if args.start is None and os.environ.get("ARCHIVE_INCREMENTAL") == "1" else None
@@ -86,6 +119,7 @@ def _run_collect(args: argparse.Namespace) -> None:
         slice_hours=slice_hours,
         slice_symbols=symbols.get("aggTrades", ()),
         incremental_window_days=incremental,
+        allowed=allowed,
     )
     if plans is None:
         print("archive collect status=LISTING_FAILED")  # noqa: T201
@@ -93,7 +127,26 @@ def _run_collect(args: argparse.Namespace) -> None:
     for dataset in datasets:
         ds_plans = [p for p in plans if p.dataset == dataset]
         ds_days = sum(len(p.days) for p in ds_plans)
-        print(f"plan dataset={dataset} symbols={len(ds_plans)} days={ds_days} files={ds_days}")  # noqa: T201
+        if allowed is not None and dataset in allowed:
+            from src.market_data.public_archive.store import load_coverage
+
+            yesterday = datetime.now(UTC).date() - timedelta(days=1)
+            coverage = load_coverage(root, dataset)
+            amap = allowed[dataset]
+            allowed_n = sum(len(v) for v in amap.values())
+            missing_n = sum(
+                1
+                for sym, days in amap.items()
+                for day in days
+                if day <= yesterday
+                and (coverage.get((sym, day)) is None or coverage[(sym, day)].status != "ok")
+            )
+            print(  # noqa: T201
+                f"plan dataset={dataset} symbols={len(ds_plans)} days={ds_days} files={ds_days} "
+                f"mask_symbols={len(amap)} allowed_days={allowed_n} missing_days={missing_n}"
+            )
+        else:
+            print(f"plan dataset={dataset} symbols={len(ds_plans)} days={ds_days} files={ds_days}")  # noqa: T201
     if not args.execute:
         return
     report = service_mod.execute_plan(downloader, plans, root=root, workers=args.workers)
@@ -180,6 +233,9 @@ def add_archive_commands(archive_parser: argparse.ArgumentParser) -> None:
     collect.add_argument("--workers", type=int, default=4)
     collect.add_argument("--execute", action="store_true", default=False)
     collect.add_argument("--root", type=str, default=None)
+    collect.add_argument("--breadth", type=int, default=None)
+    collect.add_argument("--preroll-days", type=int, default=None)
+    collect.add_argument("--no-mask", action="store_true", default=False)
     collect.set_defaults(handler=_run_collect)
 
     status = subparsers.add_parser("status", help="Show archive coverage per dataset")

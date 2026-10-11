@@ -30,4 +30,4 @@ def test_archive_service_is_profile_gated() -> None:
 def test_archive_service_resource_budget() -> None:
     block = "\n".join(_service_block())
     assert "mem_limit: 3g" in block
-    assert "ohlcv" not in block
+    assert "./data/futures/ohlcv:/app/data/futures/ohlcv:ro" in block

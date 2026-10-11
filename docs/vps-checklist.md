@@ -250,17 +250,14 @@ data); use `status` and read-only checks.
 |---|---|---|---|
 | P1 | Last run | `cat ~/crypto-pilot/data/public_archive/_status/collect_heartbeat.json` | `ts` within 26 h, `failed == 0` |
 | P2 | Log | `grep -h 'rc=' ~/logs/crypto-pilot-public-archive-$(date -u +%F).log` | steps rc 0 |
-| P3 | Coverage lag | `docker compose --profile archive run --rm public-archive /app/.venv/bin/python -m src.cli.main archive status` | last `ok` day per dataset ≤ 3 days behind today |
-| P4 | Drive copy | `rclone lsf gdrive:quant-lake/live/crypto-pilot/data/public_archive --dirs-only` | `metrics/`, `bookDepth/`, `aggTrades/`, `aggTrades_slice/`, `_coverage/` present |
+| P3 | Coverage lag | `docker compose --profile archive run --rm public-archive /app/.venv/bin/python -m src.cli.main archive status` | last `ok` day per dataset ≤ 3 days behind today; the default run covers metrics + bookDepth under the PIT mask |
+| P4 | Drive copy | `rclone lsf gdrive:quant-lake/live/crypto-pilot/data/public_archive --dirs-only` | `metrics/`, `bookDepth/`, `_coverage/` present; `aggTrades/` and `aggTrades_slice/` only after an explicitly requested backfill |
 | P5 | Prune gate | archive prune JSON | `prune_blocked=false` |
 | P6 | Archive backup marker | `cat ~/crypto-pilot/deploy/backup/status/last_archive_success.json` | `finished_at` within 36 h |
 | P7 | Archive versions | `rclone lsf gdrive:quant-lake/live/crypto-pilot/_versions_archive --dirs-only` | at most 8 dated folders |
+| P8 | Mask input | `ls ~/crypto-pilot/data/futures/ohlcv/1h \| wc -l` | equals the daemon census size; empty ⇒ the job exits 2 (alert) |
 
-Operator runbook (workstation backfill, then VPS handoff): (1) workstation:
-`archive collect --dataset metrics --execute`, then `bookDepth`, then `aggTrades`;
-(2) `rclone copy data/public_archive gdrive:quant-lake/live/crypto-pilot/data/public_archive --exclude ".archive-*/**" --exclude "*.tmp" --transfers 4`
-run manually; (3) restore `_coverage/` to the VPS; (4) only then push so the
-timer and the backup filter go live.
+Operator runbook: (1) one-off backfill runs ON THE VPS (`archive collect --execute`, default datasets) after the backup/versions steps of spec 54 are deployed; stop the timer during it; (2) aggTrades only on explicit request, per year with `--start/--end`, backup + prune between stages; (3) workstation holds no archive data by default — pull needed `<dataset>/<symbol>/<YYYYMM>.parquet` from Drive on demand.
 
 ## 10. Known Risks and Open Items
 
