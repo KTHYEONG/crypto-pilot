@@ -6,6 +6,7 @@ import sys
 from collections.abc import Sequence
 from typing import TypeVar, overload
 
+from src.cli.commands.archive import add_archive_commands
 from src.cli.commands.backtest import add_backtest_commands
 from src.cli.commands.data import add_data_commands
 from src.cli.commands.evaluate import add_evaluate_commands
@@ -91,9 +92,9 @@ class _CommandParser(argparse.ArgumentParser):
 
 
 def build_root_parser(argv: Sequence[str] | None = None) -> argparse.ArgumentParser:
-    """Compose the single documented CLI entry point with six command groups.
+    """Compose the single documented CLI entry point with seven command groups.
 
-    Top-level groups are ``data``, ``backtest``, ``evaluate``, ``lab``, ``live`` and ``ops``.
+    Top-level groups are ``archive``, ``data``, ``backtest``, ``evaluate``, ``lab``, ``live`` and ``ops``.
     ``argv`` can pre-register the lab leaves for command discovery. Otherwise
     argparse registers them when parsing the lab group, so the parser remains
     reusable and other command groups start without importing ``src.lab``.
@@ -126,6 +127,7 @@ def build_root_parser(argv: Sequence[str] | None = None) -> argparse.ArgumentPar
         add_lab_commands(lab_parser)
     add_live_commands(subparsers.add_parser("live", help="Live/shadow exchange execution"))
     add_ops_commands(subparsers.add_parser("ops", help="Operational provisioning for the VPS runtime"))
+    add_archive_commands(subparsers.add_parser("archive", help="Mirror public Binance Vision archives into compact parquet"))
     return parser
 
 
