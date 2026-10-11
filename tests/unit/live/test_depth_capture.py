@@ -14,6 +14,7 @@ from src.live.depth_capture import (
     EXEC_DEPTH_DATASET,
     DepthCaptureSummary,
     ExecutionDepthRecorder,
+    select_depth_symbols,
 )
 
 _DECISION = pd.Timestamp("2026-09-22T00:25:00Z")
@@ -582,3 +583,26 @@ def test_flush_empty_rows_is_noop(tmp_path: Path) -> None:
     rec = _make_recorder(tmp_path, ["BTCUSDT"], [[]], calls)
     assert rec._flush_rows([], CoverageTracker("exec_depth", tmp_path)) is True
     assert rec._parts == 0
+
+
+def test_traded_first_then_candidates() -> None:
+    """Candidates append after traded symbols with overlap skipped."""
+    assert select_depth_symbols(["A", "B"], ["C", "A", "D"], max_symbols=10) == ["A", "B", "C", "D"]
+
+
+def test_candidates_never_displace_traded() -> None:
+    """Traded symbols keep their slots when the cap is already full."""
+    traded = ["A", "B", "C"]
+    assert select_depth_symbols(traded, ["D", "E"], max_symbols=3) == traded
+
+
+def test_truncates_candidates_at_cap() -> None:
+    """The combined list is cut at the cap with the traded symbol first."""
+    out = select_depth_symbols(["A"], [f"C{i:03d}" for i in range(100)], max_symbols=5)
+    assert len(out) == 5
+    assert out[0] == "A"
+
+
+def test_duplicates_removed() -> None:
+    """Repeated symbols in either input appear once."""
+    assert select_depth_symbols(["A", "A", "B"], ["B", "C", "C"], max_symbols=10) == ["A", "B", "C"]

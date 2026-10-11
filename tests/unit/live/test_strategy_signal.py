@@ -1119,3 +1119,106 @@ def test_symbol_absent_from_exchange_info_is_not_counted_as_refresh_incomplete(t
     report = _run(_DAY, paths, decision_bar_max_missing_fraction=0.05, listing_root=listing_dir)
     assert report.decision_bar_missing == 0
     assert report.written is True
+
+
+def _read_candidates(paths: dict[str, Path]) -> dict[str, object]:
+    from src.live.depth_candidates import DEPTH_CANDIDATES_NAME
+
+    sidecar = paths["weights"].parent / DEPTH_CANDIDATES_NAME
+    return json.loads(sidecar.read_text(encoding="utf-8"))
+
+
+def test_candidates_file_written_ranked_by_adv(
+    layout: dict[str, Path], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Finite-ADV symbols rank descending with NaN excluded and the decision day stamped."""
+    import dataclasses
+
+    import src.live.strategy_signal as signal_mod
+
+    victim = _SYMS[0]
+    real_build = signal_mod.build_live_strategy_book
+
+    def _patched(*args: object, **kwargs: object) -> object:
+        book = real_build(*args, **kwargs)  # type: ignore[arg-type]
+        adv = book.adv.copy()  # type: ignore[union-attr]
+        adv.loc[_DAY, victim] = float("nan")
+        return dataclasses.replace(book, adv=adv)  # type: ignore[type-var]
+
+    monkeypatch.setattr(signal_mod, "build_live_strategy_book", _patched)
+    report = _run(_DAY, layout)
+    assert report.written is True
+    payload = _read_candidates(layout)
+    assert payload["decision_day"] == pd.Timestamp(_DAY).tz_convert("UTC").isoformat()
+    book = build_live_strategy_book(
+        layout["data"], tuple(sorted(_SYMS)),
+        panel_start=_START, panel_end=_START + pd.Timedelta(days=150),
+    )
+    adv_row = book.adv.loc[_DAY]
+    snap_row = book.snapshot_closes.loc[_DAY]
+    expected = sorted(
+        (
+            str(symbol) for symbol in adv_row.index
+            if float(adv_row[symbol]) == float(adv_row[symbol])
+            and float(adv_row[symbol]) > 0.0
+            and float(snap_row[str(symbol)]) == float(snap_row[str(symbol)])
+            and str(symbol) != victim
+        ),
+        key=lambda name: (-float(adv_row[name]), name),
+    )[:60]
+    assert list(payload["symbols"]) == expected
+    assert victim not in payload["symbols"]
+
+
+def test_candidates_written_when_row_exists(layout: dict[str, Path]) -> None:
+    """A rerun with the weight row present still refreshes the sidecar."""
+    from src.live.depth_candidates import DEPTH_CANDIDATES_NAME
+
+    first = _run(_DAY, layout)
+    assert first.written is True
+    weights_blob = layout["weights"].read_bytes()
+    (layout["weights"].parent / DEPTH_CANDIDATES_NAME).unlink()
+    second = _run(_DAY, layout)
+    assert second.written is False
+    assert layout["weights"].read_bytes() == weights_blob
+    payload = _read_candidates(layout)
+    assert payload["decision_day"] == pd.Timestamp(_DAY).tz_convert("UTC").isoformat()
+    assert len(payload["symbols"]) > 0
+    assert (layout["weights"].parent / DEPTH_CANDIDATES_NAME).exists()
+
+
+def test_candidate_write_failure_is_isolated(
+    layout: dict[str, Path], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unwritable sidecar never blocks the report or weight artifacts."""
+    import src.live.strategy_signal as signal_mod
+
+    def _boom(*args: object, **kwargs: object) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(signal_mod, "write_depth_candidates", _boom)
+    report = _run(_DAY, layout)
+    assert report.written is True
+    assert layout["weights"].exists()
+    assert _report_path(layout).exists()
+
+
+def test_depth_ranking_filters_nonfinite_values_and_breaks_ties_at_cap() -> None:
+    from src.live.strategy_book import LiveStrategyBook
+    from src.live.strategy_signal import _rank_depth_candidates
+
+    symbols = [f"C{i:02d}" for i in reversed(range(65))]
+    invalid = ["NAN_ADV", "INF_ADV", "ZERO_ADV", "NEG_ADV", "NAN_CLOSE", "INF_CLOSE"]
+    columns = symbols + invalid
+    index = pd.DatetimeIndex([_DAY])
+    adv = pd.DataFrame(100.0, index=index, columns=columns)
+    adv.loc[_DAY, invalid[:4]] = [np.nan, np.inf, 0.0, -1.0]
+    closes = pd.DataFrame(1.0, index=index, columns=columns)
+    closes.loc[_DAY, invalid[4:]] = [np.nan, np.inf]
+    book = LiveStrategyBook(
+        unit_weights=pd.DataFrame(0.0, index=index, columns=columns),
+        snapshot_closes=closes, adv=adv,
+        daily_sigma=pd.DataFrame(0.01, index=index, columns=columns),
+        valid_from=_DAY, panel_last_bar=_DAY + pd.Timedelta(hours=22),
+    )
+    assert _rank_depth_candidates(book, _DAY) == [f"C{i:02d}" for i in range(60)]
