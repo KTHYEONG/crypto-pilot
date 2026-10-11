@@ -11,7 +11,7 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-ARCHIVE_BACKUP_MOUNT: Path = Path("/app/backup_status/last_success.json")
+ARCHIVE_BACKUP_MOUNT: Path = Path("/app/backup_status/last_archive_success.json")
 
 
 def _root(args: argparse.Namespace) -> Path:
@@ -145,7 +145,7 @@ def _run_prune(args: argparse.Namespace) -> None:
     elif ARCHIVE_BACKUP_MOUNT.exists():
         status_path = ARCHIVE_BACKUP_MOUNT
     else:
-        status_path = BASE_DIR / "deploy" / "backup" / "status" / "last_success.json"
+        status_path = BASE_DIR / "deploy" / "backup" / "status" / "last_archive_success.json"
     try:
         status = read_backup_status(status_path)
         report = prune_backed_up_archive(

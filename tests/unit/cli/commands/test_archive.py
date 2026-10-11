@@ -385,7 +385,8 @@ def test_prune_io_error_exits_four(tmp_path: Path, monkeypatch: pytest.MonkeyPat
 def test_prune_default_mount_status(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from src.cli.commands import archive as archive_mod
 
-    status_file = tmp_path / "last_success.json"
+    assert Path("/app/backup_status/last_archive_success.json") == archive_mod.ARCHIVE_BACKUP_MOUNT
+    status_file = tmp_path / "last_archive_success.json"
     _write_status(status_file)
     monkeypatch.setattr(archive_mod, "ARCHIVE_BACKUP_MOUNT", status_file)
     target = _old_partition(tmp_path)
@@ -406,6 +407,49 @@ def test_prune_default_repo_status_missing(tmp_path: Path, monkeypatch: pytest.M
     ns.handler(ns)
     payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
     assert payload["prune_blocked"] is True
+    assert target.exists()
+
+
+def test_prune_reads_archive_marker_by_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    import json
+
+    from src.cli.commands import archive as archive_mod
+
+    monkeypatch.setattr(archive_mod, "ARCHIVE_BACKUP_MOUNT", tmp_path / "absent.json")
+    base = tmp_path / "repo_base"
+    status_file = base / "deploy" / "backup" / "status" / "last_archive_success.json"
+    status_file.parent.mkdir(parents=True)
+    _write_status(status_file)
+    monkeypatch.setattr("src.common.paths.BASE_DIR", base)
+    target = _old_partition(tmp_path)
+    ns = _prune_ns(tmp_path, ["prune"])
+    ns.handler(ns)
+    payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert payload["prune_blocked"] is False
+    assert not target.exists()
+
+
+def test_prune_ignores_live_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    import json
+
+    from src.cli.commands import archive as archive_mod
+
+    monkeypatch.setattr(archive_mod, "ARCHIVE_BACKUP_MOUNT", tmp_path / "absent.json")
+    base = tmp_path / "repo_base"
+    live_marker = base / "deploy" / "backup" / "status" / "last_success.json"
+    live_marker.parent.mkdir(parents=True)
+    _write_status(live_marker)
+    monkeypatch.setattr("src.common.paths.BASE_DIR", base)
+    target = _old_partition(tmp_path)
+    ns = _prune_ns(tmp_path, ["prune"])
+    ns.handler(ns)
+    payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert payload["prune_blocked"] is True
+    assert payload["blocked_reason"] == "status_missing"
     assert target.exists()
 
 
