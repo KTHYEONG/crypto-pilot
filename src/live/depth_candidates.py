@@ -60,3 +60,4 @@ def read_depth_candidates(path: Path, decision_day: pd.Timestamp, *, limit: int)
     except Exception:
         _logger.info("[DATA] stage=exec_depth_candidates status=malformed")
         return ()
+
