@@ -718,3 +718,10 @@ def test_live_modes_do_not_derive_run_scoped_tax_ledger(tmp_path, monkeypatch) -
     assert live.order_journal_path == str(tmp_path / "state" / "runs" / "run_a_12345678" / "order_journal.jsonl")
     paper = LiveSettings(mode="paper", record_run_id="run_a_12345678")
     assert paper.tax_ledger_dir == str(tmp_path / "state" / "runs" / "run_a_12345678" / "tax_ledger")
+
+
+def test_candidate_breadth_validated() -> None:
+    with pytest.raises(ValueError, match="exec_depth_candidate_breadth"):
+        LiveSettings(exec_depth_candidate_breadth=-1)
+    assert LiveSettings(exec_depth_candidate_breadth=0).exec_depth_candidate_breadth == 0
+    assert LiveSettings().exec_depth_candidate_breadth == 30

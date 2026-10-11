@@ -22,6 +22,25 @@ _logger = logging.getLogger(__name__)
 
 EXEC_DEPTH_DATASET: str = "exec_depth"
 
+
+def select_depth_symbols(
+    traded: Sequence[str], candidates: Sequence[str], *, max_symbols: int,
+) -> list[str]:
+    """Order traded symbols first, then unseen candidates, truncated to cap."""
+    cap = int(max_symbols)
+    traded_names = [str(symbol) for symbol in traded]
+    traded_set = set(traded_names)
+    out: list[str] = []
+    seen: set[str] = set()
+    for name in traded_names + [str(s) for s in candidates if str(s) not in traded_set]:
+        if len(out) >= cap:
+            break
+        if name in seen:
+            continue
+        seen.add(name)
+        out.append(name)
+    return out
+
 _DEPTH_LEVELS: frozenset[int] = frozenset({5, 10, 20})
 _DEPTH_UPDATE_MS: frozenset[int] = frozenset({100, 250, 500})
 _RECONNECT_BACKOFF_MAX_S: float = 30.0
