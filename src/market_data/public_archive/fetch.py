@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import re
 import zipfile
 
 import numpy as np
@@ -95,6 +96,9 @@ def _normalize_maker(series: pd.Series) -> pd.Series:
     return series.map(_one).astype("bool")
 
 
+_SHA256_HEX = re.compile(r"[0-9a-f]{64}")
+
+
 def _strip_prefix(key: str) -> tuple[str, ...]:
     if key.startswith(_BUCKET_PREFIX):
         key = key[len(_BUCKET_PREFIX):]
@@ -112,9 +116,11 @@ def fetch_verified_zip(
     if checksum_bytes is None:
         raise DataIntegrityError(f"missing checksum for {key!r}")
     try:
-        expected = checksum_bytes.decode("ascii", errors="strict").split()[0]
+        expected = checksum_bytes.decode("utf-8", errors="strict").split()[0]
     except (UnicodeDecodeError, IndexError) as exc:
         raise DataIntegrityError(f"malformed checksum for {key!r}") from exc
+    if _SHA256_HEX.fullmatch(expected.strip().lower()) is None:
+        raise DataIntegrityError(f"malformed checksum for {key!r}")
     actual = hashlib.sha256(zip_bytes).hexdigest()
     if actual != expected.strip().lower():
         raise DataIntegrityError(f"checksum mismatch for {key!r}")
