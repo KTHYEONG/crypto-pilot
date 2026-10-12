@@ -90,7 +90,11 @@ def _check_inside_day(stamps: pd.Series, day: date) -> None:
 
 
 def derive_metrics(raw: pd.DataFrame, *, symbol: str, day: date) -> pd.DataFrame:
-    """Derive canonical 5m metrics for one symbol-day."""
+    """Derive canonical 5m metrics for one symbol-day.
+
+    Sub-bucket publisher jitter is floored to the 5m grid. A window shifted by one bucket
+    (first row after midnight) drops its trailing next-midnight row.
+    """
     _require_columns(
         raw,
         (
@@ -115,8 +119,12 @@ def derive_metrics(raw: pd.DataFrame, *, symbol: str, day: date) -> pd.DataFrame
     stamps = _to_utc_ms(raw["create_time"])
     if stamps.isna().any():
         raise DataIntegrityError("null create_time")
-    if (stamps != stamps.dt.floor("5min")).any():
-        raise DataIntegrityError("off-grid metrics timestamp")
+    stamps = stamps.dt.floor("5min")
+    start, end = _day_bounds(day)
+    inside = (stamps < end).to_numpy()
+    if stamps.min() > start and inside.any():
+        keep_rows = inside
+        raw, stamps = raw.loc[keep_rows], stamps.loc[keep_rows]
     _check_inside_day(stamps, day)
     dup_mask = stamps.duplicated(keep=False)
     if dup_mask.any():
