@@ -34,7 +34,7 @@ def trades() -> pd.DataFrame:
     })
 
 
-@pytest.mark.parametrize(("time", "value"), [("bad", 1), ("2024-01-15", "bad"), ("2024-01-15", np.inf), ("2024-01-15 00:00:00.000001", 1)])
+@pytest.mark.parametrize(("time", "value"), [("bad", 1), ("2024-01-15", "bad"), ("2024-01-15", np.inf)])
 def test_metrics_invalid_values_fail_closed(time, value) -> None:
     with pytest.raises(DataIntegrityError):
         derive_metrics(metrics(time, value), symbol="BTCUSDT", day=DAY)

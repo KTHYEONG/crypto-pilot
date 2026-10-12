@@ -45,10 +45,34 @@ def _metrics_frame(times_ms: list[int], **overrides: object) -> pd.DataFrame:
     return pd.DataFrame(data, columns=_METRICS_COLS)
 
 
-def test_metrics_rejects_off_grid_timestamp() -> None:
-    frame = _metrics_frame([_DAY_START_MS + 3 * 60 * 1000])
+def test_metrics_floors_sub_bucket_jitter_to_grid() -> None:
+    times = [_DAY_START_MS + 5 * 60 * 1000 + 48_000, _DAY_START_MS + 10 * 60 * 1000 + 234_000]
+    out = derive_metrics(_metrics_frame(times), symbol="BTCUSDT", day=_DAY)
+    assert out["timestamp"].astype("int64").tolist() == [
+        _DAY_START_MS + 5 * 60 * 1000,
+        _DAY_START_MS + 10 * 60 * 1000,
+    ]
+
+
+def test_metrics_rejects_conflicting_rows_in_one_bucket() -> None:
+    frame = _metrics_frame([_DAY_START_MS, _DAY_START_MS + 49_000])
+    frame.loc[1, "sum_open_interest"] = 99.0
     with pytest.raises(DataIntegrityError):
         derive_metrics(frame, symbol="BTCUSDT", day=_DAY)
+
+
+def test_metrics_shifted_window_drops_only_next_midnight_row() -> None:
+    times = [_DAY_START_MS + i * 5 * 60 * 1000 + 30_000 for i in range(1, 289)]
+    out = derive_metrics(_metrics_frame(times), symbol="BTCUSDT", day=_DAY)
+    assert len(out) == 287
+    assert out["timestamp"].iloc[0] == pd.Timestamp(_DAY_START_MS + 5 * 60 * 1000, unit="ms", tz="UTC")
+    assert out["timestamp"].iloc[-1] == pd.Timestamp(_DAY_START_MS + 287 * 5 * 60 * 1000, unit="ms", tz="UTC")
+
+
+def test_metrics_next_midnight_row_in_aligned_window_still_fails() -> None:
+    times = [_DAY_START_MS + i * 5 * 60 * 1000 for i in range(0, 289)]
+    with pytest.raises(DataIntegrityError):
+        derive_metrics(_metrics_frame(times), symbol="BTCUSDT", day=_DAY)
 
 
 def test_metrics_keeps_missing_points_missing() -> None:
