@@ -180,3 +180,26 @@ def test_csv_member_is_streamed_with_bom_header(monkeypatch: pytest.MonkeyPatch)
     frame = read_single_csv(payload)
     assert frame["agg_trade_id"].tolist() == [7]
     assert frame["price"].tolist() == [100.0]
+
+
+def test_fetch_verified_zip_accepts_non_ascii_filename_in_checksum() -> None:
+    payload = _zip_bytes({"a.csv": "x,y\n1,2\n"})
+    digest = hashlib.sha256(payload).hexdigest()
+    mapping = {
+        "daily/metrics/币安人生USDT/f": payload,
+        "daily/metrics/币安人生USDT/f.CHECKSUM": f"{digest}  币安人生USDT-f.zip\n".encode(),
+    }
+    downloader = _downloader_with(mapping)
+    result = fetch_verified_zip(downloader, "data/futures/um/daily/metrics/币安人生USDT/f")
+    assert result is not None and result[1] == digest
+
+
+def test_fetch_verified_zip_rejects_non_hex_checksum() -> None:
+    payload = _zip_bytes({"a.csv": "x,y\n1,2\n"})
+    mapping = {
+        "daily/metrics/BTCUSDT/f": payload,
+        "daily/metrics/BTCUSDT/f.CHECKSUM": b"<html>error</html>\n",
+    }
+    downloader = _downloader_with(mapping)
+    with pytest.raises(DataIntegrityError, match="malformed checksum"):
+        fetch_verified_zip(downloader, "data/futures/um/daily/metrics/BTCUSDT/f")
