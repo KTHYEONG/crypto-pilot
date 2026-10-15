@@ -120,12 +120,14 @@ def _patch_run(
     from tests.unit.live.testnet_drill._stubs import make_settings
 
     reports: list[Any] = []
+    runs: list[bool] = []
     monkeypatch.setattr(settings_module, "LiveSettings", lambda: make_settings())
     monkeypatch.setattr(guard_module, "drill_scratch_root", lambda: tmp_path)
     monkeypatch.setattr(guard_module, "assert_drill_allowed", lambda settings, workspace: None)
     monkeypatch.setattr(session_module, "open_drill_session", lambda *a, **kw: opened.append(kw) or kw)
 
-    def _run(factory: Any, selection: str, config: Any) -> Any:
+    def _run(factory: Any, selection: str, config: Any, *, continue_on_fail: bool = False) -> Any:
+        runs.append(continue_on_fail)
         factory()
         factory()
         if isinstance(results, Exception):
@@ -212,3 +214,27 @@ def test_skipped_results_do_not_fail_the_run(monkeypatch: pytest.MonkeyPatch, tm
     _patch_run(monkeypatch, tmp_path, (_result(Verdict.SKIPPED, False), _result(Verdict.PASS)), [])
     args = _parse(["testnet-drill", "--run-id", "run1", "--scenario", "C"])
     args.handler(args)
+
+
+def test_group_d_selection_and_findings_table(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from src.live.testnet_drill.report import Verdict
+
+    _patch_run(monkeypatch, tmp_path, (_result(Verdict.PASS),), [])
+    args = _parse(["testnet-drill", "--run-id", "run1", "--scenario", "D", "--symbols", "BTCUSDT", "--findings"])
+    args.handler(args)
+    assert (tmp_path / "run1" / "findings.md").is_file()
+
+
+def test_dirty_run_writes_partial_report_and_exits_1(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog) -> None:
+    from src.live.testnet_drill.report import Verdict
+    from src.live.testnet_drill.session import DirtySessionError
+
+    dirty = DirtySessionError("DIRTY", residuals={"ETHUSDT": "0.2"})
+    dirty.partial_results = (_result(Verdict.FAIL, False),)
+    reports = _patch_run(monkeypatch, tmp_path, dirty, [])
+    args = _parse(["testnet-drill", "--run-id", "run1", "--scenario", "A", "--continue-on-fail"])
+    with caplog.at_level(logging.CRITICAL), pytest.raises(SystemExit) as excinfo:
+        args.handler(args)
+    assert excinfo.value.code == 1
+    assert reports == [dirty.partial_results]
+    assert "ETHUSDT" in caplog.text
