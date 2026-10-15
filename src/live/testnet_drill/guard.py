@@ -21,6 +21,7 @@ _PRODUCTION_PATH_FIELDS = (
     "tax_ledger_dir",
     "heartbeat_path",
     "alert_outbox_path",
+    "ledger_resync_backup_dir",
 )
 
 

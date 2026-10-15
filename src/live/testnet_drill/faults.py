@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import re
+import time
 import urllib.parse
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
 from typing import NoReturn, Protocol
@@ -34,6 +36,7 @@ class FaultAction(str, Enum):  # noqa: UP042 - contract pins the (str, Enum) bas
     KILL_BEFORE_DELIVERY = "kill_before_delivery"
     KILL_AFTER_DELIVERY = "kill_after_delivery"
     KILL_ON_RESPONSE = "kill_on_response"
+    OVERRIDE_HEADERS = "override_headers"
 
 
 _RESERVED_QUERY_PARAMS = frozenset({"signature", "timestamp", "recvWindow"})
@@ -86,6 +89,12 @@ class WireRecord:
     response_body: bytes
     delivered: bool | None
     error: str | None = None
+    at: float = 0.0
+
+
+KILL_ACTIONS = frozenset(
+    {FaultAction.KILL_BEFORE_DELIVERY, FaultAction.KILL_AFTER_DELIVERY, FaultAction.KILL_ON_RESPONSE}
+)
 
 
 def _filter_headers(headers: Mapping[str, str]) -> tuple[tuple[str, str], ...]:
@@ -134,9 +143,11 @@ class FaultInjectingTransport:
         sleep: Callable[[float], None],
         kill: Callable[[int], NoReturn],
         on_record: Callable[[WireRecord], None] | None = None,
+        clock: Callable[[], float] = time.time,
     ) -> None:
         if _host(base_url) != _host(TESTNET_FAPI_URL):
             raise DrillRefused("drill refused: base_url")
+        self._clock = clock
         self._inner = inner
         self._rules = list(rules)
         self._remaining = [rule.times for rule in self._rules]
@@ -150,6 +161,22 @@ class FaultInjectingTransport:
     def records(self) -> tuple[WireRecord, ...]:
         """Append-only wire records with monotonic sequence numbers."""
         return tuple(self._records)
+
+    @contextmanager
+    def inject(self, rules: Sequence[FaultRule]) -> Iterator[None]:
+        """Apply extra non-kill rules for the duration of the block, ahead of construction-time rules."""
+        added = list(rules)
+        if any(rule.action in KILL_ACTIONS for rule in added):
+            raise DrillRefused("drill refused: parent_kill")
+        self._rules[:0] = added
+        self._remaining[:0] = [rule.times for rule in added]
+        try:
+            yield
+        finally:
+            for rule in added:
+                index = next(i for i, current in enumerate(self._rules) if current is rule)
+                del self._rules[index]
+                del self._remaining[index]
 
     def close(self) -> None:
         """Close the inner transport when it supports it."""
@@ -202,6 +229,7 @@ class FaultInjectingTransport:
                 response_body=_redact_body(response_body, headers),
                 delivered=delivered,
                 error=error,
+                at=self._clock(),
             )
         )
         if self._on_record is not None:
@@ -284,6 +312,19 @@ class FaultInjectingTransport:
             )
             self._kill(rule.exit_code)
             raise AssertionError("unreachable: kill must not return")
+        if rule.action is FaultAction.OVERRIDE_HEADERS:
+            merged = {**dict(response.headers), **dict(rule.headers)}
+            self._append(
+                method,
+                path,
+                clean_url,
+                headers,
+                status_code=response.status_code,
+                response_headers=merged,
+                response_body=response.body,
+                delivered=True,
+            )
+            return HttpResponse(status_code=response.status_code, headers=merged, body=response.body)
         if rule.action is FaultAction.CORRUPT_BODY:
             mutated = HttpResponse(status_code=response.status_code, headers=dict(response.headers), body=rule.body)
         elif rule.action is FaultAction.TRUNCATE_BODY:

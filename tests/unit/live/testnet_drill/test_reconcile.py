@@ -445,7 +445,7 @@ def test_invalid_account_truth_fails(venue_session):
         _snapshot(venue_session, 0, 100)
 
 
-def test_other_adjustment_kinds_are_not_execution_fills(venue_session):
+def test_journaled_adjustments_move_position_fold_but_not_trade_parity(venue_session):
     import pandas as pd
 
     from src.live.testnet_drill.reconcile import _snapshot
@@ -466,7 +466,9 @@ def test_other_adjustment_kinds_are_not_execution_fills(venue_session):
         cumulative_executed_qty=None,
         simulated=False,
     )
-    assert _snapshot(venue_session, 0, 100).journal_positions == ()
+    evidence = _snapshot(venue_session, 0, 100)
+    assert evidence.journal_positions == (("BTCUSDT", Decimal("1")),)
+    assert evidence.journal_trade_qty == ()
 
 
 @pytest.mark.parametrize("wait", [-1, float("nan"), float("inf")])
@@ -520,7 +522,11 @@ def test_transient_read_exhaustion_is_explicit(venue_session, monkeypatch):
     assert not any(item.passed for item in reconcile.evaluate_reconciliation(evidence, make_config()))
 
 
-@pytest.mark.parametrize(("code", "terminal", "raises"), [(-2013, "NOT_PLACED", False), (-2013, None, True), (-1000, "NOT_PLACED", True)])
+@pytest.mark.parametrize(
+    ("code", "terminal", "raises"),
+    [(-2013, "NOT_PLACED", False), (-2013, "OBSOLETE", False), (-2013, "CANCELED", True), (-2013, None, True),
+     (-1000, "NOT_PLACED", True)],
+)
 def test_unknown_order_is_zero_only_for_unplaced_terminals(venue_session, code, terminal, raises):
     from src.live.errors import VenueError
     from src.live.testnet_drill.reconcile import _snapshot

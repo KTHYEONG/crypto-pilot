@@ -21,6 +21,10 @@ class Exchange:
         self.close_count = 0
         self.uid = 0
         self.symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+        self.funding_interval_ms = None
+        self.funding_rate = Decimal("0.0001")
+        self.next_funding_ms = None
+        self.funding_rows = []
 
     def account(self, key):
         return self.accounts.setdefault(key, {"positions": {}, "entry": {}, "wallet": Decimal("1000"),
@@ -28,7 +32,8 @@ class Exchange:
             "margin": "cross", "leverage": 20})
 
     def response(self, payload, status=200):
-        return HttpResponse(status, {}, json.dumps(payload, default=str).encode())
+        used = str(min(len(self.calls), 50))
+        return HttpResponse(status, {"X-MBX-USED-WEIGHT-1M": used}, json.dumps(payload, default=str).encode())
 
     def error(self, code):
         return self.response({"code": code, "msg": "scripted rejection"}, 400)
@@ -66,10 +71,35 @@ class Exchange:
         row["updateTime"] = int(time.time() * 1000)
         self.uid += 1
         account["trades"].append({"id": self.uid, "orderId": row["orderId"], "symbol": symbol, "time": row["updateTime"],
-            "qty": str(amount), "price": str(price), "commission": str(commission), "commissionAsset": "USDT", "maker": maker})
-        account["income"].append({"tranId": self.uid, "incomeType": "COMMISSION", "asset": "USDT", "income": str(-commission), "time": row["updateTime"]})
+            "qty": str(amount), "price": str(price), "quoteQty": str(amount * price), "side": row["side"],
+            "positionSide": "BOTH", "buyer": row["side"] == "BUY", "realizedPnl": str(pnl),
+            "commission": str(commission), "commissionAsset": "USDT", "maker": maker})
+        account["income"].append({"tranId": self.uid, "incomeType": "COMMISSION", "asset": "USDT", "income": str(-commission), "time": row["updateTime"], "symbol": symbol})
         if pnl:
-            account["income"].append({"tranId": self.uid, "incomeType": "REALIZED_PNL", "asset": "USDT", "income": str(pnl), "time": row["updateTime"]})
+            account["income"].append({"tranId": self.uid, "incomeType": "REALIZED_PNL", "asset": "USDT", "income": str(pnl), "time": row["updateTime"], "symbol": symbol})
+
+    def settle_funding(self):
+        """Venue funding: positive rate means longs pay shorts, booked as FUNDING_FEE income."""
+        now_ms = int(time.time() * 1000)
+        if self.funding_interval_ms is None:
+            return
+        if self.next_funding_ms is None:
+            self.next_funding_ms = now_ms + self.funding_interval_ms
+        while now_ms >= self.next_funding_ms:
+            at = self.next_funding_ms
+            for symbol in self.symbols:
+                mark = Decimal("100")
+                self.funding_rows.append({"symbol": symbol, "fundingTime": at, "fundingRate": str(self.funding_rate),
+                                          "markPrice": str(mark)})
+                for account in self.accounts.values():
+                    position = account["positions"].get(symbol, Decimal(0))
+                    if position:
+                        amount = -position * mark * self.funding_rate
+                        account["wallet"] += amount
+                        self.uid += 1
+                        account["income"].append({"tranId": self.uid, "incomeType": "FUNDING_FEE", "asset": "USDT",
+                                                  "income": str(amount), "time": at, "symbol": symbol})
+            self.next_funding_ms += self.funding_interval_ms
 
     def public(self, row):
         return {key: value for key, value in row.items() if key != "key"}
@@ -80,6 +110,7 @@ class Exchange:
             params = dict(parse_qsl(urlsplit(url).query))
             key = headers.get("X-MBX-APIKEY", "")
             self.calls.append((key, method, path, params))
+            self.settle_funding()
             account = self.account(key)
             if path == "/fapi/v1/time":
                 return self.response({"serverTime": int(time.time() * 1000)})
@@ -95,7 +126,8 @@ class Exchange:
             if path == "/fapi/v1/ticker/bookTicker":
                 return self.response(self.quote(params["symbol"]) if "symbol" in params else [self.quote(s) for s in self.symbols])
             if path == "/fapi/v1/depth":
-                return self.response({"bids": [["99.95", "0.3"]], "asks": [["100.05", "0.3"]]})
+                quote = self.quote(params["symbol"])
+                return self.response({"bids": [[quote["bidPrice"], "0.3"]], "asks": [[quote["askPrice"], "0.3"]]})
             if path == "/fapi/v2/positionRisk":
                 return self.response([{"symbol": s, "positionAmt": str(account["positions"].get(s, 0)),
                     "marginType": account["margin"], "leverage": str(account["leverage"])} for s in self.symbols])
@@ -103,7 +135,8 @@ class Exchange:
                 return self.response({"totalWalletBalance": str(account["wallet"]), "availableBalance": str(account["wallet"]),
                     "totalInitialMargin": "0", "totalMaintMargin": "0", "totalUnrealizedProfit": "0",
                     "dualSidePosition": account["dualSidePosition"], "multiAssetsMargin": account["multiAssetsMargin"],
-                    "positions": [{"symbol": s, "leverage": str(account["leverage"]), "marginType": account["margin"]} for s in self.symbols]})
+                    "positions": [{"symbol": s, "leverage": str(account["leverage"]), "marginType": account["margin"],
+                                   "positionAmt": str(account["positions"].get(s, 0))} for s in self.symbols]})
             if path in ("/fapi/v1/positionSide/dual", "/fapi/v1/multiAssetsMargin"):
                 name = "dualSidePosition" if path.endswith("dual") else "multiAssetsMargin"
                 if method == "POST":
@@ -125,6 +158,9 @@ class Exchange:
                 rows = [row for row in account["trades"] if row["symbol"] == params["symbol"]]
                 rows = [row for row in rows if row["id"] >= int(params.get("fromId", "0")) and int(params.get("startTime", "0")) <= row["time"] <= int(params.get("endTime", "9999999999999"))]
                 return self.response(rows[:1000])
+            if path == "/fapi/v1/fundingRate":
+                return self.response([r for r in self.funding_rows if r["symbol"] == params["symbol"]
+                                      and r["fundingTime"] >= int(params.get("startTime", "0"))])
             if path == "/fapi/v1/income":
                 return self.response([row for row in account["income"] if int(params.get("startTime", "0")) <= row["time"] <= int(params.get("endTime", "9999999999999"))])
             if path == "/fapi/v1/openOrders":

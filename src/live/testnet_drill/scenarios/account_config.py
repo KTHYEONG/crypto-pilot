@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import Iterator
 from contextlib import contextmanager
 from decimal import ROUND_DOWN, Decimal
@@ -35,7 +36,10 @@ def _restore_configuration(session: Any, path: str, params: dict[str, Any]) -> I
             session.client.request("POST", path, params, signed=True)
         except Exception as exc:
             session.audit.record("drill_dirty", path=path, error=type(exc).__name__)
-            raise DirtySessionError(f"DIRTY: restoration failed at {path}") from exc
+            residuals: dict[str, str] = {}
+            with contextlib.suppress(Exception):
+                residuals = {symbol: str(qty) for symbol, qty in _read_positions(session.client).items()}
+            raise DirtySessionError(f"DIRTY: restoration failed at {path}", residuals=residuals) from exc
 
 
 def _run_with_slate(body: Any) -> Any:

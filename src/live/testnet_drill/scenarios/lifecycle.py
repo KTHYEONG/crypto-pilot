@@ -238,7 +238,7 @@ def _eval_c14(evidence: ScenarioEvidence) -> Any:
     )
 
 
-_EVALUATORS: dict[str, Any] = {
+_C_EVALUATORS: dict[str, Any] = {
     "C1": _eval_c1,
     "C2": _eval_c2,
     "C3": _eval_c3,
@@ -255,7 +255,7 @@ _EVALUATORS: dict[str, Any] = {
     "C14": _eval_c14,
 }
 
-_TITLES: dict[str, tuple[str, tuple[str, ...]]] = {
+_C_TITLES: dict[str, tuple[str, tuple[str, ...]]] = {
     "C1": ("resting gtx cancel", ()),
     "C2": ("gtx marketable reject", ()),
     "C3": ("ioc full fill", ("H2",)),
@@ -277,6 +277,6 @@ def scenario_specs() -> tuple[ScenarioSpec, ...]:
     """Group C scenario registry."""
     specs: list[ScenarioSpec] = []
     for scenario_id in ("C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9", "C10", "C11", "C12", "C13", "C14"):
-        title, hypotheses = _TITLES[scenario_id]
-        specs.append(ScenarioSpec(scenario_id, "C", title, hypotheses, runner(scenario_id), _EVALUATORS[scenario_id]))
+        title, hypotheses = _C_TITLES[scenario_id]
+        specs.append(ScenarioSpec(scenario_id, "C", title, hypotheses, runner(scenario_id), _C_EVALUATORS[scenario_id]))
     return tuple(specs)
