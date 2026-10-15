@@ -45,8 +45,21 @@ class DrillConfig:
     price_rel_tolerance: Decimal
     fee_abs_tolerance_usdt: Decimal
     slate_max_attempts: int = 3
+    settle_wait_s: float = 5.0
+    settle_poll_s: float = 0.2
+    counterparty_step_wait_s: float = 0.2
+    race_repetitions: int = 20
+    race_offsets_s: tuple[float, ...] = (-0.05, 0.0, 0.05)
 
     def __post_init__(self) -> None:
+        for name in ("settle_wait_s", "settle_poll_s", "counterparty_step_wait_s"):
+            value = getattr(self, name)
+            if not math.isfinite(value) or value <= 0:
+                raise ValueError(f"{name} must be finite and positive")
+        if _as_int(self.race_repetitions, "race_repetitions") < 1:
+            raise ValueError("race_repetitions must be positive")
+        if not self.race_offsets_s or any(not math.isfinite(offset) for offset in self.race_offsets_s):
+            raise ValueError("race_offsets_s must be non-empty and finite")
         symbols = tuple(self.symbols)
         if not symbols:
             raise ValueError("symbols must be non-empty")

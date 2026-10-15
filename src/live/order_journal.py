@@ -565,6 +565,16 @@ class OrderJournal:
         self._ensure_loaded()
         return self._next_submit_seq
 
+    def submits(self) -> tuple[JournalSubmit, ...]:
+        """Return all durable submissions, including terminal orders, in journal order."""
+        self._ensure_loaded()
+        return tuple(self._submits)
+
+    def terminal(self, client_order_id: str) -> JournalTerminal | None:
+        """Return the durable terminal state for one client order id."""
+        self._ensure_loaded()
+        return self._terminals.get(client_order_id)
+
     def last_fill_seq(self) -> int:
         self._ensure_loaded()
         return self._next_fill_seq - 1

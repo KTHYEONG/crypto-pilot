@@ -53,7 +53,9 @@ class ScenarioResult:
     def __post_init__(self) -> None:
         if self.hypothesis_outcome not in _HYPOTHESIS_OUTCOMES:
             raise ValueError(f"hypothesis_outcome must be one of {sorted(_HYPOTHESIS_OUTCOMES)}")
-        if self.verdict is Verdict.PASS and (not self.expectations or not all(passed for _, passed in self.expectations) or not self.conservation_passed):
+        if self.verdict is Verdict.PASS and (
+            not self.expectations or not all(passed for _, passed in self.expectations) or not self.conservation_passed
+        ):
             object.__setattr__(self, "verdict", Verdict.FAIL)
 
 
@@ -190,18 +192,33 @@ def write_report(results: Sequence[ScenarioResult], workspace: Path) -> ReportPa
                 )
     json_path.write_text(
         json.dumps(
-            {"summary": summary, "results": [_result_payload(result) for result in rows], "hypotheses": hypotheses,
-             "registry_proposals": [dataclasses.asdict(p) for p in build_registry_proposals(rows)]},
+            {
+                "summary": summary,
+                "results": [_result_payload(result) for result in rows],
+                "hypotheses": hypotheses,
+                "registry_proposals": [dataclasses.asdict(p) for p in build_registry_proposals(rows)],
+            },
             ensure_ascii=False,
             indent=2,
             sort_keys=True,
         ),
         encoding="utf-8",
     )
-    lines = ["# Testnet Drill Report", "", f"합계: PASS {summary['pass']} / FAIL {summary['fail']} / OBSERVED {summary['observed']} / SKIPPED {summary['skipped']}", "", "| scenario_id | verdict | expectations | hypotheses |", "| --- | --- | --- | --- |"]
+    lines = [
+        "# Testnet Drill Report",
+        "",
+        f"합계: PASS {summary['pass']} / FAIL {summary['fail']} / OBSERVED {summary['observed']} / SKIPPED {summary['skipped']}",
+        "",
+        "| scenario_id | verdict | expectations | hypotheses |",
+        "| --- | --- | --- | --- |",
+    ]
     for result in rows:
-        expectations = ", ".join(f"{name}={'PASS' if passed else 'FAIL'}" for name, passed in result.expectations) or "-"
-        hypotheses_cell = ", ".join(f"{hypothesis}={result.hypothesis_outcome}" for hypothesis in result.hypothesis_ids) or "-"
+        expectations = (
+            ", ".join(f"{name}={'PASS' if passed else 'FAIL'}" for name, passed in result.expectations) or "-"
+        )
+        hypotheses_cell = (
+            ", ".join(f"{hypothesis}={result.hypothesis_outcome}" for hypothesis in result.hypothesis_ids) or "-"
+        )
         lines.append(f"| {result.scenario_id} | {result.verdict.value} | {expectations} | {hypotheses_cell} |")
     lines.extend(["", "| hypothesis_id | outcome | evidence |", "| --- | --- | --- |"])
     lines.extend(f"| {h['id']} | {h['outcome']} | {h['evidence']} |" for h in hypotheses)

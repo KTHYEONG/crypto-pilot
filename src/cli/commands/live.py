@@ -265,6 +265,15 @@ _DRILL_SCENARIO_GROUPS = {
 
 def _run_testnet_drill(args: argparse.Namespace) -> None:
     import re
+    from decimal import Decimal
+
+    from src.live.errors import LiveTradingError
+    from src.live.settings import LiveSettings
+    from src.live.testnet_drill.config import DrillConfig
+    from src.live.testnet_drill.guard import assert_drill_allowed, drill_scratch_root
+    from src.live.testnet_drill.registry import SCENARIOS, run_selected
+    from src.live.testnet_drill.report import Verdict, write_report
+    from src.live.testnet_drill.session import open_drill_session
 
     if args.list:
         for group in sorted(_DRILL_SCENARIO_GROUPS):
@@ -274,11 +283,50 @@ def _run_testnet_drill(args: argparse.Namespace) -> None:
         logger.error("[SYS] testnet-drill status=REFUSED reason=run_id is required")
         raise SystemExit(2)
     scenario = str(args.scenario)
-    if scenario != "all" and scenario not in _DRILL_SCENARIO_GROUPS and re.fullmatch(r"[A-G][0-9]+", scenario) is None:
+    if scenario != "all" and scenario not in ("A", "B", "C") and scenario not in SCENARIOS:
         logger.error("[SYS] testnet-drill status=REFUSED reason=unknown scenario=%s", scenario)
         raise SystemExit(2)
-    logger.error("[SYS] testnet-drill status=UNAVAILABLE scenario=%s reason=scenario runners require Parts 2 and 3", scenario)
-    raise SystemExit(2)
+    if args.resume or args.no_teardown or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,15}", args.run_id) is None:
+        logger.error("[SYS] testnet-drill status=REFUSED reason=fresh workspace and teardown are required")
+        raise SystemExit(2)
+    try:
+        settings = LiveSettings()
+        workspace = drill_scratch_root() / args.run_id
+        assert_drill_allowed(settings, workspace)
+        if workspace.exists():
+            raise ValueError("run workspace already exists")
+        config = DrillConfig(symbols=tuple(s.strip() for s in args.symbols.split(",")),
+            probe_notional_usdt=Decimal(args.probe_notional_usdt), resting_distance_bps=args.resting_distance_bps,
+            max_probe_notional_usdt=Decimal(args.max_probe_notional_usdt), max_open_orders_probe=args.max_open_orders_probe,
+            scenario_timeout_s=args.scenario_timeout_s, recv_window_ms=settings.recv_window_ms,
+            funding_soak_min_funding_events=1, qty_tolerance=Decimal(0),
+            price_rel_tolerance=Decimal("0.001"), fee_abs_tolerance_usdt=Decimal("0.01"))
+    except ValueError as exc:
+        logger.error("[SYS] testnet-drill status=REFUSED reason=%s", type(exc).__name__)
+        raise SystemExit(2) from None
+    except LiveTradingError as exc:
+        logger.error("[SYS] testnet-drill status=REFUSED reason=%s", type(exc).__name__)
+        raise SystemExit(2) from None
+    counter = 0
+
+    def factory() -> Any:
+        nonlocal counter
+        counter += 1
+        run_id = f"{counter:04x}{args.run_id[:12]}"
+        return open_drill_session(settings, config, run_id=run_id, workspace=workspace / f"scenario_{counter:04d}")
+
+    try:
+        results = run_selected(factory, scenario, config)
+        paths = write_report(results, workspace)
+    except (LiveTradingError, ValueError) as exc:
+        logger.error("[SYS] testnet-drill status=FAILED reason=%s", type(exc).__name__)
+        raise SystemExit(1) from None
+    logger.info("[SYS] testnet-drill report=%s", paths.md_path)
+    if not results or any(
+        result.verdict is Verdict.FAIL or (result.verdict is not Verdict.SKIPPED and not result.conservation_passed)
+        for result in results
+    ):
+        raise SystemExit(1)
 
 
 def _run_tax_collect(args: argparse.Namespace) -> None:
@@ -487,8 +535,12 @@ def add_live_commands(live_parser: argparse.ArgumentParser) -> None:
     drill.add_argument("--list", action="store_true", default=False, help="List drill scenario groups")
     drill.add_argument("--scenario", type=str, default="all", help="Scenario id, group letter or all")
     drill.add_argument("--run-id", type=str, default=None, help="Drill run id (workspace name)")
-    drill.add_argument("--symbols", type=str, default="BTCUSDT,ETHUSDT", help="Comma-separated drill symbols")
-    drill.add_argument("--probe-notional-usdt", type=str, default="10", help="Notional of a normal probe order")
+    drill.add_argument("--symbols", type=str, default="ETHUSDT,SOLUSDT", help="Comma-separated drill symbols")
+    drill.add_argument("--probe-notional-usdt", type=str, default="25", help="Notional of a normal probe order")
+    drill.add_argument("--max-probe-notional-usdt", type=str, default="50", help="Hard notional cap for each probe and cleanup order")
+    drill.add_argument("--resting-distance-bps", type=int, default=50)
+    drill.add_argument("--max-open-orders-probe", type=int, default=5)
+    drill.add_argument("--scenario-timeout-s", type=float, default=4000.0)
     drill.add_argument("--no-teardown", action="store_true", default=False, help="Skip teardown (debug)")
     drill.add_argument("--resume", action="store_true", default=False, help="Reuse an existing run workspace")
     drill.set_defaults(handler=_run_testnet_drill)

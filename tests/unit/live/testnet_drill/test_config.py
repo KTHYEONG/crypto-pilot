@@ -2,11 +2,19 @@
 
 from __future__ import annotations
 
+
 from decimal import Decimal
 
 import pytest
 
 from tests.unit.live.testnet_drill._stubs import make_config
+
+
+@pytest.mark.parametrize("name", ["settle_wait_s", "settle_poll_s"])
+@pytest.mark.parametrize("value", [0, -1, float("nan"), float("inf")])
+def test_settlement_durations_are_positive_and_finite(name, value):
+    with pytest.raises(ValueError, match=name):
+        make_config(**{name: value})
 
 
 def test_valid_config_normalizes() -> None:
@@ -93,3 +101,16 @@ def test_rejects_empty_funding_soak() -> None:
 def test_rejects_empty_slate_attempts() -> None:
     with pytest.raises(ValueError, match="slate_max_attempts"):
         make_config(slate_max_attempts=0)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"race_repetitions": 0}, "race_repetitions"),
+        ({"race_offsets_s": ()}, "race_offsets_s"),
+        ({"race_offsets_s": (0.0, float("nan"))}, "race_offsets_s"),
+    ],
+)
+def test_race_parameters_are_bounded(overrides, message):
+    with pytest.raises(ValueError, match=message):
+        make_config(**overrides)
