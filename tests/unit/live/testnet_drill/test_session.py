@@ -79,6 +79,29 @@ def test_notional_cap_enforced_centrally(drill_root: Path) -> None:
     assert len([call for call in venue.calls if call[0] == "POST"]) == posts
 
 
+def test_raw_cap_is_enforced_before_transport(drill_root: Path) -> None:
+    venue = StatefulVenue(["BTCUSDT"])
+    session = _open(drill_root, venue)
+    before = len(venue.calls)
+    with pytest.raises(DrillRefused, match="max_notional"):
+        session.guarded_new_order({"symbol": "BTCUSDT", "side": "BUY", "type": "LIMIT", "quantity": "10.0001", "price": "100.0001"}, raw=True)
+    assert len(venue.calls) == before
+
+
+def test_probe_cannot_trade_exchange_symbol_outside_drill_scope(drill_root: Path) -> None:
+    session = _open(drill_root, StatefulVenue(["BTCUSDT", "ETHUSDT"]))
+    with pytest.raises(DrillRefused, match="symbol"):
+        session.guarded_new_order({"symbol": "ETHUSDT", "quantity": "0.001", "price": "100"})
+
+
+def test_clean_slate_refuses_foreign_symbols_before_cancel(drill_root: Path) -> None:
+    venue = StatefulVenue(["BTCUSDT", "ETHUSDT"], orders=[{"symbol": "ETHUSDT", "clientOrderId": "foreign"}])
+    session = _open(drill_root, venue)
+    with pytest.raises(DrillRefused, match="out_of_scope"):
+        prepare_clean_slate(session)
+    assert not any(method != "GET" for method, _, _ in venue.calls)
+
+
 def test_guarded_new_order_assigns_id_and_sends(drill_root: Path) -> None:
     venue = StatefulVenue(["BTCUSDT"])
     session = _open(drill_root, venue)

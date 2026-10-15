@@ -11,7 +11,7 @@ import os
 import re
 import time
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field, replace
 from decimal import ROUND_DOWN, Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
@@ -27,7 +27,7 @@ from src.live.rest import BinanceFuturesRestClient, KeepAliveTransport
 from src.live.settings import LiveSettings
 from src.live.testnet_drill.config import DrillConfig
 from src.live.testnet_drill.faults import FaultAction, FaultInjectingTransport, FaultRule, WireRecord
-from src.live.testnet_drill.guard import DrillRefused, assert_drill_allowed, drill_scratch_root
+from src.live.testnet_drill.guard import _PRODUCTION_PATH_FIELDS, DrillRefused, assert_drill_allowed, drill_scratch_root
 
 logger = logging.getLogger("TestnetDrill")
 
@@ -42,6 +42,10 @@ class SlateNotClean(LiveTradingError):  # noqa: N818 - spec pins the name
     def __init__(self, message: str, *, residuals: Mapping[str, str]) -> None:
         super().__init__(message)
         self.residuals = dict(residuals)
+
+
+class DirtySessionError(LiveTradingError):
+    """Venue configuration could not be restored; stop all subsequent scenarios."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,6 +73,13 @@ class DrillSession:
     filters: Mapping[str, SymbolFilters]
     transport: FaultInjectingTransport
     opened_at: float
+    starting_wallet_balance: Decimal | None = None
+    counterparties: list[DrillSession] = field(default_factory=list, repr=False, compare=False)
+
+    @property
+    def aux_client(self) -> BinanceFuturesRestClient | None:
+        """Client of the independently credentialed counterparty account."""
+        return self.counterparties[0].client if self.counterparties else None
 
     def next_client_order_id(self, symbol: str) -> str:
         """Allocate the next drill-namespaced client order id for a symbol."""
@@ -77,16 +88,23 @@ class DrillSession:
             raise DrillRefused("drill refused: client_order_id")
         return candidate
 
-    def guarded_new_order(self, params: Mapping[str, Any]) -> Any:
+    def guarded_new_order(self, params: Mapping[str, Any], *, raw: bool = False) -> Any:
         """Send one drill order after prefix and notional-cap checks."""
         order = dict(params)
         symbol = str(order.get("symbol", ""))
-        if symbol not in self.filters:
+        if symbol not in self.filters or symbol not in self.config.symbols:
             raise DrillRefused("drill refused: symbol")
         raw_id = order.get("newClientOrderId")
         if raw_id is None:
             order["newClientOrderId"] = self.next_client_order_id(symbol)
-        elif not str(raw_id).startswith(self.client_order_prefix + "-") or _CLIENT_ID_RE.fullmatch(str(raw_id)) is None:
+        elif _CLIENT_ID_RE.fullmatch(str(raw_id)) is None or not (
+            str(raw_id).startswith(self.client_order_prefix + "-")
+            or (
+                raw
+                and re.match(r"^\d{8}-", str(raw_id))
+                and any(s.client_order_id == str(raw_id) for s in self.journal.submits())
+            )
+        ):
             raise DrillRefused("drill refused: client_order_id")
         if order.get("type") == "MARKET":
             order_for_cap = {**order, "price": str(_market_price(self.client, symbol))}
@@ -129,26 +147,42 @@ def open_drill_session(
     rules: Sequence[FaultRule] = (),
     clock: Callable[[], float] = time.time,
     inner: Any | None = None,
+    workspace: Path | None = None,
 ) -> DrillSession:
     """Open an isolated drill session against the testnet venue."""
     if _RUN_ID_RE.fullmatch(run_id) is None:
         raise DrillRefused("drill refused: run_id")
-    workspace = drill_scratch_root() / run_id
+    workspace = workspace if workspace is not None else drill_scratch_root() / run_id
     assert_drill_allowed(settings, workspace)
-    if multiprocessing.parent_process() is None and any(rule.action in (FaultAction.KILL_BEFORE_DELIVERY, FaultAction.KILL_AFTER_DELIVERY, FaultAction.KILL_ON_RESPONSE) for rule in rules):
+    if multiprocessing.parent_process() is None and any(
+        rule.action in (FaultAction.KILL_BEFORE_DELIVERY, FaultAction.KILL_AFTER_DELIVERY, FaultAction.KILL_ON_RESPONSE)
+        for rule in rules
+    ):
         raise DrillRefused("drill refused: parent_kill")
-    isolated = settings.model_copy(update={
-        "record_run_id": None,
-        **{name: str(workspace / filename) for name, filename in {
-            "ledger_path": "position_ledger.json", "order_journal_path": "order_journal.jsonl",
-            "tax_ledger_dir": "tax_ledger", "heartbeat_path": "heartbeat.json",
-            "fills_dir": "fills", "execution_quality_dir": "execution_quality",
-            "portfolio_state_dir": "portfolio_state", "microstructure_dir": "microstructure",
-            "alert_outbox_path": "alert_outbox.json",
-        }.items()},
-    })
+    isolated = settings.model_copy(
+        update={
+            "record_run_id": None,
+            **{
+                name: str(workspace / filename)
+                for name, filename in {
+                    "ledger_path": "position_ledger.json",
+                    "order_journal_path": "order_journal.jsonl",
+                    "tax_ledger_dir": "tax_ledger",
+                    "heartbeat_path": "heartbeat.json",
+                    "fills_dir": "fills",
+                    "execution_quality_dir": "execution_quality",
+                    "portfolio_state_dir": "portfolio_state",
+                    "microstructure_dir": "microstructure",
+                    "alert_outbox_path": "alert_outbox.json",
+                }.items()
+            },
+        }
+    )
     assert_drill_allowed(isolated, workspace)
-    if any(not (workspace / name).resolve().is_relative_to(workspace.resolve()) for name in ("audit.jsonl", "order_journal.jsonl", "last_wallet.json", "wire.jsonl")):
+    if any(
+        not (workspace / name).resolve().is_relative_to(workspace.resolve())
+        for name in ("audit.jsonl", "order_journal.jsonl", "last_wallet.json", "wire.jsonl")
+    ):
         raise DrillRefused("drill refused: session_paths")
     workspace.mkdir(parents=True, exist_ok=True)
     audit = AuditLog(workspace / "audit.jsonl")
@@ -198,6 +232,43 @@ def open_drill_session(
     )
 
 
+def open_counterparty_session(session: DrillSession, *, inner: Any | None = None) -> DrillSession:
+    """Open a flat, separately credentialed testnet account with isolated state."""
+    if session.counterparties:
+        return session.counterparties[0]
+    settings = session.settings
+    key, secret = settings.order_api_key2, settings.order_api_secret2
+    if key is None or secret is None or not key.get_secret_value() or not secret.get_secret_value():
+        raise DrillRefused("drill refused: counterparty_credentials")
+    other_keys = (settings.order_api_key, settings.api_key)
+    if any(other is not None and key.get_secret_value() == other.get_secret_value() for other in other_keys):
+        raise DrillRefused("drill refused: counterparty_key_separation")
+    child_settings = settings.model_copy(
+        update={
+            "order_api_key": key,
+            "order_api_secret": secret,
+            "api_key": None,
+            "api_secret": None,
+            **dict.fromkeys(_PRODUCTION_PATH_FIELDS),
+        }
+    )
+    aux = open_drill_session(
+        child_settings, session.config, run_id=session.run_id, workspace=session.workspace / "counterparty", inner=inner
+    )
+    aux = replace(aux, client_order_prefix="aux" + session.client_order_prefix.removeprefix(CLIENT_ORDER_NAMESPACE))
+    try:
+        if _read_positions(aux.client) or aux.client.open_orders():
+            raise DrillRefused("drill refused: counterparty_not_flat")
+    except BaseException:
+        try:
+            aux.transport.close()
+        finally:
+            aux.audit.close()
+        raise
+    session.counterparties.append(aux)
+    return aux
+
+
 def _persist_wire(path: Path, record: WireRecord) -> None:
     payload = asdict(record)
     payload["response_body"] = record.response_body.hex()
@@ -221,7 +292,9 @@ def _read_positions(client: BinanceFuturesRestClient) -> dict[str, Decimal]:
     return positions
 
 
-def _margin_setup(account: Mapping[str, Any], symbols: Sequence[str]) -> tuple[tuple[tuple[str, int], ...], tuple[tuple[str, str], ...]]:
+def _margin_setup(
+    account: Mapping[str, Any], symbols: Sequence[str]
+) -> tuple[tuple[tuple[str, int], ...], tuple[tuple[str, str], ...]]:
     rows = account.get("positions")
     by_symbol: dict[str, Mapping[str, Any]] = {}
     if isinstance(rows, list):
@@ -250,19 +323,26 @@ def _flatten_positions(session: DrillSession, positions: Mapping[str, Decimal]) 
             continue
         filters = session.filters[symbol]
         price = _market_price(session.client, symbol)
-        cap_qty = (session.config.max_probe_notional_usdt / price / filters.step_size).to_integral_value(rounding=ROUND_DOWN) * filters.step_size
+        cap_qty = (session.config.max_probe_notional_usdt / price / filters.step_size).to_integral_value(
+            rounding=ROUND_DOWN
+        ) * filters.step_size
         quantity = min(abs(qty), cap_qty, filters.max_qty)
         if quantity <= 0:
             raise DrillRefused("drill refused: flatten_cap")
-        session.guarded_new_order(
-            {
-                "symbol": symbol,
-                "side": "SELL" if qty > 0 else "BUY",
-                "type": "MARKET",
-                "quantity": str(quantity),
-                "reduceOnly": "true",
-            },
-        )
+        order = {
+            "symbol": symbol,
+            "side": "SELL" if qty > 0 else "BUY",
+            "type": "MARKET",
+            "quantity": str(quantity),
+            "reduceOnly": "true",
+        }
+        if session.starting_wallet_balance is not None:
+            from src.live.testnet_drill.execution import settle_journal, submit_probe
+
+            submit_probe(session, order)
+            settle_journal(session)
+        else:
+            session.guarded_new_order(order)
 
 
 def _wallet_state_path(session: DrillSession) -> Path:
@@ -296,6 +376,8 @@ def prepare_clean_slate(session: DrillSession) -> SlateReport:
         positions = _read_positions(session.client)
         open_orders = session.client.open_orders()
         symbols = {*positions, *(str(o.get("symbol", "")) for o in open_orders if isinstance(o, dict))}
+        if symbols - set(session.config.symbols):
+            raise DrillRefused("drill refused: out_of_scope_account_state")
         for symbol in sorted(s for s in symbols if s):
             session.client.request("DELETE", "/fapi/v1/allOpenOrders", {"symbol": symbol}, signed=True)
         _flatten_positions(session, _read_positions(session.client))
@@ -316,20 +398,29 @@ def prepare_clean_slate(session: DrillSession) -> SlateReport:
     )
 
 
-def teardown_session(session: DrillSession) -> None:
+def teardown_session(session: DrillSession, *, close_handles: bool = True) -> None:
     """Cancel own open orders, flatten, close handles; never raises on cleanup failure."""
     try:
+        for aux in session.counterparties:
+            teardown_session(aux, close_handles=close_handles)
         try:
             for order in session.client.open_orders():
                 if not isinstance(order, dict):
                     continue
-                if str(order.get("clientOrderId", "")).startswith(session.client_order_prefix + "-"):
+                if (
+                    str(order.get("clientOrderId", "")).startswith(session.client_order_prefix + "-")
+                    and str(order.get("symbol", "")) in session.config.symbols
+                ):
                     session.client.cancel_order(str(order.get("symbol", "")), str(order.get("clientOrderId", "")))
         except Exception as exc:
             with contextlib.suppress(Exception):
                 session.audit.record("teardown_issue", stage="cancel", error=type(exc).__name__)
         try:
             residuals: dict[str, Decimal] = {}
+            if session.starting_wallet_balance is not None:
+                from src.live.testnet_drill.execution import settle_journal
+
+                settle_journal(session)
             for _ in range(session.config.slate_max_attempts):
                 _flatten_positions(session, _read_positions(session.client))
                 residuals = _read_positions(session.client)
@@ -338,12 +429,34 @@ def teardown_session(session: DrillSession) -> None:
             if residuals:
                 raise SlateNotClean("drill teardown not flat", residuals={s: str(q) for s, q in residuals.items()})
             account = session.client.account()
-            _wallet_state_path(session).write_text(json.dumps({"balance": str(account["totalWalletBalance"]), "run_id": session.run_id, "ended_at_ms": int(time.time() * 1000)}), encoding="utf-8")
+            _wallet_state_path(session).write_text(
+                json.dumps(
+                    {
+                        "balance": str(account["totalWalletBalance"]),
+                        "run_id": session.run_id,
+                        "ended_at_ms": int(time.time() * 1000),
+                    }
+                ),
+                encoding="utf-8",
+            )
         except Exception as exc:
             with contextlib.suppress(Exception):
                 session.audit.record("teardown_issue", stage="flatten", error=type(exc).__name__)
     finally:
-        with contextlib.suppress(Exception):
+        if close_handles:
+            with contextlib.suppress(Exception):
+                session.transport.close()
+            with contextlib.suppress(Exception):
+                session.audit.close()
+
+
+def close_session_handles(session: DrillSession) -> None:
+    """Close all account transports and audit streams after final reconciliation."""
+    try:
+        for aux in session.counterparties:
+            close_session_handles(aux)
+    finally:
+        try:
             session.transport.close()
-        with contextlib.suppress(Exception):
+        finally:
             session.audit.close()
