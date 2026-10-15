@@ -91,7 +91,7 @@ REQUIRED_EVIDENCE: dict[str, frozenset[str]] = {
         "C2": "code chases window no_resting_taker",
         "C3": "status qty_exact vwap_within_tolerance maker_false",
         "C4": "status executed_qty requested_qty ioc_attempts max_ioc_attempts residual_exact booked_once",
-        "C5": "cumulative_monotonic deltas_sum_to_venue delta_price user_trade_price price_rel_tolerance uses_cumulative_avg",
+        "C5": "cumulative_monotonic deltas_sum_to_venue multi_step_observed delta_price user_trade_price price_rel_tolerance uses_cumulative_avg",
         "C6": "repetitions",
         "C7": "never_flips contained_to_intent codes",
         "C8": "final_equals_target residual_explicit has_obsolete_leg",
@@ -298,9 +298,6 @@ def isolated_run(
                 teardown_session(session, close_handles=False)
                 reconciled = reconcile_session(session, since_ms=since_ms, settle_wait_s=config.settle_wait_s)
                 checks = evaluate_reconciliation(reconciled, config)
-                aux_clean = all(
-                    not _read_positions(aux.client) and not aux.client.open_orders() for aux in session.counterparties
-                )
                 primary_clean = not _read_positions(session.client) and not session.client.open_orders()
             finally:
                 close_session_handles(session)
@@ -309,9 +306,8 @@ def isolated_run(
             payload={
                 **evidence.payload,
                 **({"r1_r6_pass": all(check.passed for check in checks)} if evidence.scenario_id == "C11" else {}),
-                "conservation_passed": primary_clean and aux_clean and all(check.passed for check in checks),
+                "conservation_passed": primary_clean and all(check.passed for check in checks),
                 "reconciliation": checks,
-                "counterparty_clean": aux_clean,
                 "primary_clean": primary_clean,
                 "testnet_reset_suspected": reset_suspected,
             },

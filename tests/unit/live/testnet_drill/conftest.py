@@ -6,7 +6,6 @@ import time
 from decimal import Decimal
 
 import pytest
-from pydantic import SecretStr
 
 from src.live.testnet_drill import session as session_module
 from tests.unit.live.testnet_drill._exchange import Exchange
@@ -28,8 +27,7 @@ def exchange_session(tmp_path, monkeypatch):
         config_values = {"probe_notional_usdt": Decimal("20"), "max_probe_notional_usdt": Decimal("30"),
                          "scenario_timeout_s": 500, "settle_wait_s": 0.001, "settle_poll_s": 0.001}
         config_values.update(config or {})
-        setting_values = {"order_api_key2": SecretStr("counterparty-key"), "order_api_secret2": SecretStr("counterparty-secret"),
-                          "maker_fee_bps": 5.0, "taker_fee_bps": 5.0, "passive_timeout_minutes": 1,
+        setting_values = {"maker_fee_bps": 5.0, "taker_fee_bps": 5.0, "passive_timeout_minutes": 1,
                           "repeg_interval_s": 6.0}
         setting_values.update(settings or {})
         session = session_module.open_drill_session(make_settings(**setting_values), make_config(**config_values),

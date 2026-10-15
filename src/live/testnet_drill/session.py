@@ -9,7 +9,7 @@ import logging
 import re
 import time
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import asdict, dataclass
 from decimal import ROUND_DOWN, Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, NoReturn
@@ -25,7 +25,7 @@ from src.live.rest import BinanceFuturesRestClient, KeepAliveTransport
 from src.live.settings import LiveSettings
 from src.live.testnet_drill.config import DrillConfig
 from src.live.testnet_drill.faults import KILL_ACTIONS, FaultInjectingTransport, FaultRule, WireRecord
-from src.live.testnet_drill.guard import _PRODUCTION_PATH_FIELDS, DrillRefused, assert_drill_allowed, drill_scratch_root
+from src.live.testnet_drill.guard import DrillRefused, assert_drill_allowed, drill_scratch_root
 
 logger = logging.getLogger("TestnetDrill")
 
@@ -80,12 +80,6 @@ class DrillSession:
     transport: FaultInjectingTransport
     opened_at: float
     starting_wallet_balance: Decimal | None = None
-    counterparties: list[DrillSession] = field(default_factory=list, repr=False, compare=False)
-
-    @property
-    def aux_client(self) -> BinanceFuturesRestClient | None:
-        """Client of the independently credentialed counterparty account."""
-        return self.counterparties[0].client if self.counterparties else None
 
     def next_client_order_id(self, symbol: str) -> str:
         """Allocate the next drill-namespaced client order id for a symbol."""
@@ -254,43 +248,6 @@ def open_drill_session(
     )
 
 
-def open_counterparty_session(session: DrillSession, *, inner: Any | None = None) -> DrillSession:
-    """Open a flat, separately credentialed testnet account with isolated state."""
-    if session.counterparties:
-        return session.counterparties[0]
-    settings = session.settings
-    key, secret = settings.order_api_key2, settings.order_api_secret2
-    if key is None or secret is None or not key.get_secret_value() or not secret.get_secret_value():
-        raise DrillRefused("drill refused: counterparty_credentials")
-    other_keys = (settings.order_api_key, settings.api_key)
-    if any(other is not None and key.get_secret_value() == other.get_secret_value() for other in other_keys):
-        raise DrillRefused("drill refused: counterparty_key_separation")
-    child_settings = settings.model_copy(
-        update={
-            "order_api_key": key,
-            "order_api_secret": secret,
-            "api_key": None,
-            "api_secret": None,
-            **dict.fromkeys(_PRODUCTION_PATH_FIELDS),
-        }
-    )
-    aux = open_drill_session(
-        child_settings, session.config, run_id=session.run_id, workspace=session.workspace / "counterparty", inner=inner
-    )
-    aux = replace(aux, client_order_prefix="aux" + session.client_order_prefix.removeprefix(CLIENT_ORDER_NAMESPACE))
-    try:
-        if _read_positions(aux.client) or aux.client.open_orders():
-            raise DrillRefused("drill refused: counterparty_not_flat")
-    except BaseException:
-        try:
-            aux.transport.close()
-        finally:
-            aux.audit.close()
-        raise
-    session.counterparties.append(aux)
-    return aux
-
-
 def _refuse_kill(exit_code: int) -> NoReturn:
     raise DrillRefused("drill refused: parent_kill")
 
@@ -427,8 +384,6 @@ def prepare_clean_slate(session: DrillSession) -> SlateReport:
 def teardown_session(session: DrillSession, *, close_handles: bool = True) -> None:
     """Cancel own open orders, flatten, close handles; never raises on cleanup failure."""
     try:
-        for aux in session.counterparties:
-            teardown_session(aux, close_handles=close_handles)
         try:
             for order in session.client.open_orders():
                 if not isinstance(order, dict):
@@ -477,12 +432,8 @@ def teardown_session(session: DrillSession, *, close_handles: bool = True) -> No
 
 
 def close_session_handles(session: DrillSession) -> None:
-    """Close all account transports and audit streams after final reconciliation."""
+    """Close the account transport and audit stream after final reconciliation."""
     try:
-        for aux in session.counterparties:
-            close_session_handles(aux)
+        session.transport.close()
     finally:
-        try:
-            session.transport.close()
-        finally:
-            session.audit.close()
+        session.audit.close()
