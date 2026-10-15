@@ -131,3 +131,16 @@ def test_report_symlink_cannot_escape_workspace(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="inside workspace"):
         write_report([], workspace)
     assert not outside.exists()
+
+
+def test_per_hypothesis_outcomes_must_be_declared_and_valid() -> None:
+    import pytest
+
+    from src.live.testnet_drill.report import ScenarioResult, Verdict
+
+    with pytest.raises(ValueError, match="declared"):
+        ScenarioResult("D5", Verdict.OBSERVED, hypothesis_ids=("H3",), hypothesis_outcomes=(("H10", "CONFIRMED"),))
+    with pytest.raises(ValueError, match="hypothesis_outcome"):
+        ScenarioResult("D5", Verdict.OBSERVED, hypothesis_ids=("H3",), hypothesis_outcomes=(("H3", "MAYBE"),))
+    result = ScenarioResult("D5", Verdict.OBSERVED, hypothesis_ids=("H3", "H10"), hypothesis_outcomes=(("H3", "REFUTED"),))
+    assert (result.outcome_for("H3"), result.outcome_for("H10")) == ("REFUTED", "INCONCLUSIVE")

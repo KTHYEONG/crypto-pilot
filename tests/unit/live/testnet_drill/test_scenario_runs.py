@@ -43,8 +43,10 @@ def test_two_accounts_pass_conservation_without_combining_fills(exchange_session
     # C6 cancel-vs-fill ordering is thread-scheduled; either side may win every repetition.
     assert primary["trades"] or scenario_id == "C6"
     assert aux["trades"] or scenario_id == "C9"
+    from src.live.order_journal import OrderJournal
+
     assert sum(Decimal(row["qty"]) for row in primary["trades"]) == sum(
-        fill.quantity for fill in session.journal.fills_after(-1)
+        fill.quantity for fill in OrderJournal(session.journal.path).fills_after(-1)
     )
     assert all(fill.client_order_id.startswith(session.client_order_prefix) for fill in session.journal.fills_after(-1))
 

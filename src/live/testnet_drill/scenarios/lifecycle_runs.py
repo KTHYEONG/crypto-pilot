@@ -6,7 +6,7 @@ import json
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from decimal import Decimal
 from itertools import pairwise
 from typing import Any
@@ -264,189 +264,281 @@ def _repeg(session: DrillSession) -> ScenarioEvidence:
     )
 
 
-def _ordinary(session: DrillSession, scenario_id: str) -> ScenarioEvidence:
+def _resting_cancel(session: DrillSession) -> ScenarioEvidence:
     symbol = session.config.symbols[0]
-    if scenario_id == "C1":
-        order = _limit(session, distance=True)
-        posted = submit_probe(session, order)
-        query = session.client.query_order(symbol, order["newClientOrderId"])
-        confirmation = cancel_probe(session, symbol, order["newClientOrderId"])
-        return ev(
-            "C1",
-            status_path=[query["status"], confirmation.status],
-            closed=confirmation.closed,
-            fills=sum(fill.client_order_id == order["newClientOrderId"] for fill in session.journal.fills_after(-1)),
-            journal_submit=any(s.client_order_id == order["newClientOrderId"] for s in session.journal.submits()),
-            journal_terminal=session.journal.terminal(order["newClientOrderId"]) is not None,
-            posted=posted,
-        )
+    order = _limit(session, distance=True)
+    posted = submit_probe(session, order)
+    query = session.client.query_order(symbol, order["newClientOrderId"])
+    confirmation = cancel_probe(session, symbol, order["newClientOrderId"])
+    return ev(
+        "C1",
+        status_path=[query["status"], confirmation.status],
+        closed=confirmation.closed,
+        fills=sum(fill.client_order_id == order["newClientOrderId"] for fill in session.journal.fills_after(-1)),
+        journal_submit=any(s.client_order_id == order["newClientOrderId"] for s in session.journal.submits()),
+        journal_terminal=session.journal.terminal(order["newClientOrderId"]) is not None,
+        posted=posted,
+    )
+
+
+def _opened(session: DrillSession, intents: list[Any], refusal: str) -> Any:
+    opening = run_cycle(session, intents)
+    if not opening.outcomes or opening.outcomes[0].filled_qty <= 0:
+        raise DrillRefused(f"drill refused: {refusal}")
+    return opening
+
+
+def _ordinary_intents(session: DrillSession, scenario_id: str) -> list[Any]:
+    symbol = session.config.symbols[0]
     intents = [make_intent(session, symbol)]
     if scenario_id == "C4":
         depth = session.client.depth(symbol)
         amount = Decimal(str(depth["asks"][0][1])) + session.filters[symbol].step_size
-        intents = [make_intent(session, symbol, quantity=amount)]
-    elif scenario_id == "C8":
-        opening = run_cycle(session, intents)
-        if not opening.outcomes or opening.outcomes[0].filled_qty <= 0:
-            raise DrillRefused("drill refused: flip_requires_open_position")
-        positions = _read_positions(session.client)
-        intents = plan_orders(
-            {symbol: -intents[0].quantity},
-            positions,
-            session.filters,
-            {symbol: intents[0].decision_price},
-            session.client_order_prefix.removeprefix("mh"),
+        return [make_intent(session, symbol, quantity=amount)]
+    if scenario_id == "C8":
+        _opened(session, intents, "flip_requires_open_position")
+        return list(
+            plan_orders(
+                {symbol: -intents[0].quantity},
+                _read_positions(session.client),
+                session.filters,
+                {symbol: intents[0].decision_price},
+                session.client_order_prefix.removeprefix("mh"),
+            )
         )
-    elif scenario_id == "C10":
-        if session.config.probe_notional_usdt <= MAX_SLICE_NOTIONAL:
-            raise DrillRefused("drill refused: slice_probe_notional_must_exceed_slice_limit")
-    elif scenario_id in ("C11", "C13"):
-        minimum = 2 if scenario_id == "C11" else 3
-        if len(session.config.symbols) < minimum:
-            raise DrillRefused("drill refused: insufficient_probe_symbols")
-        intents = [make_intent(session, sym, leg_index=index) for index, sym in enumerate(session.config.symbols)]
-        if scenario_id == "C13":
-            opening = run_cycle(session, [intents[0]])
-            if not opening.outcomes or opening.outcomes[0].filled_qty <= 0:
-                raise DrillRefused("drill refused: throttle_probe_requires_reducing_intent")
-            intents = [replace(intents[index % len(intents)], leg_index=index) for index in range(10)]
-            intents[0] = replace(intents[0], side="SELL", reduce_only=True, quantity=opening.outcomes[0].filled_qty)
-    elif scenario_id == "C7":
-        intents = [replace(intents[0], reduce_only=True)]
-    elif scenario_id == "C14":
+    if scenario_id == "C10" and session.config.probe_notional_usdt <= MAX_SLICE_NOTIONAL:
+        raise DrillRefused("drill refused: slice_probe_notional_must_exceed_slice_limit")
+    if scenario_id in ("C11", "C13"):
+        return _multi_symbol_intents(session, scenario_id)
+    if scenario_id == "C7":
+        return [replace(intents[0], reduce_only=True)]
+    if scenario_id == "C14":
         opening = run_cycle(session, intents)
-        account = session.client.account()
-        if not opening.outcomes or Decimal(str(account["availableBalance"])) > session.config.probe_notional_usdt:
+        available = Decimal(str(session.client.account()["availableBalance"]))
+        if not opening.outcomes or available > session.config.probe_notional_usdt:
             raise DrillRefused("drill refused: margin_release_requires_near_limit_account")
-        intents = [replace(intents[0], side="SELL", reduce_only=True, leg_index=0), replace(intents[0], leg_index=1)]
+        return [replace(intents[0], side="SELL", reduce_only=True, leg_index=0), replace(intents[0], leg_index=1)]
+    return intents
+
+
+def _multi_symbol_intents(session: DrillSession, scenario_id: str) -> list[Any]:
+    minimum = 2 if scenario_id == "C11" else 3
+    if len(session.config.symbols) < minimum:
+        raise DrillRefused("drill refused: insufficient_probe_symbols")
+    intents = [make_intent(session, sym, leg_index=index) for index, sym in enumerate(session.config.symbols)]
+    if scenario_id == "C11":
+        return intents
+    opening = _opened(session, [intents[0]], "throttle_probe_requires_reducing_intent")
+    intents = [replace(intents[index % len(intents)], leg_index=index) for index in range(10)]
+    intents[0] = replace(intents[0], side="SELL", reduce_only=True, quantity=opening.outcomes[0].filled_qty)
+    return intents
+
+
+@dataclass(frozen=True, slots=True)
+class _Cycle:
+    """Everything an ordinary lifecycle evidence builder reads after one production cycle."""
+
+    session: DrillSession
+    symbol: str
+    intents: list[Any]
+    trace: Any
+    fills: tuple[Any, ...]
+    posted: list[Any]
+    codes: list[int]
+    total: Decimal
+    requested: Decimal
+    exact: bool
+    residual: bool
+    positions: dict[str, Decimal]
+    common: dict[str, Any]
+
+
+def _observe_cycle(session: DrillSession, intents: list[Any]) -> _Cycle:
     trace = run_cycle(session, intents)
     outcomes = trace.outcomes
-    fills = session.journal.fills_after(-1)
-    posted = [
-        row
-        for row in session.transport.records[trace.wire_start : trace.wire_end]
-        if row.method == "POST" and row.path == "/fapi/v1/order"
-    ]
-    codes = _codes(session, trace.wire_start)
-    total = sum((outcome.filled_qty for outcome in outcomes), Decimal(0))
-    requested = sum((intent.quantity for intent in intents), Decimal(0))
     exact = len(outcomes) == len(intents) and all(
         outcome.filled_qty + outcome.unfilled_qty == intent.quantity
         for outcome, intent in zip(outcomes, intents, strict=True)
     )
-    residual = exact and any(
-        outcome.unfilled_qty > 0 and outcome.status in ("RESIDUAL", "RESIDUAL_SUB_MINIMUM", "OBSOLETE")
-        for outcome in outcomes
+    return _Cycle(
+        session=session,
+        symbol=session.config.symbols[0],
+        intents=intents,
+        trace=trace,
+        fills=session.journal.fills_after(-1),
+        posted=[
+            row
+            for row in session.transport.records[trace.wire_start : trace.wire_end]
+            if row.method == "POST" and row.path == "/fapi/v1/order"
+        ],
+        codes=_codes(session, trace.wire_start),
+        total=sum((outcome.filled_qty for outcome in outcomes), Decimal(0)),
+        requested=sum((intent.quantity for intent in intents), Decimal(0)),
+        exact=exact,
+        residual=exact
+        and any(
+            outcome.unfilled_qty > 0 and outcome.status in ("RESIDUAL", "RESIDUAL_SUB_MINIMUM", "OBSOLETE")
+            for outcome in outcomes
+        ),
+        positions=_read_positions(session.client),
+        common={"escaped_exception": trace.escaped, "wire_start": trace.wire_start, "wire_end": trace.wire_end},
     )
-    positions = _read_positions(session.client)
-    common = {"escaped_exception": trace.escaped, "wire_start": trace.wire_start, "wire_end": trace.wire_end}
-    if scenario_id == "C2":
-        return ev(
-            scenario_id,
-            **common,
-            code=next((code for code in codes if code == -5022), None),
-            chases=sum(outcome.chases for outcome in outcomes),
-            window=trace.policy.max_chases,
-            no_resting_taker=all(fill.liquidity == "maker" for fill in fills if fill.reason == "maker_fill"),
-        )
-    if scenario_id == "C3":
-        submit_ids = {s.client_order_id for s in session.journal.submits() if s.submit_seq >= trace.submit_start}
-        venue_ids = {str(session.client.query_order(symbol, client_id)["orderId"]) for client_id in submit_ids}
-        trades = [row for row in session.client.user_trades(symbol) if str(row["orderId"]) in venue_ids]
-        venue_qty = sum((Decimal(str(row["qty"])) for row in trades), Decimal(0))
-        venue_notional = sum((Decimal(str(row["qty"])) * Decimal(str(row["price"])) for row in trades), Decimal(0))
-        journal_notional = sum((outcome.filled_qty * outcome.avg_fill_price for outcome in outcomes if outcome.avg_fill_price is not None), Decimal(0))
-        vwap_parity = venue_qty == total and venue_notional > 0 and abs(journal_notional - venue_notional) / venue_notional <= session.config.price_rel_tolerance
-        return ev(
-            scenario_id,
-            **common,
-            status=outcomes[0].status if outcomes else None,
-            qty_exact=total == requested,
-            vwap_within_tolerance=vwap_parity,
-            maker_false=bool(trades) and all(row["maker"] is False for row in trades),
-        )
-    if scenario_id == "C4":
-        ioc = [
-            json.loads(row.response_body)
-            for row in posted
-            if b'"status"' in row.response_body and "timeInForce=IOC" in row.url
-        ]
-        partial: dict[str, Any] = next(
-            (row for row in ioc if row.get("status") == "EXPIRED" and Decimal(str(row.get("executedQty", 0))) > 0), {}
-        )
-        return ev(
-            scenario_id,
-            **common,
-            status=partial.get("status"),
-            executed_qty=partial.get("executedQty", "0"),
-            requested_qty=str(requested),
-            ioc_attempts=len(ioc),
-            max_ioc_attempts=trace.policy.max_ioc_attempts,
-            residual_exact=residual,
-            booked_once=len({(fill.client_order_id, fill.cumulative_executed_qty) for fill in fills}) == len(fills),
-        )
-    if scenario_id == "C7":
-        return ev(
-            scenario_id,
-            **common,
-            never_flips=positions.get(symbol, Decimal(0)) == 0,
-            contained_to_intent=trace.escaped is None,
-            codes=codes,
-        )
-    if scenario_id == "C8":
-        return ev(
-            scenario_id,
-            **common,
-            final_equals_target=positions.get(symbol, Decimal(0)) == intents[-1].target_qty,
-            residual_explicit=residual,
-            has_obsolete_leg=any(outcome.status == "OBSOLETE" for outcome in outcomes),
-        )
-    if scenario_id == "C10":
-        ids = [row.client_order_id for row in session.journal.submits()]
-        return ev(
-            scenario_id,
-            **common,
-            slice_sum=str(total),
-            intent_qty=str(requested),
-            residual_explicit=residual,
-            slice_ids_unique=len(ids) == len(set(ids)),
-            final_equals_target=positions.get(symbol, Decimal(0)) == intents[0].target_qty,
-        )
-    if scenario_id == "C11":
-        return ev(scenario_id, **common, r1_r6_pass=False, symbol_count=len({intent.symbol for intent in intents}))
-    if scenario_id == "C12":
-        ioc_posts = [row for row in posted if "timeInForce=IOC" in row.url]
-        samples = [sample for sample in trace.post_quotes if sample["timeInForce"] == "IOC"]
-        cap_ok = bool(samples) and all(
-            abs(Decimal(str(sample["price"])) - Decimal(str(sample["ask" if sample["side"] == "BUY" else "bid"])))
-            <= Decimal(str(sample["ask" if sample["side"] == "BUY" else "bid"])) * Decimal(str(trace.policy.taker_cap_bps)) / 10000
-               + session.filters[str(sample["symbol"])].tick_size
-            for sample in samples)
-        return ev(
-            scenario_id,
-            **common,
-            escalated_to_ioc=bool(ioc_posts),
-            price_within_cap=cap_ok,
-            open_empty=not session.client.open_orders(),
-            residual_exact=exact,
-        )
-    if scenario_id == "C13":
-        return ev(
-            scenario_id,
-            **common,
-            no_429=not any(row.status_code == 429 for row in session.transport.records),
-            intent_count=len(intents),
-            symbol_count=len({intent.symbol for intent in intents}),
-            throttle_respected=bool(trace.sleeps) and min(trace.sleeps) >= trace.policy.poll_interval_s,
-            reducing_first=bool(posted) and "reduceOnly=true" in posted[0].url,
-        )
+
+
+def _evidence_c2(c: _Cycle) -> ScenarioEvidence:
     return ev(
-        scenario_id,
-        **common,
-        reducing_first=bool(posted) and "reduceOnly=true" in posted[0].url,
-        no_spurious_2019=-2019 not in codes,
+        "C2",
+        **c.common,
+        code=next((code for code in c.codes if code == -5022), None),
+        chases=sum(outcome.chases for outcome in c.trace.outcomes),
+        window=c.trace.policy.max_chases,
+        no_resting_taker=all(fill.liquidity == "maker" for fill in c.fills if fill.reason == "maker_fill"),
+    )
+
+
+def _evidence_c3(c: _Cycle) -> ScenarioEvidence:
+    session, outcomes = c.session, c.trace.outcomes
+    submit_ids = {s.client_order_id for s in session.journal.submits() if s.submit_seq >= c.trace.submit_start}
+    venue_ids = {str(session.client.query_order(c.symbol, client_id)["orderId"]) for client_id in submit_ids}
+    trades = [row for row in session.client.user_trades(c.symbol) if str(row["orderId"]) in venue_ids]
+    venue_qty = sum((Decimal(str(row["qty"])) for row in trades), Decimal(0))
+    venue_notional = sum((Decimal(str(row["qty"])) * Decimal(str(row["price"])) for row in trades), Decimal(0))
+    journal_notional = sum(
+        (o.filled_qty * o.avg_fill_price for o in outcomes if o.avg_fill_price is not None), Decimal(0)
+    )
+    vwap_parity = (
+        venue_qty == c.total
+        and venue_notional > 0
+        and abs(journal_notional - venue_notional) / venue_notional <= session.config.price_rel_tolerance
+    )
+    return ev(
+        "C3",
+        **c.common,
+        status=outcomes[0].status if outcomes else None,
+        qty_exact=c.total == c.requested,
+        vwap_within_tolerance=vwap_parity,
+        maker_false=bool(trades) and all(row["maker"] is False for row in trades),
+    )
+
+
+def _evidence_c4(c: _Cycle) -> ScenarioEvidence:
+    ioc = [
+        json.loads(row.response_body)
+        for row in c.posted
+        if b'"status"' in row.response_body and "timeInForce=IOC" in row.url
+    ]
+    partial: dict[str, Any] = next(
+        (row for row in ioc if row.get("status") == "EXPIRED" and Decimal(str(row.get("executedQty", 0))) > 0), {}
+    )
+    return ev(
+        "C4",
+        **c.common,
+        status=partial.get("status"),
+        executed_qty=partial.get("executedQty", "0"),
+        requested_qty=str(c.requested),
+        ioc_attempts=len(ioc),
+        max_ioc_attempts=c.trace.policy.max_ioc_attempts,
+        residual_exact=c.residual,
+        booked_once=len({(fill.client_order_id, fill.cumulative_executed_qty) for fill in c.fills}) == len(c.fills),
+    )
+
+
+def _evidence_c7(c: _Cycle) -> ScenarioEvidence:
+    return ev(
+        "C7",
+        **c.common,
+        never_flips=c.positions.get(c.symbol, Decimal(0)) == 0,
+        contained_to_intent=c.trace.escaped is None,
+        codes=c.codes,
+    )
+
+
+def _evidence_c8(c: _Cycle) -> ScenarioEvidence:
+    return ev(
+        "C8",
+        **c.common,
+        final_equals_target=c.positions.get(c.symbol, Decimal(0)) == c.intents[-1].target_qty,
+        residual_explicit=c.residual,
+        has_obsolete_leg=any(outcome.status == "OBSOLETE" for outcome in c.trace.outcomes),
+    )
+
+
+def _evidence_c10(c: _Cycle) -> ScenarioEvidence:
+    ids = [row.client_order_id for row in c.session.journal.submits()]
+    return ev(
+        "C10",
+        **c.common,
+        slice_sum=str(c.total),
+        intent_qty=str(c.requested),
+        residual_explicit=c.residual,
+        slice_ids_unique=len(ids) == len(set(ids)),
+        final_equals_target=c.positions.get(c.symbol, Decimal(0)) == c.intents[0].target_qty,
+    )
+
+
+def _evidence_c11(c: _Cycle) -> ScenarioEvidence:
+    return ev("C11", **c.common, r1_r6_pass=False, symbol_count=len({intent.symbol for intent in c.intents}))
+
+
+def _evidence_c12(c: _Cycle) -> ScenarioEvidence:
+    cap_bps = Decimal(str(c.trace.policy.taker_cap_bps))
+    samples = [sample for sample in c.trace.post_quotes if sample["timeInForce"] == "IOC"]
+
+    def within_cap(sample: dict[str, Any]) -> bool:
+        touch = Decimal(str(sample["ask" if sample["side"] == "BUY" else "bid"]))
+        tick = c.session.filters[str(sample["symbol"])].tick_size
+        return abs(Decimal(str(sample["price"])) - touch) <= touch * cap_bps / 10000 + tick
+
+    return ev(
+        "C12",
+        **c.common,
+        escalated_to_ioc=any("timeInForce=IOC" in row.url for row in c.posted),
+        price_within_cap=bool(samples) and all(within_cap(sample) for sample in samples),
+        open_empty=not c.session.client.open_orders(),
+        residual_exact=c.exact,
+    )
+
+
+def _evidence_c13(c: _Cycle) -> ScenarioEvidence:
+    return ev(
+        "C13",
+        **c.common,
+        no_429=not any(row.status_code == 429 for row in c.session.transport.records),
+        intent_count=len(c.intents),
+        symbol_count=len({intent.symbol for intent in c.intents}),
+        throttle_respected=bool(c.trace.sleeps) and min(c.trace.sleeps) >= c.trace.policy.poll_interval_s,
+        reducing_first=bool(c.posted) and "reduceOnly=true" in c.posted[0].url,
+    )
+
+
+def _evidence_c14(c: _Cycle) -> ScenarioEvidence:
+    return ev(
+        "C14",
+        **c.common,
+        reducing_first=bool(c.posted) and "reduceOnly=true" in c.posted[0].url,
+        no_spurious_2019=-2019 not in c.codes,
         margin_near_limit=True,
     )
+
+
+_ORDINARY_EVIDENCE: dict[str, Callable[[_Cycle], ScenarioEvidence]] = {
+    "C2": _evidence_c2,
+    "C3": _evidence_c3,
+    "C4": _evidence_c4,
+    "C7": _evidence_c7,
+    "C8": _evidence_c8,
+    "C10": _evidence_c10,
+    "C11": _evidence_c11,
+    "C12": _evidence_c12,
+    "C13": _evidence_c13,
+    "C14": _evidence_c14,
+}
+
+
+def _ordinary(session: DrillSession, scenario_id: str) -> ScenarioEvidence:
+    if scenario_id == "C1":
+        return _resting_cancel(session)
+    return _ORDINARY_EVIDENCE[scenario_id](_observe_cycle(session, _ordinary_intents(session, scenario_id)))
 
 
 def runner(scenario_id: str) -> Callable[[DrillSession, Any], ScenarioEvidence]:

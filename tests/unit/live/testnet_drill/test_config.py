@@ -114,3 +114,18 @@ def test_rejects_empty_slate_attempts() -> None:
 def test_race_parameters_are_bounded(overrides, message):
     with pytest.raises(ValueError, match=message):
         make_config(**overrides)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"funding_soak_s": -1.0}, "funding_soak_s"),
+        ({"funding_soak_s": float("inf")}, "funding_soak_s"),
+        ({"retry_after_probe_s": 0}, "retry_after_probe_s"),
+        ({"snapshot_trials": 0}, "snapshot_trials"),
+        ({"funding_poll_s": 0.0}, "funding_poll_s"),
+    ],
+)
+def test_fault_recovery_parameters_are_bounded(overrides, message):
+    with pytest.raises(ValueError, match=message):
+        make_config(**overrides)

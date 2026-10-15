@@ -10,7 +10,7 @@ from typing import Any
 
 import pandas as pd
 
-from src.live.errors import LiveTradingError, VenueError
+from src.live.errors import VenueError
 from src.live.executor import (
     ExecutionOutcome,
     FeeSchedule,
@@ -169,9 +169,51 @@ class _GuardedClient:
         return getattr(self.session.client, name)
 
     def new_order(self, params: Mapping[str, Any]) -> Any:
-        quote = self.session.client.book_ticker(str(params["symbol"]))
-        self.trace.post_quotes.append({**dict(params), "bid": quote["bidPrice"], "ask": quote["askPrice"], "observed_at": self.clock()})
+        # Observed via depth so bookTicker fault rules only ever hit the executor's own reads.
+        book = self.session.client.depth(str(params["symbol"]), limit=5)
+        self.trace.post_quotes.append(
+            {**dict(params), "bid": book["bids"][0][0], "ask": book["asks"][0][0], "observed_at": self.clock()}
+        )
         return self.session.guarded_new_order(params)
+
+
+@dataclass(frozen=True, slots=True)
+class AuditEvent:
+    """One audit event with the wire position and clock reading at the moment it was written."""
+
+    wire_index: int
+    at: float
+    event: str
+    fields: Mapping[str, Any]
+
+
+class AuditTap:
+    """Record audit events in order against the wire log while preserving the durable audit write."""
+
+    def __init__(self, session: DrillSession, clock: Callable[[], float] | None = None) -> None:
+        self.events: list[AuditEvent] = []
+        self._session = session
+        self._clock = clock if clock is not None else (lambda: time.time())
+        self._original: Any = None
+
+    def __enter__(self) -> AuditTap:
+        audit = self._session.audit
+        self._original = audit.record
+
+        def record(event: str, **fields: Any) -> Any:
+            result = self._original(event, **fields)
+            self.events.append(AuditEvent(len(self._session.transport.records), self._clock(), event, dict(fields)))
+            return result
+
+        setattr(audit, "record", record)  # noqa: B010 - instance-level tap, restored on exit
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        setattr(self._session.audit, "record", self._original)  # noqa: B010 - restore the tapped method
+
+    def named(self, event: str) -> list[AuditEvent]:
+        """Events with the given name, in write order."""
+        return [item for item in self.events if item.event == event]
 
 
 def run_cycle(
@@ -181,6 +223,7 @@ def run_cycle(
     on_tick: Callable[[int], None] | None = None,
     clock: Callable[[], float] | None = None,
     sleep: Callable[[float], None] | None = None,
+    stop: Callable[[], bool] | None = None,
 ) -> CycleEvidence:
     """Run bounded production execution with guarded posts and recorded tick samples."""
     clock_fn = clock if clock is not None else time.time
@@ -193,7 +236,7 @@ def run_cycle(
     class Deadline:
         @property
         def requested(self) -> bool:
-            return clock_fn() - start >= session.config.scenario_timeout_s
+            return clock_fn() - start >= session.config.scenario_timeout_s or (stop is not None and stop())
 
     def tick_wait(duration: float) -> None:
         rows = session.client.open_orders()
@@ -234,9 +277,10 @@ def run_cycle(
             shutdown=Deadline(),
             shutdown_cleanup_budget_s=session.config.scenario_timeout_s,
         )
-    except LiveTradingError as exc:
+    except Exception as exc:
+        # Any escape is evidence (H1/H11 observe exactly this); it must not abort the scenario harness.
         trace.escaped = type(exc).__name__
-        trace.outcomes = tuple(exc.partial_outcomes or ())
+        trace.outcomes = tuple(getattr(exc, "partial_outcomes", None) or ())
     finally:
         trace.wire_end = len(session.transport.records)
     return trace

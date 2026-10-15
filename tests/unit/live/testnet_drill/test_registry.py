@@ -140,3 +140,63 @@ def test_evidence_symlink_outside_workspace_is_refused(monkeypatch, tmp_path):
     with pytest.raises(ValueError, match="inside workspace"):
         registry.run_selected(lambda: SimpleNamespace(workspace=workspace), "all", None)
     assert not (tmp_path / "outside.json").exists()
+
+
+def test_continue_on_fail_runs_later_groups(monkeypatch, tmp_path):
+    seen = []
+
+    def fake_spec(key, group, verdict):
+        def run(session, config):
+            seen.append(key)
+            return ev(key)
+
+        return SimpleNamespace(group=group, run=run, evaluate=lambda evidence: ScenarioResult(key, verdict))
+
+    monkeypatch.setattr(registry, "SCENARIOS", {"A1": fake_spec("A1", "A", Verdict.FAIL), "D1": fake_spec("D1", "D", Verdict.OBSERVED)})
+    registry.run_selected(lambda: SimpleNamespace(workspace=tmp_path), "all", None, continue_on_fail=True)
+    assert seen == ["A1", "D1"]
+
+
+def test_integrity_error_is_a_failure_not_a_crash(monkeypatch, tmp_path):
+    from src.common.errors import DataIntegrityError
+
+    monkeypatch.setattr(registry, "SCENARIOS", {"E1": _raising_spec("E1", DataIntegrityError("journal regressed"))})
+    results = registry.run_selected(lambda: SimpleNamespace(workspace=tmp_path), "all", None)
+    assert [(r.scenario_id, r.verdict) for r in results] == [("E1", Verdict.FAIL)]
+    assert "DataIntegrityError" in results[0].proposal_rationale
+
+
+def test_dirty_session_carries_partial_results_and_residuals(monkeypatch, tmp_path):
+    from src.live.testnet_drill.session import DirtySessionError
+
+    ok = SimpleNamespace(group="A", run=lambda s, c: ev("A1"), evaluate=lambda e: ScenarioResult("A1", Verdict.OBSERVED))
+    dirty = _raising_spec("A4", DirtySessionError("DIRTY", residuals={"BTCUSDT": "0.1"}))
+    monkeypatch.setattr(registry, "SCENARIOS", {"A1": ok, "A4": dirty})
+    with pytest.raises(DirtySessionError) as excinfo:
+        registry.run_selected(lambda: SimpleNamespace(workspace=tmp_path), "all", None)
+    assert [r.scenario_id for r in excinfo.value.partial_results] == ["A1", "A4"]
+    assert "BTCUSDT" in excinfo.value.partial_results[-1].proposal_rationale
+
+
+def test_reset_suspicion_reaches_the_report_header(monkeypatch, tmp_path):
+    from src.live.testnet_drill.report import write_report
+
+    spec = SimpleNamespace(
+        group="C",
+        run=lambda s, c: ev("C1", testnet_reset_suspected=True),
+        evaluate=lambda e: ScenarioResult("C1", Verdict.OBSERVED),
+    )
+    monkeypatch.setattr(registry, "SCENARIOS", {"C1": spec})
+    results = registry.run_selected(lambda: SimpleNamespace(workspace=tmp_path), "all", None)
+    assert results[0].testnet_reset_suspected is True
+    paths = write_report(results, tmp_path / "report")
+    assert "테스트넷 리셋" in paths.md_path.read_text(encoding="utf-8")
+
+
+def test_continue_on_fail_survives_an_aborted_scenario(monkeypatch, tmp_path):
+    from src.common.errors import DataIntegrityError
+
+    later = SimpleNamespace(group="E", run=lambda s, c: ev("E2"), evaluate=lambda e: ScenarioResult("E2", Verdict.OBSERVED))
+    monkeypatch.setattr(registry, "SCENARIOS", {"E1": _raising_spec("E1", DataIntegrityError("x")), "E2": later})
+    results = registry.run_selected(lambda: SimpleNamespace(workspace=tmp_path), "all", None, continue_on_fail=True)
+    assert [(r.scenario_id, r.verdict) for r in results] == [("E1", Verdict.FAIL), ("E2", Verdict.OBSERVED)]

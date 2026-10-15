@@ -54,6 +54,44 @@ def _abs_diff(left: Decimal, right: Decimal) -> Decimal:
     return abs(Decimal(left) - Decimal(right))
 
 
+def _trade_parity(evidence: ReconciliationEvidence, price_tol: Decimal, fee_tol: Decimal) -> ExpectationResult:
+    journal_qty = _as_map(evidence.journal_trade_qty)
+    journal_vwap = _as_map(evidence.journal_trade_vwap)
+    journal_fee = _as_map(evidence.journal_trade_fee)
+    venue_qty = _as_map(evidence.venue_trade_qty)
+    venue_vwap = _as_map(evidence.venue_trade_vwap)
+    venue_fee = _as_map(evidence.venue_trade_commission)
+    journal_maker = _as_map(evidence.journal_maker_count)
+    venue_maker = _as_map(evidence.venue_maker_count)
+    r3_bad: list[str] = []
+    maker_notes: list[str] = []
+    for order_id in sorted(set(journal_qty) | set(venue_qty)):
+        jq = Decimal(str(journal_qty.get(order_id, 0)))
+        vq = Decimal(str(venue_qty.get(order_id, 0)))
+        if jq != vq:
+            r3_bad.append(f"{order_id} qty journal={jq} venue={vq}")
+            continue
+        if jq > 0 and vq > 0 and (order_id not in journal_vwap or order_id not in venue_vwap):
+            r3_bad.append(f"{order_id} missing VWAP")
+        if jq > 0 and vq > 0 and order_id in journal_vwap and order_id in venue_vwap:
+            jw = Decimal(str(journal_vwap[order_id]))
+            vw = Decimal(str(venue_vwap[order_id]))
+            denom = abs(vw) if vw != 0 else Decimal(1)
+            if abs(jw - vw) / denom > price_tol:
+                r3_bad.append(f"{order_id} vwap journal={jw} venue={vw}")
+        jf = Decimal(str(journal_fee.get(order_id, 0)))
+        vf = Decimal(str(venue_fee.get(order_id, 0)))
+        if _abs_diff(jf, vf) > fee_tol:
+            r3_bad.append(f"{order_id} fee journal={jf} venue={vf}")
+        jm = int(journal_maker.get(order_id, 0))
+        vm = int(venue_maker.get(order_id, 0))
+        if jm != vm:
+            maker_notes.append(f"{order_id} maker journal={jm} venue={vm}")
+    r3_detail = "; ".join(r3_bad + ([f"maker_mismatch: {', '.join(maker_notes)}"] if maker_notes else []))
+    r3 = ExpectationResult("trade_parity", not r3_bad, r3_detail)
+    return r3
+
+
 def evaluate_reconciliation(evidence: ReconciliationEvidence, config: DrillConfig) -> tuple[ExpectationResult, ...]:
     """Pure R1..R6 checks over recorded evidence."""
     qty_tol = config.qty_tolerance
@@ -118,40 +156,7 @@ def evaluate_reconciliation(evidence: ReconciliationEvidence, config: DrillConfi
             r2_bad.append(f"{order_id} journal={journal_obs.get(order_id, 0)} venue={venue_exec.get(order_id, 0)}")
     r2 = ExpectationResult("order_watermark_parity", not r2_bad, "; ".join(r2_bad))
 
-    journal_qty = _as_map(evidence.journal_trade_qty)
-    journal_vwap = _as_map(evidence.journal_trade_vwap)
-    journal_fee = _as_map(evidence.journal_trade_fee)
-    venue_qty = _as_map(evidence.venue_trade_qty)
-    venue_vwap = _as_map(evidence.venue_trade_vwap)
-    venue_fee = _as_map(evidence.venue_trade_commission)
-    journal_maker = _as_map(evidence.journal_maker_count)
-    venue_maker = _as_map(evidence.venue_maker_count)
-    r3_bad: list[str] = []
-    maker_notes: list[str] = []
-    for order_id in sorted(set(journal_qty) | set(venue_qty)):
-        jq = Decimal(str(journal_qty.get(order_id, 0)))
-        vq = Decimal(str(venue_qty.get(order_id, 0)))
-        if jq != vq:
-            r3_bad.append(f"{order_id} qty journal={jq} venue={vq}")
-            continue
-        if jq > 0 and vq > 0 and (order_id not in journal_vwap or order_id not in venue_vwap):
-            r3_bad.append(f"{order_id} missing VWAP")
-        if jq > 0 and vq > 0 and order_id in journal_vwap and order_id in venue_vwap:
-            jw = Decimal(str(journal_vwap[order_id]))
-            vw = Decimal(str(venue_vwap[order_id]))
-            denom = abs(vw) if vw != 0 else Decimal(1)
-            if abs(jw - vw) / denom > price_tol:
-                r3_bad.append(f"{order_id} vwap journal={jw} venue={vw}")
-        jf = Decimal(str(journal_fee.get(order_id, 0)))
-        vf = Decimal(str(venue_fee.get(order_id, 0)))
-        if _abs_diff(jf, vf) > fee_tol:
-            r3_bad.append(f"{order_id} fee journal={jf} venue={vf}")
-        jm = int(journal_maker.get(order_id, 0))
-        vm = int(venue_maker.get(order_id, 0))
-        if jm != vm:
-            maker_notes.append(f"{order_id} maker journal={jm} venue={vm}")
-    r3_detail = "; ".join(r3_bad + ([f"maker_mismatch: {', '.join(maker_notes)}"] if maker_notes else []))
-    r3 = ExpectationResult("trade_parity", not r3_bad, r3_detail)
+    r3 = _trade_parity(evidence, price_tol, fee_tol)
 
     income = _as_map(evidence.income_sums)
     wallet_delta = evidence.wallet_end - evidence.wallet_start if evidence.wallet_start is not None else None
@@ -182,6 +187,10 @@ def evaluate_reconciliation(evidence: ReconciliationEvidence, config: DrillConfi
     return (r1, r2, r3, r4, r5, r6)
 
 
+# Terminal statuses of orders the venue never accepted; only these may answer -2013 with zero observed quantity.
+_NEVER_ON_VENUE = frozenset({"NOT_PLACED", "NOT_FOUND", "REJECTED", "OBSOLETE"})
+
+
 def _number(value: Any) -> Decimal:
     amount = Decimal(str(value))
     if not amount.is_finite():
@@ -195,14 +204,30 @@ def _rows(payload: Any, endpoint: str) -> list[dict[str, Any]]:
     return payload
 
 
-def _snapshot(session: Any, since_ms: int, until_ms: int) -> ReconciliationEvidence:
-    client = session.client
-    symbols = session.config.symbols
-    journal = session.journal
-    fills = journal.fills_after(-1)
-    submits = journal.submits()
-    orders = {s.client_order_id: s.symbol for s in submits}
-    orders.update({f.client_order_id: f.symbol for f in fills if f.client_order_id is not None})
+@dataclass(slots=True)
+class _Aggregate:
+    """Per-order quantity, notional, fee and maker-count sums."""
+
+    qty: dict[str, Decimal]
+    notional: dict[str, Decimal]
+    fees: dict[str, Decimal]
+    makers: dict[str, int]
+
+    @classmethod
+    def empty(cls) -> _Aggregate:
+        return cls({}, {}, {}, {})
+
+    def add(self, key: str, amount: Decimal, price: Decimal, fee: Decimal, maker: bool) -> None:
+        self.qty[key] = self.qty.get(key, Decimal(0)) + amount
+        self.notional[key] = self.notional.get(key, Decimal(0)) + amount * price
+        self.fees[key] = self.fees.get(key, Decimal(0)) + fee
+        self.makers[key] = self.makers.get(key, 0) + int(maker)
+
+    def vwap(self) -> tuple[tuple[str, Decimal], ...]:
+        return tuple((key, self.notional[key] / value) for key, value in self.qty.items())
+
+
+def _venue_positions(client: Any, symbols: tuple[str, ...]) -> dict[str, Decimal]:
     positions: dict[str, Decimal] = {}
     for row in _rows(client.position_risk(), "positionRisk"):
         if row["symbol"] not in symbols:
@@ -213,28 +238,38 @@ def _snapshot(session: Any, since_ms: int, until_ms: int) -> ReconciliationEvide
     missing = set(symbols) - positions.keys()
     if missing:
         raise DataIntegrityError(f"positionRisk: missing symbols {sorted(missing)}")
-    journal_positions: dict[str, Decimal] = {}
-    qty: dict[str, Decimal] = {}
-    notional: dict[str, Decimal] = {}
-    fees: dict[str, Decimal] = {}
-    maker_counts: dict[str, int] = {}
+    return positions
+
+
+_ORDER_FILL_KINDS = frozenset({"execution", "recovered", "orphan_settlement"})
+# Journaled position adjustments without a venue order (operator resync, adopted force-close): they move the
+# position fold (R1) but have no userTrades counterpart, so they stay out of trade parity (R3).
+_ADJUSTMENT_KINDS = frozenset({"operator_resync", "venue_force_close"})
+
+
+def _journal_fold(fills: Any) -> tuple[dict[str, Decimal], _Aggregate]:
+    positions: dict[str, Decimal] = {}
+    trades = _Aggregate.empty()
     for fill in fills:
-        if fill.kind not in ("execution", "recovered", "orphan_settlement"):
+        if fill.kind not in _ORDER_FILL_KINDS and fill.kind not in _ADJUSTMENT_KINDS:
             continue
-        journal_positions[fill.symbol] = journal_positions.get(fill.symbol, Decimal(0)) + (
+        positions[fill.symbol] = positions.get(fill.symbol, Decimal(0)) + (
             fill.quantity if fill.side == "BUY" else -fill.quantity
         )
-        if fill.client_order_id is not None:
-            key = fill.client_order_id
-            qty[key] = qty.get(key, Decimal(0)) + fill.quantity
-            notional[key] = notional.get(key, Decimal(0)) + fill.quantity * fill.price
-            fees[key] = fees.get(key, Decimal(0)) + fill.quantity * fill.price * Decimal(str(fill.fee_bps)) / 10000
-            maker_counts[key] = maker_counts.get(key, 0) + int(fill.liquidity == "maker")
+        if fill.kind in _ORDER_FILL_KINDS and fill.client_order_id is not None:
+            fee = fill.quantity * fill.price * Decimal(str(fill.fee_bps)) / 10000
+            trades.add(fill.client_order_id, fill.quantity, fill.price, fee, fill.liquidity == "maker")
+    return positions, trades
+
+
+def _venue_orders(
+    client: Any, journal: Any, orders: dict[str, str]
+) -> tuple[dict[str, Decimal], dict[tuple[str, str], str]]:
+    from src.live.errors import VenueError
+
     executed: dict[str, Decimal] = {}
     venue_ids: dict[tuple[str, str], str] = {}
     for client_id, symbol in orders.items():
-        from src.live.errors import VenueError
-
         try:
             order = client.query_order(symbol, client_id)
         except VenueError as exc:
@@ -242,7 +277,7 @@ def _snapshot(session: Any, since_ms: int, until_ms: int) -> ReconciliationEvide
             if (
                 exc.code != -2013
                 or terminal is None
-                or terminal.status not in ("NOT_PLACED", "NOT_FOUND", "REJECTED")
+                or terminal.status not in _NEVER_ON_VENUE
                 or journal.observed_qty(client_id) != 0
             ):
                 raise
@@ -255,10 +290,22 @@ def _snapshot(session: Any, since_ms: int, until_ms: int) -> ReconciliationEvide
         if key in venue_ids:
             raise DataIntegrityError("orderId maps to multiple client ids")
         venue_ids[key] = client_id
-    trade_qty: dict[str, Decimal] = {}
-    trade_notional: dict[str, Decimal] = {}
-    trade_fees: dict[str, Decimal] = {}
-    trade_makers: dict[str, int] = {}
+    return executed, venue_ids
+
+
+def _book_trade(trades: _Aggregate, key: str, row: dict[str, Any]) -> None:
+    if row["commissionAsset"] != "USDT" or not isinstance(row["maker"], bool):
+        raise DataIntegrityError("userTrades: unsupported commission asset or maker flag")
+    amount, price = _number(row["qty"]), _number(row["price"])
+    if amount <= 0 or price <= 0:
+        raise DataIntegrityError("userTrades: non-positive execution")
+    trades.add(key, amount, price, _number(row["commission"]), row["maker"])
+
+
+def _venue_trades(
+    client: Any, symbols: tuple[str, ...], venue_ids: dict[tuple[str, str], str], since_ms: int, until_ms: int
+) -> _Aggregate:
+    trades = _Aggregate.empty()
     for symbol in symbols:
         cursor: int | None = None
         seen: set[int] = set()
@@ -274,54 +321,49 @@ def _snapshot(session: Any, since_ms: int, until_ms: int) -> ReconciliationEvide
                 if trade_id in seen:
                     raise DataIntegrityError("userTrades: duplicate or non-advancing page")
                 seen.add(trade_id)
-                if not since_ms <= int(row["time"]) <= until_ms:
-                    continue
                 key = venue_ids.get((symbol, str(row["orderId"])))
-                if key is None:
-                    continue
-                if row["commissionAsset"] != "USDT" or not isinstance(row["maker"], bool):
-                    raise DataIntegrityError("userTrades: unsupported commission asset or maker flag")
-                amount, price = _number(row["qty"]), _number(row["price"])
-                if amount <= 0 or price <= 0:
-                    raise DataIntegrityError("userTrades: non-positive execution")
-                trade_qty[key] = trade_qty.get(key, Decimal(0)) + amount
-                trade_notional[key] = trade_notional.get(key, Decimal(0)) + amount * price
-                trade_fees[key] = trade_fees.get(key, Decimal(0)) + _number(row["commission"])
-                trade_makers[key] = trade_makers.get(key, 0) + int(row["maker"])
+                if key is not None and since_ms <= int(row["time"]) <= until_ms:
+                    _book_trade(trades, key, row)
             if len(rows) < 1000 or max(int(row["time"]) for row in rows) > until_ms:
                 break
             next_cursor = max(int(row["id"]) for row in rows) + 1
             if cursor is not None and next_cursor <= cursor:
                 raise DataIntegrityError("userTrades: cursor did not advance")
             cursor = next_cursor
+    return trades
+
+
+def _income_sums(client: Any, since_ms: int, until_ms: int) -> dict[str, Decimal]:
     income: dict[str, Decimal] = {}
     page = 1
-    seen_income: set[tuple[str, str, str]] = set()
+    seen: set[tuple[str, str, str]] = set()
     while True:
-        rows = _rows(
-            client.request(
-                "GET",
-                "/fapi/v1/income",
-                {
-                    "startTime": since_ms,
-                    "endTime": until_ms,
-                    "limit": 1000,
-                    "page": page,
-                },
-                signed=True,
-            ),
-            "income",
-        )
+        params = {"startTime": since_ms, "endTime": until_ms, "limit": 1000, "page": page}
+        rows = _rows(client.request("GET", "/fapi/v1/income", params, signed=True), "income")
         for row in rows:
-            key_income = (str(row["tranId"]), str(row["incomeType"]), str(row["asset"]))
-            if key_income in seen_income:
+            key = (str(row["tranId"]), str(row["incomeType"]), str(row["asset"]))
+            if key in seen:
                 raise DataIntegrityError("income: duplicate or non-advancing page")
-            seen_income.add(key_income)
+            seen.add(key)
             if row["asset"] == "USDT" and row["incomeType"] in ("REALIZED_PNL", "COMMISSION", "FUNDING_FEE"):
                 income[row["incomeType"]] = income.get(row["incomeType"], Decimal(0)) + _number(row["income"])
         if len(rows) < 1000:
-            break
+            return income
         page += 1
+
+
+def _snapshot(session: Any, since_ms: int, until_ms: int) -> ReconciliationEvidence:
+    client = session.client
+    symbols = session.config.symbols
+    journal = session.journal
+    fills = journal.fills_after(-1)
+    orders = {s.client_order_id: s.symbol for s in journal.submits()}
+    orders.update({f.client_order_id: f.symbol for f in fills if f.client_order_id is not None})
+    positions = _venue_positions(client, symbols)
+    journal_positions, booked = _journal_fold(fills)
+    executed, venue_ids = _venue_orders(client, journal, orders)
+    traded = _venue_trades(client, symbols, venue_ids, since_ms, until_ms)
+    income = _income_sums(client, since_ms, until_ms)
     account = client.account()
     if not isinstance(account, dict):
         raise DataIntegrityError("account: invalid response")
@@ -332,14 +374,14 @@ def _snapshot(session: Any, since_ms: int, until_ms: int) -> ReconciliationEvide
         venue_positions=tuple(positions.items()),
         journal_observed=tuple((key, journal.observed_qty(key)) for key in orders),
         venue_executed=tuple(executed.items()),
-        journal_trade_qty=tuple(qty.items()),
-        journal_trade_vwap=tuple((key, notional[key] / value) for key, value in qty.items()),
-        journal_trade_fee=tuple(fees.items()),
-        journal_maker_count=tuple(maker_counts.items()),
-        venue_trade_qty=tuple(trade_qty.items()),
-        venue_trade_vwap=tuple((key, trade_notional[key] / value) for key, value in trade_qty.items()),
-        venue_trade_commission=tuple(trade_fees.items()),
-        venue_maker_count=tuple(trade_makers.items()),
+        journal_trade_qty=tuple(booked.qty.items()),
+        journal_trade_vwap=booked.vwap(),
+        journal_trade_fee=tuple(booked.fees.items()),
+        journal_maker_count=tuple(booked.makers.items()),
+        venue_trade_qty=tuple(traded.qty.items()),
+        venue_trade_vwap=traded.vwap(),
+        venue_trade_commission=tuple(traded.fees.items()),
+        venue_maker_count=tuple(traded.makers.items()),
         wallet_start=session.starting_wallet_balance,
         wallet_end=_number(account["totalWalletBalance"]),
         income_sums=tuple(income.items()),
