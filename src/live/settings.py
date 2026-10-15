@@ -93,6 +93,8 @@ class LiveSettings(BaseSettings):
     # 주문 전용 베뉴(기본 테스트넷) 자격증명. 미설정 시 api_key/api_secret 로 폴백한다.
     order_api_key: SecretStr | None = None
     order_api_secret: SecretStr | None = None
+    order_api_key2: SecretStr | None = None
+    order_api_secret2: SecretStr | None = None
     mainnet_trading_ack: str | None = None
     # 사이징 에쿼티의 절대 상한 캡(I-EQUITY-MTM): E = min(계좌 MTM, 이 값).
     # '목표 노셔널'이 아니다. 값과 검증은 불변이다.
@@ -624,6 +626,8 @@ class LiveSettings(BaseSettings):
         # 반쪽 주문 자격증명은 키/시크릿 출처 혼선을 막기 위해 거부
         if (self.order_api_key is None) != (self.order_api_secret is None):
             raise ValueError("order_api_key and order_api_secret must be set together")
+        if (self.order_api_key2 is None) != (self.order_api_secret2 is None):
+            raise ValueError("order_api_key2 and order_api_secret2 must be set together")
         # 라이브 모드는 필터·호가 베뉴와 주문 베뉴가 같아야 검증이 유효
         if not self.mode.suppresses_mutations and _venue_host(
             self.market_data_base_url

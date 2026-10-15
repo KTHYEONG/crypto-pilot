@@ -102,14 +102,19 @@ def _filter_headers(headers: Mapping[str, str]) -> tuple[tuple[str, str], ...]:
 def redact(text: str) -> str:
     """Strip credential fields from query strings, JSON and header-like text."""
     return re.sub(
-        r'''(?i)((?:["']?)(?:signature|x-mbx-apikey|api[_-]?key|api[_-]?secret|secret)(?:["']?)\s*[:=]\s*["']?)[^&\s,"'}]+''',
-        r"\1<stripped>", text,
+        r"""(?i)((?:["']?)(?:signature|x-mbx-apikey|api[_-]?key|api[_-]?secret|secret)(?:["']?)\s*[:=]\s*["']?)[^&\s,"'}]+""",
+        r"\1<stripped>",
+        text,
     )
 
 
 def _strip_url(url: str) -> tuple[str, str, dict[str, list[str]]]:
     parts = urlsplit(url)
-    kept = [(k, v) for k, v in urllib.parse.parse_qsl(parts.query, keep_blank_values=True) if k.lower() not in {"signature", "apikey", "api_key", "secret", "apisecret", "api_secret"}]
+    kept = [
+        (k, v)
+        for k, v in urllib.parse.parse_qsl(parts.query, keep_blank_values=True)
+        if k.lower() not in {"signature", "apikey", "api_key", "secret", "apisecret", "api_secret"}
+    ]
     clean = parts._replace(query=urllib.parse.urlencode(kept)).geturl()
     multi: dict[str, list[str]] = {}
     for key, value in kept:
@@ -213,34 +218,90 @@ class FaultInjectingTransport:
             return self._forward(method, path, clean_url, url, headers)
         rule = self._rules[selected]
         if rule.action is FaultAction.DROP_REQUEST:
-            self._append(method, path, clean_url, headers, status_code=None, response_headers=(), response_body=b"", delivered=False)
+            self._append(
+                method,
+                path,
+                clean_url,
+                headers,
+                status_code=None,
+                response_headers=(),
+                response_body=b"",
+                delivered=False,
+            )
             raise TimeoutError(f"drill fault {rule.action.value} at {path}")
         if rule.action is FaultAction.SYNTHETIC_STATUS:
             stored = _filter_headers(dict(rule.headers))
-            self._append(method, path, clean_url, headers, status_code=rule.status, response_headers=stored, response_body=rule.body, delivered=False)
+            self._append(
+                method,
+                path,
+                clean_url,
+                headers,
+                status_code=rule.status,
+                response_headers=stored,
+                response_body=rule.body,
+                delivered=False,
+            )
             return HttpResponse(status_code=rule.status, headers=dict(rule.headers), body=rule.body)
         if rule.action is FaultAction.DELAY_DELIVER:
             self._sleep(rule.delay_s)
             return self._forward(method, path, clean_url, url, headers)
         if rule.action is FaultAction.KILL_BEFORE_DELIVERY:
-            self._append(method, path, clean_url, headers, status_code=None, response_headers=(), response_body=b"", delivered=False)
+            self._append(
+                method,
+                path,
+                clean_url,
+                headers,
+                status_code=None,
+                response_headers=(),
+                response_body=b"",
+                delivered=False,
+            )
             self._kill(rule.exit_code)
             raise AssertionError("unreachable: kill must not return")
         response = self._forward(method, path, clean_url, url, headers, record=False)
         if rule.action is FaultAction.DELIVER_DROP_RESPONSE:
-            self._append(method, path, clean_url, headers, status_code=response.status_code, response_headers=response.headers, response_body=response.body, delivered=True)
+            self._append(
+                method,
+                path,
+                clean_url,
+                headers,
+                status_code=response.status_code,
+                response_headers=response.headers,
+                response_body=response.body,
+                delivered=True,
+            )
             raise TimeoutError(f"drill fault {rule.action.value} at {path}")
         if rule.action in (FaultAction.KILL_AFTER_DELIVERY, FaultAction.KILL_ON_RESPONSE):
-            self._append(method, path, clean_url, headers, status_code=response.status_code, response_headers=response.headers, response_body=response.body, delivered=True)
+            self._append(
+                method,
+                path,
+                clean_url,
+                headers,
+                status_code=response.status_code,
+                response_headers=response.headers,
+                response_body=response.body,
+                delivered=True,
+            )
             self._kill(rule.exit_code)
             raise AssertionError("unreachable: kill must not return")
         if rule.action is FaultAction.CORRUPT_BODY:
             mutated = HttpResponse(status_code=response.status_code, headers=dict(response.headers), body=rule.body)
         elif rule.action is FaultAction.TRUNCATE_BODY:
-            mutated = HttpResponse(status_code=response.status_code, headers=dict(response.headers), body=response.body[: rule.truncate_to])
+            mutated = HttpResponse(
+                status_code=response.status_code, headers=dict(response.headers), body=response.body[: rule.truncate_to]
+            )
         else:
             mutated = response
-        self._append(method, path, clean_url, headers, status_code=response.status_code, response_headers=response.headers, response_body=response.body, delivered=True)
+        self._append(
+            method,
+            path,
+            clean_url,
+            headers,
+            status_code=response.status_code,
+            response_headers=response.headers,
+            response_body=response.body,
+            delivered=True,
+        )
         return mutated
 
     def _forward(
@@ -256,10 +317,29 @@ class FaultInjectingTransport:
         try:
             response = self._inner.call(method, original_url, headers)
         except Exception as exc:
-            self._append(method, path, clean_url, headers, status_code=None, response_headers=(), response_body=b"", delivered=None, error=type(exc).__name__)
+            self._append(
+                method,
+                path,
+                clean_url,
+                headers,
+                status_code=None,
+                response_headers=(),
+                response_body=b"",
+                delivered=None,
+                error=type(exc).__name__,
+            )
             raise
         if record:
-            self._append(method, path, clean_url, headers, status_code=response.status_code, response_headers=response.headers, response_body=response.body, delivered=True)
+            self._append(
+                method,
+                path,
+                clean_url,
+                headers,
+                status_code=response.status_code,
+                response_headers=response.headers,
+                response_body=response.body,
+                delivered=True,
+            )
         return response
 
 
@@ -268,6 +348,7 @@ def _redact_body(body: bytes, headers: Mapping[str, str]) -> bytes:
         if key.lower() == "x-mbx-apikey" and value:
             body = body.replace(value.encode(), b"<stripped>")
     return re.sub(
-        rb'''(?i)((?:["']?)(?:signature|x-mbx-apikey|api[_-]?key|api[_-]?secret|secret)(?:["']?)\s*[:=]\s*["']?)[^&\s,"'}]+''',
-        rb"\1<stripped>", body,
+        rb"""(?i)((?:["']?)(?:signature|x-mbx-apikey|api[_-]?key|api[_-]?secret|secret)(?:["']?)\s*[:=]\s*["']?)[^&\s,"'}]+""",
+        rb"\1<stripped>",
+        body,
     )

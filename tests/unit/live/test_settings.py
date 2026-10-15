@@ -304,6 +304,8 @@ def test_live_settings_testnet_requires_dedicated_order_credentials() -> None:
         LiveSettings(mode=ExecutionMode.LIVE_TESTNET, order_api_key=SecretStr("t-k"))
     with pytest.raises(ValueError, match="must be set together"):
         LiveSettings(mode=ExecutionMode.PAPER, order_api_secret=SecretStr("t-s"))
+    with pytest.raises(ValueError, match="order_api_key2 and order_api_secret2 must be set together"):
+        LiveSettings(mode=ExecutionMode.PAPER, order_api_key2=SecretStr("c-k"))
 
     ok = LiveSettings(
         mode=ExecutionMode.LIVE_TESTNET, api_key=SecretStr("main-k"), api_secret=SecretStr("main-s"),

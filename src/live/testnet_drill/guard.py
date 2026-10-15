@@ -65,7 +65,9 @@ def assert_drill_allowed(settings: LiveSettings, workspace: Path) -> None:
     state_root = _resolve(DATA_DIR / "state")
     if resolved_workspace != drill_root and not resolved_workspace.is_relative_to(drill_root):
         violations.append("workspace_root")
-    if (resolved_workspace == state_root or resolved_workspace.is_relative_to(state_root)) and "workspace_root" not in violations:
+    if (
+        resolved_workspace == state_root or resolved_workspace.is_relative_to(state_root)
+    ) and "workspace_root" not in violations:
         violations.append("workspace_root")
     if settings.record_run_id is not None:
         violations.append("record_run_id")
