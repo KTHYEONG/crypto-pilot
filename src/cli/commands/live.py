@@ -267,13 +267,14 @@ def _run_testnet_drill(args: argparse.Namespace) -> None:
     import re
     from decimal import Decimal
 
+    from src.common.errors import DataIntegrityError
     from src.live.errors import LiveTradingError
     from src.live.settings import LiveSettings
     from src.live.testnet_drill.config import DrillConfig
     from src.live.testnet_drill.guard import assert_drill_allowed, drill_scratch_root
     from src.live.testnet_drill.registry import SCENARIOS, run_selected
     from src.live.testnet_drill.report import Verdict, write_report
-    from src.live.testnet_drill.session import open_drill_session
+    from src.live.testnet_drill.session import DirtySessionError, open_drill_session
 
     if args.list:
         for group in sorted(_DRILL_SCENARIO_GROUPS):
@@ -283,7 +284,7 @@ def _run_testnet_drill(args: argparse.Namespace) -> None:
         logger.error("[SYS] testnet-drill status=REFUSED reason=run_id is required")
         raise SystemExit(2)
     scenario = str(args.scenario)
-    if scenario != "all" and scenario not in ("A", "B", "C") and scenario not in SCENARIOS:
+    if scenario != "all" and scenario not in ("A", "B", "C", "D", "E", "F", "G") and scenario not in SCENARIOS:
         logger.error("[SYS] testnet-drill status=REFUSED reason=unknown scenario=%s", scenario)
         raise SystemExit(2)
     if args.resume or args.no_teardown or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,15}", args.run_id) is None:
@@ -300,7 +301,8 @@ def _run_testnet_drill(args: argparse.Namespace) -> None:
             max_probe_notional_usdt=Decimal(args.max_probe_notional_usdt), max_open_orders_probe=args.max_open_orders_probe,
             scenario_timeout_s=args.scenario_timeout_s, recv_window_ms=settings.recv_window_ms,
             funding_soak_min_funding_events=1, qty_tolerance=Decimal(0),
-            price_rel_tolerance=Decimal("0.001"), fee_abs_tolerance_usdt=Decimal("0.01"))
+            price_rel_tolerance=Decimal("0.001"), fee_abs_tolerance_usdt=Decimal("0.01"),
+            funding_soak_s=args.funding_soak_s)
     except ValueError as exc:
         logger.error("[SYS] testnet-drill status=REFUSED reason=%s", type(exc).__name__)
         raise SystemExit(2) from None
@@ -316,9 +318,21 @@ def _run_testnet_drill(args: argparse.Namespace) -> None:
         return open_drill_session(settings, config, run_id=run_id, workspace=workspace / f"scenario_{counter:04d}")
 
     try:
-        results = run_selected(factory, scenario, config)
+        try:
+            results = run_selected(factory, scenario, config, continue_on_fail=bool(args.continue_on_fail))
+        except DirtySessionError as exc:
+            write_report(exc.partial_results, workspace)
+            logger.critical("[RISK] testnet-drill status=DIRTY residuals=%s", exc.residuals)
+            raise SystemExit(1) from None
         paths = write_report(results, workspace)
-    except (LiveTradingError, ValueError) as exc:
+        if getattr(args, "findings", False):
+            from src.live.testnet_drill.findings import derive_findings, format_findings_md
+
+            table = format_findings_md(derive_findings(results))
+            workspace.mkdir(parents=True, exist_ok=True)
+            (workspace / "findings.md").write_text(table, encoding="utf-8")
+            logger.info("[SYS] testnet-drill findings\n%s", table)
+    except (LiveTradingError, DataIntegrityError, ValueError) as exc:
         logger.error("[SYS] testnet-drill status=FAILED reason=%s", type(exc).__name__)
         raise SystemExit(1) from None
     logger.info("[SYS] testnet-drill report=%s", paths.md_path)
@@ -541,6 +555,11 @@ def add_live_commands(live_parser: argparse.ArgumentParser) -> None:
     drill.add_argument("--resting-distance-bps", type=int, default=50)
     drill.add_argument("--max-open-orders-probe", type=int, default=5)
     drill.add_argument("--scenario-timeout-s", type=float, default=4000.0)
+    drill.add_argument("--findings", action="store_true", default=False, help="Print the hypothesis table after the run")
+    drill.add_argument(
+        "--continue-on-fail", action="store_true", default=False, help="Keep running later groups after a FAIL"
+    )
+    drill.add_argument("--funding-soak-s", type=float, default=0.0, help="F5 soak duration; 0 skips F5")
     drill.add_argument("--no-teardown", action="store_true", default=False, help="Skip teardown (debug)")
     drill.add_argument("--resume", action="store_true", default=False, help="Reuse an existing run workspace")
     drill.set_defaults(handler=_run_testnet_drill)
