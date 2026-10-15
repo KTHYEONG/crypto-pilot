@@ -48,7 +48,6 @@ class DrillConfig:
     slate_max_attempts: int = 3
     settle_wait_s: float = 5.0
     settle_poll_s: float = 0.2
-    counterparty_step_wait_s: float = 0.2
     race_repetitions: int = 20
     race_offsets_s: tuple[float, ...] = (-0.05, 0.0, 0.05)
     retry_after_probe_s: int = 2
@@ -126,7 +125,6 @@ class DrillConfig:
 _POSITIVE_DURATIONS = (
     "settle_wait_s",
     "settle_poll_s",
-    "counterparty_step_wait_s",
     "recv_window_overshoot_s",
     "restart_kill_timeout_s",
     "funding_poll_s",

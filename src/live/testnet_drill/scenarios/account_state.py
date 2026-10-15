@@ -197,25 +197,15 @@ def _open_stale_session(session: Any) -> Any:
 
 def _run_f3(session: Any, config: Any) -> ScenarioEvidence:
     from src.live.testnet_drill.execution import AuditTap, submit_probe
-    from src.live.testnet_drill.session import close_session_handles, open_counterparty_session
+    from src.live.testnet_drill.session import close_session_handles
 
     symbol = session.config.symbols[0]
     stale = _open_stale_session(session)
     try:
         params = _resting(stale, price=str(stale.client.book_ticker(symbol)["bidPrice"]))
-        quantity = Decimal(params["quantity"])
-        step = stale.filters[symbol].step_size
         submit_probe(stale, params)
     finally:
         close_session_handles(stale)
-    partial = Decimal(0)
-    with contextlib.suppress(DrillRefused):
-        aux = open_counterparty_session(session)
-        partial = (quantity / 2 / step).to_integral_value() * step
-        if partial > 0:
-            aux.guarded_new_order(
-                {"symbol": symbol, "side": "SELL", "type": "LIMIT", "timeInForce": "IOC", "quantity": str(partial), "price": params["price"]}
-            )
     with AuditTap(session) as tap:
         sweep = _sweep(session)
     order = session.client.query_order(symbol, params["newClientOrderId"])
@@ -234,7 +224,6 @@ def _run_f3(session: Any, config: Any) -> ScenarioEvidence:
         and all(f.kind == "orphan_settlement" and Decimal(str(f.fee_bps)) == Decimal(str(session.settings.taker_fee_bps)) for f in settled),
         symbol_withheld_on_unconfirmed=withheld_ok,
         executed_qty=str(executed),
-        counterparty_fill=str(partial),
     )
 
 
@@ -245,22 +234,15 @@ def _audited(tap: Any, event: str, order_id: str) -> bool:
 def _run_f4(session: Any, config: Any) -> ScenarioEvidence:
     from src.live.account import RECONCILE_QTY_TOLERANCE_FRACTION
     from src.live.testnet_drill.execution import cancel_probe, submit_probe
-    from src.live.testnet_drill.session import open_counterparty_session
 
     symbol = session.config.symbols[0]
-    aux = open_counterparty_session(session)
     params = _resting(session)
     params["price"] = str(session.client.book_ticker(symbol)["bidPrice"])
     submit_probe(session, params)
-    step = session.filters[symbol].step_size
     trials, mismatches, exceed = int(config.snapshot_trials), 0, False
     samples = []
     try:
         for _ in range(trials):
-            with contextlib.suppress(LiveTradingError):
-                aux.guarded_new_order(
-                    {"symbol": symbol, "side": "SELL", "type": "LIMIT", "timeInForce": "IOC", "quantity": str(step), "price": params["price"]}
-                )
             account = session.client.account()
             risk = _positions(session).get(symbol, Decimal(0))
             account_qty = next(

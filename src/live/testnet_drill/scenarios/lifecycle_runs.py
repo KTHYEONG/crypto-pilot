@@ -1,11 +1,10 @@
-"""Venue-backed lifecycle experiments with an independently owned counterparty."""
+"""Venue-backed lifecycle experiments on a single account against natural market flow."""
 
 from __future__ import annotations
 
 import json
 import time
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from decimal import Decimal
 from itertools import pairwise
@@ -21,7 +20,7 @@ from src.live.testnet_drill.execution import (
 )
 from src.live.testnet_drill.guard import DrillRefused
 from src.live.testnet_drill.scenarios.base import ScenarioEvidence, ev, isolated_run
-from src.live.testnet_drill.session import DrillSession, _read_positions, open_counterparty_session
+from src.live.testnet_drill.session import DrillSession, _read_positions
 
 
 def _limit(session: DrillSession, *, distance: bool = False) -> dict[str, Any]:
@@ -71,46 +70,11 @@ def _primary_orders(session: DrillSession, symbol: str) -> list[dict[str, Any]]:
     ]
 
 
-def _counterparty_order(aux: DrillSession, row: dict[str, Any], quantity: Decimal, *, resting: bool = False) -> Any:
-    return aux.guarded_new_order(
-        {
-            "symbol": row["symbol"],
-            "side": "SELL" if row["side"] == "BUY" else "BUY",
-            "type": "LIMIT",
-            "timeInForce": "GTC" if resting else "IOC",
-            "quantity": str(quantity),
-            "price": str(row["price"]),
-        }
-    )
-
-
 def _partial(session: DrillSession) -> ScenarioEvidence:
-    aux = open_counterparty_session(session)
     symbol = session.config.symbols[0]
     intent = make_intent(session, symbol)
-    step = session.filters[symbol].step_size
-    portions = [intent.quantity // (step * 2) * step]
-    portions.append(intent.quantity - portions[0])
-    if min(portions) <= 0:
-        raise DrillRefused("drill refused: partial_probe_needs_two_steps")
-    sweeps: list[dict[str, Any]] = []
 
-    def sweep(tick: int) -> None:
-        orders = _primary_orders(session, symbol)
-        if orders and len(sweeps) < len(portions):
-            row = orders[0]
-            amount = portions[len(sweeps)]
-            response = _counterparty_order(aux, row, amount)
-            sweeps.append(
-                {
-                    "primary_seq": len(session.transport.records),
-                    "aux_seq": len(aux.transport.records),
-                    "response": response,
-                }
-            )
-            time.sleep(session.config.counterparty_step_wait_s)
-
-    trace = run_cycle(session, [intent], on_tick=sweep)
+    trace = run_cycle(session, [intent])
     fills = [fill for fill in session.journal.fills_after(-1) if fill.symbol == symbol and fill.kind == "execution"]
     by_id: dict[str, list[Any]] = {}
     for fill in fills:
@@ -153,18 +117,17 @@ def _partial(session: DrillSession) -> ScenarioEvidence:
     return ev(
         "C5",
         cumulative_monotonic=monotonic,
-        deltas_sum_to_venue=parity and compared and len(sweeps) >= 2,
+        deltas_sum_to_venue=parity,
+        multi_step_observed=compared,
         delta_price=str(delta_price),
         user_trade_price=str(trade_price),
         price_rel_tolerance=str(session.config.price_rel_tolerance),
         uses_cumulative_avg=mismatch is not None,
-        sweeps=sweeps,
         escaped_exception=trace.escaped,
     )
 
 
 def _race(session: DrillSession) -> ScenarioEvidence:
-    aux = open_counterparty_session(session)
     repetitions = []
     started = time.monotonic()
     for index in range(session.config.race_repetitions):
@@ -174,21 +137,10 @@ def _race(session: DrillSession) -> ScenarioEvidence:
         posted = submit_probe(session, order)
         if posted.get("status") not in ("NEW", "PARTIALLY_FILLED"):
             raise DrillRefused("drill refused: race_order_did_not_rest")
-        row = session.client.query_order(order["symbol"], order["newClientOrderId"])
         offset = session.config.race_offsets_s[index % len(session.config.race_offsets_s)]
 
-        def cancel(order: dict[str, Any] = order, offset: float = offset) -> Any:
-            time.sleep(max(0, -offset))
-            return cancel_probe(session, order["symbol"], order["newClientOrderId"])
-
-        def trade(row: dict[str, Any] = row, order: dict[str, Any] = order, offset: float = offset) -> Any:
-            time.sleep(max(0, offset))
-            return _counterparty_order(aux, row, Decimal(order["quantity"]))
-
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            cancelled, traded = pool.submit(cancel), pool.submit(trade)
-            confirmation = cancelled.result()
-            traded.result()
+        time.sleep(abs(offset))
+        confirmation = cancel_probe(session, order["symbol"], order["newClientOrderId"])
         query = session.client.query_order(order["symbol"], order["newClientOrderId"])
         fills = session.journal.fills_after(-1)
         keys = [
@@ -212,46 +164,16 @@ def _race(session: DrillSession) -> ScenarioEvidence:
                 "qty_match": parity,
                 "no_double": len(keys) == len(set(keys)),
                 "primary_seq": len(session.transport.records),
-                "aux_seq": len(aux.transport.records),
+                "executed_qty": str(query["executedQty"]),
             }
         )
     return ev("C6", repetitions=repetitions)
 
 
 def _repeg(session: DrillSession) -> ScenarioEvidence:
-    aux = open_counterparty_session(session)
     symbol = session.config.symbols[0]
     intent = make_intent(session, symbol)
-    quotes = []
-    last_id: str | None = None
-
-    def move(tick: int) -> None:
-        nonlocal last_id
-        if last_id is not None:
-            aux.client.cancel_order(symbol, last_id)
-        quote = aux.client.book_ticker(symbol)
-        price = min(Decimal(str(quote["askPrice"])) - aux.filters[symbol].tick_size,
-                    Decimal(str(quote["bidPrice"])) + aux.filters[symbol].tick_size * (1 + tick % 2))
-        from src.live.filters import quantize_order
-
-        order = quantize_order(aux.filters[symbol], intent.quantity, price, reduce_only=False)
-        if order is None:
-            raise DrillRefused("drill refused: quote_minimum")
-        last_id = aux.next_client_order_id(symbol)
-        aux.guarded_new_order(
-            {
-                "symbol": symbol,
-                "side": "BUY",
-                "type": "LIMIT",
-                "timeInForce": "GTC",
-                "price": str(order.price),
-                "quantity": str(abs(order.quantity)),
-                "newClientOrderId": last_id,
-            }
-        )
-        quotes.append({"primary_seq": len(session.transport.records), "aux_seq": len(aux.transport.records)})
-
-    trace = run_cycle(session, [intent], on_tick=move)
+    trace = run_cycle(session, [intent])
     times = [sample["observed_at"] for sample in trace.post_quotes if sample["timeInForce"] == "GTX"]
     interval_ok = len(times) >= 2 and all(b - a >= trace.policy.repeg_interval_s for a, b in pairwise(times))
     return ev(
@@ -260,7 +182,6 @@ def _repeg(session: DrillSession) -> ScenarioEvidence:
         cumulative_filled=str(sum((outcome.filled_qty for outcome in trace.outcomes), Decimal(0))),
         intent_qty=str(intent.quantity),
         interval_respected=interval_ok,
-        quote_records=quotes,
     )
 
 

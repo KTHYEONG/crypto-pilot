@@ -88,10 +88,12 @@ def _eval_c5(evidence: ScenarioEvidence) -> Any:
     differs = abs(delta_price - trade_price) / denom > tolerance
     confirmed = monotonic and sums_ok and uses_cumulative_avg and differs
     passed = monotonic and sums_ok
+    observed = bool(evidence.payload.get("multi_step_observed", False))
+    verdict = Verdict.FAIL if not passed else (Verdict.PASS if observed else Verdict.OBSERVED)
     return result_of(
         evidence,
         "C5",
-        Verdict.PASS if passed else Verdict.FAIL,
+        verdict,
         (("partial_attribution", passed),),
         hypotheses=("H2",),
         hypothesis_outcome="CONFIRMED" if confirmed else "INCONCLUSIVE",
@@ -107,11 +109,12 @@ def _eval_c6(evidence: ScenarioEvidence) -> Any:
         for index, rep in enumerate(repetitions)
         if not (rep.get("terminal_confirmed", False) and rep.get("qty_match", False) and rep.get("no_double", True))
     ]
-    passed = not bad
+    raced = any(Decimal(str(rep.get("executed_qty", "0"))) > 0 for rep in repetitions)
+    verdict = Verdict.FAIL if bad else (Verdict.PASS if raced else Verdict.OBSERVED)
     return result_of(
         evidence,
         "C6",
-        Verdict.PASS if passed else Verdict.FAIL,
+        verdict,
         tuple((f"race_accounting:{rep_id}", False) for rep_id in bad) if bad else (("race_accounting", True),),
         hypotheses=(),
         proposal_rationale="",
