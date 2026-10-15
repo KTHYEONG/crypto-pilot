@@ -252,6 +252,35 @@ def _run_preflight(args: argparse.Namespace) -> None:
         raise SystemExit(1)
 
 
+_DRILL_SCENARIO_GROUPS = {
+    "A": "config",
+    "B": "acceptance",
+    "C": "lifecycle",
+    "D": "transport faults",
+    "E": "restart recovery",
+    "F": "account state",
+    "G": "cycle E2E",
+}
+
+
+def _run_testnet_drill(args: argparse.Namespace) -> None:
+    import re
+
+    if args.list:
+        for group in sorted(_DRILL_SCENARIO_GROUPS):
+            logger.info("[SYS] testnet-drill group=%s area=%s", group, _DRILL_SCENARIO_GROUPS[group])
+        return
+    if not args.run_id:
+        logger.error("[SYS] testnet-drill status=REFUSED reason=run_id is required")
+        raise SystemExit(2)
+    scenario = str(args.scenario)
+    if scenario != "all" and scenario not in _DRILL_SCENARIO_GROUPS and re.fullmatch(r"[A-G][0-9]+", scenario) is None:
+        logger.error("[SYS] testnet-drill status=REFUSED reason=unknown scenario=%s", scenario)
+        raise SystemExit(2)
+    logger.error("[SYS] testnet-drill status=UNAVAILABLE scenario=%s reason=scenario runners require Parts 2 and 3", scenario)
+    raise SystemExit(2)
+
+
 def _run_tax_collect(args: argparse.Namespace) -> None:
     import pandas as pd
 
@@ -453,6 +482,16 @@ def add_live_commands(live_parser: argparse.ArgumentParser) -> None:
     )
     preflight.add_argument("--mode", choices=["shadow", "paper", "live_testnet", "live_mainnet"], default=None, help="Override LIVE_MODE for this run")
     preflight.set_defaults(handler=_run_preflight)
+
+    drill = subparsers.add_parser("testnet-drill", help="Run the testnet drill harness (plumbing verification)")
+    drill.add_argument("--list", action="store_true", default=False, help="List drill scenario groups")
+    drill.add_argument("--scenario", type=str, default="all", help="Scenario id, group letter or all")
+    drill.add_argument("--run-id", type=str, default=None, help="Drill run id (workspace name)")
+    drill.add_argument("--symbols", type=str, default="BTCUSDT,ETHUSDT", help="Comma-separated drill symbols")
+    drill.add_argument("--probe-notional-usdt", type=str, default="10", help="Notional of a normal probe order")
+    drill.add_argument("--no-teardown", action="store_true", default=False, help="Skip teardown (debug)")
+    drill.add_argument("--resume", action="store_true", default=False, help="Reuse an existing run workspace")
+    drill.set_defaults(handler=_run_testnet_drill)
 
     backfill = subparsers.add_parser(
         "paper-funding-backfill", help="Backfill PAPER ledger funding never accrued (dry-run unless --apply)"
