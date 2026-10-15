@@ -6,15 +6,13 @@ import contextlib
 import hashlib
 import json
 import logging
-import multiprocessing
-import os
 import re
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field, replace
 from decimal import ROUND_DOWN, Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 from uuid import uuid4
 
 from src.common.errors import DataIntegrityError
@@ -26,7 +24,7 @@ from src.live.planner import CLIENT_ORDER_NAMESPACE, symbol_tag
 from src.live.rest import BinanceFuturesRestClient, KeepAliveTransport
 from src.live.settings import LiveSettings
 from src.live.testnet_drill.config import DrillConfig
-from src.live.testnet_drill.faults import FaultAction, FaultInjectingTransport, FaultRule, WireRecord
+from src.live.testnet_drill.faults import KILL_ACTIONS, FaultInjectingTransport, FaultRule, WireRecord
 from src.live.testnet_drill.guard import _PRODUCTION_PATH_FIELDS, DrillRefused, assert_drill_allowed, drill_scratch_root
 
 logger = logging.getLogger("TestnetDrill")
@@ -45,7 +43,15 @@ class SlateNotClean(LiveTradingError):  # noqa: N818 - spec pins the name
 
 
 class DirtySessionError(LiveTradingError):
-    """Venue configuration could not be restored; stop all subsequent scenarios."""
+    """Venue configuration could not be restored; stop all subsequent scenarios.
+
+    ``residuals`` is the best-effort venue position map at failure; ``partial_results`` is set by the registry.
+    """
+
+    def __init__(self, message: str, *, residuals: Mapping[str, str] | None = None) -> None:
+        super().__init__(message)
+        self.residuals = dict(residuals or {})
+        self.partial_results: tuple[Any, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,8 +94,19 @@ class DrillSession:
             raise DrillRefused("drill refused: client_order_id")
         return candidate
 
-    def guarded_new_order(self, params: Mapping[str, Any], *, raw: bool = False) -> Any:
-        """Send one drill order after prefix and notional-cap checks."""
+    @property
+    def foreign_order_prefix(self) -> str:
+        """Non-namespace prefix for deliberately foreign drill orders (F1); teardown still cancels them."""
+        return "fx" + self.client_order_prefix.removeprefix(CLIENT_ORDER_NAMESPACE)
+
+    def guarded_new_order(
+        self, params: Mapping[str, Any], *, raw: bool = False, scope: str = "session"
+    ) -> Any:
+        """Send one drill order after prefix and notional-cap checks.
+
+        ``scope="namespace"`` admits any production-namespace id (orders built by the runner itself);
+        ``scope="foreign"`` admits only this session's foreign prefix. The notional cap applies to all.
+        """
         order = dict(params)
         symbol = str(order.get("symbol", ""))
         if symbol not in self.filters or symbol not in self.config.symbols:
@@ -98,7 +115,9 @@ class DrillSession:
         if raw_id is None:
             order["newClientOrderId"] = self.next_client_order_id(symbol)
         elif _CLIENT_ID_RE.fullmatch(str(raw_id)) is None or not (
-            str(raw_id).startswith(self.client_order_prefix + "-")
+            (scope == "session" and str(raw_id).startswith(self.client_order_prefix + "-"))
+            or (scope == "namespace" and str(raw_id).startswith(CLIENT_ORDER_NAMESPACE))
+            or (scope == "foreign" and str(raw_id).startswith(self.foreign_order_prefix + "-"))
             or (
                 raw
                 and re.match(r"^\d{8}-", str(raw_id))
@@ -148,16 +167,17 @@ def open_drill_session(
     clock: Callable[[], float] = time.time,
     inner: Any | None = None,
     workspace: Path | None = None,
+    kill: Callable[[int], NoReturn] | None = None,
 ) -> DrillSession:
-    """Open an isolated drill session against the testnet venue."""
+    """Open an isolated drill session against the testnet venue.
+
+    ``KILL_*`` rules are refused unless the worker process injects ``kill``; the parent never kills itself.
+    """
     if _RUN_ID_RE.fullmatch(run_id) is None:
         raise DrillRefused("drill refused: run_id")
     workspace = workspace if workspace is not None else drill_scratch_root() / run_id
     assert_drill_allowed(settings, workspace)
-    if multiprocessing.parent_process() is None and any(
-        rule.action in (FaultAction.KILL_BEFORE_DELIVERY, FaultAction.KILL_AFTER_DELIVERY, FaultAction.KILL_ON_RESPONSE)
-        for rule in rules
-    ):
+    if kill is None and any(rule.action in KILL_ACTIONS for rule in rules):
         raise DrillRefused("drill refused: parent_kill")
     isolated = settings.model_copy(
         update={
@@ -174,6 +194,7 @@ def open_drill_session(
                     "portfolio_state_dir": "portfolio_state",
                     "microstructure_dir": "microstructure",
                     "alert_outbox_path": "alert_outbox.json",
+                    "ledger_resync_backup_dir": "ledger_backups",
                 }.items()
             },
         }
@@ -192,8 +213,9 @@ def open_drill_session(
         rules,
         base_url=settings.order_base_url,
         sleep=time.sleep,
-        kill=os._exit,
+        kill=kill if kill is not None else _refuse_kill,
         on_record=lambda record: _persist_wire(workspace / "wire.jsonl", record),
+        clock=lambda: time.time(),
     )
     client = BinanceFuturesRestClient(
         settings.order_base_url,
@@ -267,6 +289,10 @@ def open_counterparty_session(session: DrillSession, *, inner: Any | None = None
         raise
     session.counterparties.append(aux)
     return aux
+
+
+def _refuse_kill(exit_code: int) -> NoReturn:
+    raise DrillRefused("drill refused: parent_kill")
 
 
 def _persist_wire(path: Path, record: WireRecord) -> None:
@@ -407,9 +433,9 @@ def teardown_session(session: DrillSession, *, close_handles: bool = True) -> No
             for order in session.client.open_orders():
                 if not isinstance(order, dict):
                     continue
-                if (
-                    str(order.get("clientOrderId", "")).startswith(session.client_order_prefix + "-")
-                    and str(order.get("symbol", "")) in session.config.symbols
+                order_id = str(order.get("clientOrderId", ""))
+                if str(order.get("symbol", "")) in session.config.symbols and order_id.startswith(
+                    (session.client_order_prefix + "-", session.foreign_order_prefix + "-")
                 ):
                     session.client.cancel_order(str(order.get("symbol", "")), str(order.get("clientOrderId", "")))
         except Exception as exc:

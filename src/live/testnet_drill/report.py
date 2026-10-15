@@ -46,17 +46,27 @@ class ScenarioResult:
     hypothesis_ids: tuple[str, ...] = ()
     hypothesis_outcome: str = "INCONCLUSIVE"
     evidence_path: str = ""
+    hypothesis_outcomes: tuple[tuple[str, str], ...] = ()
+    testnet_reset_suspected: bool = False
     conservation_passed: bool = False
     proposed_action: str | None = None
     proposal_rationale: str = ""
 
     def __post_init__(self) -> None:
-        if self.hypothesis_outcome not in _HYPOTHESIS_OUTCOMES:
+        if self.hypothesis_outcome not in _HYPOTHESIS_OUTCOMES or any(
+            outcome not in _HYPOTHESIS_OUTCOMES for _, outcome in self.hypothesis_outcomes
+        ):
             raise ValueError(f"hypothesis_outcome must be one of {sorted(_HYPOTHESIS_OUTCOMES)}")
+        if any(hypothesis not in self.hypothesis_ids for hypothesis, _ in self.hypothesis_outcomes):
+            raise ValueError("hypothesis_outcomes must name declared hypothesis_ids")
         if self.verdict is Verdict.PASS and (
             not self.expectations or not all(passed for _, passed in self.expectations) or not self.conservation_passed
         ):
             object.__setattr__(self, "verdict", Verdict.FAIL)
+
+    def outcome_for(self, hypothesis_id: str) -> str:
+        """Per-hypothesis outcome, falling back to the scalar outcome shared by all declared ids."""
+        return dict(self.hypothesis_outcomes).get(hypothesis_id, self.hypothesis_outcome)
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,7 +174,7 @@ def write_report(results: Sequence[ScenarioResult], workspace: Path) -> ReportPa
     rows = list(results)
     summary = summarize_results(rows)
     hypotheses = [
-        {"id": hypothesis, "outcome": result.hypothesis_outcome, "evidence": result.evidence_path}
+        {"id": hypothesis, "outcome": result.outcome_for(hypothesis), "evidence": result.evidence_path}
         for result in rows
         for hypothesis in result.hypothesis_ids
     ]
@@ -207,6 +217,11 @@ def write_report(results: Sequence[ScenarioResult], workspace: Path) -> ReportPa
     lines = [
         "# Testnet Drill Report",
         "",
+        *(
+            ["> 경고: 테스트넷 리셋이 의심된다. 원장 비교는 새 기준 잔고를 사용했다.", ""]
+            if any(result.testnet_reset_suspected for result in rows)
+            else []
+        ),
         f"합계: PASS {summary['pass']} / FAIL {summary['fail']} / OBSERVED {summary['observed']} / SKIPPED {summary['skipped']}",
         "",
         "| scenario_id | verdict | expectations | hypotheses |",
@@ -217,7 +232,7 @@ def write_report(results: Sequence[ScenarioResult], workspace: Path) -> ReportPa
             ", ".join(f"{name}={'PASS' if passed else 'FAIL'}" for name, passed in result.expectations) or "-"
         )
         hypotheses_cell = (
-            ", ".join(f"{hypothesis}={result.hypothesis_outcome}" for hypothesis in result.hypothesis_ids) or "-"
+            ", ".join(f"{hypothesis}={result.outcome_for(hypothesis)}" for hypothesis in result.hypothesis_ids) or "-"
         )
         lines.append(f"| {result.scenario_id} | {result.verdict.value} | {expectations} | {hypotheses_cell} |")
     lines.extend(["", "| hypothesis_id | outcome | evidence |", "| --- | --- | --- |"])
