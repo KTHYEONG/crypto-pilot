@@ -30,6 +30,7 @@ def test_partial_price_attribution_confirms_h2() -> None:
         "C5",
         cumulative_monotonic=True,
         deltas_sum_to_venue=True,
+        multi_step_observed=True,
         delta_price="100",
         user_trade_price="101",
         price_rel_tolerance="0.001",
@@ -42,10 +43,15 @@ def test_partial_price_attribution_confirms_h2() -> None:
 
 
 def test_race_accounting() -> None:
-    reps = [{"id": f"r{i}", "terminal_confirmed": True, "qty_match": True, "no_double": True} for i in range(20)]
+    reps = [
+        {"id": f"r{i}", "terminal_confirmed": True, "qty_match": True, "no_double": True, "executed_qty": "0.1"}
+        for i in range(20)
+    ]
     assert _SPECS["C6"].evaluate(ev("C6", repetitions=reps, conservation_passed=True)).verdict is Verdict.PASS
+    quiet = [{**rep, "executed_qty": "0"} for rep in reps]
+    assert _SPECS["C6"].evaluate(ev("C6", repetitions=quiet, conservation_passed=True)).verdict is Verdict.OBSERVED
     bad = list(reps)
-    bad[7] = {"id": "r7", "terminal_confirmed": True, "qty_match": False, "no_double": True}
+    bad[7] = {"id": "r7", "terminal_confirmed": True, "qty_match": False, "no_double": True, "executed_qty": "0.1"}
     result = _SPECS["C6"].evaluate(ev("C6", repetitions=bad))
     assert result.verdict is Verdict.FAIL
 

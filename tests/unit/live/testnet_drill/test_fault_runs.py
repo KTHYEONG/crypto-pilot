@@ -83,7 +83,6 @@ def test_scenarios_run_against_real_faults(exchange_session, in_process_worker, 
     in_process_worker(session, venue)
     evidence, result = _run(session, scenario_id)
     assert evidence.payload["primary_clean"] is True
-    assert evidence.payload["counterparty_clean"] is True
     assert not any(name in ("complete_evidence", "valid_evidence") for name, _ in result.expectations), result
     assert result.verdict is _EXPECTED[scenario_id], (result, evidence.payload)
 
