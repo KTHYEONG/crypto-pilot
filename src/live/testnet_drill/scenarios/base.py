@@ -101,6 +101,36 @@ REQUIRED_EVIDENCE: dict[str, frozenset[str]] = {
         "C12": "escalated_to_ioc price_within_cap open_empty residual_exact",
         "C13": "no_429 intent_count symbol_count throttle_respected reducing_first",
         "C14": "reducing_first no_spurious_2019 margin_near_limit",
+        "D1": "unresolved_adopted single_post booked_once",
+        "D2": "booked_from_query position_parity no_repost",
+        "D3": "reposted_early reposted_after_horizon miss_limit_reached journal_not_placed never_two_live post_count",
+        "D4": "delete_count confirmed_by_query terminal_once",
+        "D5": "not_placed retried_later no_halt cancel_outcome resting_left rate_limited_read retry_after_s sleep_s remaining_window_s sleep_exceeds_window",
+        "D6": "records_after_ban ban_horizon_captured halted",
+        "D7": "get_retries_bounded post_unknown_no_repost post_fail_closed no_duplicate_exposure post_resent_after_5xx",
+        "D8": "resolved_by_query treated_as_active_without_query",
+        "D9": "post_count first_code resync_count no_duplicate",
+        "D10": "tick_skipped counters_reset aborted_with_cleanup no_live_order max_failures_exceeded order_read_contained",
+        "E1": "exit_code query_code terminal_status venue_exposure orphan_count",
+        "E2": "settled_terminal no_fills no_orphan",
+        "E3": "recovered_qty venue_qty fee_taker single_booking",
+        "E4": "recovered_once no_double_count",
+        "E5": "journal_ahead_before ledger_equal_after single_commit",
+        "E6": "confirmed_or_recancelled fill_booked",
+        "E7": "no_live_order no_double_exposure next_cycle_posts",
+        "E8": "recovery_passes recovered_fill_count single_pass_fill_count idempotent",
+        "E9": "unsettled_within_budget settled_after_restart decision_executed",
+        "E10": "tail_corrupt_at truncated_tail_ok mid_file_fails_closed",
+        "F1": "foreign_audited foreign_cancelled symbol_excluded halt_when_derisk_off derisk_when_enabled",
+        "F2": "breach_detected derisk_or_halt adoption_listed breach_cleared",
+        "F3": "orphan_cancelled orphan_settled symbol_withheld_on_unconfirmed",
+        "F4": "inconsistency_rate breach_would_exceed",
+        "F5": "funding_events funding_parity sign_convention_ok skipped",
+        "F6": "limits_match throttle_reacts no_429",
+        "F7": "clean_pass removal_flips warning_only",
+        "G1": "cycles_completed r1_r6_pass fills_agree final_flat",
+        "G2": "new_orders decision_guard_honored no_duplicate_fills",
+        "G3": "converged no_double_execution",
     }.items()
 }
 
@@ -154,6 +184,86 @@ BOOLEAN_FIELDS = frozenset(
         "reducing_first",
         "no_spurious_2019",
         "margin_near_limit",
+        "unresolved_adopted",
+        "single_post",
+        "booked_from_query",
+        "position_parity",
+        "no_repost",
+        "reposted_early",
+        "reposted_after_horizon",
+        "miss_limit_reached",
+        "confirmed_by_query",
+        "not_placed",
+        "retried_later",
+        "no_halt",
+        "sleep_exceeds_window",
+        "ban_horizon_captured",
+        "get_retries_bounded",
+        "post_unknown_no_repost",
+        "post_fail_closed",
+        "no_duplicate_exposure",
+        "post_resent_after_5xx",
+        "resolved_by_query",
+        "treated_as_active_without_query",
+        "no_duplicate",
+        "tick_skipped",
+        "counters_reset",
+        "aborted_with_cleanup",
+        "no_live_order",
+        "max_failures_exceeded",
+        "settled_terminal",
+        "no_fills",
+        "no_orphan",
+        "fee_taker",
+        "single_booking",
+        "recovered_once",
+        "no_double_count",
+        "journal_ahead_before",
+        "ledger_equal_after",
+        "single_commit",
+        "confirmed_or_recancelled",
+        "fill_booked",
+        "no_double_exposure",
+        "idempotent",
+        "unsettled_within_budget",
+        "settled_after_restart",
+        "decision_executed",
+        "truncated_tail_ok",
+        "mid_file_fails_closed",
+        "foreign_audited",
+        "foreign_cancelled",
+        "symbol_excluded",
+        "halt_when_derisk_off",
+        "breach_detected",
+        "derisk_or_halt",
+        "adoption_listed",
+        "breach_cleared",
+        "orphan_cancelled",
+        "orphan_settled",
+        "symbol_withheld_on_unconfirmed",
+        "breach_would_exceed",
+        "funding_parity",
+        "skipped",
+        "limits_match",
+        "throttle_reacts",
+        "clean_pass",
+        "removal_flips",
+        "warning_only",
+        "fills_agree",
+        "final_flat",
+        "decision_guard_honored",
+        "no_duplicate_fills",
+        "converged",
+        "no_double_execution",
+        "journal_not_placed",
+        "never_two_live",
+        "resting_left",
+        "rate_limited_read",
+        "halted",
+        "order_read_contained",
+        "next_cycle_posts",
+        "derisk_when_enabled",
+        "sign_convention_ok",
     ]
 )
 
@@ -164,6 +274,7 @@ def isolated_run(
     """Collect teardown and conservation evidence before closing session handles."""
 
     def run(session: Any, config: Any) -> ScenarioEvidence:
+        from src.live.order_journal import OrderJournal
         from src.live.testnet_drill.reconcile import evaluate_reconciliation, reconcile_session
         from src.live.testnet_drill.session import (
             _read_positions,
@@ -173,13 +284,16 @@ def isolated_run(
         )
 
         since_ms = int(session.opened_at * 1000)
+        reset_suspected = False
         try:
-            prepare_clean_slate(session)
+            reset_suspected = prepare_clean_slate(session).testnet_reset_suspected
             baseline = Decimal(str(session.client.account()["totalWalletBalance"]))
             session = replace(session, starting_wallet_balance=baseline)
             since_ms = int(time.time() * 1000)
             evidence = body(session, config, None) if with_slate else body(session, config)
         finally:
+            # Child workers (group E) append to the same journal file; re-read it before judging conservation.
+            session = replace(session, journal=OrderJournal(session.journal.path))
             try:
                 teardown_session(session, close_handles=False)
                 reconciled = reconcile_session(session, since_ms=since_ms, settle_wait_s=config.settle_wait_s)
@@ -199,6 +313,7 @@ def isolated_run(
                 "reconciliation": checks,
                 "counterparty_clean": aux_clean,
                 "primary_clean": primary_clean,
+                "testnet_reset_suspected": reset_suspected,
             },
         )
 
@@ -237,6 +352,7 @@ def result_of(
     observations: tuple[VenueObservation, ...] = (),
     hypotheses: tuple[str, ...] = (),
     hypothesis_outcome: str = "INCONCLUSIVE",
+    hypothesis_outcomes: tuple[tuple[str, str], ...] = (),
     proposed_action: str | None = None,
     proposal_rationale: str = "",
 ) -> ScenarioResult:
@@ -248,6 +364,7 @@ def result_of(
         observations=observations,
         hypothesis_ids=hypotheses,
         hypothesis_outcome=hypothesis_outcome,
+        hypothesis_outcomes=hypothesis_outcomes,
         conservation_passed=evidence.payload.get("conservation_passed") is True,
         proposed_action=proposed_action,
         proposal_rationale=proposal_rationale,
