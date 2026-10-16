@@ -1039,6 +1039,23 @@ def test_mutation_non_json_success_body_is_not_resent(tmp_path, monkeypatch) -> 
     assert sleeps == []
 
 
+def test_config_endpoint_ack_body_is_success_not_error(tmp_path, monkeypatch) -> None:
+    """A 2xx ``{"code": 200}`` acknowledgement returns the body on POST and GET without raising."""
+    from src.live.rest import HttpResponse
+
+    ack = b'{"code":200,"msg":"success"}'
+    client, calls, _ = _rest_client(
+        tmp_path, monkeypatch,
+        lambda m, u: HttpResponse(status_code=200, headers={}, body=ack),
+        audit_name="config_ack.jsonl",
+    )
+    assert client.request("POST", "/fapi/v1/marginType", {"symbol": "AAAUSDT"}, signed=True) == {
+        "code": 200, "msg": "success",
+    }
+    assert client.request("GET", "/fapi/v1/anything") == {"code": 200, "msg": "success"}
+    assert len(calls) == 2
+
+
 def test_rejection_digest_is_shared_across_methods(tmp_path, monkeypatch) -> None:
     """GET and POST rejections digest the same body identically; empty 429 digests empty."""
     import pytest
