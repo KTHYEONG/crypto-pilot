@@ -74,6 +74,21 @@ def test_trade_parity_tolerance_and_fee() -> None:
     assert not _by_name(evaluate_reconciliation(failing, make_config()))["trade_parity"].passed
 
 
+def test_estimated_recovery_fee_may_exceed_but_not_undercut_venue() -> None:
+    over = _base(journal_trade_fee=(("oid-1", Decimal("0.5")),), estimated_fee_orders=("oid-1",))
+    assert _by_name(evaluate_reconciliation(over, make_config()))["trade_parity"].passed
+    under = _base(
+        journal_trade_fee=(("oid-1", Decimal("0.001")),),
+        venue_trade_commission=(("oid-1", Decimal("0.5")),),
+        estimated_fee_orders=("oid-1",),
+    )
+    result = _by_name(evaluate_reconciliation(under, make_config()))["trade_parity"]
+    assert not result.passed
+    assert "undercuts" in result.detail
+    exact_required = _base(journal_trade_fee=(("oid-1", Decimal("0.5")),))
+    assert not _by_name(evaluate_reconciliation(exact_required, make_config()))["trade_parity"].passed
+
+
 def test_maker_mismatch_reported_not_failed() -> None:
     evidence = _base(
         journal_maker_count=(("oid-1", 1),),

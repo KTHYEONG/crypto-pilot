@@ -38,6 +38,7 @@ class ReconciliationEvidence:
     venue_trade_commission: tuple[tuple[str, Decimal], ...] = ()
     venue_maker_count: tuple[tuple[str, int], ...] = ()
     journal_maker_count: tuple[tuple[str, int], ...] = ()
+    estimated_fee_orders: tuple[str, ...] = ()
     wallet_start: Decimal | None = None
     wallet_end: Decimal = Decimal(0)
     income_sums: tuple[tuple[str, Decimal], ...] = ()
@@ -62,6 +63,7 @@ def _trade_parity(evidence: ReconciliationEvidence, price_tol: Decimal, fee_tol:
     venue_vwap = _as_map(evidence.venue_trade_vwap)
     venue_fee = _as_map(evidence.venue_trade_commission)
     journal_maker = _as_map(evidence.journal_maker_count)
+    estimated = set(evidence.estimated_fee_orders)
     venue_maker = _as_map(evidence.venue_maker_count)
     r3_bad: list[str] = []
     maker_notes: list[str] = []
@@ -81,6 +83,10 @@ def _trade_parity(evidence: ReconciliationEvidence, price_tol: Decimal, fee_tol:
                 r3_bad.append(f"{order_id} vwap journal={jw} venue={vw}")
         jf = Decimal(str(journal_fee.get(order_id, 0)))
         vf = Decimal(str(venue_fee.get(order_id, 0)))
+        if order_id in estimated:
+            if vf - jf > fee_tol:
+                r3_bad.append(f"{order_id} estimated fee undercuts venue journal={jf} venue={vf}")
+            continue
         if _abs_diff(jf, vf) > fee_tol:
             r3_bad.append(f"{order_id} fee journal={jf} venue={vf}")
         jm = int(journal_maker.get(order_id, 0))
@@ -212,10 +218,11 @@ class _Aggregate:
     notional: dict[str, Decimal]
     fees: dict[str, Decimal]
     makers: dict[str, int]
+    estimated: set[str]
 
     @classmethod
     def empty(cls) -> _Aggregate:
-        return cls({}, {}, {}, {})
+        return cls({}, {}, {}, {}, set())
 
     def add(self, key: str, amount: Decimal, price: Decimal, fee: Decimal, maker: bool) -> None:
         self.qty[key] = self.qty.get(key, Decimal(0)) + amount
@@ -245,6 +252,9 @@ _ORDER_FILL_KINDS = frozenset({"execution", "recovered", "orphan_settlement"})
 # Journaled position adjustments without a venue order (operator resync, adopted force-close): they move the
 # position fold (R1) but have no userTrades counterpart, so they stay out of trade parity (R3).
 _ADJUSTMENT_KINDS = frozenset({"operator_resync", "venue_force_close"})
+# Recovery books the conservative taker fee because an order query does not reveal maker/taker, so the
+# journal fee may exceed the venue commission for these orders but must never undercut it.
+_ESTIMATED_FEE_KINDS = frozenset({"recovered", "orphan_settlement"})
 
 
 def _journal_fold(fills: Any) -> tuple[dict[str, Decimal], _Aggregate]:
@@ -259,6 +269,8 @@ def _journal_fold(fills: Any) -> tuple[dict[str, Decimal], _Aggregate]:
         if fill.kind in _ORDER_FILL_KINDS and fill.client_order_id is not None:
             fee = fill.quantity * fill.price * Decimal(str(fill.fee_bps)) / 10000
             trades.add(fill.client_order_id, fill.quantity, fill.price, fee, fill.liquidity == "maker")
+            if fill.kind in _ESTIMATED_FEE_KINDS:
+                trades.estimated.add(fill.client_order_id)
     return positions, trades
 
 
@@ -378,6 +390,7 @@ def _snapshot(session: Any, since_ms: int, until_ms: int) -> ReconciliationEvide
         journal_trade_vwap=booked.vwap(),
         journal_trade_fee=tuple(booked.fees.items()),
         journal_maker_count=tuple(booked.makers.items()),
+        estimated_fee_orders=tuple(sorted(booked.estimated)),
         venue_trade_qty=tuple(traded.qty.items()),
         venue_trade_vwap=traded.vwap(),
         venue_trade_commission=tuple(traded.fees.items()),
