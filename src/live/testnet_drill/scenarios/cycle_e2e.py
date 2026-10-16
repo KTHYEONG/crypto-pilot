@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import replace
-from decimal import Decimal
+from decimal import ROUND_CEILING, Decimal
 from pathlib import Path
 from typing import Any
 
@@ -293,6 +293,22 @@ def _eval_g3(evidence: ScenarioEvidence) -> Any:
     return result_of(evidence, "G3", Verdict.PASS if passed else Verdict.FAIL, (("restart_in_cycle", passed),))
 
 
+# IOC limit beyond the touch so a thin top-of-book cannot leave the seeding order partially filled.
+_G4_CROSS_FRACTION = Decimal("0.002")
+
+
+def _await_terminal(session: Any, symbol: str, client_order_id: str, config: Any) -> dict[str, Any]:
+    """Poll the venue until the order leaves NEW/PARTIALLY_FILLED (the POST ack is always NEW) or the settle budget ends."""
+    import time
+
+    deadline = time.monotonic() + config.settle_wait_s
+    while True:
+        payload = dict(session.client.query_order(symbol, client_order_id))
+        if str(payload.get("status", "")) not in ("NEW", "PARTIALLY_FILLED") or time.monotonic() >= deadline:
+            return payload
+        time.sleep(config.settle_poll_s)
+
+
 def _run_g4(session: Any, config: Any) -> ScenarioEvidence:
     """Reuse a filled venue id from a fresh journal while the replacement rests."""
     import time
@@ -300,7 +316,7 @@ def _run_g4(session: Any, config: Any) -> ScenarioEvidence:
     from src.live.executor import FeeSchedule, _IntentRuntime, _sync_venue_order
     from src.live.order_identity import StaleOrderIdentity
     from src.live.recovery import recover_unresolved_orders
-    from src.live.testnet_drill.execution import make_intent, settle_journal, submit_probe
+    from src.live.testnet_drill.execution import make_intent, submit_probe
     from src.live.testnet_drill.scenarios.lifecycle_runs import _limit
 
     symbol = _symbols(session)[0]
@@ -308,12 +324,19 @@ def _run_g4(session: Any, config: Any) -> ScenarioEvidence:
     resting = _limit(session, distance=True)
     order_id = resting["newClientOrderId"]
     quote = session.client.book_ticker(symbol)
-    first = submit_probe(session, {
-        **resting, "timeInForce": "IOC", "price": quote["askPrice"],
-    })
-    if first.get("status") != "FILLED":
+    tick = session.filters[symbol].tick_size
+    crossing = (Decimal(str(quote["askPrice"])) * (1 + _G4_CROSS_FRACTION) / tick).to_integral_value(
+        rounding=ROUND_CEILING
+    ) * tick
+    # Seeded outside the session journal and flattened at once: a venue lookup of the reused id is ambiguous
+    # by construction, so the session's own R1..R6 reconciliation must never reference this id.
+    first = session.guarded_new_order({**resting, "timeInForce": "IOC", "price": str(crossing)})
+    seeded = _await_terminal(session, symbol, order_id, config)
+    if seeded.get("status") != "FILLED":
         raise DrillRefused("drill refused: g4_initial_order_not_filled")
-    settle_journal(session)
+    session.guarded_new_order({
+        "symbol": symbol, "side": "SELL", "type": "MARKET", "quantity": str(seeded["executedQty"]), "reduceOnly": "true",
+    })
     tolerance = session.settings.order_identity_tolerance_ms + session.client.clock_offset_margin_ms
     if tolerance / 1000 + 1 >= config.scenario_timeout_s:
         raise DrillRefused("drill refused: g4_clock_wait_exceeds_budget")
@@ -331,6 +354,7 @@ def _run_g4(session: Any, config: Any) -> ScenarioEvidence:
         active_price=Decimal(resting["price"]), active_post_qty=intent.quantity,
         order_identity_tolerance_ms=session.settings.order_identity_tolerance_ms,
     )
+    stale_lookup = session.client.query_order(symbol, order_id).get("orderId") == first["orderId"]
     now = pd.Timestamp.now(tz="UTC")
     executor_tripped = False
     recovery_tripped = False
@@ -356,6 +380,9 @@ def _run_g4(session: Any, config: Any) -> ScenarioEvidence:
     return ev(
         "G4",
         guard_tripped=tripped,
+        stale_lookup_observed=stale_lookup,
+        executor_tripped=executor_tripped,
+        recovery_tripped=recovery_tripped,
         no_phantom_fill=not fills and rt.filled_total == Decimal("0"),
         first_order_id=first["orderId"], replacement_order_id=replacement["orderId"],
         h12="REFUTED" if tripped else "CONFIRMED" if fills else "INCONCLUSIVE",
@@ -364,11 +391,16 @@ def _run_g4(session: Any, config: Any) -> ScenarioEvidence:
 
 def _eval_g4(evidence: ScenarioEvidence) -> Any:
     p = evidence.payload
-    passed = p["guard_tripped"] is True and p["no_phantom_fill"] is True
+    phantom = p["no_phantom_fill"] is not True
+    tripped = p["guard_tripped"] is True or p.get("executor_tripped") is True
+    if not phantom and not tripped and p.get("stale_lookup_observed") is False:
+        # The venue's id index had already caught up, so no stale order was served and nothing needed guarding.
+        return result_of(evidence, "G4", Verdict.OBSERVED, (("stale_lookup_not_served", True),), hypotheses=("H12",))
+    passed = tripped and not phantom
     return result_of(
         evidence, "G4", Verdict.PASS if passed else Verdict.FAIL, (("id_reuse_guard", passed),),
         hypotheses=("H12",),
-        hypothesis_outcome="REFUTED" if passed else "CONFIRMED" if not p["no_phantom_fill"] else "INCONCLUSIVE",
+        hypothesis_outcome="REFUTED" if passed else "CONFIRMED" if phantom else "INCONCLUSIVE",
     )
 
 
