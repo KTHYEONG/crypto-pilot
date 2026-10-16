@@ -114,11 +114,20 @@ def test_ban_stops_the_wire_in_both_phases(exchange_session):
 
 def test_repeg_kill_without_repeg_is_refused_not_passed(exchange_session, in_process_worker):
     from src.live.testnet_drill.guard import DrillRefused
+    from src.live.testnet_drill.scenarios.restart_recovery import _killed_and_restarted
 
     session, venue, _ = exchange_session(config={"symbols": ("BTCUSDT", "ETHUSDT")})
     in_process_worker(session, venue)
+    never = {"action": "cycle", "kill_on_audit_event": {"event": "event_that_never_occurs", "fields": {}}}
     with pytest.raises(DrillRefused, match="kill_point_not_reached"):
-        _run(session, "E7")
+        _killed_and_restarted(session, never, [])
+
+
+def test_repeg_kill_is_reached_when_the_anchor_keeps_the_order_unfilled(exchange_session, in_process_worker):
+    session, venue, _ = exchange_session(config={"symbols": ("BTCUSDT", "ETHUSDT")})
+    in_process_worker(session, venue)
+    evidence, result = _run(session, "E7")
+    assert result.verdict is Verdict.PASS, evidence.payload
 
 
 def test_external_position_adoption_conserves_with_journaled_resync(exchange_session):

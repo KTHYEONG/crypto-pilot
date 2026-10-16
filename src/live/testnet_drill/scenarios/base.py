@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from decimal import Decimal
@@ -293,9 +294,13 @@ def isolated_run(
         reset_suspected = False
         try:
             reset_suspected = prepare_clean_slate(session).testnet_reset_suspected
+            # Venue timestamps and the learned clock offset disagree by up to a round trip, so keep slate
+            # cleanup trades and the scenario's first trade at least one guard interval away from the window edge.
+            time.sleep(config.window_guard_s)
             baseline = Decimal(str(session.client.account()["totalWalletBalance"]))
             session = replace(session, starting_wallet_balance=baseline)
             since_ms = session.client.server_time_ms()
+            time.sleep(config.window_guard_s)
             evidence = body(session, config, None) if with_slate else body(session, config)
         finally:
             # Child workers (group E) append to the same journal file; re-read it before judging conservation.

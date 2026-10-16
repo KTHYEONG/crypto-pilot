@@ -339,9 +339,14 @@ def _run_e7(session: Any, config: Any) -> ScenarioEvidence:
     from src.live.testnet_drill.session import _read_positions
 
     symbol = session.config.symbols[0]
-    script = {"action": "cycle", "kill_on_audit_event": {"event": "order_cancelled", "fields": {"reason": "repeg"}}}
+    script = {
+        "action": "cycle",
+        "anchor_offset_bps": config.unfilled_anchor_bps,
+        "kill_on_audit_event": {"event": "order_cancelled", "fields": {"reason": "repeg"}},
+    }
     run, fresh, before = _killed_and_restarted(session, script, [])
     venue = _read_positions(fresh.client).get(symbol, Decimal(0))
+    journaled = _fold(fresh, symbol)
     no_live = not _own_open(fresh)
     intent = make_intent(fresh, symbol)
     with AuditTap(fresh) as tap:
@@ -350,7 +355,7 @@ def _run_e7(session: Any, config: Any) -> ScenarioEvidence:
         "E7",
         **_common(run, before),
         no_live_order=no_live,
-        no_double_exposure=venue == _fold(fresh, symbol) and abs(venue) <= intent.quantity,
+        no_double_exposure=venue == journaled and abs(venue) <= intent.quantity,
         next_cycle_posts=bool(tap.named("order_posted")),
     )
 
