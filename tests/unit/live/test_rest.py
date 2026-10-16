@@ -1100,7 +1100,10 @@ def test_corrupt_mutation_body_resolves_by_query_without_repost(tmp_path, monkey
             assert urlparse(url).path == "/fapi/v1/order"
             return HttpResponse(status_code=200, headers={}, body=b"<html>gateway</html>")
         gets.append(url)
-        return HttpResponse(status_code=200, headers={}, body=b'{"status":"FILLED","executedQty":"1","avgPrice":"100.00"}')
+        return HttpResponse(status_code=200, headers={}, body=json.dumps({
+            "status": "FILLED", "executedQty": "1", "avgPrice": "100.00",
+            "time": int(pd.Timestamp.now(tz="UTC").value // 1_000_000),
+        }).encode())
 
     client, calls, sleeps = _rest_client(tmp_path, monkeypatch, _responder, audit_name="mut_resolve.jsonl")
     journal = OrderJournal(tmp_path / "journal.jsonl")

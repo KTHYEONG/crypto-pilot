@@ -131,6 +131,7 @@ REQUIRED_EVIDENCE: dict[str, frozenset[str]] = {
         "G1": "cycles_completed r1_r6_pass fills_agree final_flat",
         "G2": "new_orders decision_guard_honored no_duplicate_fills",
         "G3": "converged no_double_execution",
+        "G4": "guard_tripped no_phantom_fill",
     }.items()
 }
 
@@ -255,6 +256,8 @@ BOOLEAN_FIELDS = frozenset(
         "no_duplicate_fills",
         "converged",
         "no_double_execution",
+        "guard_tripped",
+        "no_phantom_fill",
         "journal_not_placed",
         "never_two_live",
         "resting_left",

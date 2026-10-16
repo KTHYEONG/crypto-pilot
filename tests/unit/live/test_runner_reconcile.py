@@ -25,6 +25,12 @@ from src.live.settings import LiveSettings
 
 from tests.unit.live._runner_stubs import DECISION_TIME, NOW, StubMarketClient, StubOrderClient
 
+def _venue_now_ms() -> int:
+    import time
+
+    return int(time.time() * 1000)
+
+
 
 def _tmp_state_kwargs(tmp_path: Path, stem: str) -> dict[str, str]:
     """Isolate every filesystem side channel of one cycle under tmp_path."""
@@ -692,7 +698,7 @@ class _BreachOrderClient(StubOrderClient):
         return {}
 
     def query_order(self, symbol, orig_client_order_id):
-        return {"status": "CANCELED", "side": "BUY", "avgPrice": "100", "executedQty": "0"}
+        return {"time": _venue_now_ms(), "status": "CANCELED", "side": "BUY", "avgPrice": "100", "executedQty": "0"}
 
     def force_orders(self, *, start_time_ms, end_time_ms, limit=100):
         self.force_calls.append((start_time_ms, end_time_ms, limit))
@@ -909,7 +915,7 @@ def test_foreign_open_order_excludes_symbol_and_derisks(artifact, monkeypatch, t
             return {}
 
         def query_order(self, symbol, orig_client_order_id):
-            return {"status": "CANCELED", "side": "BUY", "avgPrice": "100", "executedQty": "0"}
+            return {"time": _venue_now_ms(), "status": "CANCELED", "side": "BUY", "avgPrice": "100", "executedQty": "0"}
 
     client = _ForeignClient()
     posted, _alerts = _live_derisk_env(monkeypatch, tmp_path, client)

@@ -170,6 +170,7 @@ def cancel_orphan_orders(
     journal: OrderJournal,
     now: pd.Timestamp,
     taker_fee_bps: float,
+    order_identity_tolerance_ms: int | None = None,
 ) -> OrphanSweep:
     """Cancel namespace orphan orders before reconciliation and report foreign and unconfirmed orders.
 
@@ -188,6 +189,10 @@ def cancel_orphan_orders(
             parseable executedQty, a BUY/SELL side, or a positive avgPrice.
         VenueError: non-benign cancel or query rejection.
     """
+    from src.live.recovery import _default_order_identity_tolerance_ms, _guard_order_identity
+
+    submits_by_id = {s.client_order_id: s for s in journal.submits()}
+    tolerance = order_identity_tolerance_ms if order_identity_tolerance_ms is not None else _default_order_identity_tolerance_ms()
     open_orders = client.open_orders()
     ours: list[Mapping[str, Any]] = []
     foreign_symbols: list[str] = []
@@ -221,6 +226,11 @@ def cancel_orphan_orders(
             continue
         assert confirmation.payload is not None
         queried = confirmation.payload
+        margin = getattr(client, "clock_offset_margin_ms", 0)
+        _guard_order_identity(
+            journal, queried, order_id,
+            tolerance + (margin if isinstance(margin, int) and margin > 0 else 0), submits_by_id,
+        )
         status = confirmation.status
         if not confirmation.closed:
             audit.record(

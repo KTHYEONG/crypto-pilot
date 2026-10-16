@@ -21,6 +21,12 @@ from src.live.planner import build_client_order_id
 from tests.unit.live._runner_stubs import DECISION_TIME, NOW, StubMarketClient, StubOrderClient
 from tests.unit.live.test_runner_reconcile import _live_settings, _tmp_state_kwargs
 
+def _venue_now_ms() -> int:
+    import time
+
+    return int(time.time() * 1000)
+
+
 OLD_DT = DECISION_TIME - pd.Timedelta(days=1)
 OLD_ID = build_client_order_id(OLD_DT.strftime("%Y%m%d"), "AAAUSDT", 0, 0, 0)
 
@@ -104,8 +110,8 @@ class _VenueWithRestingOrder(StubOrderClient):
         if self.query_answer is not None:
             return dict(self.query_answer)
         if self.variant == "empty_status":
-            return {"side": "BUY", "executedQty": "0"}
-        return {"status": "NEW", "side": "BUY", "executedQty": "0", "avgPrice": "0", "updateTime": 1}
+            return {"time": _venue_now_ms(), "side": "BUY", "executedQty": "0"}
+        return {"time": _venue_now_ms(), "status": "NEW", "side": "BUY", "executedQty": "0", "avgPrice": "0", "updateTime": 1}
 
 
 def _env(monkeypatch, tmp_path, client):
@@ -226,8 +232,8 @@ def test_confirmed_cancel_clears_freeze(artifact, monkeypatch, tmp_path) -> None
         def query_order(self, symbol, orig_client_order_id):
             self.queries.append(orig_client_order_id)
             if self.seen_cancel:
-                return {"status": "CANCELED", "side": "BUY", "executedQty": "0", "avgPrice": "0", "updateTime": 1}
-            return {"status": "NEW", "side": "BUY", "executedQty": "0", "avgPrice": "0", "updateTime": 1}
+                return {"time": _venue_now_ms(), "status": "CANCELED", "side": "BUY", "executedQty": "0", "avgPrice": "0", "updateTime": 1}
+            return {"time": _venue_now_ms(), "status": "NEW", "side": "BUY", "executedQty": "0", "avgPrice": "0", "updateTime": 1}
 
     client = _ConfirmingVenue()
     posted, _alerts = _env(monkeypatch, tmp_path, client)
@@ -254,7 +260,7 @@ def test_partial_fill_of_still_open_order_booked_before_reconciliation(artifact,
 
         def query_order(self, symbol, orig_client_order_id):
             self.queries.append(orig_client_order_id)
-            return {"status": "PARTIALLY_FILLED", "side": "BUY", "executedQty": "0.1", "avgPrice": "100", "updateTime": fill_ms}
+            return {"time": _venue_now_ms(), "status": "PARTIALLY_FILLED", "side": "BUY", "executedQty": "0.1", "avgPrice": "100", "updateTime": fill_ms}
 
     client = _PartialVenue("not_listed")
     posted, _alerts = _env(monkeypatch, tmp_path, client)
@@ -324,7 +330,7 @@ def test_late_fill_after_freeze_converges_without_over_exposure(artifact_aaa, mo
 
     client.position = "0.4"
     fill_ms = int((NOW + pd.Timedelta(hours=3)).value // 1_000_000)
-    client.query_answer = {"status": "FILLED", "side": "BUY", "executedQty": "0.4", "avgPrice": "97", "updateTime": fill_ms}
+    client.query_answer = {"time": _venue_now_ms(), "status": "FILLED", "side": "BUY", "executedQty": "0.4", "avgPrice": "97", "updateTime": fill_ms}
     r2 = runner_mod.run_shadow_cycle(settings, DAY2, artifact_aaa, now=NOW + pd.Timedelta(days=1))
 
     journal = OrderJournal(Path(settings.order_journal_path))
@@ -419,7 +425,7 @@ def test_freeze_clears_automatically_once_order_terminal(artifact_aaa, monkeypat
 
     fill_ms = int((NOW + pd.Timedelta(hours=3)).value // 1_000_000)
     client.variant = "terminal"
-    client.query_answer = {"status": "CANCELED", "side": "BUY", "executedQty": "0", "avgPrice": "0", "updateTime": fill_ms}
+    client.query_answer = {"time": _venue_now_ms(), "status": "CANCELED", "side": "BUY", "executedQty": "0", "avgPrice": "0", "updateTime": fill_ms}
     client.open_orders = lambda: []  # type: ignore[method-assign]
     n1_posted = len(posted)
     audits_before = len(_events(tmp_path))
@@ -457,7 +463,7 @@ def test_new_episode_alerts_again(artifact_aaa, monkeypatch, tmp_path) -> None:
     assert r1.status == "DEGRADED"
 
     fill_ms = int((NOW + pd.Timedelta(hours=3)).value // 1_000_000)
-    client.query_answer = {"status": "CANCELED", "side": "BUY", "executedQty": "0", "avgPrice": "0", "updateTime": fill_ms}
+    client.query_answer = {"time": _venue_now_ms(), "status": "CANCELED", "side": "BUY", "executedQty": "0", "avgPrice": "0", "updateTime": fill_ms}
     client.open_orders = lambda: []  # type: ignore[method-assign]
     r2 = runner_mod.run_shadow_cycle(settings, DAY2, artifact_aaa, now=NOW + pd.Timedelta(days=1))
     assert r2.status == "COMPLETE"
@@ -479,7 +485,7 @@ def test_new_episode_alerts_again(artifact_aaa, monkeypatch, tmp_path) -> None:
 
     def _query(symbol, oid):
         client.queries.append(oid)
-        return {"status": "NEW", "side": "BUY", "executedQty": "0", "avgPrice": "0", "updateTime": 1}
+        return {"time": _venue_now_ms(), "status": "NEW", "side": "BUY", "executedQty": "0", "avgPrice": "0", "updateTime": 1}
 
     client.query_order = _query  # type: ignore[method-assign]
     r3 = runner_mod.run_shadow_cycle(settings, DAY3, artifact_aaa, now=NOW + pd.Timedelta(days=2))
