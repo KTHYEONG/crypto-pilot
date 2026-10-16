@@ -327,6 +327,11 @@ def venue_session(tmp_path):
             self.wallet = {"totalWalletBalance": "1000"}
             self.calls = []
 
+        def server_time_ms(self):
+            import time
+
+            return int(time.time() * 1000)
+
         def position_risk(self):
             return self.risk
 

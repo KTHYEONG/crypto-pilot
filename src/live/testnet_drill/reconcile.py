@@ -418,7 +418,7 @@ def reconcile_session(session: Any, *, since_ms: int, settle_wait_s: float) -> R
     deadline = time.monotonic() + settle_wait_s
     while True:
         try:
-            evidence = _snapshot(session, since_ms, int(time.time() * 1000))
+            evidence = _snapshot(session, since_ms, session.client.server_time_ms())
         except TransientReadError as exc:
             evidence = ReconciliationEvidence(symbols=session.config.symbols, read_errors=(type(exc).__name__,))
         if (
