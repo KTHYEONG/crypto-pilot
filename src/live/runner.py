@@ -1017,6 +1017,7 @@ def _reconcile_pre_trade(
         journal=journal,
         now=now,
         taker_fee_bps=float(settings.taker_fee_bps),
+        order_identity_tolerance_ms=settings.order_identity_tolerance_ms,
     )
     recovery = recover_unresolved_orders(
         order_client,
@@ -1025,9 +1026,15 @@ def _reconcile_pre_trade(
         now=now,
         lookback=pd.Timedelta(hours=settings.journal_recovery_lookback_hours),
         taker_fee_bps=float(settings.taker_fee_bps),
+        order_identity_tolerance_ms=settings.order_identity_tolerance_ms,
     )
     settlement = settle_unresolved_orders(
-        order_client, journal, audit, recovery.unresolved, taker_fee_bps=float(settings.taker_fee_bps)
+        order_client,
+        journal,
+        audit,
+        recovery.unresolved,
+        taker_fee_bps=float(settings.taker_fee_bps),
+        order_identity_tolerance_ms=settings.order_identity_tolerance_ms,
     )
     fallback_attempt = _cycle_fallback_attempt(settings, decision_time, now)
     ledger_state = _commit_and_record(
@@ -1627,7 +1634,7 @@ def run_shadow_cycle(
         attempt = journal.begin_attempt(decision_time=decision_time, run_id=run_id, mode=settings.mode.value, pre_trade_equity=equity, sizing_anchor=_sizing_anchor, decision_marks={i.symbol: decision_marks[i.symbol] for i in kept if i.symbol in decision_marks}, started_at=now_ts)
         try:
             try:
-                outcomes = list(execute_intents(order_client, kept, filters, policy, audit, _clock, time.sleep, rate_limits=rate_limits, outcome_sink=sink, shutdown=shutdown, paper_fill_model=paper_fill_model, journal=journal, attempt=attempt, shutdown_cleanup_budget_s=settings.execution_shutdown_cleanup_budget_s))
+                outcomes = list(execute_intents(order_client, kept, filters, policy, audit, _clock, time.sleep, rate_limits=rate_limits, outcome_sink=sink, shutdown=shutdown, paper_fill_model=paper_fill_model, journal=journal, attempt=attempt, shutdown_cleanup_budget_s=settings.execution_shutdown_cleanup_budget_s, order_identity_tolerance_ms=settings.order_identity_tolerance_ms))
                 _alert_reject_cluster(settings, outcomes, audit, decision_time=decision_time, now=now_ts)
                 final_state = _commit_and_record(settings, ledger_path, ledger_state, journal, audit, fallback_attempt=attempt, equity=equity, executed_decision_time=None if (derisk_active or bool(frozen_symbols)) else decision_time, funding_records=funding_records, settlement_records=settlement_records, reconcile_cash_before=cash_before)
                 _write_execution_quality_once(settings, audit, decision_time=decision_time, weights=weights, marks=marks, intents=kept, outcomes=outcomes, observed_at=now_ts)

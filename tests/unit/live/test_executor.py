@@ -26,6 +26,12 @@ from src.live.filters import SymbolFilters
 from src.live.planner import OrderIntent
 from src.live.rest import PaperResponse, ShadowResponse
 
+def _venue_now_ms() -> int:
+    import time
+
+    return int(time.time() * 1000)
+
+
 
 class StubClient:
     def __init__(
@@ -77,8 +83,8 @@ class StubClient:
             else self._executed_sequence_default
         )
         if orig_client_order_id in self.cancels:
-            return {"status": "CANCELED", "executedQty": executed}
-        return {"status": "NEW", "executedQty": executed}
+            return {"time": _venue_now_ms(), "status": "CANCELED", "executedQty": executed}
+        return {"time": _venue_now_ms(), "status": "NEW", "executedQty": executed}
 
     _executed_sequence_default = "0"
 
@@ -296,7 +302,7 @@ class ShadowStubClient:
 
     def query_order(self, symbol: str, orig_client_order_id: str) -> dict[str, Any]:
         self.queries += 1
-        return {"status": "NEW", "executedQty": "0"}
+        return {"time": _venue_now_ms(), "status": "NEW", "executedQty": "0"}
 
 
 def test_SCENARIO_LIVE_23_shadow_shortcircuit_and_chase_band(tmp_path) -> None:
@@ -497,8 +503,8 @@ class CancelFillStubClient(StubClient):
         self.queries += 1
         executed = "0.5" if orig_client_order_id in self.cancelled_ids else "0"
         if orig_client_order_id in self.cancelled_ids:
-            return {"status": "CANCELED", "executedQty": executed}
-        return {"status": "NEW", "executedQty": executed}
+            return {"time": _venue_now_ms(), "status": "CANCELED", "executedQty": executed}
+        return {"time": _venue_now_ms(), "status": "NEW", "executedQty": executed}
 
 
 def test_SCENARIO_LIVE_24_CANCEL_SETTLES_PARTIAL_FILL(tmp_path) -> None:
@@ -851,7 +857,7 @@ def test_SCENARIO_RESIL_01_sink_survives_non_live_error(tmp_path):  # noqa: D103
             return {}
 
         def query_order(self, *a, **k):  # noqa: ARG002
-            return {"executedQty": "0"}
+            return {"time": _venue_now_ms(), "executedQty": "0"}
 
     intents = [make_intent("AAAUSDT"), make_intent("BBBUSDT"), make_intent("CCCUSDT")]
     filters = {"AAAUSDT": filt_a, "BBBUSDT": filt_b, "CCCUSDT": filt_a}
@@ -928,7 +934,7 @@ def test_SCENARIO_RESIL_07_order_budget_throttle(tmp_path):  # noqa: D103
             return {}
 
         def query_order(self, *a, **k):  # noqa: ARG002
-            return {"executedQty": "0"}
+            return {"time": _venue_now_ms(), "executedQty": "0"}
 
     client_high = BudgetClient(order_10s=250)
     assert _order_budget_exceeded(client_high, policy, rate_limits) is True
@@ -974,9 +980,9 @@ def test_SCENARIO_PARITY_01_slice_progress_no_stall(tmp_path):
             for o in self.orders:
                 if o["newClientOrderId"]==oid:
                     status = "CANCELED" if oid in self.cancelled else "NEW"
-                    return {"status": status, "executedQty": str(o["quantity"]), "avgPrice": o["price"]}
+                    return {"time": _venue_now_ms(), "status": status, "executedQty": str(o["quantity"]), "avgPrice": o["price"]}
             status = "CANCELED" if oid in self.cancelled else "NEW"
-            return {"status": status, "executedQty": "0", "avgPrice": "0"}
+            return {"time": _venue_now_ms(), "status": status, "executedQty": "0", "avgPrice": "0"}
         def open_orders(self):
             return []
     client = SliceClient()
@@ -1029,9 +1035,9 @@ def test_SCENARIO_PARITY_02_avg_price_preferred(tmp_path):
             return {}
         def query_order(self,s,oid):
             if self.with_avg:
-                return {"executedQty":"1", "avgPrice":"99.50"}
+                return {"time": _venue_now_ms(), "executedQty":"1", "avgPrice":"99.50"}
             else:
-                return {"executedQty":"1"}
+                return {"time": _venue_now_ms(), "executedQty":"1"}
         def open_orders(self):
             return []
     # Test with avgPrice
@@ -1059,7 +1065,7 @@ def test_SCENARIO_PARITY_02_avg_price_preferred(tmp_path):
     rt.active_post_qty=Decimal("1")
     class _AvgClient:
         def query_order(self, *_args):
-            return {"executedQty": "1", "avgPrice": "99.50"}
+            return {"time": _venue_now_ms(), "executedQty": "1", "avgPrice": "99.50"}
     _sync_venue_order(_AvgClient(), rt, now=3.0, audit=audit, touch=None)
     assert rt.fill_notional==Decimal("99.50")
     # fallback without avgPrice
@@ -1070,7 +1076,7 @@ def test_SCENARIO_PARITY_02_avg_price_preferred(tmp_path):
     rt2.active_post_qty=Decimal("1")
     class _NoAvgClient:
         def query_order(self, *_args):
-            return {"executedQty": "1"}
+            return {"time": _venue_now_ms(), "executedQty": "1"}
     _sync_venue_order(_NoAvgClient(), rt2, now=3.0, audit=audit, touch=None)
     assert rt2.fill_notional==Decimal("100.00")
 
@@ -1276,8 +1282,8 @@ def test_execute_intents_default_model_preserves_peg_chase_path(tmp_path) -> Non
             # return filled quantity as posted
             for o in self.orders:
                 if o["newClientOrderId"] == oid:
-                    return {"executedQty": str(o["quantity"]), "avgPrice": o["price"]}
-            return {"executedQty": "0", "avgPrice": "0"}
+                    return {"time": _venue_now_ms(), "executedQty": str(o["quantity"]), "avgPrice": o["price"]}
+            return {"time": _venue_now_ms(), "executedQty": "0", "avgPrice": "0"}
 
     audit = AuditLog(tmp_path / "peg.jsonl")
     client = FillClient()
@@ -1388,7 +1394,7 @@ def test_execute_intents_rate_limited_submission_retries_next_tick_with_new_seq(
             return {}
 
         def query_order(self, symbol, orig_client_order_id):
-            return {"status": "FILLED", "executedQty": "1", "avgPrice": "100.00"}
+            return {"time": _venue_now_ms(), "status": "FILLED", "executedQty": "1", "avgPrice": "100.00"}
 
     client = _Client()
 
@@ -1456,7 +1462,7 @@ def test_execute_intents_abort_cancels_and_settles_active_orders(tmp_path) -> No
             return {}
 
         def query_order(self, symbol, orig_client_order_id):
-            return {"status": "CANCELED", "executedQty": "0.4", "avgPrice": "100.00"}
+            return {"time": _venue_now_ms(), "status": "CANCELED", "executedQty": "0.4", "avgPrice": "100.00"}
 
     client = _Client()
     filters = {"AAAUSDT": _filters("AAAUSDT"), "BBBUSDT": _filters("BBBUSDT")}
@@ -1523,7 +1529,7 @@ def test_execute_intents_abort_cleanup_failure_does_not_mask_original_error(tmp_
             raise ConnectionError("network down")
 
         def query_order(self, symbol, orig_client_order_id):
-            return {"status": "NEW", "executedQty": "0"}
+            return {"time": _venue_now_ms(), "status": "NEW", "executedQty": "0"}
 
     filters = {"AAAUSDT": _filters("AAAUSDT"), "BBBUSDT": _filters("BBBUSDT")}
 
@@ -1632,7 +1638,7 @@ def test_cancel_orphan_orders_settles_prior_day_and_legacy_orders_by_journal_del
 
         def query_order(self, symbol, orig_client_order_id):
             status = self._cancel_unknown_status or "CANCELED"
-            return {"status": status, "side": "BUY", "avgPrice": "100",
+            return {"time": _venue_now_ms(), "status": status, "side": "BUY", "avgPrice": "100",
                     "executedQty": self._executed.get(orig_client_order_id, "0")}
 
     prior = "mh20260913-ABCDEFGHIJ-0-0-7"
@@ -1961,7 +1967,7 @@ def test_cancel_orphan_orders_falls_back_to_open_order_avg_price(tmp_path) -> No
 
     class _NoAvgClient(_Client):
         def query_order(self, symbol, orig_client_order_id):
-            return {"status": "CANCELED", "side": "SELL", "executedQty": "2"}
+            return {"time": _venue_now_ms(), "status": "CANCELED", "side": "SELL", "executedQty": "2"}
 
     client = _NoAvgClient([{"symbol": "AAAUSDT", "clientOrderId": order, "avgPrice": "99.5"}], {})
 
@@ -2022,7 +2028,7 @@ def test_execute_intents_unknown_ioc_submission_adopted_without_second_send(tmp_
             return {}
 
         def query_order(self, symbol, orig_client_order_id):
-            return {"status": "FILLED", "executedQty": "1", "avgPrice": "100.20"}
+            return {"time": _venue_now_ms(), "status": "FILLED", "executedQty": "1", "avgPrice": "100.20"}
 
     client = _Client()
 
@@ -2421,8 +2427,8 @@ def test_live_partial_fills_emit_deltas(tmp_path) -> None:
         def query_order(self, symbol, orig_client_order_id):
             executed = self._executed.pop(0) if self._executed else "0"
             if orig_client_order_id in self.cancels:
-                return {"status": "CANCELED", "executedQty": executed}
-            return {"status": "NEW", "executedQty": executed}
+                return {"time": _venue_now_ms(), "status": "CANCELED", "executedQty": executed}
+            return {"time": _venue_now_ms(), "status": "NEW", "executedQty": executed}
 
     policy = PassiveExecutionPolicy(
         poll_interval_s=1.0, chase_ticks=2, max_chases=8,
@@ -2640,7 +2646,7 @@ def test_book_fetch_transient_skips_single_tick(tmp_path) -> None:
             return {}
 
         def query_order(self, symbol, oid):
-            return {"status": "FILLED", "executedQty": "1", "avgPrice": "100.00"}
+            return {"time": _venue_now_ms(), "status": "FILLED", "executedQty": "1", "avgPrice": "100.00"}
 
     outcomes = execute_intents(_Client(), [_exec_intent("AAAUSDT")], {"AAAUSDT": _exec_filters("AAAUSDT")},
                                policy, audit, clock, sleep_fn)
@@ -2682,8 +2688,8 @@ def test_consecutive_book_failures_abort_fail_closed(tmp_path) -> None:
 
         def query_order(self, symbol, oid):
             if oid in self.cancels:
-                return {"status": "CANCELED", "executedQty": "0"}
-            return {"status": "NEW", "executedQty": "0"}
+                return {"time": _venue_now_ms(), "status": "CANCELED", "executedQty": "0"}
+            return {"time": _venue_now_ms(), "status": "NEW", "executedQty": "0"}
 
     client = _Client()
     with pytest.raises(TransientReadError) as exc_info:
@@ -2736,11 +2742,11 @@ def test_order_query_transient_isolates_intent(tmp_path) -> None:
                     raise TransientReadError("blip", path="/fapi/v1/order", http_status=503, code=None, attempts=4)
             if oid in self.cancels:
                 if symbol == "AAAUSDT":
-                    return {"status": "CANCELED", "executedQty": "0"}
-                return {"status": "CANCELED", "executedQty": "1", "avgPrice": "100.00"}
+                    return {"time": _venue_now_ms(), "status": "CANCELED", "executedQty": "0"}
+                return {"time": _venue_now_ms(), "status": "CANCELED", "executedQty": "1", "avgPrice": "100.00"}
             if symbol == "AAAUSDT":
-                return {"status": "NEW", "executedQty": "0"}
-            return {"status": "FILLED", "executedQty": "1", "avgPrice": "100.00"}
+                return {"time": _venue_now_ms(), "status": "NEW", "executedQty": "0"}
+            return {"time": _venue_now_ms(), "status": "FILLED", "executedQty": "1", "avgPrice": "100.00"}
 
     client = _Client()
     outcomes = execute_intents(client, [_exec_intent("AAAUSDT"), _exec_intent("BBBUSDT")],
@@ -2955,7 +2961,7 @@ def test_poll_active_avg_price_branches(tmp_path) -> None:
 
     class _ZeroAvg:
         def query_order(self, s, oid):
-            return {"status": "NEW", "executedQty": "0", "avgPrice": "0.000"}
+            return {"time": _venue_now_ms(), "status": "NEW", "executedQty": "0", "avgPrice": "0.000"}
 
         def cancel_order(self, *a, **k):
             return {}
@@ -2968,7 +2974,7 @@ def test_poll_active_avg_price_branches(tmp_path) -> None:
 
     class _BadAvg:
         def query_order(self, s, oid):
-            return {"status": "NEW", "executedQty": "0", "avgPrice": "nan-x"}
+            return {"time": _venue_now_ms(), "status": "NEW", "executedQty": "0", "avgPrice": "nan-x"}
 
         def cancel_order(self, *a, **k):
             return {}
@@ -3053,8 +3059,8 @@ def test_sub_minimum_residual_after_partial_fill(tmp_path) -> None:
         def query_order(self, symbol, oid):
             if symbol == "AAAUSDT":
                 status = "CANCELED" if oid in self.cancels else "NEW"
-                return {"status": status, "executedQty": "0.96", "avgPrice": "100.00"}
-            return {"status": "FILLED", "executedQty": "1", "avgPrice": "100.00"}
+                return {"time": _venue_now_ms(), "status": status, "executedQty": "0.96", "avgPrice": "100.00"}
+            return {"time": _venue_now_ms(), "status": "FILLED", "executedQty": "1", "avgPrice": "100.00"}
 
     client = _Client()
     policy = _iso_policy(passive_deadline_s=20.0, window_deadline_s=600.0)
@@ -3088,8 +3094,8 @@ def test_sub_minimum_reduce_only_residual_is_posted(tmp_path) -> None:
 
         def query_order(self, s, oid):
             if oid in self.cancels:
-                return {"status": "CANCELED", "executedQty": "0"}
-            return {"status": "NEW", "executedQty": "0"}
+                return {"time": _venue_now_ms(), "status": "CANCELED", "executedQty": "0"}
+            return {"time": _venue_now_ms(), "status": "NEW", "executedQty": "0"}
 
     client = _Client()
     policy = _iso_policy(window_deadline_s=6.0, passive_deadline_s=5.0)
@@ -3112,7 +3118,7 @@ def test_remainder_below_min_qty_never_posted(tmp_path) -> None:
             return {}
 
         def query_order(self, s, oid):
-            return {"status": "NEW", "executedQty": "0"}
+            return {"time": _venue_now_ms(), "status": "NEW", "executedQty": "0"}
 
     policy = _iso_policy(window_deadline_s=6.0, passive_deadline_s=5.0)
     outcomes, events, _ = _iso_run(_Client(), [_iso_intent("AAAUSDT", qty="0.0005")],
@@ -3143,8 +3149,8 @@ def test_undersized_head_slice_posts_whole_remainder(tmp_path) -> None:
 
         def query_order(self, s, oid):
             if oid in self.cancels:
-                return {"status": "CANCELED", "executedQty": "0"}
-            return {"status": "NEW", "executedQty": "0"}
+                return {"time": _venue_now_ms(), "status": "CANCELED", "executedQty": "0"}
+            return {"time": _venue_now_ms(), "status": "NEW", "executedQty": "0"}
 
     client = _Client()
     policy = _iso_policy(window_deadline_s=6.0, passive_deadline_s=5.0)
@@ -3175,7 +3181,7 @@ def test_symbol_scoped_rejection_ends_only_that_intent(tmp_path) -> None:
             return {}
 
         def query_order(self, s, oid):
-            return {"status": "FILLED", "executedQty": "1", "avgPrice": "100.00"}
+            return {"time": _venue_now_ms(), "status": "FILLED", "executedQty": "1", "avgPrice": "100.00"}
 
     client = _Client()
     filters = {"AAAUSDT": _iso_filters("AAAUSDT"), "BBBUSDT": _iso_filters("BBBUSDT")}
@@ -3214,7 +3220,7 @@ def test_margin_rejection_waits_then_retries(tmp_path) -> None:
             return {}
 
         def query_order(self, s, oid):
-            return {"status": "FILLED", "executedQty": "1", "avgPrice": "100.00"}
+            return {"time": _venue_now_ms(), "status": "FILLED", "executedQty": "1", "avgPrice": "100.00"}
 
     from src.live.audit import AuditLog
     from src.live.executor import execute_intents
@@ -3255,7 +3261,7 @@ def test_margin_rejections_bounded(tmp_path) -> None:
             return {}
 
         def query_order(self, s, oid):
-            return {"status": "FILLED", "executedQty": "1", "avgPrice": "100.00"}
+            return {"time": _venue_now_ms(), "status": "FILLED", "executedQty": "1", "avgPrice": "100.00"}
 
     client = _Client()
     policy = _iso_policy(passive_deadline_s=500.0, window_deadline_s=600.0, max_margin_rejects=2)
@@ -3283,7 +3289,7 @@ def test_margin_rejection_on_reduce_only_rejects_immediately(tmp_path) -> None:
             return {}
 
         def query_order(self, s, oid):
-            return {"status": "NEW", "executedQty": "0"}
+            return {"time": _venue_now_ms(), "status": "NEW", "executedQty": "0"}
 
     policy = _iso_policy(window_deadline_s=6.0, passive_deadline_s=5.0)
     outcomes, _, _ = _iso_run(_Client(), [_iso_intent("AAAUSDT", reduce_only=True)],
@@ -3313,7 +3319,7 @@ def test_risk_increase_freeze_stops_only_increases(tmp_path) -> None:
             return {}
 
         def query_order(self, s, oid):
-            return {"status": "FILLED", "executedQty": "1", "avgPrice": "100.00"}
+            return {"time": _venue_now_ms(), "status": "FILLED", "executedQty": "1", "avgPrice": "100.00"}
 
     client = _Client()
     filters = {s: _iso_filters(s) for s in ("AAAUSDT", "BBBUSDT", "CCCUSDT")}
@@ -3348,8 +3354,8 @@ def test_reductions_posted_before_increases(tmp_path) -> None:
 
         def query_order(self, s, oid):
             if oid in self.cancels:
-                return {"status": "CANCELED", "executedQty": "0"}
-            return {"status": "NEW", "executedQty": "0"}
+                return {"time": _venue_now_ms(), "status": "CANCELED", "executedQty": "0"}
+            return {"time": _venue_now_ms(), "status": "NEW", "executedQty": "0"}
 
     client = _Client()
     policy = _iso_policy(window_deadline_s=4.0, passive_deadline_s=3.0)
@@ -3383,7 +3389,7 @@ def test_unregistered_rejection_still_aborts(tmp_path) -> None:
             return {}
 
         def query_order(self, s, oid):
-            return {"status": "CANCELED", "executedQty": "0.4", "avgPrice": "100.00"}
+            return {"time": _venue_now_ms(), "status": "CANCELED", "executedQty": "0.4", "avgPrice": "100.00"}
 
     import pytest
 
@@ -3543,7 +3549,7 @@ def test_order_budget_exceeded_posts_nothing(tmp_path) -> None:
             return {}
 
         def query_order(self, s, oid):
-            return {"status": "NEW", "executedQty": "0"}
+            return {"time": _venue_now_ms(), "status": "NEW", "executedQty": "0"}
 
     client = _Client()
     limits = RateLimits(request_weight_1m=2400, orders_1m=1200, orders_10s=300)
@@ -3617,11 +3623,11 @@ class _ShutdownLiveClient:
         for order in self.orders:
             if order["newClientOrderId"] == orig_client_order_id:
                 if orig_client_order_id in self.cancels:
-                    return {"status": "CANCELED", "executedQty": "0.4" if symbol == "AAAUSDT" else "0",
+                    return {"time": _venue_now_ms(), "status": "CANCELED", "executedQty": "0.4" if symbol == "AAAUSDT" else "0",
                             "avgPrice": "100.00"}
-                return {"status": "NEW", "executedQty": "0.4" if symbol == "AAAUSDT" else "0",
+                return {"time": _venue_now_ms(), "status": "NEW", "executedQty": "0.4" if symbol == "AAAUSDT" else "0",
                         "avgPrice": "100.00"}
-        return {"status": "NEW", "executedQty": "0"}
+        return {"time": _venue_now_ms(), "status": "NEW", "executedQty": "0"}
 
 
 def test_shutdown_during_window_settles_and_raises_interrupted(tmp_path) -> None:
@@ -3730,7 +3736,7 @@ def test_shutdown_cleanup_budget_bounds_venue_calls(tmp_path) -> None:
             return {s: {"symbol": s, "bidPrice": "100.00", "askPrice": "100.20"} for s in symbols}
 
         def query_order(self, symbol, orig_client_order_id):
-            return {"status": "CANCELED" if orig_client_order_id in self.cancels else "NEW",
+            return {"time": _venue_now_ms(), "status": "CANCELED" if orig_client_order_id in self.cancels else "NEW",
                     "executedQty": "0", "avgPrice": "100.00"}
 
     client = _ThreeClient(flag)
@@ -3816,8 +3822,8 @@ def test_every_fill_is_journaled_before_visible(tmp_path) -> None:
         first_id.setdefault("id", oid)
         executed = "0.4" if oid == first_id["id"] else "0"
         if oid in live_client.cancels:
-            return {"status": "CANCELED", "executedQty": executed, "avgPrice": "100.00"}
-        return {"status": "NEW", "executedQty": executed, "avgPrice": "100.00"}
+            return {"time": _venue_now_ms(), "status": "CANCELED", "executedQty": executed, "avgPrice": "100.00"}
+        return {"time": _venue_now_ms(), "status": "NEW", "executedQty": executed, "avgPrice": "100.00"}
 
     live_client.query_order = _once_partial
     short = _shutdown_policy(passive_deadline_s=20.0, window_deadline_s=600.0)
@@ -3833,7 +3839,7 @@ def test_every_fill_is_journaled_before_visible(tmp_path) -> None:
     boom_journal = OrderJournal(tmp_path / "boom_journal.jsonl")
     boom_attempt = _test_attempt(boom_journal)
     boom_client = _ShutdownLiveClient(__import__("types").SimpleNamespace(requested=False), trip_at=10**9)
-    boom_client.query_order = lambda s, oid: {"status": "NEW", "executedQty": "1", "avgPrice": "100.00"}
+    boom_client.query_order = lambda s, oid: {"time": _venue_now_ms(), "status": "NEW", "executedQty": "1", "avgPrice": "100.00"}
 
     def _boom(**kwargs):
         raise RuntimeError("journal down")
@@ -3876,7 +3882,7 @@ def test_orphan_settlement_journaled_not_applied(tmp_path) -> None:
             return {}
 
         def query_order(self, symbol, oid):
-            return {"status": "CANCELED", "side": "SELL", "avgPrice": "101", "executedQty": "1.5"}
+            return {"time": _venue_now_ms(), "status": "CANCELED", "side": "SELL", "avgPrice": "101", "executedQty": "1.5"}
 
     fills = cancel_orphan_orders(_Client(), "20260914", audit, journal=journal, now=now, taker_fee_bps=4.5)
 
@@ -4146,8 +4152,8 @@ def test_cancel_fill_race_at_passive_timeout_completes_intent(tmp_path) -> None:
 
         def query_order(self, symbol, oid):
             if oid in self.cancelled:
-                return {"status": "FILLED", "executedQty": "1", "avgPrice": "100.00"}
-            return {"status": "NEW", "executedQty": "0", "avgPrice": "0"}
+                return {"time": _venue_now_ms(), "status": "FILLED", "executedQty": "1", "avgPrice": "100.00"}
+            return {"time": _venue_now_ms(), "status": "NEW", "executedQty": "0", "avgPrice": "0"}
 
     journal = OrderJournal(tmp_path / "journal.jsonl")
     attempt = _test_attempt(journal)
@@ -4189,7 +4195,7 @@ def test_reduce_only_obsolete_ends_only_that_intent_and_journals_terminal(tmp_pa
             return {}
 
         def query_order(self, symbol, oid):
-            return {"status": "FILLED", "executedQty": "1", "avgPrice": "100.00"}
+            return {"time": _venue_now_ms(), "status": "FILLED", "executedQty": "1", "avgPrice": "100.00"}
 
     reduce = OrderIntent(symbol="AAAUSDT", side="SELL", quantity=Decimal("1"), reduce_only=True,
                          target_qty=Decimal("0"), current_qty=Decimal("1"), client_order_prefix="20260914",
@@ -4674,7 +4680,7 @@ def test_in_execution_cancel_with_open_confirmation_raises_and_keeps_order_non_t
             raise _venue_error(-2011)
 
         def query_order(self, symbol, oid):
-            return {"status": "NEW", "executedQty": "0"}
+            return {"time": _venue_now_ms(), "status": "NEW", "executedQty": "0"}
 
     audit_path = tmp_path / "audit.jsonl"
     journal = OrderJournal(tmp_path / "journal.jsonl")

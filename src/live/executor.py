@@ -56,7 +56,7 @@ from src.live.rest import (
 )
 
 if TYPE_CHECKING:
-    from src.live.order_journal import JournalAttempt, JournalFill
+    from src.live.order_journal import JournalAttempt, JournalFill, JournalSubmit
 
 _BPS_DENOMINATOR = Decimal(10_000)
 
@@ -82,6 +82,13 @@ def _default_unknown_outcome_horizon_s() -> float:
 
     recv_window_ms = LiveSettings.model_fields["recv_window_ms"].default
     return float(recv_window_ms) / 1000 + _HTTP_TIMEOUT_SECONDS
+
+
+def _default_order_identity_tolerance_ms() -> int:
+    from src.live.settings import _ORDER_IDENTITY_SKEW_MARGIN_MS, LiveSettings
+
+    recv_window_ms = LiveSettings.model_fields["recv_window_ms"].default
+    return int(recv_window_ms) + int(_ORDER_IDENTITY_SKEW_MARGIN_MS)
 
 
 DEFAULT_UNKNOWN_OUTCOME_HORIZON_S: float = _default_unknown_outcome_horizon_s()
@@ -545,9 +552,9 @@ def _journal_submit(
     quantity: Decimal,
     reduce_only: bool,
     leg_index: int,
-) -> None:
+) -> JournalSubmit:
     """Record one submission (fsync) before the order is sent."""
-    journal.record_submit(
+    return journal.record_submit(
         client_order_id,
         symbol,
         submit_seq,
@@ -736,6 +743,35 @@ def _apply_fill(
     _emit_fill_event(audit, rt, quantity, price, liquidity, simulated, touch, client_order_id)
 
 
+def _guard_order_identity(rt: _IntentRuntime, payload: Mapping[str, Any], clock_margin_ms: int = 0) -> None:
+    """Reject a venue payload created before its journal submit beyond clock skew."""
+    from src.live.order_identity import assert_order_identity
+
+    journal = rt.journal
+    if journal is None or rt.active_id is None:
+        return
+    submits = getattr(journal, "submits", None)
+    if submits is None:
+        return
+    if rt.identity_submits is None:
+        rt.identity_submits = {s.client_order_id: s for s in submits()}
+    match = rt.identity_submits.get(rt.active_id)
+    if match is None:
+        return
+    recorded_at = match.recorded_at
+    if recorded_at == pd.Timestamp.min.tz_localize("UTC"):
+        return
+    tolerance = rt.order_identity_tolerance_ms
+    if tolerance is None:
+        tolerance = _default_order_identity_tolerance_ms()
+    assert_order_identity(
+        payload,
+        client_order_id=str(rt.active_id),
+        submitted_at=recorded_at,
+        tolerance_ms=int(tolerance) + clock_margin_ms,
+    )
+
+
 def _sync_venue_order(
     client: Any,
     rt: _IntentRuntime,
@@ -750,6 +786,8 @@ def _sync_venue_order(
     assert not rt.paper_active
     if payload is None:
         payload = client.query_order(rt.intent.symbol, rt.active_id)
+    margin = getattr(client, "clock_offset_margin_ms", 0)
+    _guard_order_identity(rt, payload, margin if isinstance(margin, int) and margin > 0 else 0)
     status = str(payload.get("status", "") or "")
     executed = Decimal(str(payload.get("executedQty", "0")))
     if executed > rt.active_post_qty:
@@ -860,6 +898,8 @@ class _IntentRuntime:
     journal_enabled: bool = False
     journal_submitted: set[str] = field(default_factory=set)
     journal_terminals: set[str] = field(default_factory=set)
+    order_identity_tolerance_ms: int | None = None
+    identity_submits: dict[str, JournalSubmit] | None = None
 
     @property
     def done(self) -> bool:
@@ -980,6 +1020,7 @@ def execute_intents(
     journal: OrderJournal | None = None,
     attempt: JournalAttempt | None = None,
     shutdown_cleanup_budget_s: float | None = None,
+    order_identity_tolerance_ms: int | None = None,
 ) -> tuple[ExecutionOutcome, ...]:
     """단일 협조 루프(post-all/poll-all/예산 스로틀). 반환 순서는 intents 와 1:1.
 
@@ -1045,18 +1086,21 @@ def execute_intents(
                 chases=0,
             )
         return outcomes
+    identity_submits = {s.client_order_id: s for s in journal.submits()} if journal is not None else None
     runtimes = [
         _IntentRuntime(
             intent=intent,
             filters=filters.get(intent.symbol),
             fee_schedule=policy.fee_schedule,
             journal=journal,
+            identity_submits=identity_submits,
         )
         for intent in intents
     ]
     for rt in runtimes:
         rt.attempt_seq = attempt_seq
         rt.journal_enabled = journal is not None
+        rt.order_identity_tolerance_ms = order_identity_tolerance_ms
         if rt.filters is None:
             rt.terminal_status = "RESIDUAL"
     try:
@@ -1839,7 +1883,7 @@ def _poll_or_post(
         rt.intent.client_order_prefix, rt.intent.symbol, rt.intent.leg_index, 0, submit_seq
     )
     if journaled and rt.journal is not None and rt.attempt_seq is not None:
-        _journal_submit(
+        submit = _journal_submit(
             rt.journal,
             client_order_id=order_id,
             symbol=rt.intent.symbol,
@@ -1850,6 +1894,8 @@ def _poll_or_post(
             reduce_only=rt.intent.reduce_only,
             leg_index=rt.intent.leg_index,
         )
+        if rt.identity_submits is not None:
+            rt.identity_submits[order_id] = submit
         rt.journal_submitted.add(order_id)
     rt.attempts += 1
     params: dict[str, Any] = {

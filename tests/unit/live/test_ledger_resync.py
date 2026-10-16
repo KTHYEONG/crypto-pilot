@@ -18,6 +18,12 @@ from src.live.settings import LiveSettings
 
 from tests.unit.live._runner_stubs import DECISION_TIME, NOW, StubMarketClient, StubOrderClient
 
+def _venue_now_ms() -> int:
+    import time
+
+    return int(time.time() * 1000)
+
+
 
 class _ResyncOrderClient(StubOrderClient):
     """Venue AAAUSDT 0.5; no open orders."""
@@ -31,7 +37,7 @@ class _ResyncOrderClient(StubOrderClient):
         return []
 
     def query_order(self, symbol, orig_client_order_id):
-        return {"status": "CANCELED", "side": "BUY", "avgPrice": "100", "executedQty": "0"}
+        return {"time": _venue_now_ms(), "status": "CANCELED", "side": "BUY", "avgPrice": "100", "executedQty": "0"}
 
 
 @pytest.fixture
@@ -320,7 +326,7 @@ def test_ledger_resync_refuses_while_own_orders_unresolved(tmp_path, monkeypatch
             raise VenueError("unknown order", code=-2011, http_status=400, path="/fapi/v1/order", payload_digest="0" * 12)
 
         def query_order(self, symbol, orig_client_order_id):
-            return {"status": "NEW", "side": "BUY", "executedQty": "0", "avgPrice": "0", "updateTime": 1}
+            return {"time": _venue_now_ms(), "status": "NEW", "side": "BUY", "executedQty": "0", "avgPrice": "0", "updateTime": 1}
 
     monkeypatch.setattr(runner_mod, "_market_client", lambda settings, decision_time: StubMarketClient())
     order_id = build_client_order_id("20260823", "AAAUSDT", 0, 0, 0)

@@ -396,7 +396,7 @@ class OrderJournal:
         quantity: Decimal,
         reduce_only: bool,
         leg_index: int,
-    ) -> None:
+    ) -> JournalSubmit:
         self._ensure_loaded()
         if submit_seq != self._next_submit_seq:
             raise ValueError(
@@ -439,6 +439,7 @@ class OrderJournal:
             )
         )
         self._next_submit_seq = submit_seq + 1
+        return self._submits[-1]
 
     def record_fill(
         self,

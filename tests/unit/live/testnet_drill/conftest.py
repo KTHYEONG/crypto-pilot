@@ -6,7 +6,9 @@ import time
 from decimal import Decimal
 
 import pytest
+import pandas as pd
 
+from src.live import order_journal
 from src.live.testnet_drill import session as session_module
 from tests.unit.live.testnet_drill._exchange import Exchange
 from tests.unit.live.testnet_drill._stubs import make_config, make_settings, patch_drill_root
@@ -19,6 +21,7 @@ def exchange_session(tmp_path, monkeypatch):
     monkeypatch.setattr(time, "time", lambda: now[0])
     monkeypatch.setattr(time, "monotonic", lambda: now[0])
     monkeypatch.setattr(time, "sleep", lambda seconds: now.__setitem__(0, now[0] + seconds))
+    monkeypatch.setattr(order_journal, "_utc_now", lambda: pd.Timestamp(now[0], unit="s", tz="UTC"))
     opened = []
 
     def factory(*, config=None, settings=None):

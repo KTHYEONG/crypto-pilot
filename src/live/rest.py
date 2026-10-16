@@ -384,6 +384,11 @@ class BinanceFuturesRestClient:
         return self._mode
 
     @property
+    def clock_offset_margin_ms(self) -> int:
+        """Absolute learned venue clock offset for local submit-time comparisons."""
+        return abs(self._time_offset_ms)
+
+    @property
     def unknown_outcome_horizon_s(self) -> float:
         """Seconds after a mutation's send time beyond which the venue can no longer materialize it.
 
