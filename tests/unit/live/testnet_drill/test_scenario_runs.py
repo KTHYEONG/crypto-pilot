@@ -83,3 +83,12 @@ def test_c4_refuses_when_reachable_depth_exceeds_available_balance(exchange_sess
     )
     with pytest.raises(DrillRefused, match="c4_reachable_depth_exceeds_available_balance"):
         SCENARIOS["C4"].run(session, session.config)
+
+
+def test_trade_window_requires_a_journaled_submit(exchange_session):
+    from src.live.testnet_drill.guard import DrillRefused
+    from src.live.testnet_drill.scenarios.lifecycle_runs import _trade_window_start_ms
+
+    session, _, _ = exchange_session(config={"symbols": ("BTCUSDT", "ETHUSDT")})
+    with pytest.raises(DrillRefused, match="trade_window_without_submits"):
+        _trade_window_start_ms(session, {"never-submitted"})

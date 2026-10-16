@@ -572,6 +572,23 @@ def test_server_time_ms_applies_learned_clock_offset(tmp_path, monkeypatch) -> N
     assert client.server_time_ms() == 999_700
 
 
+def test_user_trades_sends_start_time_when_bounded(tmp_path, monkeypatch) -> None:
+    """A start bound is forwarded as `startTime`; without it the query carries no time parameter."""
+    from urllib.parse import parse_qs, urlsplit
+
+    from src.live.rest import HttpResponse
+
+    client, calls, _ = _rest_client(
+        tmp_path, monkeypatch, lambda m, u: HttpResponse(status_code=200, headers={}, body=b"[]"),
+        audit_name="user_trades.jsonl",
+    )
+    assert client.user_trades("BTCUSDT", start_time_ms=1_700_000_000_000) == []
+    assert client.user_trades("BTCUSDT") == []
+    bounded, unbounded = (parse_qs(urlsplit(url).query) for url in calls)
+    assert bounded["startTime"] == ["1700000000000"]
+    assert "startTime" not in unbounded
+
+
 def test_get_503_then_success_returns_body(tmp_path, monkeypatch) -> None:
     """GET 503 then success returns the body with one retry audit row."""
     import json
