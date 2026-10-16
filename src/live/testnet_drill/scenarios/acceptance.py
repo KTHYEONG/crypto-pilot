@@ -357,7 +357,13 @@ def _eval_b7(evidence: ScenarioEvidence) -> Any:
 
 
 def _run_b8(session: Any, config: Any) -> ScenarioEvidence:
+    from src.live.executor import MAX_SLICE_NOTIONAL
+
     seed = make_intent(session, config.symbols[0])
+    unsliced_cap = MAX_SLICE_NOTIONAL / 2
+    if seed.quantity * seed.decision_price > unsliced_cap:
+        # The off-grid leg must reach the venue; the executor's slicer rejects off-grid quantities locally.
+        seed = make_intent(session, config.symbols[0], quantity=unsliced_cap / seed.decision_price)
     trace = run_cycle(
         session,
         [

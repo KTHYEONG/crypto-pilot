@@ -486,6 +486,10 @@ def _eval_e4(evidence: ScenarioEvidence) -> Any:
     p = evidence.payload
     if "execution" in str(p.get("kinds", "")) and "recovered" in str(p.get("kinds", "")):
         return result_of(evidence, "E4", Verdict.FAIL, (("single_booking", False),))
+    pre_restart = p.get("pre_restart_venue") or {}
+    if not pre_restart.get("positions") and not str(p.get("kinds", "")) and p["no_double_count"] is True:
+        # The IOC expired unfilled before the kill, so there was no fill to recover.
+        return result_of(evidence, "E4", Verdict.OBSERVED, (("ioc_unfilled_nothing_to_recover", True),))
     passed = p["recovered_once"] is True and p["no_double_count"] is True
     return result_of(evidence, "E4", Verdict.PASS if passed else Verdict.FAIL, (("single_booking", passed),))
 
