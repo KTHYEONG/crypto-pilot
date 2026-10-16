@@ -26,6 +26,15 @@ def test_single_booking() -> None:
     assert _SPECS["E4"].evaluate(failing).verdict is Verdict.FAIL
 
 
+def test_single_booking_unfilled_ioc_is_observed_not_failed() -> None:
+    unfilled = ev("E4", recovered_once=False, no_double_count=True, kinds="",
+                  pre_restart_venue={"positions": {}, "open_orders": []}, conservation_passed=True)
+    assert _SPECS["E4"].evaluate(unfilled).verdict is Verdict.OBSERVED
+    filled_but_lost = ev("E4", recovered_once=False, no_double_count=True, kinds="",
+                         pre_restart_venue={"positions": {"BTCUSDT": "0.1"}, "open_orders": []})
+    assert _SPECS["E4"].evaluate(filled_but_lost).verdict is Verdict.FAIL
+
+
 def test_not_found_terminal() -> None:
     passing = ev("E1", exit_code=137, query_code=-2013, terminal_status="NOT_FOUND", venue_exposure=0,
                  orphan_count=0, conservation_passed=True)
