@@ -292,6 +292,16 @@ def _run_testnet_drill(args: argparse.Namespace) -> None:
         raise SystemExit(2)
     try:
         settings = LiveSettings()
+        if not 0 < args.repeg_interval_s < args.passive_timeout_minutes * 60:
+            raise ValueError("repeg_interval_s must be positive and below the passive deadline")
+        settings = settings.model_copy(
+            update={
+                "passive_timeout_minutes": args.passive_timeout_minutes,
+                "repeg_interval_s": args.repeg_interval_s,
+                "maker_fee_bps": args.maker_fee_bps,
+                "taker_fee_bps": args.taker_fee_bps,
+            }
+        )
         workspace = drill_scratch_root() / args.run_id
         assert_drill_allowed(settings, workspace)
         if workspace.exists():
@@ -559,6 +569,12 @@ def add_live_commands(live_parser: argparse.ArgumentParser) -> None:
     drill.add_argument(
         "--continue-on-fail", action="store_true", default=False, help="Keep running later groups after a FAIL"
     )
+    drill.add_argument(
+        "--passive-timeout-minutes", type=int, default=3, help="Drill-only passive deadline (production setting is untouched)"
+    )
+    drill.add_argument("--repeg-interval-s", type=float, default=30.0, help="Drill-only re-peg interval")
+    drill.add_argument("--maker-fee-bps", type=float, default=2.0, help="Testnet maker commission for R3 parity")
+    drill.add_argument("--taker-fee-bps", type=float, default=4.0, help="Testnet taker commission for R3 parity")
     drill.add_argument("--funding-soak-s", type=float, default=0.0, help="F5 soak duration; 0 skips F5")
     drill.add_argument("--no-teardown", action="store_true", default=False, help="Skip teardown (debug)")
     drill.add_argument("--resume", action="store_true", default=False, help="Reuse an existing run workspace")

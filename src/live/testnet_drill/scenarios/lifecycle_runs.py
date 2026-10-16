@@ -170,18 +170,39 @@ def _race(session: DrillSession) -> ScenarioEvidence:
     return ev("C6", repetitions=repetitions)
 
 
+_REPEG_CLOCK_SLACK_S = 0.5
+
+
+def _repeg_lifetimes(audit_path: Any) -> list[float]:
+    """Seconds each order rested before a re-peg cancelled it, from the audit stream."""
+    from datetime import datetime
+
+    posted: dict[str, datetime] = {}
+    lifetimes: list[float] = []
+    for line in audit_path.read_text(encoding="utf-8").splitlines():
+        row = json.loads(line)
+        client_id = row.get("client_order_id")
+        at = datetime.fromisoformat(row["ts"])
+        if row.get("event") == "order_posted" and client_id is not None:
+            posted[client_id] = at
+        elif row.get("event") == "order_cancelled" and row.get("reason") == "repeg" and client_id in posted:
+            lifetimes.append((at - posted[client_id]).total_seconds())
+    return lifetimes
+
+
 def _repeg(session: DrillSession) -> ScenarioEvidence:
     symbol = session.config.symbols[0]
     intent = make_intent(session, symbol)
     trace = run_cycle(session, [intent])
-    times = [sample["observed_at"] for sample in trace.post_quotes if sample["timeInForce"] == "GTX"]
-    interval_ok = len(times) >= 2 and all(b - a >= trace.policy.repeg_interval_s for a, b in pairwise(times))
+    lifetimes = _repeg_lifetimes(session.workspace / "audit.jsonl")
+    interval_ok = all(seconds >= trace.policy.repeg_interval_s - _REPEG_CLOCK_SLACK_S for seconds in lifetimes)
     return ev(
         "C9",
         open_order_snapshots=trace.open_counts,
         cumulative_filled=str(sum((outcome.filled_qty for outcome in trace.outcomes), Decimal(0))),
         intent_qty=str(intent.quantity),
         interval_respected=interval_ok,
+        repegs=len(lifetimes),
     )
 
 

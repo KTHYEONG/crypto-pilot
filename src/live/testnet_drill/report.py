@@ -165,6 +165,7 @@ def _result_payload(result: ScenarioResult) -> dict[str, object]:
         "hypothesis_outcome": result.hypothesis_outcome,
         "evidence_path": result.evidence_path,
         "conservation_passed": result.conservation_passed,
+        "rationale": _strip_secrets(result.proposal_rationale),
     }
 
 

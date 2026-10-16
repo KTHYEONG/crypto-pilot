@@ -334,7 +334,16 @@ def _run_f6(session: Any, config: Any) -> ScenarioEvidence:
     hot = str(math.floor(policy.rate_weight_budget_fraction * limits.request_weight_1m) + 1)
     rules = [
         FaultRule(method, path, action=FaultAction.OVERRIDE_HEADERS, headers=(("X-MBX-USED-WEIGHT-1M", hot),), times=10**6)
-        for method, path in (("GET", BOOK_TICKER_PATH), ("GET", ORDER_PATH), ("POST", ORDER_PATH), ("DELETE", ORDER_PATH))
+        for method, path in (
+            ("GET", BOOK_TICKER_PATH),
+            ("GET", ORDER_PATH),
+            ("POST", ORDER_PATH),
+            ("DELETE", ORDER_PATH),
+            ("GET", "/fapi/v1/openOrders"),
+            ("GET", "/fapi/v1/depth"),
+            ("GET", "/fapi/v2/account"),
+            ("GET", "/fapi/v2/positionRisk"),
+        )
     ]
     intents = [make_intent(session, symbol, leg_index=i) for i, symbol in enumerate(session.config.symbols)]
     start = len(session.transport.records)
@@ -370,6 +379,8 @@ def _run_f7(session: Any, config: Any) -> ScenarioEvidence:
     client = GuardedVenueClient(session)
     today = _now().normalize()
     artifact = write_weights_artifact(session, {today: dict.fromkeys(session.config.symbols[:1], 0.0)})
+    sealed = artifact.with_name(artifact.name + ".enc")
+    artifact = sealed if sealed.exists() else artifact
 
     def checks(settings: Any, order_client: Any) -> dict[str, tuple[bool, str]]:
         report = run_preflight(settings, artifact, market_client=client, order_client=order_client)
