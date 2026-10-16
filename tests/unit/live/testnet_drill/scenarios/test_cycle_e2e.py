@@ -66,14 +66,18 @@ def test_g4_refuses_unproven_venue_preconditions(exchange_session, monkeypatch, 
 
     def call(method, url, headers):
         response = original(method, url, headers)
+        if method == "GET" and urlsplit(url).path == "/fapi/v1/order" and variant == "initial_unfilled" and posts:
+            row = json.loads(response.body)
+            if row.get("clientOrderId") == posts[0]["clientOrderId"]:
+                row.update(status="EXPIRED", executedQty="0")
+                return replace(response, body=json.dumps(row).encode())
         if method == "POST" and urlsplit(url).path == "/fapi/v1/order":
             row = json.loads(response.body)
             posts.append(row)
-            if len(posts) == 1 and variant == "initial_unfilled":
-                row["status"] = "EXPIRED"
-            elif len(posts) == 2 and variant == "replacement_unrest":
+            # posts: 1 seed IOC, 2 unjournaled flatten, 3 replacement
+            if len(posts) == 3 and variant == "replacement_unrest":
                 row["status"] = "FILLED"
-            elif len(posts) == 2 and variant == "same_order_id":
+            elif len(posts) == 3 and variant == "same_order_id":
                 row["orderId"] = posts[0]["orderId"]
             return replace(response, body=json.dumps(row).encode())
         return response
