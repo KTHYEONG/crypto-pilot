@@ -1505,11 +1505,14 @@ def test_run_shadow_cycle_wires_one_order_journal_into_orphan_cleanup_and_execut
     monkeypatch.setattr(runner_mod, "default_order_journal_path", lambda: journal_path)
     captured: dict[str, object] = {}
 
-    def fake_orphans(client, client_order_prefix, audit, *, journal=None, now=None, taker_fee_bps=None):
+    def fake_orphans(
+        client, client_order_prefix, audit, *, journal=None, now=None, taker_fee_bps=None, order_identity_tolerance_ms=None
+    ):
         from src.live.executor import OrphanSweep
 
         captured["orphan_journal"] = journal
         captured["prefix"] = client_order_prefix
+        captured["identity_tolerance_ms"] = order_identity_tolerance_ms
         return OrphanSweep(fills=(), foreign_symbols=())
 
     def fake_execute(client, intents, filters, policy, audit, clock, sleep_fn, *, rate_limits=None, **kwargs):
@@ -1534,6 +1537,7 @@ def test_run_shadow_cycle_wires_one_order_journal_into_orphan_cleanup_and_execut
     assert captured["orphan_journal"] is captured["execute_journal"]
     assert captured["orphan_journal"].path == journal_path
     assert captured["prefix"] == "20260824"
+    assert captured["identity_tolerance_ms"] > 0
     assert real_journal_snapshot() == real_journal_before
     assert journal_path.exists()
     assert captured["orphan_journal"].fills_after(-1) == ()
