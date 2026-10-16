@@ -67,9 +67,7 @@ def _run(session, scenario_id):
 
 
 _EXPECTED = {
-    **dict.fromkeys(("D1", "D2", "D3", "D4", "D5", "D6", "D7", "D9", "D10"), Verdict.PASS),
-    # The production client returns None for a corrupt 2xx mutation body and the executor treats it as accepted.
-    "D8": Verdict.FAIL,
+    **dict.fromkeys(("D1", "D2", "D3", "D4", "D5", "D6", "D7", "D8", "D9", "D10"), Verdict.PASS),
     **dict.fromkeys(("E1", "E2", "E3", "E4", "E5", "E6", "E8", "E9", "E10"), Verdict.PASS),
     **dict.fromkeys(("F1", "F2", "F3", "F6", "F7"), Verdict.PASS),
     "F4": Verdict.OBSERVED,
@@ -87,12 +85,13 @@ def test_scenarios_run_against_real_faults(exchange_session, in_process_worker, 
     assert result.verdict is _EXPECTED[scenario_id], (result, evidence.payload)
 
 
-def test_corrupt_success_body_confirms_h11(exchange_session):
+def test_corrupt_success_body_refutes_h11(exchange_session):
     session, _, _ = exchange_session(config={"symbols": ("BTCUSDT", "ETHUSDT")})
     evidence, result = _run(session, "D8")
-    assert result.outcome_for("H11") == "CONFIRMED"
+    assert result.outcome_for("H11") == "REFUTED"
     assert {v["variant"] for v in evidence.payload["variants"]} == {"corrupt", "truncated", "empty"}
     assert all(v["venue_accepted"] for v in evidence.payload["variants"])
+    assert all(v["path"] == "resolved_by_query" for v in evidence.payload["variants"])
 
 
 def test_dropped_request_waits_for_horizon_and_misses(exchange_session):

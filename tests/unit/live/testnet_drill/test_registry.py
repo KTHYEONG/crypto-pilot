@@ -91,7 +91,7 @@ def test_malformed_complete_evidence_is_a_failure():
 
 
 def test_failed_observation_is_not_reported_as_success():
-    evidence = ev("B10", code=-4116, query_returned="", submit_seq_journal_derived=False)
+    evidence = ev("B10", code=-4061, query_returned="", submit_seq_journal_derived=False)
     assert registry.SCENARIOS["B10"].evaluate(evidence).verdict is Verdict.FAIL
 
 

@@ -525,7 +525,7 @@ class BinanceFuturesRestClient:
                 ) from exc
             self._update_rate_state(response.headers)
 
-            body, _ = self._decode_body(response.body)
+            body, decoded_ok = self._decode_body(response.body)
 
             if response.status_code == 418:
                 raise LiveTradingError(f"IP ban received at {path}; halting")
@@ -540,6 +540,13 @@ class BinanceFuturesRestClient:
 
             error_code = self._error_code(body)
             if response.status_code < 400 and error_code is None:
+                if not decoded_ok or not isinstance(body, dict):
+                    raise OrderStatusUnknown(
+                        f"venue returned an uninterpretable body for {method} {path}; execution status unknown",
+                        path=path,
+                        http_status=response.status_code,
+                        code=None,
+                    )
                 return body
 
             if (
