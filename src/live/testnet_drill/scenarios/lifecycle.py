@@ -68,6 +68,8 @@ def _eval_c4(evidence: ScenarioEvidence) -> Any:
     max_attempts = int(evidence.payload.get("max_ioc_attempts", 10))
     residual_ok = bool(evidence.payload.get("residual_exact", True))
     passed = status == "EXPIRED" and Decimal(0) < executed < requested and attempts <= max_attempts and residual_ok
+    if attempts == 0 and evidence.payload.get("escaped_exception") is None:
+        return result_of(evidence, "C4", Verdict.OBSERVED, (("ioc_path_not_exercised", True),), hypotheses=())
     return result_of(
         evidence,
         "C4",
@@ -158,12 +160,14 @@ def _eval_c9(evidence: ScenarioEvidence) -> Any:
     requested = Decimal(str(evidence.payload.get("intent_qty", "0")))
     interval_ok = bool(evidence.payload.get("interval_respected", True))
     per_intent_ok = all(int(count) <= 1 for count in snapshots)
-    passed = bool(snapshots) and requested > 0 and per_intent_ok and filled <= requested and interval_ok
+    repegs = int(evidence.payload.get("repegs", 0))
+    sound = bool(snapshots) and requested > 0 and per_intent_ok and filled <= requested and interval_ok
+    verdict = Verdict.FAIL if not sound else (Verdict.PASS if repegs >= 1 else Verdict.OBSERVED)
     return result_of(
         evidence,
         "C9",
-        Verdict.PASS if passed else Verdict.FAIL,
-        (("single_live_order", per_intent_ok), ("fill_bounded", filled <= requested)),
+        verdict,
+        (("single_live_order", per_intent_ok), ("fill_bounded", filled <= requested), ("repeg_interval", interval_ok)),
         hypotheses=(),
     )
 
@@ -202,6 +206,8 @@ def _eval_c12(evidence: ScenarioEvidence) -> Any:
     cap_ok = bool(evidence.payload.get("price_within_cap", True))
     empty = bool(evidence.payload.get("open_empty", True))
     passed = escalated and cap_ok and empty and evidence.payload["residual_exact"] is True
+    if not escalated and empty and evidence.payload["residual_exact"] is True:
+        return result_of(evidence, "C12", Verdict.OBSERVED, (("escalation_not_reached", True),), hypotheses=())
     return result_of(
         evidence,
         "C12",

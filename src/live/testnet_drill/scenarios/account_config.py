@@ -98,7 +98,7 @@ def _eval_a1(evidence: ScenarioEvidence) -> Any:
 def _run_a2(session: Any, config: Any, slate: Any) -> ScenarioEvidence:
     intent = make_intent(session, config.symbols[0])
     original = session.client._time_offset_ms
-    offset = config.recv_window_ms // 2
+    offset = -(config.recv_window_ms // 2)
     start = len(session.transport.records)
     try:
         session.client._time_offset_ms = original + offset
@@ -312,6 +312,8 @@ def _eval_a6(evidence: ScenarioEvidence) -> Any:
             (("margin_block", True),),
             observations=(observation(int(code), action, path="/fapi/v1/marginType"),),
             hypotheses=(),
+            proposed_action=action,
+            proposal_rationale=f"margin code {code} handled by the blocked-code gate; registry entry unlisted",
         )
     return result_of(
         evidence,

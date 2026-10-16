@@ -11,7 +11,7 @@ _SPECS = {spec.scenario_id: spec for spec in lifecycle.scenario_specs()}
 
 def test_single_live_order_per_intent() -> None:
     failing = ev(
-        "C9", open_order_snapshots=[1, 2, 1], cumulative_filled="0.1", intent_qty="0.2", interval_respected=True
+        "C9", open_order_snapshots=[1, 2, 1], cumulative_filled="0.1", intent_qty="0.2", interval_respected=True, repegs=1
     )
     assert _SPECS["C9"].evaluate(failing).verdict is Verdict.FAIL
     passing = ev(
@@ -20,9 +20,20 @@ def test_single_live_order_per_intent() -> None:
         cumulative_filled="0.1",
         intent_qty="0.2",
         interval_respected=True,
+        repegs=2,
         conservation_passed=True,
     )
     assert _SPECS["C9"].evaluate(passing).verdict is Verdict.PASS
+    unexercised = ev(
+        "C9",
+        open_order_snapshots=[1, 0],
+        cumulative_filled="0.2",
+        intent_qty="0.2",
+        interval_respected=True,
+        repegs=0,
+        conservation_passed=True,
+    )
+    assert _SPECS["C9"].evaluate(unexercised).verdict is Verdict.OBSERVED
 
 
 def test_partial_price_attribution_confirms_h2() -> None:
