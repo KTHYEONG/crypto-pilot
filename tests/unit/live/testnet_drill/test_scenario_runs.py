@@ -45,6 +45,16 @@ def test_slicing_uses_real_unique_submissions(exchange_session):
     assert SCENARIOS["C10"].evaluate(evidence).verdict is Verdict.PASS
 
 
+def test_c8_production_sequence_reaches_target(exchange_session):
+    session, _, _ = exchange_session()
+    evidence = SCENARIOS["C8"].run(session, session.config)
+    assert evidence.payload["final_equals_target"] is True
+    assert evidence.payload["open_posted_after_close_filled"] is True
+    result = SCENARIOS["C8"].evaluate(evidence)
+    assert result.verdict is Verdict.PASS
+    assert result.outcome_for("H7") == "REFUTED"
+
+
 def test_cleanup_budget_failure_cannot_pass(exchange_session):
     session, _, _ = exchange_session(config={"symbols": ("BTCUSDT", "ETHUSDT", "SOLUSDT"), "slate_max_attempts": 1})
     evidence = SCENARIOS["C13"].run(session, session.config)

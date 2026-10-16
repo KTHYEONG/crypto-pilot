@@ -254,6 +254,15 @@ EVENT_INFO: dict[str, dict[str, str]] = {
         "impact": "동일 거절 코드가 여러 종목에서 발생 — 필터/거래 규칙 파싱 이상 의심. 사이클은 중단하지 않고 관측만 합니다.",
         "action": "docker exec mhs-live-daemon uv run python -m src.cli.main live status",
     },
+    "flip_open_blocked": {
+        "title": "반대 포지션 전환 진입 레그 보류",
+        "severity_badge": "⚠️ 주의",
+        "severity_label": "WARNING",
+        "header_color": "#d97706",
+        "bg_color": "#fffbeb",
+        "impact": "청산 레그가 끝나지 않아 진입 레그를 내지 못했습니다. 다음 결정까지 목표 대비 미체결 상태로 유지되며 사이클은 중단하지 않습니다.",
+        "action": "docker exec mhs-live-daemon uv run python -m src.cli.main live status",
+    },
     "ledger_reconcile_mismatch": {
         "title": "페이퍼 원장 현금 불일치",
         "severity_badge": "🚨 긴급",
