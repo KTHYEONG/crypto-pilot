@@ -11,6 +11,8 @@ import hashlib
 import hmac
 import http.client
 import json
+import re
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -54,6 +56,87 @@ _CONFIG_ACK_CODE = 200
 _USED_WEIGHT_1M_HEADER = "X-MBX-USED-WEIGHT-1M"
 _ORDER_COUNT_1M_HEADER = "X-MBX-ORDER-COUNT-1M"
 _ORDER_COUNT_10S_HEADER = "X-MBX-ORDER-COUNT-10S"
+
+IP_BAN_DEFAULT_HORIZON_S: float = 300.0
+IP_BAN_RELEASE_MARGIN_S: float = 5.0
+
+_ip_ban_until: float = 0.0
+_ip_ban_lock = threading.Lock()
+_BAN_UNTIL_PATTERN = re.compile(rb"banned until\s+([0-9]{1,16})(?![0-9])", re.IGNORECASE)
+
+
+class IpBanned(LiveTradingError):  # noqa: N818 - contract pins the name
+    """Process-wide IP ban is in force."""
+
+    def __init__(self, message: str, *, path: str, banned_until: float) -> None:
+        super().__init__(message)
+        self.path = path
+        self.banned_until = banned_until
+
+
+def ip_ban_remaining_s(now: float | None = None) -> float:
+    """Seconds until the process-wide IP ban lifts; 0.0 when none."""
+    try:
+        now_v = time.time() if now is None else float(now)
+        with _ip_ban_lock:
+            until = _ip_ban_until
+        return max(0.0, until - now_v)
+    except Exception:
+        return 0.0
+
+
+def reset_ip_ban_for_tests() -> None:
+    """Clear the process-wide IP ban state (test hook)."""
+    global _ip_ban_until
+    with _ip_ban_lock:
+        _ip_ban_until = 0.0
+
+
+def _retry_after_horizon_s(headers: Mapping[str, str]) -> float | None:
+    raw = _header_value(headers, "Retry-After")
+    if raw is None or re.fullmatch(r"[0-9]+", raw.strip()) is None:
+        return None
+    try:
+        return float(int(raw.strip()))
+    except (ValueError, OverflowError):
+        return None
+
+
+def _ban_message_horizon_s(body: bytes, now: float) -> float | None:
+    if not body:
+        return None
+    match = _BAN_UNTIL_PATTERN.search(body)
+    if match is None:
+        return None
+    return max(0.0, int(match.group(1)) / 1000.0 - now)
+
+
+def _record_ip_ban(headers: Mapping[str, str], body: bytes) -> float:
+    global _ip_ban_until
+    now = time.time()
+    horizon = _retry_after_horizon_s(headers)
+    if horizon is None:
+        horizon = _ban_message_horizon_s(body, now)
+    if horizon is None:
+        horizon = IP_BAN_DEFAULT_HORIZON_S
+    banned_until = now + max(0.0, horizon)
+    with _ip_ban_lock:
+        _ip_ban_until = max(_ip_ban_until, banned_until)
+        return _ip_ban_until
+
+
+def _current_ban_until() -> float:
+    with _ip_ban_lock:
+        return _ip_ban_until
+
+
+def _guard_ip_ban(path: str) -> None:
+    if ip_ban_remaining_s() > 0:
+        raise IpBanned(
+            f"IP ban received at {path}; halting",
+            path=path,
+            banned_until=_current_ban_until(),
+        )
 
 
 class OrderStatusUnknown(LiveTradingError):  # noqa: N818 - contract pins the name
@@ -502,6 +585,8 @@ class BinanceFuturesRestClient:
                 f"mutation to {path} is not allowed by the shadow whitelist"
             )
 
+        _guard_ip_ban(path)
+
         is_mutation = method != "GET"
         if is_mutation:
             return self._request_mutation(method, path, base_params, signed=signed)
@@ -512,6 +597,7 @@ class BinanceFuturesRestClient:
     ) -> Any:
         resynced_clock = False
         for _send in range(_MUTATION_MAX_SENDS):
+            _guard_ip_ban(path)
             url, headers = self._build_url_headers(path, base_params, signed=signed)
 
             try:
@@ -525,10 +611,14 @@ class BinanceFuturesRestClient:
                 ) from exc
             self._update_rate_state(response.headers)
 
-            body, decoded_ok = self._decode_body(response.body)
-
             if response.status_code == 418:
-                raise LiveTradingError(f"IP ban received at {path}; halting")
+                banned_until = _record_ip_ban(response.headers, response.body)
+                raise IpBanned(
+                    f"IP ban received at {path}; halting",
+                    path=path,
+                    banned_until=banned_until,
+                )
+            body, decoded_ok = self._decode_body(response.body)
             if response.status_code == 429:
                 raise VenueError(
                     "rate limited; mutation not executed and not retried",
@@ -590,6 +680,7 @@ class BinanceFuturesRestClient:
         resynced_clock = False
         last_error: VenueError | None = None
         for attempt in range(1, budget + 1):
+            _guard_ip_ban(path)
             url, headers = self._build_url_headers(path, base_params, signed=signed)
 
             try:
@@ -610,10 +701,14 @@ class BinanceFuturesRestClient:
                 continue
             self._update_rate_state(response.headers)
 
-            body, decoded_ok = self._decode_body(response.body)
-
             if response.status_code == 418:
-                raise LiveTradingError(f"IP ban received at {path}; halting")
+                banned_until = _record_ip_ban(response.headers, response.body)
+                raise IpBanned(
+                    f"IP ban received at {path}; halting",
+                    path=path,
+                    banned_until=banned_until,
+                )
+            body, decoded_ok = self._decode_body(response.body)
             if response.status_code == 429:
                 if attempt >= budget:
                     raise TransientReadError(

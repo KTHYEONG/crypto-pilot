@@ -107,7 +107,9 @@ def test_ban_stops_the_wire_in_both_phases(exchange_session):
     session, _, _ = exchange_session(config={"symbols": ("BTCUSDT", "ETHUSDT")})
     evidence, result = _run(session, "D6")
     assert [phase["records_after"] for phase in evidence.payload["phases"]] == [0, 0]
-    assert result.outcome_for("H4") == "CONFIRMED"
+    assert evidence.payload["ban_horizon_captured"] is True
+    assert evidence.payload["subsequent_blocked"] is True
+    assert result.outcome_for("H4") == "REFUTED"
 
 
 def test_repeg_kill_without_repeg_is_refused_not_passed(exchange_session, in_process_worker):
