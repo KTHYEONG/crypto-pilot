@@ -85,3 +85,31 @@ def test_g4_refuses_unproven_venue_preconditions(exchange_session, monkeypatch, 
     monkeypatch.setattr(venue, "call", call)
     with pytest.raises(DrillRefused, match="g4_"):
         SCENARIOS["G4"].run(session, session.config)
+
+
+def _g4_evidence(**overrides):
+    from src.live.testnet_drill.scenarios.base import ScenarioEvidence
+
+    payload = {
+        "guard_tripped": False, "stale_lookup_observed": False, "executor_tripped": False, "recovery_tripped": False,
+        "stale_served_executor": 0, "stale_served_recovery": 0, "no_phantom_fill": True, "conservation_passed": True,
+    }
+    payload.update(overrides)
+    return ScenarioEvidence("G4", payload)
+
+
+def test_g4_observed_when_no_guarded_lookup_was_stale():
+    assert SCENARIOS["G4"].evaluate(_g4_evidence()).verdict is Verdict.OBSERVED
+
+
+def test_g4_fails_when_a_stale_lookup_was_served_without_a_trip():
+    result = SCENARIOS["G4"].evaluate(_g4_evidence(stale_served_executor=2))
+    assert result.verdict is Verdict.FAIL
+    assert result.outcome_for("H12") == "INCONCLUSIVE"
+
+
+def test_g4_each_consumer_must_trip_only_for_its_own_stale_lookups():
+    only_executor = _g4_evidence(stale_served_executor=1, executor_tripped=True, guard_tripped=False)
+    assert SCENARIOS["G4"].evaluate(only_executor).verdict is Verdict.PASS
+    recovery_untripped = _g4_evidence(stale_served_executor=1, executor_tripped=True, stale_served_recovery=1)
+    assert SCENARIOS["G4"].evaluate(recovery_untripped).verdict is Verdict.FAIL
