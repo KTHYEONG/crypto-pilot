@@ -48,6 +48,8 @@ _GET_RETRY_BACKOFF_SECONDS: tuple[float, ...] = (0.5, 1.0, 2.0)
 _TRANSIENT_READ_CODES: frozenset[int] = frozenset({-1000, -1001, -1007})
 
 _UNKNOWN_OUTCOME_CODES: frozenset[int] = frozenset({-1000, -1001, -1007})
+# Config endpoints (marginType, positionSide/dual, ...) acknowledge success with {"code": 200, "msg": "success"}.
+_CONFIG_ACK_CODE = 200
 
 _USED_WEIGHT_1M_HEADER = "X-MBX-USED-WEIGHT-1M"
 _ORDER_COUNT_1M_HEADER = "X-MBX-ORDER-COUNT-1M"
@@ -341,11 +343,13 @@ class BinanceFuturesRestClient:
 
     @staticmethod
     def _error_code(body: Any) -> int | None:
+        """Venue error code of a response body; the config-endpoint ack ``{"code": 200}`` is success, not an error."""
         if isinstance(body, dict) and "code" in body:
             try:
-                return int(body["code"])
+                code = int(body["code"])
             except (TypeError, ValueError):
                 return None
+            return None if code == _CONFIG_ACK_CODE else code
         return None
 
     def _build_url_headers(
