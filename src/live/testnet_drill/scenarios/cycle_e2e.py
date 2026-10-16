@@ -389,17 +389,19 @@ def _run_g4(session: Any, config: Any) -> ScenarioEvidence:
         order_identity_tolerance_ms=session.settings.order_identity_tolerance_ms,
     )
     stale_lookup = session.client.query_order(symbol, order_id).get("orderId") == first["orderId"]
+    executor_client = _StaleLookupRecorder(session.client, first["orderId"])
+    recovery_client = _StaleLookupRecorder(session.client, first["orderId"])
     now = pd.Timestamp.now(tz="UTC")
     executor_tripped = False
     recovery_tripped = False
     try:
         try:
-            _sync_venue_order(session.client, rt, now=now.timestamp(), audit=session.audit, touch=None)
+            _sync_venue_order(executor_client, rt, now=now.timestamp(), audit=session.audit, touch=None)
         except StaleOrderIdentity:
             executor_tripped = True
         try:
             recover_unresolved_orders(
-                session.client, journal_b, session.audit, now=now,
+                recovery_client, journal_b, session.audit, now=now,
                 lookback=pd.Timedelta(hours=72), taker_fee_bps=session.settings.taker_fee_bps,
                 order_identity_tolerance_ms=session.settings.order_identity_tolerance_ms,
             )
@@ -417,6 +419,8 @@ def _run_g4(session: Any, config: Any) -> ScenarioEvidence:
         stale_lookup_observed=stale_lookup,
         executor_tripped=executor_tripped,
         recovery_tripped=recovery_tripped,
+        stale_served_executor=executor_client.served,
+        stale_served_recovery=recovery_client.served,
         no_phantom_fill=not fills and rt.filled_total == Decimal("0"),
         first_order_id=first["orderId"], replacement_order_id=replacement["orderId"],
         h12="REFUTED" if tripped else "CONFIRMED" if fills else "INCONCLUSIVE",
@@ -426,16 +430,37 @@ def _run_g4(session: Any, config: Any) -> ScenarioEvidence:
 def _eval_g4(evidence: ScenarioEvidence) -> Any:
     p = evidence.payload
     phantom = p["no_phantom_fill"] is not True
-    tripped = p["guard_tripped"] is True or p.get("executor_tripped") is True
-    if not phantom and not tripped and p.get("stale_lookup_observed") is False:
-        # The venue's id index had already caught up, so no stale order was served and nothing needed guarding.
+    served_executor = int(p.get("stale_served_executor", 1 if p.get("stale_lookup_observed") else 0)) > 0
+    served_recovery = int(p.get("stale_served_recovery", 0)) > 0
+    if not phantom and not served_executor and not served_recovery:
+        # Every lookup the guarded consumers made returned the current order: nothing needed guarding.
         return result_of(evidence, "G4", Verdict.OBSERVED, (("stale_lookup_not_served", True),), hypotheses=("H12",))
-    passed = tripped and not phantom
+    executor_ok = not served_executor or p.get("executor_tripped") is True
+    recovery_ok = not served_recovery or p.get("recovery_tripped") is True
+    passed = executor_ok and recovery_ok and not phantom
     return result_of(
         evidence, "G4", Verdict.PASS if passed else Verdict.FAIL, (("id_reuse_guard", passed),),
         hypotheses=("H12",),
         hypothesis_outcome="REFUTED" if passed else "CONFIRMED" if phantom else "INCONCLUSIVE",
     )
+
+
+class _StaleLookupRecorder:
+    """Pass-through venue client that counts order lookups served from the superseded order."""
+
+    def __init__(self, client: Any, superseded_order_id: Any) -> None:
+        self._client = client
+        self._superseded = superseded_order_id
+        self.served = 0
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._client, name)
+
+    def query_order(self, symbol: str, client_order_id: str) -> Any:
+        payload = self._client.query_order(symbol, client_order_id)
+        if isinstance(payload, dict) and payload.get("orderId") == self._superseded:
+            self.served += 1
+        return payload
 
 
 _G_TITLES: dict[str, tuple[str, tuple[str, ...]]] = {
