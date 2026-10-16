@@ -32,17 +32,17 @@ def _result(scenario: str, verdict: Verdict, **overrides) -> ScenarioResult:
 def test_proposal_only_for_unregistered_codes() -> None:
     results = [
         _result("B5", Verdict.OBSERVED, observations=(_observation(-2019),), proposed_action="margin_wait", proposal_rationale="wait"),
-        _result("B9", Verdict.OBSERVED, observations=(_observation(-4116),), proposed_action="fail_closed", proposal_rationale="halt"),
+        _result("B9", Verdict.OBSERVED, observations=(_observation(-4061),), proposed_action="fail_closed", proposal_rationale="halt"),
     ]
     (proposal,) = build_registry_proposals(results)
-    assert proposal.code == -4116
+    assert proposal.code == -4061
     assert proposal.observed_in == ("B9",)
     assert proposal.proposed_action == "fail_closed"
     assert proposal.rationale == "halt"
 
 
 def test_duplicate_code_merges_observed_in() -> None:
-    results = [_result("B9", Verdict.OBSERVED, observations=(_observation(-4116),)), _result("B10", Verdict.OBSERVED, observations=(_observation(-4116),))]
+    results = [_result("B9", Verdict.OBSERVED, observations=(_observation(-4061),)), _result("B10", Verdict.OBSERVED, observations=(_observation(-4061),))]
     (proposal,) = build_registry_proposals(results)
     assert proposal.observed_in == ("B9", "B10")
 
@@ -86,7 +86,7 @@ def test_rejects_unknown_hypothesis_outcome() -> None:
 def test_report_is_write_only_to_workspace(tmp_path: Path) -> None:
     policy_before = dict(BINANCE_ERROR_POLICY)
     workspace = tmp_path / "ws"
-    paths = write_report([_result("B9", Verdict.PASS, observations=(_observation(-4116),))], workspace)
+    paths = write_report([_result("B9", Verdict.PASS, observations=(_observation(-4061),))], workspace)
     assert paths.json_path.is_relative_to(workspace)
     assert paths.md_path.is_relative_to(workspace)
     assert paths.evidence_path.is_relative_to(workspace)
@@ -113,7 +113,7 @@ def test_pass_requires_expectations_and_explicit_conservation() -> None:
 
 
 def test_undeclared_and_conflicting_proposals_refused() -> None:
-    observation = (_observation(-4116),)
+    observation = (_observation(-4061),)
     with pytest.raises(ValueError, match="declared"):
         build_registry_proposals([_result("B1", Verdict.OBSERVED, observations=observation, proposed_action=None)])
     with pytest.raises(ValueError, match="conflicting"):

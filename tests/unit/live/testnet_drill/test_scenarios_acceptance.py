@@ -14,13 +14,13 @@ _SPECS = {spec.scenario_id: spec for spec in acceptance.scenario_specs()}
 
 
 def test_unregistered_code_yields_proposal_not_pass() -> None:
-    evidence = ev("B9", code=-4116, cycle_halted=True)
+    evidence = ev("B9", code=-4061, cycle_halted=True)
     result = _SPECS["B9"].evaluate(evidence)
     assert result.verdict is Verdict.OBSERVED
-    assert result.observations[0].code == -4116
+    assert result.observations[0].code == -4061
     assert result.observations[0].registry_action == "fail_closed"
     assert result.proposed_action == "fail_closed"
-    assert -4116 not in BINANCE_ERROR_POLICY
+    assert -4061 not in BINANCE_ERROR_POLICY
 
 
 def test_scoped_reject_isolation_evaluated() -> None:

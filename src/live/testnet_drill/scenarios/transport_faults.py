@@ -371,7 +371,9 @@ def _run_d8(session: Any, config: Any) -> ScenarioEvidence:
         if post is None:
             raise DrillRefused("drill refused: d8_fault_not_reached")
         order_id = _order_id(post)
-        if _event_for(tap, _UNKNOWN_EVENTS, order_id) is not None:
+        if _event_for(tap, {"order_unknown_adopted"}, order_id) is not None:
+            path = "resolved_by_query"
+        elif _event_for(tap, _UNKNOWN_EVENTS, order_id) is not None:
             path = "unknown_outcome_query"
         elif trace.escaped is not None and trace.escaped not in ("OrderStatusUnknown", "ExecutionInterrupted"):
             path = f"escaped:{trace.escaped}"
@@ -382,7 +384,7 @@ def _run_d8(session: Any, config: Any) -> ScenarioEvidence:
         variants.append({"variant": name, "path": path, "order_id": order_id, "venue_accepted": post.status_code == 200})
     return ev(
         "D8",
-        resolved_by_query=all(v["path"] == "unknown_outcome_query" for v in variants),
+        resolved_by_query=all(v["path"] == "resolved_by_query" for v in variants),
         treated_as_active_without_query=any(
             v["path"] == "treated_as_active" or str(v["path"]).startswith("escaped:") for v in variants
         ),

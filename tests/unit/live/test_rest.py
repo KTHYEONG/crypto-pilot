@@ -1025,18 +1025,120 @@ def test_mutation_backoff_codes_are_never_resent(tmp_path, monkeypatch) -> None:
     assert "venue rejected POST /fapi/v1/order; mutation not retried" in str(exc_info.value)
 
 
-def test_mutation_non_json_success_body_is_not_resent(tmp_path, monkeypatch) -> None:
-    """Mutation 200 with a non-JSON body returns None with one send and no sleep."""
-    from src.live.rest import HttpResponse
+def test_mutation_non_json_success_body_is_unknown(tmp_path, monkeypatch) -> None:
+    """Mutation 200 with a non-JSON body raises OrderStatusUnknown with one send and no sleep."""
+    import pytest
+    from src.live.rest import HttpResponse, OrderStatusUnknown
 
     client, calls, sleeps = _rest_client(
         tmp_path, monkeypatch,
         lambda m, u: HttpResponse(status_code=200, headers={}, body=b"<html>"),
         audit_name="mut_html.jsonl",
     )
-    assert client.new_order({"symbol": "AAAUSDT"}) is None
+    with pytest.raises(OrderStatusUnknown) as exc_info:
+        client.new_order({"symbol": "AAAUSDT"})
+    assert exc_info.value.code is None
+    assert exc_info.value.http_status == 200
+    assert exc_info.value.path == "/fapi/v1/order"
     assert len(calls) == 1
     assert sleeps == []
+
+
+def test_mutation_empty_success_body_is_unknown(tmp_path, monkeypatch) -> None:
+    """Mutation 200 with an empty body raises OrderStatusUnknown with one send and no sleep."""
+    import pytest
+    from src.live.rest import HttpResponse, OrderStatusUnknown
+
+    client, calls, sleeps = _rest_client(
+        tmp_path, monkeypatch,
+        lambda m, u: HttpResponse(status_code=200, headers={}, body=b""),
+        audit_name="mut_empty.jsonl",
+    )
+    with pytest.raises(OrderStatusUnknown) as exc_info:
+        client.new_order({"symbol": "AAAUSDT"})
+    assert exc_info.value.code is None
+    assert exc_info.value.http_status == 200
+    assert len(calls) == 1
+    assert sleeps == []
+
+
+def test_mutation_array_success_body_is_unknown(tmp_path, monkeypatch) -> None:
+    """Mutation 200 with a JSON array body raises OrderStatusUnknown with one send and no sleep."""
+    import pytest
+    from src.live.rest import HttpResponse, OrderStatusUnknown
+
+    client, calls, sleeps = _rest_client(
+        tmp_path, monkeypatch,
+        lambda m, u: HttpResponse(status_code=200, headers={}, body=b"[]"),
+        audit_name="mut_array.jsonl",
+    )
+    with pytest.raises(OrderStatusUnknown) as exc_info:
+        client.request("POST", "/fapi/v1/order", {"symbol": "AAAUSDT"}, signed=True)
+    assert exc_info.value.code is None
+    assert len(calls) == 1
+    assert sleeps == []
+
+
+def test_corrupt_mutation_body_resolves_by_query_without_repost(tmp_path, monkeypatch) -> None:
+    """The executor resolves a corrupt POST response and books its fill exactly once."""
+    from decimal import Decimal
+    import pandas as pd
+    from urllib.parse import urlparse
+    from src.live.executor import PassiveExecutionPolicy, execute_intents
+    from src.live.filters import SymbolFilters
+    from src.live.order_journal import OrderJournal
+    from src.live.planner import OrderIntent
+    from src.live.rest import HttpResponse
+
+    posts: list[str] = []
+    gets: list[str] = []
+
+    def _responder(method, url):
+        if urlparse(url).path == "/fapi/v1/ticker/bookTicker":
+            return HttpResponse(200, {}, b'[{"symbol":"AAAUSDT","bidPrice":"100.00","askPrice":"100.20"}]')
+        if method == "POST":
+            posts.append(url)
+            assert urlparse(url).path == "/fapi/v1/order"
+            return HttpResponse(status_code=200, headers={}, body=b"<html>gateway</html>")
+        gets.append(url)
+        return HttpResponse(status_code=200, headers={}, body=b'{"status":"FILLED","executedQty":"1","avgPrice":"100.00"}')
+
+    client, calls, sleeps = _rest_client(tmp_path, monkeypatch, _responder, audit_name="mut_resolve.jsonl")
+    journal = OrderJournal(tmp_path / "journal.jsonl")
+    now = pd.Timestamp("2026-09-14T00:00:00Z")
+    attempt = journal.begin_attempt(
+        decision_time=now, run_id="test", mode="LIVE_TESTNET", pre_trade_equity=Decimal("1000"),
+        sizing_anchor="equity", decision_marks={}, started_at=now,
+    )
+    intent = OrderIntent(
+        symbol="AAAUSDT", side="BUY", quantity=Decimal("1"), reduce_only=False,
+        target_qty=Decimal("1"), current_qty=Decimal("0"), client_order_prefix="20260914",
+        leg_index=0, decision_price=Decimal("100.10"),
+    )
+    filters = SymbolFilters(
+        symbol="AAAUSDT", tick_size=Decimal("0.01"), step_size=Decimal("0.001"),
+        min_qty=Decimal("0.001"), min_notional=Decimal("1"), max_qty=Decimal("100000"),
+        quantity_precision=3, price_precision=2,
+    )
+    clock_state = [0.0]
+
+    def sleep(seconds):
+        clock_state[0] += seconds
+
+    outcomes = execute_intents(
+        client, [intent], {intent.symbol: filters},
+        PassiveExecutionPolicy(poll_interval_s=1.0, passive_deadline_s=10.0, window_deadline_s=20.0),
+        AuditLog(tmp_path / "executor.jsonl"), lambda: clock_state[0], sleep,
+        journal=journal, attempt=attempt,
+    )
+    assert len(posts) == 1
+    assert sleeps == []
+    assert gets
+    assert outcomes[0].status == "FILLED"
+    assert outcomes[0].filled_qty == Decimal("1")
+    fills = journal.fills_after(-1)
+    assert len(fills) == 1
+    assert fills[0].quantity == Decimal("1")
 
 
 def test_config_endpoint_ack_body_is_success_not_error(tmp_path, monkeypatch) -> None:
