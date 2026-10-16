@@ -192,7 +192,7 @@ def _repeg_lifetimes(audit_path: Any) -> list[float]:
 
 def _repeg(session: DrillSession) -> ScenarioEvidence:
     symbol = session.config.symbols[0]
-    intent = make_intent(session, symbol)
+    intent = make_intent(session, symbol, anchor_offset_bps=session.config.unfilled_anchor_bps)
     trace = run_cycle(session, [intent])
     lifetimes = _repeg_lifetimes(session.workspace / "audit.jsonl")
     interval_ok = all(seconds >= trace.policy.repeg_interval_s - _REPEG_CLOCK_SLACK_S for seconds in lifetimes)
@@ -230,13 +230,26 @@ def _opened(session: DrillSession, intents: list[Any], refusal: str) -> Any:
     return opening
 
 
+# Ask levels read to size the C4 partial-IOC probe (a depth limit the venue accepts).
+_C4_DEPTH_LEVELS = 100
+
+
 def _ordinary_intents(session: DrillSession, scenario_id: str) -> list[Any]:
     symbol = session.config.symbols[0]
-    intents = [make_intent(session, symbol)]
+    anchor = session.config.unfilled_anchor_bps if scenario_id in ("C4", "C12") else 0
+    intents = [make_intent(session, symbol, anchor_offset_bps=anchor)]
     if scenario_id == "C4":
-        depth = session.client.depth(symbol)
-        amount = Decimal(str(depth["asks"][0][1])) + session.filters[symbol].step_size
-        return [make_intent(session, symbol, quantity=amount)]
+        from src.live.testnet_drill.execution import execution_policy
+
+        asks = session.client.depth(symbol, limit=_C4_DEPTH_LEVELS)["asks"]
+        cross_limit = Decimal(str(asks[0][0])) * (1 + Decimal(str(execution_policy(session).taker_cap_bps)) / 10000)
+        # Size beyond everything the capped IOC can reach so its first attempt must expire partially filled.
+        reachable = sum((Decimal(str(size)) for price, size in asks if Decimal(str(price)) <= cross_limit), Decimal(0))
+        amount = reachable + session.filters[symbol].step_size
+        available = Decimal(str(session.client.account()["availableBalance"]))
+        if amount * Decimal(str(asks[0][0])) > available:
+            raise DrillRefused("drill refused: c4_reachable_depth_exceeds_available_balance")
+        return [make_intent(session, symbol, quantity=amount, anchor_offset_bps=anchor)]
     if scenario_id == "C8":
         _opened(session, intents, "flip_requires_open_position")
         return list(

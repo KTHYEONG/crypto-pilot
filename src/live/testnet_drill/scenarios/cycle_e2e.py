@@ -369,7 +369,9 @@ def _run_g4(session: Any, config: Any) -> ScenarioEvidence:
     session.guarded_new_order({
         "symbol": symbol, "side": "SELL", "type": "MARKET", "quantity": str(seeded["executedQty"]), "reduceOnly": "true",
     })
-    tolerance = session.settings.order_identity_tolerance_ms + session.client.clock_offset_margin_ms
+    # The guard adds the learned clock margin to its tolerance and the old order's venue time sits on the
+    # venue clock, so up to two margins separate "older than tolerance" on the wire from the local gap.
+    tolerance = session.settings.order_identity_tolerance_ms + 2 * session.client.clock_offset_margin_ms
     if tolerance / 1000 + 1 >= config.scenario_timeout_s:
         raise DrillRefused("drill refused: g4_clock_wait_exceeds_budget")
     time.sleep(tolerance / 1000 + 1)

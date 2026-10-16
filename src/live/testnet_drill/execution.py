@@ -46,8 +46,14 @@ def make_intent(
     side: str = "BUY",
     reduce_only: bool = False,
     leg_index: int = 0,
+    anchor_offset_bps: int = 0,
 ) -> OrderIntent:
-    """Create an exactly quantized, budgeted intent using current observable touch."""
+    """Create an exactly quantized, budgeted intent using current observable touch.
+
+    ``anchor_offset_bps`` moves only the decision price away from the touch (BUY below, SELL above) so the
+    passive order rests unfilled through the re-peg band and the passive deadline escalates to the IOC backstop.
+    """
+    offset = Decimal(anchor_offset_bps) / 10000
     quote = session.client.book_ticker(symbol)
     price = Decimal(str(quote["bidPrice" if side == "BUY" else "askPrice"]))
     desired = quantity if quantity is not None else session.config.probe_notional_usdt / price
@@ -67,7 +73,7 @@ def make_intent(
         Decimal(0),
         session.client_order_prefix.removeprefix("mh"),
         leg_index,
-        order.price,
+        order.price * (1 - offset if side == "BUY" else 1 + offset),
     )
 
 

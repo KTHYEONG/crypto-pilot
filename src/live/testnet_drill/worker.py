@@ -132,7 +132,10 @@ def _perform(session: Any, script: Mapping[str, Any], stop: Callable[[], bool]) 
         return {}
     if action == "cycle":
         symbols = script.get("symbols") or [session.config.symbols[0]]
-        trace = run_cycle(session, [make_intent(session, str(symbol)) for symbol in symbols], stop=stop)
+        anchor = int(script.get("anchor_offset_bps", 0))
+        trace = run_cycle(
+            session, [make_intent(session, str(symbol), anchor_offset_bps=anchor) for symbol in symbols], stop=stop
+        )
         return {"escaped": trace.escaped, "outcomes": [o.status for o in trace.outcomes]}
     if action == "runner_cycle":
         import pandas as pd

@@ -52,6 +52,8 @@ class DrillConfig:
     race_offsets_s: tuple[float, ...] = (-0.05, 0.0, 0.05)
     retry_after_probe_s: int = 2
     recv_window_overshoot_s: float = 1.0
+    window_guard_s: float = 1.0
+    unfilled_anchor_bps: int = 100
     snapshot_trials: int = 10
     funding_soak_s: float = 0.0
     funding_poll_s: float = 60.0
@@ -117,7 +119,7 @@ class DrillConfig:
             raise ValueError("funding_soak_min_funding_events must be at least 1")
         if _as_int(self.slate_max_attempts, "slate_max_attempts") < 1:
             raise ValueError("slate_max_attempts must be at least 1")
-        for name in ("race_repetitions", "retry_after_probe_s", "snapshot_trials"):
+        for name in ("race_repetitions", "retry_after_probe_s", "snapshot_trials", "unfilled_anchor_bps"):
             if _as_int(getattr(self, name), name) < 1:
                 raise ValueError(f"{name} must be positive")
 
@@ -126,6 +128,7 @@ _POSITIVE_DURATIONS = (
     "settle_wait_s",
     "settle_poll_s",
     "recv_window_overshoot_s",
+    "window_guard_s",
     "restart_kill_timeout_s",
     "funding_poll_s",
 )
