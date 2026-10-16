@@ -4,6 +4,12 @@ from __future__ import annotations
 
 from src.live.executor import FeeSchedule
 
+def _venue_now_ms() -> int:
+    import time
+
+    return int(time.time() * 1000)
+
+
 def _test_attempt(journal):
     """Create one v2 attempt on ``journal`` for tests (Spec 03 both-or-none contract)."""
     import pandas as pd
@@ -88,7 +94,7 @@ def test_execute_intents_unknown_submission_is_adopted_not_resent(tmp_path) -> N
             return {}
 
         def query_order(self, symbol, orig_client_order_id):
-            return {"status": "FILLED", "executedQty": "1", "avgPrice": "100.00"}
+            return {"time": _venue_now_ms(), "status": "FILLED", "executedQty": "1", "avgPrice": "100.00"}
 
     client = _Client()
 
@@ -170,7 +176,7 @@ def test_execute_intents_unknown_submission_confirmed_absent_posts_new_seq(tmp_p
             self.lookups.append(orig_client_order_id)
             if orig_client_order_id == self.posted[0]["newClientOrderId"]:
                 raise VenueError("missing", code=-2013, http_status=400, path="/fapi/v1/order", payload_digest="0" * 12)
-            return {"status": "FILLED", "executedQty": "1", "avgPrice": "100.00"}
+            return {"time": _venue_now_ms(), "status": "FILLED", "executedQty": "1", "avgPrice": "100.00"}
 
     client = _Client()
 
@@ -248,7 +254,7 @@ def test_execute_intents_abort_resolves_unknown_submission_at_exit(tmp_path) -> 
             return {}
 
         def query_order(self, symbol, orig_client_order_id):
-            return {"status": "PARTIALLY_FILLED", "executedQty": "0.25", "avgPrice": "100.00"}
+            return {"time": _venue_now_ms(), "status": "PARTIALLY_FILLED", "executedQty": "0.25", "avgPrice": "100.00"}
 
     client = _Client()
     filters = {"AAAUSDT": _filters("AAAUSDT"), "BBBUSDT": _filters("BBBUSDT")}
@@ -490,7 +496,7 @@ def test_unknown_submission_not_placed_before_horizon(tmp_path) -> None:
         def query_order(self, s, oid):
             if oid == self.posted[0]["newClientOrderId"]:
                 raise VenueError("m", code=-2013, http_status=400, path="/fapi/v1/order", payload_digest="0" * 12)
-            return {"status": "FILLED", "executedQty": "1", "avgPrice": "100.00"}
+            return {"time": _venue_now_ms(), "status": "FILLED", "executedQty": "1", "avgPrice": "100.00"}
 
     client = _Client()
     execute_intents(client, [_exec_intent("AAAUSDT")], {"AAAUSDT": _exec_filters("AAAUSDT")}, policy, audit,
@@ -538,10 +544,10 @@ def test_unknown_submission_found_late_adopted(tmp_path) -> None:
 
         def query_order(self, s, oid):
             if oid in self.cancels:
-                return {"status": "CANCELED", "executedQty": "0", "avgPrice": "0"}
+                return {"time": _venue_now_ms(), "status": "CANCELED", "executedQty": "0", "avgPrice": "0"}
             if clock_state[0] < 10.0:
                 raise VenueError("m", code=-2013, http_status=400, path="/fapi/v1/order", payload_digest="0" * 12)
-            return {"status": "NEW", "executedQty": "0", "avgPrice": "0"}
+            return {"time": _venue_now_ms(), "status": "NEW", "executedQty": "0", "avgPrice": "0"}
 
     client = _Client()
     import json
@@ -635,8 +641,8 @@ def test_finalize_horizon_branches(tmp_path) -> None:
 
         def query_order(self, s, oid):
             if oid in self.cancels:
-                return {"status": "CANCELED", "executedQty": "0"}
-            return {"status": "NEW", "executedQty": "0"}
+                return {"time": _venue_now_ms(), "status": "CANCELED", "executedQty": "0"}
+            return {"time": _venue_now_ms(), "status": "NEW", "executedQty": "0"}
 
         def cancel_order(self, symbol, oid):
             self.cancels.append(oid)
@@ -659,10 +665,10 @@ def test_finalize_horizon_branches(tmp_path) -> None:
         def query_order(self, s, oid):
             self.n += 1
             if oid in self.cancels:
-                return {"status": "CANCELED", "executedQty": "0"}
+                return {"time": _venue_now_ms(), "status": "CANCELED", "executedQty": "0"}
             if self.n == 1:
                 raise VenueError("m", code=-2013, http_status=400, path="/fapi/v1/order", payload_digest="0" * 12)
-            return {"status": "NEW", "executedQty": "0"}
+            return {"time": _venue_now_ms(), "status": "NEW", "executedQty": "0"}
 
         def cancel_order(self, symbol, oid):
             self.cancels.append(oid)

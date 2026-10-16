@@ -31,6 +31,9 @@ TESTNET_FAPI_URL = "https://testnet.binancefuture.com"
 
 _MAX_RECV_WINDOW_MS = 60_000
 
+#: Clock-skew margin added to ``recv_window_ms`` for the order-identity guard.
+_ORDER_IDENTITY_SKEW_MARGIN_MS = 30_000
+
 
 class ExecutionMode(str, Enum):  # noqa: UP042 - contract pins the (str, Enum) base
     """실행 모드. SHADOW/PAPER는 변이 요청을 전송 계층에서 억제한다.
@@ -98,6 +101,10 @@ class LiveSettings(BaseSettings):
     # '목표 노셔널'이 아니다. 값과 검증은 불변이다.
     notional_equity_usdt: float = 2_000.0
     recv_window_ms: int = 5_000
+    order_identity_tolerance_ms: int = Field(
+        default_factory=lambda data: data["recv_window_ms"] + _ORDER_IDENTITY_SKEW_MARGIN_MS,
+        gt=0,
+    )
     growth_envelope: str = "growth_extreme"
     # None이면 data/state/live_position_ledger.json(default_ledger_path)을 쓴다.
     # 병렬 실행/테스트 격리를 위해 경로를 오버라이드할 수 있다.

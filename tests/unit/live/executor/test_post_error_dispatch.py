@@ -28,6 +28,12 @@ from src.live.filters import SymbolFilters
 from src.live.order_journal import OrderJournal
 from src.live.planner import OrderIntent
 
+def _venue_now_ms() -> int:
+    import time
+
+    return int(time.time() * 1000)
+
+
 
 def _filters(symbol="AAAUSDT"):
     return SymbolFilters(
@@ -299,7 +305,7 @@ class _QueryClient:
         self.calls += 1
         outcome = self.script.pop(0)
         if outcome == "found":
-            return {"status": "NEW", "executedQty": "0"}
+            return {"time": _venue_now_ms(), "status": "NEW", "executedQty": "0"}
         if outcome == "transient":
             raise TransientReadError("t", path="/fapi/v1/order", http_status=503, code=None, attempts=4)
         if outcome == "other":

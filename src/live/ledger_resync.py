@@ -128,7 +128,8 @@ def run_ledger_resync(
             )
             return ResyncPlan(adjustments=breaches, backup_path=None, applied=False)
         sweep = cancel_orphan_orders(
-            order_client, run_id, audit, journal=journal, now=now_ts, taker_fee_bps=float(settings.taker_fee_bps)
+            order_client, run_id, audit, journal=journal, now=now_ts, taker_fee_bps=float(settings.taker_fee_bps),
+            order_identity_tolerance_ms=settings.order_identity_tolerance_ms,
         )
         if sweep.foreign_symbols:
             raise LiveTradingError(
@@ -142,8 +143,9 @@ def run_ledger_resync(
             now=now_ts,
             lookback=pd.Timedelta(hours=settings.journal_recovery_lookback_hours),
             taker_fee_bps=float(settings.taker_fee_bps),
+            order_identity_tolerance_ms=settings.order_identity_tolerance_ms,
         )
-        settlement = settle_unresolved_orders(order_client, journal, audit, recovery.unresolved, taker_fee_bps=float(settings.taker_fee_bps))
+        settlement = settle_unresolved_orders(order_client, journal, audit, recovery.unresolved, taker_fee_bps=float(settings.taker_fee_bps), order_identity_tolerance_ms=settings.order_identity_tolerance_ms)
         pending = (*sweep.unconfirmed, *settlement.still_open)
         if pending:
             pending_symbols = sorted({o.symbol for o in pending})

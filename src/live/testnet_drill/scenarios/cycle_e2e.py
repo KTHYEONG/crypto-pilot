@@ -1,7 +1,7 @@
-"""Group G runner-cycle end-to-end scenarios (G1..G3).
+"""Group G runner-cycle end-to-end scenarios (G1..G4).
 
-Cycles run the production ``run_shadow_cycle`` bound to the drill session (``seams.production_bound``): orders pass
-the per-order notional cap, and target weights are sized so each leg is about ``probe_notional_usdt``.
+Same-day reruns of group G require the durable offset reservations under scratch.
+Keep that reservation file across runs: deleting it can re-issue historical ids.
 """
 
 from __future__ import annotations
@@ -62,9 +62,33 @@ def _symbols(session: Any) -> tuple[str, str]:
     return session.config.symbols[0], session.config.symbols[1]
 
 
-def _decision_days(count: int) -> list[pd.Timestamp]:
-    today = pd.Timestamp.now(tz="UTC").normalize()
-    return [today - pd.Timedelta(days=count - 1 - i) for i in range(count)]
+def _decision_days(count: int, *, seed: str = "") -> list[pd.Timestamp]:
+    import fcntl
+    import hashlib
+    import json
+    import os
+
+    from src.live.testnet_drill.guard import drill_scratch_root
+
+    root = drill_scratch_root()
+    root.mkdir(parents=True, exist_ok=True)
+    anchor = pd.Timestamp("2020-01-01", tz="UTC")
+    slots = ((pd.Timestamp.now(tz="UTC").normalize() - anchor).days - 30) // count
+    start = int(hashlib.sha256(seed.encode()).hexdigest(), 16) % max(slots, 1)
+    with (root / "g_decision_windows.jsonl").open("a+", encoding="utf-8") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        handle.seek(0)
+        used = {day for line in handle for day in json.loads(line)["days"]}
+        for offset in range(slots):
+            slot = (start + offset) % slots
+            days = [anchor + pd.Timedelta(days=slot * count + i) for i in range(count)]
+            labels = [day.isoformat() for day in days]
+            if used.isdisjoint(labels):
+                handle.write(json.dumps({"run_id": seed, "days": labels}) + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+                return days
+    raise DrillRefused("drill refused: g_decision_window_exhausted")
 
 
 def cycle_now(day: pd.Timestamp) -> pd.Timestamp:
@@ -122,7 +146,7 @@ def _reconciled(session: Any) -> bool:
 def _script(session: Any) -> tuple[Path, list[pd.Timestamp]]:
     first, second = _symbols(session)
     weight = _probe_weight(session)
-    days = _decision_days(3)
+    days = _decision_days(3, seed=getattr(session, "run_id", ""))
     rows = {
         days[0]: {first: weight, second: weight},
         days[1]: {first: -weight, second: weight},
@@ -269,10 +293,90 @@ def _eval_g3(evidence: ScenarioEvidence) -> Any:
     return result_of(evidence, "G3", Verdict.PASS if passed else Verdict.FAIL, (("restart_in_cycle", passed),))
 
 
+def _run_g4(session: Any, config: Any) -> ScenarioEvidence:
+    """Reuse a filled venue id from a fresh journal while the replacement rests."""
+    import time
+
+    from src.live.executor import FeeSchedule, _IntentRuntime, _sync_venue_order
+    from src.live.order_identity import StaleOrderIdentity
+    from src.live.recovery import recover_unresolved_orders
+    from src.live.testnet_drill.execution import make_intent, settle_journal, submit_probe
+    from src.live.testnet_drill.scenarios.lifecycle_runs import _limit
+
+    symbol = _symbols(session)[0]
+    intent = make_intent(session, symbol)
+    resting = _limit(session, distance=True)
+    order_id = resting["newClientOrderId"]
+    quote = session.client.book_ticker(symbol)
+    first = submit_probe(session, {
+        **resting, "timeInForce": "IOC", "price": quote["askPrice"],
+    })
+    if first.get("status") != "FILLED":
+        raise DrillRefused("drill refused: g4_initial_order_not_filled")
+    settle_journal(session)
+    tolerance = session.settings.order_identity_tolerance_ms + session.client.clock_offset_margin_ms
+    if tolerance / 1000 + 1 >= config.scenario_timeout_s:
+        raise DrillRefused("drill refused: g4_clock_wait_exceeds_budget")
+    time.sleep(tolerance / 1000 + 1)
+    journal_b = OrderJournal(session.workspace / "g4-journal-b.jsonl")
+    replacement = submit_probe(replace(session, journal=journal_b), resting)
+    if replacement.get("status") != "NEW":
+        raise DrillRefused("drill refused: g4_replacement_did_not_rest")
+    if replacement["orderId"] == first["orderId"]:
+        raise DrillRefused("drill refused: g4_venue_did_not_reuse_id")
+    rt = _IntentRuntime(
+        intent=intent, filters=session.filters[symbol],
+        fee_schedule=FeeSchedule(session.settings.maker_fee_bps, session.settings.taker_fee_bps),
+        journal=journal_b, journal_enabled=True, active_id=order_id,
+        active_price=Decimal(resting["price"]), active_post_qty=intent.quantity,
+        order_identity_tolerance_ms=session.settings.order_identity_tolerance_ms,
+    )
+    now = pd.Timestamp.now(tz="UTC")
+    executor_tripped = False
+    recovery_tripped = False
+    try:
+        try:
+            _sync_venue_order(session.client, rt, now=now.timestamp(), audit=session.audit, touch=None)
+        except StaleOrderIdentity:
+            executor_tripped = True
+        try:
+            recover_unresolved_orders(
+                session.client, journal_b, session.audit, now=now,
+                lookback=pd.Timedelta(hours=72), taker_fee_bps=session.settings.taker_fee_bps,
+                order_identity_tolerance_ms=session.settings.order_identity_tolerance_ms,
+            )
+        except StaleOrderIdentity:
+            recovery_tripped = True
+    finally:
+        session.client.request("DELETE", "/fapi/v1/order", {
+            "symbol": symbol, "orderId": replacement["orderId"],
+        }, signed=True)
+    fills = [f for f in journal_b.fills_after(-1) if f.client_order_id == order_id]
+    tripped = executor_tripped and recovery_tripped
+    return ev(
+        "G4",
+        guard_tripped=tripped,
+        no_phantom_fill=not fills and rt.filled_total == Decimal("0"),
+        first_order_id=first["orderId"], replacement_order_id=replacement["orderId"],
+        h12="REFUTED" if tripped else "CONFIRMED" if fills else "INCONCLUSIVE",
+    )
+
+
+def _eval_g4(evidence: ScenarioEvidence) -> Any:
+    p = evidence.payload
+    passed = p["guard_tripped"] is True and p["no_phantom_fill"] is True
+    return result_of(
+        evidence, "G4", Verdict.PASS if passed else Verdict.FAIL, (("id_reuse_guard", passed),),
+        hypotheses=("H12",),
+        hypothesis_outcome="REFUTED" if passed else "CONFIRMED" if not p["no_phantom_fill"] else "INCONCLUSIVE",
+    )
+
+
 _G_TITLES: dict[str, tuple[str, tuple[str, ...]]] = {
     "G1": ("three cycle script", ()),
     "G2": ("idempotent rerun", ()),
     "G3": ("restart in cycle", ()),
+    "G4": ("id reuse guard", ("H12",)),
 }
 
 def _swept(body: Callable[[Any, Any], ScenarioEvidence]) -> Callable[[Any, Any], ScenarioEvidence]:
@@ -296,8 +400,8 @@ def _swept(body: Callable[[Any, Any], ScenarioEvidence]) -> Callable[[Any, Any],
     return run
 
 
-_G_RUNNERS: dict[str, Any] = {"G1": _swept(_run_g1), "G2": _swept(_run_g2), "G3": _swept(_run_g3)}
-_G_EVALUATORS: dict[str, Any] = {"G1": _eval_g1, "G2": _eval_g2, "G3": _eval_g3}
+_G_RUNNERS: dict[str, Any] = {"G1": _swept(_run_g1), "G2": _swept(_run_g2), "G3": _swept(_run_g3), "G4": _run_g4}
+_G_EVALUATORS: dict[str, Any] = {"G1": _eval_g1, "G2": _eval_g2, "G3": _eval_g3, "G4": _eval_g4}
 
 
 def scenario_specs() -> tuple[ScenarioSpec, ...]:

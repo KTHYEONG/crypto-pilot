@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
@@ -22,7 +22,7 @@ from src.live.order_cancel import (
 from src.live.order_journal import OrderJournal
 
 if TYPE_CHECKING:
-    from src.live.order_journal import JournalFill
+    from src.live.order_journal import JournalFill, JournalSubmit
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,6 +73,39 @@ def _venue_update_time(payload: Any, order_id: str) -> pd.Timestamp:
     return pd.Timestamp(millis, unit="ms", tz="UTC")
 
 
+def _default_order_identity_tolerance_ms() -> int:
+    from src.live.settings import _ORDER_IDENTITY_SKEW_MARGIN_MS, LiveSettings
+
+    recv_window_ms = LiveSettings.model_fields["recv_window_ms"].default
+    return int(recv_window_ms) + int(_ORDER_IDENTITY_SKEW_MARGIN_MS)
+
+
+def _guard_order_identity(
+    journal: OrderJournal,
+    payload: Any,
+    order_id: str,
+    tolerance_ms: int | None,
+    submits_by_id: Mapping[str, JournalSubmit] | None = None,
+) -> None:
+    """Reject a recovery payload created before its journal submit beyond skew."""
+    from src.live.order_identity import assert_order_identity
+
+    submits = submits_by_id if submits_by_id is not None else {s.client_order_id: s for s in journal.submits()}
+    match = submits.get(order_id)
+    if match is None:
+        return
+    recorded_at = match.recorded_at
+    if recorded_at == pd.Timestamp.min.tz_localize("UTC"):
+        return
+    tolerance = tolerance_ms if tolerance_ms is not None else _default_order_identity_tolerance_ms()
+    assert_order_identity(
+        payload,
+        client_order_id=order_id,
+        submitted_at=recorded_at,
+        tolerance_ms=int(tolerance),
+    )
+
+
 def _book_recovered_delta(
     journal: OrderJournal,
     audit: AuditLog,
@@ -83,12 +116,15 @@ def _book_recovered_delta(
     leg_index: int,
     payload: Any,
     taker_fee_bps: float,
+    order_identity_tolerance_ms: int | None = None,
+    submits_by_id: Mapping[str, JournalSubmit] | None = None,
 ) -> JournalFill | None:
     """Journal the venue executed delta over the observed watermark as one ``recovered`` fill.
 
     Returns None when nothing new executed. Validates side, avgPrice and updateTime only when a
     delta exists, so closed orders without new executions terminal without venue-field demands.
     """
+    _guard_order_identity(journal, payload, order_id, order_identity_tolerance_ms, submits_by_id)
     executed = _venue_decimal(payload, "executedQty", order_id)
     observed = journal.observed_qty(order_id)
     delta = executed - observed
@@ -136,6 +172,7 @@ def recover_unresolved_orders(
     now: pd.Timestamp,
     lookback: pd.Timedelta,
     taker_fee_bps: float,
+    order_identity_tolerance_ms: int | None = None,
 ) -> RecoveryReport:
     """Query every schema-v2 journal submit recorded within `lookback` that has no terminal record, journal the executed delta as a `recovered` fill and mark closed orders terminal.
 
@@ -147,6 +184,8 @@ def recover_unresolved_orders(
         return RecoveryReport(recovered=(), resolved_ids=(), unresolved_ids=())
     since = now - lookback
     submits = journal.unresolved_submits(since=since)
+    submits_by_id = {s.client_order_id: s for s in submits}
+    tolerance = order_identity_tolerance_ms if order_identity_tolerance_ms is not None else _default_order_identity_tolerance_ms()
     recovered: list[JournalFill] = []
     resolved: list[str] = []
     unresolved: list[UnresolvedOrder] = []
@@ -165,6 +204,9 @@ def recover_unresolved_orders(
             resolved.append(order_id)
             continue
         status = str(payload.get("status", "") or "")
+        margin = getattr(client, "clock_offset_margin_ms", 0)
+        effective_tolerance = tolerance + (margin if isinstance(margin, int) and margin > 0 else 0)
+        _guard_order_identity(journal, payload, order_id, effective_tolerance, submits_by_id)
         if not status:
             raise DataIntegrityError(f"recovery query for {order_id} lacks status")
         if status in _OPEN_ORDER_STATUSES:
@@ -190,6 +232,8 @@ def recover_unresolved_orders(
             leg_index=leg_index if isinstance(leg_index, int) else 0,
             payload=payload,
             taker_fee_bps=taker_fee_bps,
+            order_identity_tolerance_ms=effective_tolerance,
+            submits_by_id=submits_by_id,
         )
         if fill is not None:
             recovered.append(fill)
@@ -211,6 +255,7 @@ def settle_unresolved_orders(
     unresolved: Sequence[UnresolvedOrder],
     *,
     taker_fee_bps: float,
+    order_identity_tolerance_ms: int | None = None,
 ) -> UnresolvedSettlement:
     """Cancel each order recovery left open, with venue confirmation, and book what it executed.
 
@@ -240,6 +285,8 @@ def settle_unresolved_orders(
     recovered: list[JournalFill] = []
     resolved: list[str] = []
     still_open: list[UnresolvedOrder] = []
+    submits_by_id = {s.client_order_id: s for s in journal.submits()}
+    tolerance = order_identity_tolerance_ms if order_identity_tolerance_ms is not None else _default_order_identity_tolerance_ms()
     for order in unresolved:
         confirmation = cancel_and_confirm(client, order.symbol, order.client_order_id)
         if confirmation.status == ORDER_NOT_FOUND_STATUS:
@@ -253,6 +300,7 @@ def settle_unresolved_orders(
             resolved.append(order.client_order_id)
             continue
         assert confirmation.payload is not None
+        margin = getattr(client, "clock_offset_margin_ms", 0)
         fill = _book_recovered_delta(
             journal,
             audit,
@@ -262,6 +310,8 @@ def settle_unresolved_orders(
             leg_index=order.leg_index,
             payload=confirmation.payload,
             taker_fee_bps=taker_fee_bps,
+            order_identity_tolerance_ms=tolerance + (margin if isinstance(margin, int) and margin > 0 else 0),
+            submits_by_id=submits_by_id,
         )
         if fill is not None:
             recovered.append(fill)

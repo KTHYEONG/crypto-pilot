@@ -80,6 +80,7 @@ def settle_journal(session: DrillSession) -> None:
         now=pd.Timestamp.now(tz="UTC"),
         lookback=pd.Timedelta(hours=session.settings.journal_recovery_lookback_hours),
         taker_fee_bps=session.settings.taker_fee_bps,
+        order_identity_tolerance_ms=session.settings.order_identity_tolerance_ms,
     )
     settled = settle_unresolved_orders(
         session.client,
@@ -87,6 +88,7 @@ def settle_journal(session: DrillSession) -> None:
         session.audit,
         recovery.unresolved,
         taker_fee_bps=session.settings.taker_fee_bps,
+        order_identity_tolerance_ms=session.settings.order_identity_tolerance_ms,
     )
     if settled.still_open:
         raise DrillRefused("drill refused: unsettled_orders")
@@ -276,6 +278,7 @@ def run_cycle(
             attempt=attempt,
             shutdown=Deadline(),
             shutdown_cleanup_budget_s=session.config.scenario_timeout_s,
+            order_identity_tolerance_ms=session.settings.order_identity_tolerance_ms,
         )
     except Exception as exc:
         # Any escape is evidence (H1/H11 observe exactly this); it must not abort the scenario harness.

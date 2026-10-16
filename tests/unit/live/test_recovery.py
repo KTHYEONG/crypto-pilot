@@ -46,6 +46,20 @@ def _journal_with_submit(tmp_path, name="journal.jsonl", **overrides):
     return journal, attempt, order_id
 
 
+def _fresh_time_ms(journal: OrderJournal, order_id: str, delta_ms: int = 50) -> int:
+    submit = next(s for s in journal.submits() if s.client_order_id == order_id)
+    return int(submit.recorded_at.value // 1_000_000) + delta_ms
+
+
+def _with_fresh_time(journal: OrderJournal, order_id: str, answer):
+    if isinstance(answer, Exception):
+        return answer
+    out = dict(answer)
+    out.setdefault("time", _fresh_time_ms(journal, order_id))
+    out.setdefault("updateTime", _fresh_time_ms(journal, order_id, 1_000))
+    return out
+
+
 class _VenueClient:
     """Query answers keyed by client order id; counts every call."""
 
@@ -58,7 +72,7 @@ class _VenueClient:
         answer = self.answers[orig_client_order_id]
         if isinstance(answer, Exception):
             raise answer
-        return dict(answer)
+        return {"time": int(pd.Timestamp.now(tz="UTC").value // 1_000_000), **answer}
 
 
 def _venue_error(code):
@@ -72,7 +86,7 @@ def test_recovered_fill_for_closed_order(tmp_path) -> None:
     journal, attempt, order_id = _journal_with_submit(tmp_path)
     audit_path = tmp_path / "audit.jsonl"
     audit = AuditLog(audit_path)
-    client = _VenueClient({order_id: {"status": "FILLED", "side": "BUY", "executedQty": "1.0", "avgPrice": "100", "updateTime": _UPDATE_MS}})
+    client = _VenueClient({order_id: _with_fresh_time(journal, order_id, {"status": "FILLED", "side": "BUY", "executedQty": "1.0", "avgPrice": "100", "updateTime": _UPDATE_MS})})
 
     report = recover_unresolved_orders(client, journal, audit, now=_NOW, lookback=_LOOKBACK, taker_fee_bps=_TAKER_BPS)
 
@@ -190,7 +204,7 @@ def test_recovery_fill_without_price_fails_closed(tmp_path) -> None:
     """Executed quantity with a non-positive avgPrice raises DataIntegrityError and journals nothing."""
     journal, _, order_id = _journal_with_submit(tmp_path)
     audit = AuditLog(tmp_path / "audit.jsonl")
-    client = _VenueClient({order_id: {"status": "FILLED", "side": "BUY", "executedQty": "1.0", "avgPrice": "0"}})
+    client = _VenueClient({order_id: _with_fresh_time(journal, order_id, {"status": "FILLED", "side": "BUY", "executedQty": "1.0", "avgPrice": "0"})})
 
     with pytest.raises(DataIntegrityError):
         recover_unresolved_orders(client, journal, audit, now=_NOW, lookback=_LOOKBACK, taker_fee_bps=_TAKER_BPS)
@@ -215,7 +229,7 @@ def test_recovery_malformed_venue_answer_fails_closed(tmp_path, answer) -> None:
     """A closed order whose query lacks or garbles executedQty/side/avgPrice raises and journals nothing."""
     journal, _, order_id = _journal_with_submit(tmp_path)
     audit = AuditLog(tmp_path / "audit.jsonl")
-    client = _VenueClient({order_id: answer})
+    client = _VenueClient({order_id: _with_fresh_time(journal, order_id, answer)})
 
     with pytest.raises(DataIntegrityError):
         recover_unresolved_orders(client, journal, audit, now=_NOW, lookback=_LOOKBACK, taker_fee_bps=_TAKER_BPS)
@@ -246,7 +260,7 @@ def test_recovery_closed_order_without_new_execution_terminals_only(tmp_path) ->
     """CANCELED with executedQty equal to the observed 0.4 is terminalled without a recovered fill."""
     journal, _, order_id = _journal_with_submit(tmp_path)
     audit = AuditLog(tmp_path / "audit.jsonl")
-    client = _VenueClient({order_id: {"status": "CANCELED", "side": "BUY", "executedQty": "0.4", "avgPrice": "99"}})
+    client = _VenueClient({order_id: _with_fresh_time(journal, order_id, {"status": "CANCELED", "side": "BUY", "executedQty": "0.4", "avgPrice": "99"})})
 
     report = recover_unresolved_orders(client, journal, audit, now=_NOW, lookback=_LOOKBACK, taker_fee_bps=_TAKER_BPS)
 
@@ -260,7 +274,7 @@ def test_recovery_closed_order_without_new_execution_terminals_only(tmp_path) ->
 def test_recovery_fill_without_venue_update_time_fails_closed(tmp_path, update_time) -> None:
     """A recovered fill is never stamped with the wall clock: a missing/invalid updateTime fails closed."""
     journal, _attempt, order_id = _journal_with_submit(tmp_path)
-    answer = {"status": "FILLED", "side": "BUY", "executedQty": "1.0", "avgPrice": "100"}
+    answer = {"status": "FILLED", "side": "BUY", "executedQty": "1.0", "avgPrice": "100", "time": _fresh_time_ms(journal, order_id)}
     if update_time is not None:
         answer["updateTime"] = update_time
     client = _VenueClient({order_id: answer})
@@ -292,7 +306,7 @@ def _settle_client(*, cancel_exc=None, answers=None):
             answer = (answers or {})[oid]
             if isinstance(answer, Exception):
                 raise answer
-            return dict(answer)
+            return {"time": int(pd.Timestamp.now(tz="UTC").value // 1_000_000), **answer}
 
     return _C()
 
@@ -320,7 +334,7 @@ def test_settle_confirmed_cancel_books_delta_and_terminals(tmp_path) -> None:
     audit = AuditLog(tmp_path / "audit.jsonl")
     order = UnresolvedOrder(order_id, "AAAUSDT", attempt.attempt_seq, 0)
     client = _settle_client(answers={order_id: {
-        "status": "CANCELED", "side": "BUY", "executedQty": "0.7", "avgPrice": "100", "updateTime": _UPDATE_MS}})
+        "status": "CANCELED", "side": "BUY", "executedQty": "0.7", "avgPrice": "100", "updateTime": _UPDATE_MS, "time": _fresh_time_ms(journal, order_id)}})
 
     settlement = settle_unresolved_orders(client, journal, audit, (order,), taker_fee_bps=_TAKER_BPS)
 
@@ -347,7 +361,7 @@ def test_settle_2011_still_open_books_partial_delta_without_terminal(tmp_path) -
     client = _settle_client(
         cancel_exc=_venue_error(-2011),
         answers={order_id: {
-            "status": "PARTIALLY_FILLED", "side": "BUY", "executedQty": "0.6", "avgPrice": "100", "updateTime": _UPDATE_MS}})
+            "status": "PARTIALLY_FILLED", "side": "BUY", "executedQty": "0.6", "avgPrice": "100", "updateTime": _UPDATE_MS, "time": _fresh_time_ms(journal, order_id)}})
 
     settlement = settle_unresolved_orders(client, journal, audit, (order,), taker_fee_bps=_TAKER_BPS)
 
@@ -365,7 +379,7 @@ def test_settle_is_idempotent_on_unchanged_venue_state(tmp_path) -> None:
     journal, attempt, order_id = _journal_with_submit(tmp_path)
     audit = AuditLog(tmp_path / "audit.jsonl")
     order = UnresolvedOrder(order_id, "AAAUSDT", attempt.attempt_seq, 0)
-    answer = {"status": "PARTIALLY_FILLED", "side": "BUY", "executedQty": "0.6", "avgPrice": "100", "updateTime": _UPDATE_MS}
+    answer = {"status": "PARTIALLY_FILLED", "side": "BUY", "executedQty": "0.6", "avgPrice": "100", "updateTime": _UPDATE_MS, "time": _fresh_time_ms(journal, order_id)}
 
     first = settle_unresolved_orders(_settle_client(answers={order_id: answer}),
                                      journal, audit, (order,), taker_fee_bps=_TAKER_BPS)

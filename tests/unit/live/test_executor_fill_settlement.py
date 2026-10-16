@@ -22,6 +22,12 @@ from src.live.filters import SymbolFilters
 from src.live.planner import OrderIntent
 from src.live.rest import PaperResponse
 
+def _venue_now_ms() -> int:
+    import time
+
+    return int(time.time() * 1000)
+
+
 
 def _runtime(*, quantity: str = "1", fee_schedule: FeeSchedule | None = None) -> _IntentRuntime:
     intent = OrderIntent(
@@ -85,7 +91,7 @@ def test_cancel_settlement_uses_runtime_maker_fee(tmp_path) -> None:
             return {}
 
         def query_order(self, *_args):
-            return {"status": "CANCELED", "executedQty": "0.4", "avgPrice": "99.50"}
+            return {"time": _venue_now_ms(), "status": "CANCELED", "executedQty": "0.4", "avgPrice": "99.50"}
 
     rt = _runtime(fee_schedule=FeeSchedule(0.9, 3.6))
     journal = Journal()
@@ -111,7 +117,7 @@ def test_window_end_settlement_uses_runtime_taker_fee(tmp_path) -> None:
             return {}
 
         def query_order(self, *_args):
-            return {"status": "CANCELED", "executedQty": "0.25", "avgPrice": "101"}
+            return {"time": _venue_now_ms(), "status": "CANCELED", "executedQty": "0.25", "avgPrice": "101"}
 
     rt = _runtime(fee_schedule=FeeSchedule(0.9, 3.6))
     rt.active_id = "order-2"
@@ -127,7 +133,7 @@ def test_stale_venue_reads_do_not_double_count(tmp_path) -> None:
         quantities = iter(("3", "2", "3"))
 
         def query_order(self, *_args):
-            return {"status": "PARTIALLY_FILLED", "executedQty": next(self.quantities), "avgPrice": "100"}
+            return {"time": _venue_now_ms(), "status": "PARTIALLY_FILLED", "executedQty": next(self.quantities), "avgPrice": "100"}
 
     rt = _runtime(fee_schedule=FeeSchedule(0.9, 3.6))
     rt.active_id = "order-3"
@@ -189,7 +195,7 @@ def test_fill_application_rejects_nonpositive_quantity_or_price(tmp_path, quanti
 def test_venue_execution_cannot_exceed_submitted_order_quantity(tmp_path) -> None:
     class Client:
         def query_order(self, *_args):
-            return {"status": "FILLED", "executedQty": "1.1", "avgPrice": "100"}
+            return {"time": _venue_now_ms(), "status": "FILLED", "executedQty": "1.1", "avgPrice": "100"}
 
     rt = _runtime()
     rt.active_id = "overfilled-order"
@@ -304,7 +310,7 @@ def test_anchored_repeg_ignores_exhausted_post_only_chase_budget(tmp_path) -> No
             self.cancelled.append(order_id)
 
         def query_order(self, *_args):
-            return {"status": "CANCELED", "executedQty": "0"}
+            return {"time": _venue_now_ms(), "status": "CANCELED", "executedQty": "0"}
 
         def new_order(self, params):
             self.orders.append(params)
@@ -333,7 +339,7 @@ def test_touch_chase_budget_holds_active_order(tmp_path) -> None:
             raise AssertionError("exhausted touch chase must hold")
 
         def query_order(self, *_args):
-            return {"status": "NEW", "executedQty": "0"}
+            return {"time": _venue_now_ms(), "status": "NEW", "executedQty": "0"}
 
         def new_order(self, _params):
             raise AssertionError("held order must not be reposted")
@@ -412,7 +418,7 @@ def test_anchored_repeg_records_repeg_price_as_quote_level(tmp_path) -> None:
             return None
 
         def query_order(self, *_args):
-            return {"status": "CANCELED", "executedQty": "0"}
+            return {"time": _venue_now_ms(), "status": "CANCELED", "executedQty": "0"}
 
         def new_order(self, params):
             return {"orderId": 1}

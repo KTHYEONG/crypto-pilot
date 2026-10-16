@@ -49,4 +49,4 @@ def test_three_cycle_and_idempotent_rerun() -> None:
 
 def test_registry_covers_f_and_g() -> None:
     assert set(_F) == {f"F{i}" for i in range(1, 8)}
-    assert set(_G) == {f"G{i}" for i in range(1, 4)}
+    assert set(_G) == {f"G{i}" for i in range(1, 5)}

@@ -173,7 +173,11 @@ class Exchange:
             if path != "/fapi/v1/order":
                 raise AssertionError((method, path))
             if method != "POST":
-                row = next((row for row in reversed(self.orders) if row["key"] == key and row["clientOrderId"] == params["origClientOrderId"]), None)
+                candidates = self.orders if method == "GET" else list(reversed(self.orders))
+                row = next((row for row in candidates if row["key"] == key and (
+                    str(row["orderId"]) == params["orderId"] if "orderId" in params
+                    else row["clientOrderId"] == params["origClientOrderId"]
+                )), None)
                 if row is None:
                     return self.error(-2013)
                 if method == "DELETE":
@@ -200,8 +204,9 @@ class Exchange:
             if amount * limit < 5 and params.get("reduceOnly") != "true":
                 return self.error(-4164)
             self.uid += 1
+            now_ms = int(time.time() * 1000)
             row = {"key": key, "symbol": params["symbol"], "side": params["side"], "clientOrderId": params["newClientOrderId"],
-                "orderId": self.uid, "origQty": str(amount), "executedQty": "0", "avgPrice": "0", "price": str(limit), "status": "NEW", "updateTime": int(time.time() * 1000)}
+                "orderId": self.uid, "origQty": str(amount), "executedQty": "0", "avgPrice": "0", "price": str(limit), "status": "NEW", "time": now_ms, "updateTime": now_ms}
             self.orders.append(row)
             active = params["type"] == "MARKET" or params.get("timeInForce") in ("IOC", "GTC")
             remaining = min(amount, abs(position)) if params.get("reduceOnly") == "true" else amount

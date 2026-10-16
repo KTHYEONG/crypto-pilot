@@ -6,6 +6,12 @@ from collections.abc import Mapping
 
 from src.live.errors import BINANCE_ERROR_POLICY, ErrorAction, resolve_error_action
 
+def _venue_now_ms() -> int:
+    import time
+
+    return int(time.time() * 1000)
+
+
 
 def test_SCENARIO_LIVE_02_error_registry_fails_closed() -> None:
     assert resolve_error_action(-1021) is ErrorAction.RESYNC_CLOCK
@@ -114,10 +120,10 @@ def test_max_qty_reject_isolates_one_intent(tmp_path) -> None:
                     "quantity exceeds maximum", code=-4005, http_status=400,
                     path="/fapi/v1/order", payload_digest="0" * 12,
                 )
-            return {"status": "FILLED", "executedQty": "1", "avgPrice": "100.00"}
+            return {"time": _venue_now_ms(), "status": "FILLED", "executedQty": "1", "avgPrice": "100.00"}
 
         def query_order(self, symbol, order_id):
-            return {"status": "FILLED", "executedQty": "1", "avgPrice": "100.00"}
+            return {"time": _venue_now_ms(), "status": "FILLED", "executedQty": "1", "avgPrice": "100.00"}
 
     clock_state = [0.0]
 
