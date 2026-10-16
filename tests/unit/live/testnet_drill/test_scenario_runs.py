@@ -70,3 +70,16 @@ def test_min_notional_boundary_levels_stay_on_step_grid(exchange_session):
     assert len(rows) == 6
     assert all(row["code"] != -1111 for row in rows)
     assert evidence.payload["client_decision"] == evidence.payload["venue_decision"] == "accept"
+
+
+def test_c4_refuses_when_reachable_depth_exceeds_available_balance(exchange_session, monkeypatch):
+    from src.live.testnet_drill.guard import DrillRefused
+
+    session, _, _ = exchange_session(config={"symbols": ("BTCUSDT", "ETHUSDT")})
+    quote = session.client.book_ticker("BTCUSDT")
+    ask = str(quote["askPrice"])
+    monkeypatch.setattr(
+        session.client, "depth", lambda symbol, *, limit=20: {"bids": [[quote["bidPrice"], "1"]], "asks": [[ask, "1000000"]]}
+    )
+    with pytest.raises(DrillRefused, match="c4_reachable_depth_exceeds_available_balance"):
+        SCENARIOS["C4"].run(session, session.config)

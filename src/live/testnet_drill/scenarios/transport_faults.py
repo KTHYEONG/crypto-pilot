@@ -89,8 +89,11 @@ def _faulted_cycle(session: Any, rules: Sequence[FaultRule]) -> Iterator[AuditTa
         yield tap
 
 
-def _cycle(session: Any, rules: Sequence[FaultRule], **kwargs: Any) -> tuple[CycleEvidence, AuditTap, int]:
-    intent = make_intent(session, session.config.symbols[0])
+def _cycle(
+    session: Any, rules: Sequence[FaultRule], *, unfilled: bool = False, **kwargs: Any
+) -> tuple[CycleEvidence, AuditTap, int]:
+    anchor = session.config.unfilled_anchor_bps if unfilled else 0
+    intent = make_intent(session, session.config.symbols[0], anchor_offset_bps=anchor)
     start = len(session.transport.records)
     with _faulted_cycle(session, rules) as tap:
         trace = run_cycle(session, [intent], **kwargs)
@@ -104,7 +107,7 @@ def _no_post_between(posts: Sequence[WireRecord], after_seq: int, until_index: i
 def _run_lost_response(session: Any, scenario_id: str, *, tif: str | None) -> ScenarioEvidence:
     params = (("timeInForce", tif),) if tif else ()
     rule = FaultRule("POST", ORDER_PATH, params=params, action=FaultAction.DELIVER_DROP_RESPONSE)
-    trace, tap, start = _cycle(session, [rule])
+    trace, tap, start = _cycle(session, [rule], unfilled=tif == "IOC")
     posts = _mutations(_records(session, start, trace.wire_end), "POST")
     lost = next((r for r in posts if tif is None or _param(r, "timeInForce") == tif), None)
     if lost is None or lost.delivered is not True:
