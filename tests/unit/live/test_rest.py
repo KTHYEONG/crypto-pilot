@@ -557,6 +557,21 @@ def _rest_client(tmp_path, monkeypatch, responder, audit_name="rest_audit.jsonl"
     return client, calls, sleeps
 
 
+def test_server_time_ms_applies_learned_clock_offset(tmp_path, monkeypatch) -> None:
+    """Venue-clock milliseconds equal local time plus the learned offset, negative offsets included."""
+    from src.live.rest import HttpResponse
+
+    client, _, _ = _rest_client(
+        tmp_path, monkeypatch, lambda m, u: HttpResponse(status_code=200, headers={}, body=b"{}"),
+        audit_name="server_time.jsonl",
+    )
+    monkeypatch.setattr("src.live.rest.time.time", lambda: 1000.0)
+    client._time_offset_ms = 2500
+    assert client.server_time_ms() == 1_002_500
+    client._time_offset_ms = -300
+    assert client.server_time_ms() == 999_700
+
+
 def test_get_503_then_success_returns_body(tmp_path, monkeypatch) -> None:
     """GET 503 then success returns the body with one retry audit row."""
     import json
