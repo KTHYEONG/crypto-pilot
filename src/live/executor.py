@@ -293,6 +293,7 @@ class ExecutionOutcome:
     maker_qty: Decimal = _ZERO
     taker_qty: Decimal = _ZERO
     reject_code: int | None = None
+    block_reason: str | None = None
 
 
 def _slice_quantities(total: Decimal, slice_count: int, step_size: Decimal) -> list[Decimal]:
@@ -900,6 +901,10 @@ class _IntentRuntime:
     journal_terminals: set[str] = field(default_factory=set)
     order_identity_tolerance_ms: int | None = None
     identity_submits: dict[str, JournalSubmit] | None = None
+    close_dependency: _IntentRuntime | None = None
+    block_reason: str | None = None
+    hard_stop_at: float = 0.0
+    wait_logged: bool = False
 
     @property
     def done(self) -> bool:
@@ -939,7 +944,86 @@ class _IntentRuntime:
             maker_qty=maker_qty,
             taker_qty=taker_qty,
             reject_code=self.reject_code if status == "REJECTED" else None,
+            block_reason=self.block_reason,
         )
+
+
+def _link_close_dependencies(runtimes: Sequence[_IntentRuntime]) -> None:
+    """Attach to each risk-increasing runtime its same-symbol reduce-only predecessor, if any."""
+    for rt in runtimes:
+        rt.close_dependency = None
+        if rt.intent.reduce_only:
+            continue
+        candidate: _IntentRuntime | None = None
+        for other in runtimes:
+            if (
+                other is not rt
+                and other.intent.symbol == rt.intent.symbol
+                and other.intent.reduce_only
+                and other.intent.leg_index < rt.intent.leg_index
+                and (candidate is None or other.intent.leg_index > candidate.intent.leg_index)
+            ):
+                candidate = other
+        rt.close_dependency = candidate
+
+
+def _gate_state(rt: _IntentRuntime) -> Literal["open", "wait", "blocked"]:
+    """Whether a runtime may post given its close-leg predecessor."""
+    dep = rt.close_dependency
+    if dep is None:
+        return "open"
+    status = dep.terminal_status
+    if status is None:
+        return "wait"
+    if status in ("RESIDUAL", "REJECTED"):
+        return "blocked"
+    return "open"
+
+
+def _effective_window_deadline_s(
+    policy: PassiveExecutionPolicy, runtimes: Sequence[_IntentRuntime]
+) -> float:
+    """Hard stop for the loop, extended by one passive phase when any open leg is gated."""
+    for rt in runtimes:
+        if rt.close_dependency is not None:
+            return policy.window_deadline_s + policy.passive_deadline_s
+    return policy.window_deadline_s
+
+
+def _gated_passive_deadline_s(rt: _IntentRuntime, policy: PassiveExecutionPolicy) -> float:
+    """Passive-phase length of a gated leg, clamped so the IOC reserve survives the hard stop."""
+    if rt.close_dependency is None:
+        return policy.passive_deadline_s
+    reserve = policy.window_deadline_s - policy.passive_deadline_s
+    remaining = rt.hard_stop_at - rt.passive_started_at - reserve
+    return min(policy.passive_deadline_s, max(0.0, remaining))
+
+
+def _apply_close_gate(rt: _IntentRuntime, now: float, audit: AuditLog) -> bool:
+    state = _gate_state(rt)
+    if state == "open":
+        return False
+    if state == "wait":
+        if not rt.wait_logged:
+            rt.wait_logged = True
+            dep = rt.close_dependency
+            audit.record(
+                "flip_open_waiting",
+                symbol=rt.intent.symbol,
+                close_leg_status=dep.terminal_status if dep is not None else None,
+            )
+        return True
+    rt.terminal_status = "RESIDUAL"
+    rt.block_reason = "blocked_by_close_leg"
+    rt.finalized_at = now
+    dep = rt.close_dependency
+    audit.record(
+        "flip_open_blocked",
+        symbol=rt.intent.symbol,
+        close_status=dep.terminal_status if dep is not None else None,
+        unfilled_qty=str(max(rt.intent.quantity - rt.filled_total, _ZERO)),
+    )
+    return True
 
 
 def _order_budget_exceeded(client: Any, policy: PassiveExecutionPolicy, rate_limits: RateLimits | None) -> bool:
@@ -1002,6 +1086,21 @@ def simulate_immediate_taker_fills(
             )
         )
     return tuple(outcomes)
+
+
+def _intent_outcome_fields(rt: _IntentRuntime, outcome: ExecutionOutcome) -> dict[str, Any]:
+    fields: dict[str, Any] = {
+        "symbol": rt.intent.symbol,
+        "status": outcome.status,
+        "filled_qty": str(rt.filled_total),
+        "unfilled_qty": str(max(rt.intent.quantity - rt.filled_total, _ZERO)),
+        "chases": rt.chases,
+    }
+    if outcome.reject_code is not None:
+        fields["reject_code"] = outcome.reject_code
+    if outcome.block_reason is not None:
+        fields["block_reason"] = outcome.block_reason
+    return fields
 
 
 def execute_intents(
@@ -1097,14 +1196,27 @@ def execute_intents(
         )
         for intent in intents
     ]
+    _link_close_dependencies(runtimes)
     for rt in runtimes:
         rt.attempt_seq = attempt_seq
         rt.journal_enabled = journal is not None
         rt.order_identity_tolerance_ms = order_identity_tolerance_ms
         if rt.filters is None:
             rt.terminal_status = "RESIDUAL"
+    effective_window_s = _effective_window_deadline_s(policy, runtimes)
     try:
-        _run_loop(client, runtimes, policy, audit, clock, sleep_fn, rate_limits, shutdown, shutdown_cleanup_budget_s)
+        _run_loop(
+            client,
+            runtimes,
+            policy,
+            audit,
+            clock,
+            sleep_fn,
+            rate_limits,
+            shutdown,
+            shutdown_cleanup_budget_s,
+            effective_window_s=effective_window_s,
+        )
     except BaseException as exc:
         _cleanup_on_abort(client, runtimes, audit, clock)
         if isinstance(exc, LiveTradingError):
@@ -1114,17 +1226,7 @@ def execute_intents(
         if outcome_sink is not None:
             outcome_sink[:] = [rt.snapshot() for rt in runtimes]
     for rt in runtimes:
-        outcome = rt.snapshot()
-        fields: dict[str, Any] = {
-            "symbol": rt.intent.symbol,
-            "status": outcome.status,
-            "filled_qty": str(rt.filled_total),
-            "unfilled_qty": str(max(rt.intent.quantity - rt.filled_total, _ZERO)),
-            "chases": rt.chases,
-        }
-        if outcome.reject_code is not None:
-            fields["reject_code"] = outcome.reject_code
-        audit.record("intent_outcome", **fields)
+        audit.record("intent_outcome", **_intent_outcome_fields(rt, rt.snapshot()))
     return tuple(rt.snapshot() for rt in runtimes)
 
 
@@ -1138,14 +1240,22 @@ def _run_loop(
     rate_limits: RateLimits | None,
     shutdown: Any | None = None,
     shutdown_cleanup_budget_s: float | None = None,
+    effective_window_s: float | None = None,
 ) -> None:
     live = [rt for rt in runtimes if not rt.done]
     if not live:
         return
     symbols = sorted({rt.intent.symbol for rt in live})
     start = clock()
+    window_s = (
+        effective_window_s
+        if effective_window_s is not None
+        else _effective_window_deadline_s(policy, runtimes)
+    )
+    for rt in runtimes:
+        rt.hard_stop_at = start + window_s
     interval = policy.poll_interval_s
-    max_ticks = math.ceil(policy.window_deadline_s / policy.poll_interval_s) + 1
+    max_ticks = math.ceil(window_s / policy.poll_interval_s) + 1
     ticks = 0
     book_failures = 0
     quote_invalid_reported: set[str] = set()
@@ -1162,7 +1272,7 @@ def _run_loop(
                 f"shutdown requested during execution window with {unsettled} unsettled order(s)"
             )
         now = clock()
-        if now - start >= policy.window_deadline_s:
+        if now - start >= window_s:
             break
         try:
             books = _fetch_books(
@@ -1198,6 +1308,9 @@ def _run_loop(
         sleep_fn(interval)
 
     _finalize(client, live, audit, clock, sleep_fn)
+    for rt in live:
+        if rt.block_reason is None and _gate_state(rt) == "blocked":
+            _apply_close_gate(rt, clock(), audit)
 
 
 def _throttled_interval(
@@ -1266,7 +1379,10 @@ def _shutdown_finalize(
         # Every runtime visited here is owned by the shutdown path (settled, already done,
         # or deliberately left for restart recovery), so _cleanup_on_abort must not touch it.
         rt.shutdown_finalized = True
-        if rt.done or (rt.active_id is None and rt.unresolved_id is None):
+        if rt.done:
+            continue
+        if rt.active_id is None and rt.unresolved_id is None:
+            _finalize(client, [rt], audit, clock, lambda _seconds: None)
             continue
         if clock() - start >= budget:
             unsettled += _open_order_ids(rt)
@@ -1515,7 +1631,7 @@ def _poll_active(
         return
     if rt.phase == "passive":
         band_low, band_high = _band(rt.intent, policy)
-        timed_out = now - rt.passive_started_at >= policy.passive_deadline_s
+        timed_out = now - rt.passive_started_at >= _gated_passive_deadline_s(rt, policy)
         exhausted = policy.passive_pricing == "touch_chase" and rt.chases >= policy.max_chases
         repeg_due = policy.passive_pricing == "anchored_repeg" and now - rt.last_repeg_at >= policy.repeg_interval_s
         moved = abs(own_touch - rt.active_price) >= rt.filters.tick_size * policy.chase_ticks
@@ -1778,6 +1894,8 @@ def _poll_or_post(
     cycle_flags: _CycleFlags | None = None,
 ) -> None:
     assert rt.filters is not None  # filters 부재 intent 는 생성 시 즉시 RESIDUAL 처리된다
+    if _apply_close_gate(rt, now, audit):
+        return
     if rt.passive_started_at == 0.0:
         rt.passive_started_at = now
     if rt.last_repeg_at == 0.0:
@@ -1831,7 +1949,9 @@ def _poll_or_post(
     ):
         _end_rejected(rt, audit, now, cycle_flags.freeze_code)
         return
-    if rt.phase == "passive" and now - rt.passive_started_at >= policy.passive_deadline_s:
+    if rt.phase == "passive" and now - rt.passive_started_at >= _gated_passive_deadline_s(
+        rt, policy
+    ):
         # 휴지 주문 없이 밴드 밖에서 대기한 경우에도 phase-level 타임아웃으로
         # 캡 적용 IOC 백스톱으로 상승시킨다(리포스트 리셋 없음).
         rt.phase = "ioc"
