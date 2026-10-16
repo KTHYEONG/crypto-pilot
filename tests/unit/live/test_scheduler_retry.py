@@ -165,3 +165,20 @@ def test_busy_stage_members_are_the_only_interruptible_stages(
 def test_attempt_cap_must_be_positive() -> None:
     with pytest.raises(ValueError, match="daemon_max_attempts_per_day"):
         LiveSettings(daemon_max_attempts_per_day=0)
+
+
+@pytest.mark.parametrize("post_cycle", [False, True])
+def test_ban_wait_and_initial_heartbeat_share_release_deadline(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, post_cycle: bool,
+) -> None:
+    monkeypatch.setattr(scheduler, "ip_ban_remaining_s", lambda now: 900.0)
+    beats: list[dict[str, Any]] = []
+    monkeypatch.setattr(scheduler, "write_heartbeat", lambda path, **fields: beats.append(fields))
+    waits, _, state, calls = _run_failure(
+        monkeypatch, tmp_path, post_cycle=post_cycle, shutdown_on_wait=True,
+    )
+    halt = next(beat for beat in beats if beat["status"] == "HALT")
+    assert halt["expected_by"] >= READY + pd.Timedelta(seconds=905)
+    assert waits == [300.0]
+    assert calls == 1
+    assert state["attempts"] == 1

@@ -4033,3 +4033,14 @@ def test_testnet_daemon_warns_without_collection(tmp_path, monkeypatch, caplog) 
             refresh_fn=lambda *a, **k: None, prune_fn=lambda: None,
         )
     assert any("[RISK]" in r.message and "tax collection disabled" in r.message for r in caplog.records)
+
+
+def test_ban_aware_backoff_respects_ban(monkeypatch) -> None:
+    import src.live.scheduler as sched
+
+    monkeypatch.setattr(sched, "ip_ban_remaining_s", lambda now=None: 900.0)
+    assert sched._ban_aware_backoff(300.0, 1_700_000_000.0) == 905.0
+    monkeypatch.setattr(sched, "ip_ban_remaining_s", lambda now=None: 0.0)
+    assert sched._ban_aware_backoff(300.0, 1_700_000_000.0) == 300.0
+    monkeypatch.setattr(sched, "ip_ban_remaining_s", lambda now=None: 100.0)
+    assert sched._ban_aware_backoff(300.0, 1_700_000_000.0) == 300.0
