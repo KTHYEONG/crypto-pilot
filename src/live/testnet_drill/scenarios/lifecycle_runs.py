@@ -70,6 +70,19 @@ def _primary_orders(session: DrillSession, symbol: str) -> list[dict[str, Any]]:
     ]
 
 
+def _trade_window_start_ms(session: DrillSession, client_order_ids: Any) -> int:
+    """Venue-clock lower bound for the trades of the given orders: earliest journal submit minus clock margin."""
+    wanted = set(client_order_ids)
+    submitted = [s.recorded_at for s in session.journal.submits() if s.client_order_id in wanted]
+    if not submitted:
+        raise DrillRefused("drill refused: trade_window_without_submits")
+    return int(min(submitted).timestamp() * 1000) - session.client.clock_offset_margin_ms - _TRADE_WINDOW_GUARD_MS
+
+
+# Slack before the first submit so venue-clock trade timestamps are never cut off at the window edge.
+_TRADE_WINDOW_GUARD_MS = 5000
+
+
 def _partial(session: DrillSession) -> ScenarioEvidence:
     symbol = session.config.symbols[0]
     intent = make_intent(session, symbol)
@@ -80,7 +93,8 @@ def _partial(session: DrillSession) -> ScenarioEvidence:
     for fill in fills:
         if fill.client_order_id is not None:
             by_id.setdefault(fill.client_order_id, []).append(fill)
-    trades = session.client.user_trades(symbol)
+    cycle_submit_ids = {s.client_order_id for s in session.journal.submits() if s.submit_seq >= trace.submit_start}
+    trades = session.client.user_trades(symbol, start_time_ms=_trade_window_start_ms(session, cycle_submit_ids))
     if len(trades) >= 1000:
         raise DrillRefused("drill refused: partial_trade_window_truncated")
     monotonic = all(
@@ -355,7 +369,10 @@ def _evidence_c3(c: _Cycle) -> ScenarioEvidence:
     session, outcomes = c.session, c.trace.outcomes
     submit_ids = {s.client_order_id for s in session.journal.submits() if s.submit_seq >= c.trace.submit_start}
     venue_ids = {str(session.client.query_order(c.symbol, client_id)["orderId"]) for client_id in submit_ids}
-    trades = [row for row in session.client.user_trades(c.symbol) if str(row["orderId"]) in venue_ids]
+    window_start = _trade_window_start_ms(session, submit_ids)
+    trades = [
+        row for row in session.client.user_trades(c.symbol, start_time_ms=window_start) if str(row["orderId"]) in venue_ids
+    ]
     venue_qty = sum((Decimal(str(row["qty"])) for row in trades), Decimal(0))
     venue_notional = sum((Decimal(str(row["qty"])) * Decimal(str(row["price"])) for row in trades), Decimal(0))
     journal_notional = sum(
