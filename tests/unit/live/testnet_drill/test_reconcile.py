@@ -89,6 +89,22 @@ def test_estimated_recovery_fee_may_exceed_but_not_undercut_venue() -> None:
     assert not _by_name(evaluate_reconciliation(exact_required, make_config()))["trade_parity"].passed
 
 
+def test_journal_fold_marks_recovery_fee_as_estimated() -> None:
+    from types import SimpleNamespace
+
+    from src.live.testnet_drill.reconcile import _journal_fold
+
+    def fill(kind: str, order: str) -> SimpleNamespace:
+        return SimpleNamespace(
+            kind=kind, symbol="BTCUSDT", side="BUY", quantity=Decimal("1"), price=Decimal("100"),
+            fee_bps=4.0, liquidity="taker", client_order_id=order,
+        )
+
+    positions, trades = _journal_fold([fill("execution", "a"), fill("recovered", "b"), fill("orphan_settlement", "c")])
+    assert positions == {"BTCUSDT": Decimal("3")}
+    assert trades.estimated == {"b", "c"}
+
+
 def test_maker_mismatch_reported_not_failed() -> None:
     evidence = _base(
         journal_maker_count=(("oid-1", 1),),
