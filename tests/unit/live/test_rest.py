@@ -679,10 +679,9 @@ def test_get_retries_resign_with_fresh_timestamp(tmp_path, monkeypatch) -> None:
     ]
     client, calls, _ = _rest_client(tmp_path, monkeypatch, lambda m, u: responses.pop(0))
     # Force distinct timestamps by advancing time between sends.
-    import time as _time
-    real_time = _time.time
-    ticks = [1_000.0, 1_001.0]
-    monkeypatch.setattr("src.live.rest.time.time", lambda: ticks.pop(0) if ticks else real_time())
+    from itertools import count
+    ticks = count(1_000.0)
+    monkeypatch.setattr("src.live.rest.time.time", lambda: next(ticks))
     client.request("GET", "/fapi/v1/order", {"symbol": "AAAUSDT"}, signed=True)
     assert len(calls) == 2
     q0 = parse_qs(urlparse(calls[0]).query)
@@ -1284,3 +1283,235 @@ def test_get_429_then_double_resync_reraises_rate_limit_error(tmp_path, monkeypa
         client.request("GET", "/fapi/v1/order")
     assert exc_info.value.http_status == 429
     assert sleeps == [1.0]
+
+
+@pytest.fixture(autouse=True)
+def _reset_ip_ban_state():
+    from src.live.rest import reset_ip_ban_for_tests
+
+    reset_ip_ban_for_tests()
+    yield
+    reset_ip_ban_for_tests()
+
+
+def test_ip_ban_retry_after_captured(tmp_path, monkeypatch) -> None:
+    import pytest
+    from src.live.errors import LiveTradingError
+    from src.live.rest import HttpResponse, IpBanned, ip_ban_remaining_s
+
+    t0 = 1_700_000_000.0
+    monkeypatch.setattr("src.live.rest.time.time", lambda: t0)
+    client, calls, _ = _rest_client(
+        tmp_path, monkeypatch,
+        lambda m, u: HttpResponse(status_code=418, headers={"Retry-After": "120"}, body=b"{}"),
+        audit_name="ban1.jsonl",
+    )
+    with pytest.raises(IpBanned):
+        client.request("GET", "/fapi/v1/order")
+    remaining = ip_ban_remaining_s(t0)
+    assert 115 < remaining <= 120
+    assert len(calls) == 1
+    with pytest.raises(LiveTradingError):
+        client.request("GET", "/fapi/v1/order")
+
+
+def test_ip_ban_message_horizon_fallback(tmp_path, monkeypatch) -> None:
+    import pytest
+    from src.live.rest import HttpResponse, IpBanned, ip_ban_remaining_s
+
+    t0 = 1_700_000_000.0
+    monkeypatch.setattr("src.live.rest.time.time", lambda: t0)
+    target_ms = int((t0 + 45.0) * 1000)
+    body = f'{{"code":-1003,"msg":"Way too many requests; IP banned until {target_ms}."}}'.encode()
+    client, _, _ = _rest_client(
+        tmp_path, monkeypatch,
+        lambda m, u: HttpResponse(status_code=418, headers={}, body=body),
+        audit_name="ban2.jsonl",
+    )
+    with pytest.raises(IpBanned):
+        client.request("GET", "/fapi/v1/order")
+    assert ip_ban_remaining_s(t0) == pytest.approx(45.0, abs=1.0)
+
+
+def test_ip_ban_default_horizon(tmp_path, monkeypatch) -> None:
+    import pytest
+    from src.live.rest import (
+        IP_BAN_DEFAULT_HORIZON_S,
+        HttpResponse,
+        IpBanned,
+        ip_ban_remaining_s,
+    )
+
+    t0 = 1_700_000_000.0
+    monkeypatch.setattr("src.live.rest.time.time", lambda: t0)
+    client, _, _ = _rest_client(
+        tmp_path, monkeypatch,
+        lambda m, u: HttpResponse(status_code=418, headers={}, body=b""),
+        audit_name="ban3.jsonl",
+    )
+    with pytest.raises(IpBanned):
+        client.request("GET", "/fapi/v1/order")
+    assert ip_ban_remaining_s(t0) == pytest.approx(IP_BAN_DEFAULT_HORIZON_S, abs=1.0)
+
+
+def test_ip_ban_guard_blocks_all_methods(tmp_path, monkeypatch) -> None:
+    import pytest
+    from src.live.rest import HttpResponse, IpBanned
+
+    t0 = 1_700_000_000.0
+    monkeypatch.setattr("src.live.rest.time.time", lambda: t0)
+    client, calls, _ = _rest_client(
+        tmp_path, monkeypatch,
+        lambda m, u: HttpResponse(status_code=418, headers={"Retry-After": "600"}, body=b"{}"),
+        audit_name="ban4.jsonl",
+    )
+    with pytest.raises(IpBanned):
+        client.request("GET", "/fapi/v1/order")
+    before = len(calls)
+    for method in ("GET", "POST", "DELETE"):
+        with pytest.raises(IpBanned):
+            client.request(method, "/fapi/v1/order", {"symbol": "BTCUSDT"})
+    assert len(calls) == before
+
+
+def test_ip_ban_only_extends(tmp_path, monkeypatch) -> None:
+    import pytest
+    from src.live.rest import HttpResponse, IpBanned, ip_ban_remaining_s
+
+    t0 = 1_700_000_000.0
+    monkeypatch.setattr("src.live.rest.time.time", lambda: t0)
+    client, _, _ = _rest_client(
+        tmp_path, monkeypatch,
+        lambda m, u: HttpResponse(status_code=418, headers={"Retry-After": "600"}, body=b"{}"),
+        audit_name="ban5.jsonl",
+    )
+
+    def overlapping_response(method, url):
+        with pytest.raises(IpBanned):
+            client.request("GET", "/fapi/v1/order")
+        return HttpResponse(status_code=418, headers={"Retry-After": "30"}, body=b"{}")
+
+    second, calls, _ = _rest_client(tmp_path, monkeypatch, overlapping_response)
+    with pytest.raises(IpBanned):
+        second.request("GET", "/fapi/v1/order")
+    assert len(calls) == 1
+    assert ip_ban_remaining_s(t0) == pytest.approx(600.0, abs=1.0)
+
+
+def test_ip_ban_from_another_client_blocks_pending_retry(tmp_path, monkeypatch) -> None:
+    from src.live.rest import IpBanned
+
+    banned, _, _ = _rest_client(
+        tmp_path, monkeypatch, lambda m, u: HttpResponse(418, {"Retry-After": "600"}, b"{}"),
+    )
+    retrying, calls, _ = _rest_client(
+        tmp_path, monkeypatch, lambda m, u: HttpResponse(503, {}, b""),
+    )
+
+    def ban_during_backoff(seconds):
+        with pytest.raises(IpBanned):
+            banned.request("GET", "/fapi/v1/time")
+
+    monkeypatch.setattr("src.live.rest.time.sleep", ban_during_backoff)
+    with pytest.raises(IpBanned):
+        retrying.request("GET", "/fapi/v1/order")
+    assert len(calls) == 1
+
+
+def test_ip_ban_mutation_records_and_raises(tmp_path, monkeypatch) -> None:
+    import pytest
+    from src.live.rest import HttpResponse, IpBanned, ip_ban_remaining_s
+
+    t0 = 1_700_000_000.0
+    monkeypatch.setattr("src.live.rest.time.time", lambda: t0)
+    client, calls, _ = _rest_client(
+        tmp_path, monkeypatch,
+        lambda m, u: HttpResponse(status_code=418, headers={"Retry-After": "60"}, body=b"{}"),
+        audit_name="ban7.jsonl",
+    )
+    with pytest.raises(IpBanned):
+        client.request("POST", "/fapi/v1/order", {"symbol": "BTCUSDT"})
+    assert len(calls) == 1
+    assert ip_ban_remaining_s(t0) == pytest.approx(60.0, abs=1.0)
+
+
+@pytest.mark.parametrize("header", ["soon", "-1", "1.5", "9" * 400, "9" * 5000])
+def test_ip_ban_garbage_retry_after_falls_back_to_default(tmp_path, monkeypatch, header) -> None:
+    import pytest
+    from src.live.rest import (
+        IP_BAN_DEFAULT_HORIZON_S,
+        HttpResponse,
+        IpBanned,
+        ip_ban_remaining_s,
+    )
+
+    t0 = 1_700_000_000.0
+    monkeypatch.setattr("src.live.rest.time.time", lambda: t0)
+    client, _, _ = _rest_client(
+        tmp_path, monkeypatch,
+        lambda m, u: HttpResponse(status_code=418, headers={"Retry-After": header}, body=b"{}"),
+        audit_name="ban8.jsonl",
+    )
+    with pytest.raises(IpBanned):
+        client.request("GET", "/fapi/v1/order")
+    assert ip_ban_remaining_s(t0) == pytest.approx(IP_BAN_DEFAULT_HORIZON_S, abs=1.0)
+
+
+@pytest.mark.parametrize("method", ["GET", "POST"])
+def test_ip_ban_does_not_decode_response_json(tmp_path, monkeypatch, method) -> None:
+    from src.live.rest import IpBanned, ip_ban_remaining_s
+
+    monkeypatch.setattr("src.live.rest.time.time", lambda: 1_700_000_000.0)
+    client, calls, _ = _rest_client(
+        tmp_path, monkeypatch,
+        lambda m, u: HttpResponse(418, {"retry-after": "60"}, b'{"msg":"sensitive"}'),
+    )
+    monkeypatch.setattr(client, "_decode_body", lambda _: pytest.fail("418 body decoded"))
+    with pytest.raises(IpBanned) as error:
+        client.request(method, "/fapi/v1/order")
+    assert error.value.banned_until == 1_700_000_060.0
+    assert error.value.path == "/fapi/v1/order"
+    assert ip_ban_remaining_s() == 60.0
+    assert len(calls) == 1
+
+
+def test_ip_ban_remaining_never_raises() -> None:
+    from src.live.rest import ip_ban_remaining_s
+
+    assert ip_ban_remaining_s(object()) == 0.0  # type: ignore[arg-type]
+
+
+def test_ip_ban_suppressed_mutation_unaffected(tmp_path, monkeypatch) -> None:
+    from pydantic import SecretStr
+    from src.live.audit import AuditLog
+    from src.live.rest import (
+        HttpResponse,
+        IpBanned,
+        PaperResponse,
+        reset_ip_ban_for_tests,
+    )
+    from src.live.rest import BinanceFuturesRestClient
+    from src.live.settings import ExecutionMode
+
+    import src.live.rest as rest_module
+
+    t0 = 1_700_000_000.0
+    monkeypatch.setattr("src.live.rest.time.time", lambda: t0)
+    live_client, _, _ = _rest_client(
+        tmp_path, monkeypatch,
+        lambda m, u: HttpResponse(status_code=418, headers={"Retry-After": "600"}, body=b"{}"),
+        audit_name="ban6.jsonl",
+    )
+    try:
+        live_client.request("GET", "/fapi/v1/order")
+    except IpBanned:
+        pass
+    paper = BinanceFuturesRestClient(
+        "https://fapi.binance.com", SecretStr("k"), SecretStr("s"), ExecutionMode.PAPER,
+        AuditLog(tmp_path / "paper.jsonl"),
+        session=live_client._transport,
+    )
+    response = paper.request("POST", "/fapi/v1/order", {"symbol": "BTCUSDT"})
+    assert isinstance(response, PaperResponse)
+    reset_ip_ban_for_tests()
+    assert rest_module.ip_ban_remaining_s(t0) == 0.0

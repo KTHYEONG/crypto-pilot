@@ -264,39 +264,49 @@ def _run_d5(session: Any, config: Any) -> ScenarioEvidence:
 
 
 def _run_d6(session: Any, config: Any) -> ScenarioEvidence:
+    from src.live.rest import IpBanned, ip_ban_remaining_s, reset_ip_ban_for_tests
+
     ban_body = b'{"code":-1003,"msg":"Way too many requests; IP banned"}'
     phases: list[dict[str, Any]] = []
-    for method, path in (("GET", BOOK_TICKER_PATH), ("POST", ORDER_PATH)):
-        rule = FaultRule(
-            method, path, action=FaultAction.SYNTHETIC_STATUS, status=418, headers=(("Retry-After", "120"),), body=ban_body
+    try:
+        for method, path in (("GET", BOOK_TICKER_PATH), ("POST", ORDER_PATH)):
+            reset_ip_ban_for_tests()
+            rule = FaultRule(
+                method, path, action=FaultAction.SYNTHETIC_STATUS, status=418, headers=(("Retry-After", "60"),), body=ban_body
+            )
+            trace, _tap, start = _cycle(session, [rule])
+            records = _records(session, start, trace.wire_end)
+            ban = next((r for r in records if r.status_code == 418), None)
+            after = [r for r in records if ban is not None and r.seq > ban.seq]
+            phases.append(
+                {
+                    "method": method,
+                    "banned": ban is not None,
+                    "escaped": trace.escaped,
+                    "records_after": len(after),
+                }
+            )
+        if not all(phase["banned"] for phase in phases):
+            raise DrillRefused("drill refused: d6_fault_not_reached")
+        horizon_captured = bool(ip_ban_remaining_s() > 0)
+        blocked_start = len(session.transport.records)
+        try:
+            session.client.book_ticker(session.config.symbols[0])
+            subsequent_blocked = False
+        except IpBanned:
+            subsequent_blocked = len(session.transport.records) == blocked_start
+        except LiveTradingError:
+            subsequent_blocked = False
+        return ev(
+            "D6",
+            records_after_ban=sum(int(phase["records_after"]) for phase in phases),
+            ban_horizon_captured=horizon_captured,
+            halted=all(phase["escaped"] is not None for phase in phases),
+            subsequent_blocked=bool(subsequent_blocked),
+            phases=phases,
         )
-        trace, tap, start = _cycle(session, [rule])
-        records = _records(session, start, trace.wire_end)
-        ban = next((r for r in records if r.status_code == 418), None)
-        after = [r for r in records if ban is not None and r.seq > ban.seq]
-        captured = any(
-            any("ban" in key.lower() or "retry" in key.lower() for key in event.fields)
-            for event in tap.events
-            if ban is not None and event.wire_index >= ban.seq
-        )
-        phases.append(
-            {
-                "method": method,
-                "banned": ban is not None,
-                "escaped": trace.escaped,
-                "records_after": len(after),
-                "captured": captured,
-            }
-        )
-    if not all(phase["banned"] for phase in phases):
-        raise DrillRefused("drill refused: d6_fault_not_reached")
-    return ev(
-        "D6",
-        records_after_ban=sum(int(phase["records_after"]) for phase in phases),
-        ban_horizon_captured=any(bool(phase["captured"]) for phase in phases),
-        halted=all(phase["escaped"] is not None for phase in phases),
-        phases=phases,
-    )
+    finally:
+        reset_ip_ban_for_tests()
 
 
 _ERROR_BODIES = (
@@ -561,23 +571,32 @@ def _eval_d5(evidence: ScenarioEvidence) -> Any:
 def _eval_d6(evidence: ScenarioEvidence) -> Any:
     p = evidence.payload
     after = int(p["records_after_ban"])
-    if after > 0 or p["halted"] is not True:
+    captured = p["ban_horizon_captured"] is True
+    subsequent = p.get("subsequent_blocked") is True
+    if after > 0 or p["halted"] is not True or not captured or not subsequent:
         return result_of(
             evidence,
             "D6",
             Verdict.FAIL,
-            (("no_calls_after_ban", False),),
+            (
+                ("no_calls_after_ban", after == 0),
+                ("ban_horizon_captured", captured),
+                ("subsequent_blocked", subsequent),
+            ),
             hypotheses=("H4",),
-            proposal_rationale=f"wire continued after 418 records={after}",
+            proposal_rationale=f"wire continued after 418 records={after} captured={captured} blocked={subsequent}",
         )
-    captured = p["ban_horizon_captured"] is True
     return result_of(
         evidence,
         "D6",
         Verdict.PASS,
-        (("ban_halted", True),),
+        (
+            ("ban_halted", True),
+            ("ban_horizon_captured", True),
+            ("subsequent_blocked", True),
+        ),
         hypotheses=("H4",),
-        hypothesis_outcome="REFUTED" if captured else "CONFIRMED",
+        hypothesis_outcome="REFUTED",
     )
 
 

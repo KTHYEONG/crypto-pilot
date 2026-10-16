@@ -22,6 +22,7 @@ from src.common.durable_io import durable_write_text
 from src.common.errors import DataIntegrityError
 from src.common.paths import DATA_DIR, FUTURES_DATA_DIR, VENUE_RULES_DIR
 from src.live.errors import CausalityViolation, LiveTradingError
+from src.live.rest import IP_BAN_RELEASE_MARGIN_S, ip_ban_remaining_s
 
 if TYPE_CHECKING:
     from src.live.data_refresh import RefreshReport
@@ -430,6 +431,14 @@ def _int_or_zero(value: Any) -> int:
         return 0
 
 
+def _ban_aware_backoff(table_backoff_s: float, now_epoch: float) -> float:
+    """Extend the table backoff past the IP-ban release plus margin."""
+    remaining = float(ip_ban_remaining_s(now_epoch))
+    if remaining > 0:
+        return max(float(table_backoff_s), remaining + IP_BAN_RELEASE_MARGIN_S)
+    return float(table_backoff_s)
+
+
 def _retry_or_skip(
     settings: LiveSettings,
     *,
@@ -470,6 +479,7 @@ def _retry_or_skip(
     backoff = DAEMON_RETRY_BACKOFF_SECONDS[
         min(new_attempts - 1, len(DAEMON_RETRY_BACKOFF_SECONDS) - 1)
     ]
+    backoff = _ban_aware_backoff(backoff, now_fn().timestamp())
     remaining_backoff = backoff
     backoff_end = now_fn() + pd.Timedelta(seconds=backoff)
     while remaining_backoff > 0:
@@ -900,7 +910,12 @@ def run_daemon(
             consecutive_halts += 1
             if consecutive_halts >= settings.alert_halt_streak:
                 _daemon_alert(settings, event="halt_streak", detail=f"consecutive_halts={consecutive_halts} cause={failure_cause}", decision_time=target, now=now_fn(), dedupe_key=f"halt_streak:{target.isoformat()}:{consecutive_halts}")
-            _beat(status, "idle", detail=failure_cause, expected_by=_default_expected_by(settings, "idle", now_fn(), now_fn() + pd.Timedelta(seconds=DAEMON_RETRY_BACKOFF_SECONDS[0])))
+            _beat_tick = now_fn()
+            _beat_table = DAEMON_RETRY_BACKOFF_SECONDS[
+                min(attempts, len(DAEMON_RETRY_BACKOFF_SECONDS) - 1)
+            ]
+            _beat_backoff = _ban_aware_backoff(_beat_table, _beat_tick.timestamp())
+            _beat(status, "idle", detail=failure_cause, expected_by=_default_expected_by(settings, "idle", _beat_tick, _beat_tick + pd.Timedelta(seconds=_beat_backoff)))
             if _retry_or_skip(
                 settings,
                 state_path=state_path,
@@ -973,7 +988,11 @@ def run_daemon(
 
         try:
             tick = now_fn()
-            write_heartbeat(heartbeat_path, decision_time=target, status=status, attempts=attempts, consecutive_halts=consecutive_halts, now=tick, stage="idle", detail=failure_cause, expected_by=_default_expected_by(settings, "idle", tick, tick + pd.Timedelta(seconds=DAEMON_POLL_INTERVAL_SECONDS)))
+            backoff = _ban_aware_backoff(
+                DAEMON_RETRY_BACKOFF_SECONDS[min(attempts, len(DAEMON_RETRY_BACKOFF_SECONDS) - 1)],
+                tick.timestamp(),
+            ) if status != "COMPLETE" else DAEMON_POLL_INTERVAL_SECONDS
+            write_heartbeat(heartbeat_path, decision_time=target, status=status, attempts=attempts, consecutive_halts=consecutive_halts, now=tick, stage="idle", detail=failure_cause, expected_by=_default_expected_by(settings, "idle", tick, tick + pd.Timedelta(seconds=backoff)))
             _ping(status, tick)
         except Exception:
             logger.exception("[SYS] heartbeat write failed")

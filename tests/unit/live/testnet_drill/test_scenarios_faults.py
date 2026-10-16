@@ -66,10 +66,18 @@ def test_ban_handling() -> None:
     assert _SPECS["D6"].evaluate(failing).verdict is Verdict.FAIL
     not_halted = ev("D6", records_after_ban=0, ban_horizon_captured=False, halted=False)
     assert _SPECS["D6"].evaluate(not_halted).verdict is Verdict.FAIL
-    result = _SPECS["D6"].evaluate(ev("D6", records_after_ban=0, ban_horizon_captured=False, halted=True,
-                                      conservation_passed=True))
+    uncaptured = _SPECS["D6"].evaluate(ev("D6", records_after_ban=0, ban_horizon_captured=False, halted=True,
+                                             conservation_passed=True))
+    assert uncaptured.verdict is Verdict.FAIL
+    result = _SPECS["D6"].evaluate(ev("D6", records_after_ban=0, ban_horizon_captured=True, halted=True,
+                                      subsequent_blocked=True, conservation_passed=True))
     assert result.verdict is Verdict.PASS
-    assert result.outcome_for("H4") == "CONFIRMED"
+    assert result.outcome_for("H4") == "REFUTED"
+    missing_guard = _SPECS["D6"].evaluate(ev(
+        "D6", records_after_ban=0, ban_horizon_captured=True,
+        halted=True, conservation_passed=True,
+    ))
+    assert missing_guard.verdict is Verdict.FAIL
 
 
 def test_rate_limited_cancel() -> None:
