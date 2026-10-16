@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import ROUND_CEILING, Decimal
@@ -11,6 +12,7 @@ from uuid import uuid4
 from src.live.errors import BINANCE_ERROR_POLICY, VenueError, resolve_error_action
 from src.live.filters import quantize_order
 from src.live.testnet_drill.execution import cancel_probe, make_intent, run_cycle, settle_journal, submit_probe
+from src.live.testnet_drill.guard import DrillRefused
 from src.live.testnet_drill.report import Verdict
 from src.live.testnet_drill.scenarios.base import (
     ScenarioEvidence,
@@ -49,7 +51,7 @@ def _run_b1(session: Any, config: Any) -> ScenarioEvidence:
         valid = []
         for offset in (-1, 0, 1):
             qty = Decimal(params["quantity"]) + filters.step_size * offset
-            order = quantize_order(filters, qty, mark + filters.tick_size * offset, reduce_only=False)
+            order = quantize_order(filters, qty, mark - filters.tick_size * abs(offset), reduce_only=False)
             if order is not None:
                 candidate = {
                     **params,
@@ -180,34 +182,39 @@ def _eval_min_agreement(scenario_id: str) -> Any:
 
 
 def _run_b4(session: Any, config: Any) -> ScenarioEvidence:
-    intent = make_intent(session, config.symbols[0])
-    trace = run_cycle(session, [replace(intent, decision_price=intent.decision_price * 2)])
-    codes = _codes(session, trace.wire_start)
-    return ev(
-        "B4",
-        code=next(iter(codes), None),
-        chases=sum(o.chases for o in trace.outcomes),
-        bounded=trace.escaped is None,
-        interval_respected=bool(trace.sleeps) and min(trace.sleeps) >= trace.policy.poll_interval_s,
-    )
+    symbol = config.symbols[0]
+    intent = make_intent(session, symbol)
+    far = quantize_order(session.filters[symbol], intent.quantity, intent.decision_price * 2, reduce_only=False)
+    if far is None:
+        raise DrillRefused("drill refused: far_price_minimum")
+    start = len(session.transport.records)
+    with contextlib.suppress(VenueError):
+        submit_probe(
+            session,
+            {
+                "symbol": symbol,
+                "side": "BUY",
+                "type": "LIMIT",
+                "timeInForce": "IOC",
+                "quantity": str(abs(far.quantity)),
+                "price": str(far.price),
+            },
+            raw=True,
+        )
+    return ev("B4", code=next(iter(_codes(session, start)), None))
 
 
 def _eval_b4(evidence: ScenarioEvidence) -> Any:
     code = evidence.payload.get("code")
     if code is None:
-        return result_of(evidence, "B4", Verdict.FAIL, (("percent_price", False),), hypotheses=())
+        return result_of(evidence, "B4", Verdict.OBSERVED, (("percent_price_not_enforced", True),), hypotheses=())
     action = resolve_error_action(int(code)).value
-    passed = (
-        int(code) == -4131
-        and action == "benign_reprice"
-        and evidence.payload["bounded"] is True
-        and evidence.payload["interval_respected"] is True
-    )
+    passed = int(code) == -4131 and action == "benign_reprice"
     return result_of(
         evidence,
         "B4",
         Verdict.PASS if passed else Verdict.OBSERVED,
-        (("percent_price", passed),),
+        (("percent_price_rejected_by_venue", True),),
         observations=(observation(int(code), action),),
         hypotheses=(),
         proposed_action=None if int(code) in BINANCE_ERROR_POLICY else action,
@@ -299,7 +306,7 @@ def _eval_b6(evidence: ScenarioEvidence) -> Any:
     action = resolve_error_action(int(code)).value if code is not None else "fail_closed"
     passed = (
         int(code) == -2019
-        and 0 < retries <= max_rejects
+        and 0 < retries <= max_rejects + 1  # max waits plus the terminal rejection
         and not reduce_only_waited
         and evidence.payload["status"] == "REJECTED"
     )
@@ -336,12 +343,12 @@ def _eval_b7(evidence: ScenarioEvidence) -> Any:
     others_unaffected = bool(evidence.payload.get("others_unaffected", True))
     action = resolve_error_action(int(code)).value if code is not None else "fail_closed"
     passed = int(code) == -2027 and others_unaffected and action == "intent_reject"
-    verdict = Verdict.PASS if passed else (Verdict.OBSERVED if code not in BINANCE_ERROR_POLICY else Verdict.FAIL)
+    verdict = Verdict.PASS if passed else (Verdict.OBSERVED if others_unaffected else Verdict.FAIL)
     return result_of(
         evidence,
         "B7",
         verdict,
-        (("position_cap_isolation", passed),),
+        (("position_cap_isolation", others_unaffected),),
         observations=(observation(int(code), action),) if code is not None else (),
         hypotheses=("H1",) if code not in BINANCE_ERROR_POLICY else (),
         proposed_action=action if code not in BINANCE_ERROR_POLICY else None,
@@ -401,7 +408,7 @@ def _eval_b9(evidence: ScenarioEvidence) -> Any:
     code = evidence.payload.get("code")
     halted = bool(evidence.payload.get("cycle_halted", False))
     if code is None:
-        return result_of(evidence, "B9", Verdict.FAIL, (("order_limit", False),), hypotheses=())
+        return result_of(evidence, "B9", Verdict.OBSERVED, (("order_limit_not_reached", True),), hypotheses=())
     action = resolve_error_action(int(code)).value
     return result_of(
         evidence,

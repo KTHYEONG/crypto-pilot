@@ -313,7 +313,11 @@ class FaultInjectingTransport:
             self._kill(rule.exit_code)
             raise AssertionError("unreachable: kill must not return")
         if rule.action is FaultAction.OVERRIDE_HEADERS:
-            merged = {**dict(response.headers), **dict(rule.headers)}
+            overridden = {key.lower() for key, _ in rule.headers}
+            merged = {
+                **{key: value for key, value in dict(response.headers).items() if key.lower() not in overridden},
+                **dict(rule.headers),
+            }
             self._append(
                 method,
                 path,
