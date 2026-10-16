@@ -59,6 +59,10 @@ BINANCE_ERROR_POLICY: Mapping[int, ErrorAction] = {
     -4023: ErrorAction.INTENT_REJECT,  # "Quantity not increased by step size."
     -4003: ErrorAction.INTENT_REJECT,  # "Quantity less than zero."
     -4400: ErrorAction.RISK_INCREASE_FREEZE,  # "Quantitative rules violation; only reduceOnly orders are allowed."
+    -4016: ErrorAction.INTENT_REJECT,  # "Limit price can't be higher than {bound}."
+    -4005: ErrorAction.INTENT_REJECT,  # "Quantity greater than max quantity."
+    -4118: ErrorAction.INTENT_REJECT,  # "ReduceOnly Order Failed. Please check your existing position and open orders."
+    -4116: ErrorAction.FAIL_CLOSED,  # "ClientOrderId is duplicated."
 }
 
 
