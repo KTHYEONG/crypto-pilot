@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from src.live.testnet_drill.report import Verdict
 from src.live.testnet_drill.scenarios import lifecycle
 from src.live.testnet_drill.scenarios.base import ev
@@ -68,14 +70,96 @@ def test_race_accounting() -> None:
 
 
 def test_flip_residual_explicit() -> None:
-    explicit = ev(
-        "C8", final_equals_target=False, residual_explicit=True, has_obsolete_leg=True, conservation_passed=True
+    sequenced = ev(
+        "C8",
+        final_equals_target=True,
+        residual_explicit=False,
+        has_obsolete_leg=False,
+        open_posted_after_close_filled=True,
+        blocked_open_leg=False,
+        open_leg_posts=1,
+        position_never_crossed_zero=False,
+        final_position="0.01",
+        target_qty="0.01",
+        conservation_passed=True,
     )
-    result = _SPECS["C8"].evaluate(explicit)
+    result = _SPECS["C8"].evaluate(sequenced)
     assert result.verdict is Verdict.PASS
-    assert "H7" in result.hypothesis_ids
-    silent = ev("C8", final_equals_target=False, residual_explicit=False, has_obsolete_leg=True)
+    assert result.outcome_for("H7") == "REFUTED"
+    legacy = ev(
+        "C8",
+        final_equals_target=False,
+        residual_explicit=True,
+        has_obsolete_leg=True,
+        open_posted_after_close_filled=False,
+        blocked_open_leg=False,
+        open_leg_posts=1,
+        position_never_crossed_zero=False,
+        final_position="0.005",
+        target_qty="0.01",
+        conservation_passed=True,
+    )
+    assert _SPECS["C8"].evaluate(legacy).verdict is Verdict.FAIL
+    silent = ev(
+        "C8",
+        final_equals_target=False,
+        residual_explicit=False,
+        has_obsolete_leg=True,
+        open_posted_after_close_filled=False,
+        blocked_open_leg=False,
+        open_leg_posts=1,
+        position_never_crossed_zero=False,
+        final_position="0.005",
+        target_qty="0.01",
+    )
     assert _SPECS["C8"].evaluate(silent).verdict is Verdict.FAIL
+
+
+def test_c8_blocked_flip_passes_only_when_explicit() -> None:
+    blocked = ev(
+        "C8",
+        final_equals_target=False,
+        residual_explicit=True,
+        has_obsolete_leg=False,
+        open_posted_after_close_filled=False,
+        blocked_open_leg=True,
+        open_leg_posts=0,
+        position_never_crossed_zero=True,
+        final_position="0.01",
+        target_qty="-0.01",
+        conservation_passed=True,
+    )
+    assert _SPECS["C8"].evaluate(blocked).verdict is Verdict.PASS
+    implicit = ev(
+        "C8",
+        final_equals_target=False,
+        residual_explicit=True,
+        has_obsolete_leg=False,
+        open_posted_after_close_filled=False,
+        blocked_open_leg=False,
+        open_leg_posts=0,
+        position_never_crossed_zero=True,
+        final_position="0.01",
+        target_qty="-0.01",
+        conservation_passed=True,
+    )
+    result = _SPECS["C8"].evaluate(implicit)
+    assert result.verdict is Verdict.FAIL
+    assert result.outcome_for("H7") == "CONFIRMED"
+
+
+@pytest.mark.parametrize(
+    ("final", "never_crossed", "posts", "passed"),
+    [("0", True, 0, True), ("0.01", False, 0, False), ("0.01", True, 1, False)],
+)
+def test_c8_blocked_position_path(final, never_crossed, posts, passed) -> None:
+    evidence = ev(
+        "C8", final_equals_target=False, residual_explicit=True, has_obsolete_leg=False,
+        open_posted_after_close_filled=False, blocked_open_leg=True, open_leg_posts=posts,
+        final_position=final, target_qty="-0.01", position_never_crossed_zero=never_crossed,
+        conservation_passed=True,
+    )
+    assert (_SPECS["C8"].evaluate(evidence).verdict is Verdict.PASS) is passed
 
 
 def test_slice_sum_exactness() -> None:

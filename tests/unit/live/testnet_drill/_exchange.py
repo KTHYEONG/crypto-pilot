@@ -50,6 +50,11 @@ class Exchange:
         account = self.account(row["key"])
         symbol = row["symbol"]
         position = account["positions"].get(symbol, Decimal(0))
+        if row.get("reduceOnly"):
+            if not position or (position > 0) == (row["side"] == "BUY"):
+                row["status"] = "EXPIRED"
+                return
+            amount = min(amount, abs(position))
         signed = amount if row["side"] == "BUY" else -amount
         entry = account["entry"].get(symbol, Decimal(0))
         pnl = Decimal(0)
@@ -62,6 +67,14 @@ class Exchange:
             entry = price
         account["entry"][symbol] = entry if after else Decimal(0)
         account["positions"][symbol] = after
+        for resting in self.orders:
+            if (
+                resting is not row and resting["key"] == row["key"]
+                and resting["symbol"] == symbol and resting.get("reduceOnly")
+                and resting["status"] in ("NEW", "PARTIALLY_FILLED")
+                and (not after or (after > 0) == (resting["side"] == "BUY"))
+            ):
+                resting["status"] = "EXPIRED"
         commission = amount * price * Decimal("0.0005")
         account["wallet"] += pnl - commission
         executed = Decimal(row["executedQty"])
@@ -208,6 +221,7 @@ class Exchange:
             row = {"key": key, "symbol": params["symbol"], "side": params["side"], "clientOrderId": params["newClientOrderId"],
                 "orderId": self.uid, "origQty": str(amount), "executedQty": "0", "avgPrice": "0", "price": str(limit), "status": "NEW", "time": now_ms, "updateTime": now_ms}
             self.orders.append(row)
+            row["reduceOnly"] = params.get("reduceOnly") == "true"
             active = params["type"] == "MARKET" or params.get("timeInForce") in ("IOC", "GTC")
             remaining = min(amount, abs(position)) if params.get("reduceOnly") == "true" else amount
             if active:

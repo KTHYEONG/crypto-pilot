@@ -141,6 +141,7 @@ class CycleReport:
     # minNotional 등으로 드롭된 목표 노셔널 비중(S5): 자본 캡($2,000) 하에서의
     # 페널티를 매 사이클 로그에서 보이게 한다.
     dropped_notional_fraction: float = 0.0
+    intents: tuple[OrderIntent, ...] = ()
 
 
 def check_risk_gates(
@@ -404,6 +405,44 @@ def _alert_reject_cluster(
                 decision_time=decision_time,
                 now=now,
                 discriminator=f"code={code}",
+            )
+
+
+def _alert_flip_blocked(
+    settings: LiveSettings,
+    outcomes: Sequence[ExecutionOutcome],
+    audit: AuditLog,
+    *,
+    decision_time: pd.Timestamp,
+    now: pd.Timestamp,
+) -> None:
+    """Alert once per symbol whose open leg was blocked by an unfinished close leg."""
+    alerted: set[str] = set()
+    for outcome in outcomes:
+        if outcome.symbol in alerted:
+            continue
+        try:
+            if outcome.status != "RESIDUAL" or outcome.block_reason != "blocked_by_close_leg":
+                continue
+            unfilled = outcome.unfilled_qty
+            alerted.add(outcome.symbol)
+            audit.record(
+                "flip_open_blocked_alert",
+                symbol=outcome.symbol,
+                unfilled_qty=str(unfilled),
+            )
+            _notify_event(
+                settings,
+                event="flip_open_blocked",
+                detail=f"symbol={outcome.symbol} unfilled={unfilled}",
+                decision_time=decision_time,
+                now=now,
+                discriminator=f"symbol={outcome.symbol}",
+            )
+        except Exception:
+            logger.warning(
+                "[SYS] flip blocked alert suppressed symbol=%s",
+                getattr(outcome, "symbol", "?"),
             )
 
 
@@ -1636,6 +1675,7 @@ def run_shadow_cycle(
             try:
                 outcomes = list(execute_intents(order_client, kept, filters, policy, audit, _clock, time.sleep, rate_limits=rate_limits, outcome_sink=sink, shutdown=shutdown, paper_fill_model=paper_fill_model, journal=journal, attempt=attempt, shutdown_cleanup_budget_s=settings.execution_shutdown_cleanup_budget_s, order_identity_tolerance_ms=settings.order_identity_tolerance_ms))
                 _alert_reject_cluster(settings, outcomes, audit, decision_time=decision_time, now=now_ts)
+                _alert_flip_blocked(settings, outcomes, audit, decision_time=decision_time, now=now_ts)
                 final_state = _commit_and_record(settings, ledger_path, ledger_state, journal, audit, fallback_attempt=attempt, equity=equity, executed_decision_time=None if (derisk_active or bool(frozen_symbols)) else decision_time, funding_records=funding_records, settlement_records=settlement_records, reconcile_cash_before=cash_before)
                 _write_execution_quality_once(settings, audit, decision_time=decision_time, weights=weights, marks=marks, intents=kept, outcomes=outcomes, observed_at=now_ts)
             except ExecutionInterrupted as exc:
@@ -1644,6 +1684,7 @@ def run_shadow_cycle(
                 if partial:
                     _write_execution_quality_once(settings, audit, decision_time=decision_time, weights=weights, marks=marks, intents=kept, outcomes=partial, observed_at=now_ts)
                     _alert_reject_cluster(settings, partial, audit, decision_time=decision_time, now=now_ts)
+                    _alert_flip_blocked(settings, partial, audit, decision_time=decision_time, now=now_ts)
                 audit.record("cycle_interrupted", reason="shutdown_requested", intents=len(partial))
                 return CycleReport(
                     status="INTERRUPTED",
@@ -1661,6 +1702,7 @@ def run_shadow_cycle(
                         outcomes = list(to_persist)
                     _write_execution_quality_once(settings, audit, decision_time=decision_time, weights=weights, marks=marks, intents=kept, outcomes=list(to_persist), observed_at=now_ts)
                     _alert_reject_cluster(settings, outcomes, audit, decision_time=decision_time, now=now_ts)
+                    _alert_flip_blocked(settings, outcomes, audit, decision_time=decision_time, now=now_ts)
                 raise
         except LiveTradingError:
             raise
@@ -1688,6 +1730,7 @@ def run_shadow_cycle(
             decision_time=decision_time,
             intent_count=len(outcomes),
             outcomes=tuple(outcomes),
+            intents=tuple(kept),
             dropped_notional_fraction=dropped_fraction,
         )
         if degraded:

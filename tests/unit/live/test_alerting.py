@@ -541,3 +541,17 @@ def test_event_info_tax_genesis_not_flat_is_critical() -> None:
     assert "tax_genesis_not_flat" in EVENT_INFO
     assert EVENT_INFO["tax_genesis_not_flat"]["severity_label"] == "CRITICAL"
     assert "docker logs --tail 200 mhs-live-daemon" in EVENT_INFO["tax_genesis_not_flat"]["action"]
+
+
+def test_event_info_flip_open_blocked_is_warning() -> None:
+    """flip_open_blocked shares the reject-cluster WARNING rendering contract."""
+    from src.live.alerting import EVENT_INFO
+
+    info = EVENT_INFO["flip_open_blocked"]
+    assert info["severity_label"] == "WARNING"
+    assert info["severity_badge"] == EVENT_INFO["intent_reject_cluster"]["severity_badge"]
+    assert info["header_color"] == EVENT_INFO["intent_reject_cluster"]["header_color"]
+    assert info["bg_color"] == EVENT_INFO["intent_reject_cluster"]["bg_color"]
+    for key in ("title", "severity_badge", "severity_label", "header_color", "bg_color", "impact", "action"):
+        assert info[key]
+    assert "live status" in info["action"]

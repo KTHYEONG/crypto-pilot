@@ -236,9 +236,12 @@ def _run_g3(session: Any, config: Any) -> ScenarioEvidence:
     again, again_error = _cycle(session, weights_path, days[1])
     target = _target_positions(session, weights_path, days[1])
     venue = _read_positions(session.client)
+    converged_flag = error is None and getattr(rerun, "status", None) == "COMPLETE" and _converged(session, target, venue, rerun)
+    silent = not _converged(session, target, venue, rerun)
     return ev(
         "G3",
-        converged=error is None and getattr(rerun, "status", None) == "COMPLETE" and _converged(session, target, venue, rerun),
+        converged=converged_flag,
+        silent_shortfall=bool(silent),
         no_double_execution=again_error is None and getattr(again, "reason", None) == "already_executed",
         first_status=getattr(first, "status", None),
         rerun_status=getattr(rerun, "status", None),
@@ -262,10 +265,33 @@ def _target_positions(session: Any, weights_path: Path, day: pd.Timestamp) -> di
 
 
 def _converged(session: Any, target: Mapping[str, Decimal], venue: Mapping[str, Decimal], rerun: Any) -> bool:
-    """Venue equals target within one lot step, or the rerun recorded an explicit residual for that symbol."""
-    residual = {o.symbol for o in getattr(rerun, "outcomes", ()) if o.status in ("RESIDUAL", "RESIDUAL_SUB_MINIMUM")}
+    """Venue equals target within one lot step, or the rerun left an explicit residual."""
+    outcomes = getattr(rerun, "outcomes", ()) or ()
+
+    def _explicit(symbol: str) -> bool:
+        intents = getattr(rerun, "intents", ())
+        for index, outcome in enumerate(outcomes):
+            if getattr(outcome, "symbol", None) != symbol:
+                continue
+            if getattr(outcome, "status", None) == "OBSOLETE":
+                continue
+            if getattr(outcome, "block_reason", None) == "blocked_by_close_leg":
+                return True
+            if outcome.status == "RESIDUAL" and index < len(intents):
+                intent = intents[index]
+                total = outcome.filled_qty + outcome.unfilled_qty
+                if (
+                    intent.symbol == symbol
+                    and total == intent.quantity
+                    and outcome.filled_qty >= 0
+                    and outcome.unfilled_qty > 0
+                ):
+                    return True
+        return False
+
     return all(
-        abs(venue.get(symbol, Decimal(0)) - qty) <= session.filters[symbol].step_size or symbol in residual
+        abs(venue.get(symbol, Decimal(0)) - qty) <= session.filters[symbol].step_size
+        or _explicit(symbol)
         for symbol, qty in target.items()
     )
 
@@ -289,8 +315,14 @@ def _eval_g2(evidence: ScenarioEvidence) -> Any:
 
 def _eval_g3(evidence: ScenarioEvidence) -> Any:
     p = evidence.payload
-    passed = p["converged"] is True and p["no_double_execution"] is True
-    return result_of(evidence, "G3", Verdict.PASS if passed else Verdict.FAIL, (("restart_in_cycle", passed),))
+    silent = p.get("silent_shortfall", False) is True
+    passed = p["converged"] is True and p["no_double_execution"] is True and not silent
+    return result_of(
+        evidence,
+        "G3",
+        Verdict.PASS if passed else Verdict.FAIL,
+        (("restart_in_cycle", passed), ("no_silent_shortfall", not silent)),
+    )
 
 
 # IOC limit beyond the touch so a thin top-of-book cannot leave the seeding order partially filled.
