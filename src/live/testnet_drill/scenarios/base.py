@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from decimal import Decimal
@@ -286,13 +285,13 @@ def isolated_run(
             teardown_session,
         )
 
-        since_ms = int(session.opened_at * 1000)
+        since_ms = session.client.server_time_ms()
         reset_suspected = False
         try:
             reset_suspected = prepare_clean_slate(session).testnet_reset_suspected
             baseline = Decimal(str(session.client.account()["totalWalletBalance"]))
             session = replace(session, starting_wallet_balance=baseline)
-            since_ms = int(time.time() * 1000)
+            since_ms = session.client.server_time_ms()
             evidence = body(session, config, None) if with_slate else body(session, config)
         finally:
             # Child workers (group E) append to the same journal file; re-read it before judging conservation.
