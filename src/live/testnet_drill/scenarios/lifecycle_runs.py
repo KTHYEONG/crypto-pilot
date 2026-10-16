@@ -396,12 +396,51 @@ def _evidence_c7(c: _Cycle) -> ScenarioEvidence:
 
 
 def _evidence_c8(c: _Cycle) -> ScenarioEvidence:
+    submits = [
+        s
+        for s in c.session.journal.submits()
+        if s.submit_seq >= c.trace.submit_start and s.symbol == c.symbol
+    ]
+    open_submits = [s for s in submits if s.reduce_only is False]
+    close_submits = [s for s in submits if s.reduce_only is True]
+    close_filled_at = [
+        term.recorded_at
+        for s in close_submits
+        if (term := c.session.journal.terminal(s.client_order_id)) is not None
+        and term.status == "FILLED"
+    ]
+    if open_submits and close_filled_at:
+        first_open = min(s.recorded_at for s in open_submits)
+        sequenced = first_open >= max(close_filled_at)
+    else:
+        sequenced = False
+    final_pos = c.positions.get(c.symbol, Decimal(0))
+    target = c.intents[-1].target_qty
+    step = c.session.filters[c.symbol].step_size
+    within_step = abs(final_pos - target) <= step
+    initial = c.intents[0].current_qty
+    position = initial
+    never_crossed = True
+    attempt_seqs = {s.attempt_seq for s in submits}
+    for fill in c.fills:
+        if fill.symbol == c.symbol and fill.attempt_seq in attempt_seqs:
+            position += fill.quantity if fill.side == "BUY" else -fill.quantity
+            never_crossed &= position * initial >= 0
     return ev(
         "C8",
         **c.common,
-        final_equals_target=c.positions.get(c.symbol, Decimal(0)) == c.intents[-1].target_qty,
+        final_equals_target=bool(within_step),
         residual_explicit=c.residual,
         has_obsolete_leg=any(outcome.status == "OBSOLETE" for outcome in c.trace.outcomes),
+        open_posted_after_close_filled=bool(sequenced),
+        blocked_open_leg=any(
+            getattr(outcome, "block_reason", None) == "blocked_by_close_leg"
+            for outcome in c.trace.outcomes
+        ),
+        open_leg_posts=len(open_submits),
+        final_position=str(final_pos),
+        target_qty=str(target),
+        position_never_crossed_zero=bool(never_crossed and final_pos * initial >= 0),
     )
 
 

@@ -903,3 +903,153 @@ def test_non_flat_genesis_alerts(tmp_path, monkeypatch) -> None:
     genesis = [a for a in alerts if a["event"] == "tax_genesis_not_flat"]
     assert len(genesis) == 1
     assert genesis[0]["detail"] == "AAAUSDT=1"
+
+
+def _blocked_outcome(symbol: str, unfilled: str = "1"):
+    from decimal import Decimal
+
+    from src.live.executor import ExecutionOutcome
+
+    return ExecutionOutcome(symbol=symbol, filled_qty=Decimal(0), unfilled_qty=Decimal(unfilled),
+                            avg_fill_price=None, chases=0, status="RESIDUAL",
+                            block_reason="blocked_by_close_leg")
+
+
+def _plain_residual(symbol: str):
+    from decimal import Decimal
+
+    from src.live.executor import ExecutionOutcome
+
+    return ExecutionOutcome(symbol=symbol, filled_qty=Decimal("0.5"), unfilled_qty=Decimal("0.5"),
+                            avg_fill_price=None, chases=0, status="RESIDUAL")
+
+
+def test_flip_blocked_alerts_once_per_symbol(tmp_path, monkeypatch) -> None:
+    import json
+
+    import pandas as pd
+
+    from src.live.audit import AuditLog
+    from src.live.runner import _alert_flip_blocked
+    from src.live.settings import LiveSettings
+
+    audit = AuditLog(tmp_path / "audit.jsonl")
+    settings = LiveSettings()
+    outcomes = [_blocked_outcome("AAAUSDT", "1.5"), _blocked_outcome("BBBUSDT", "2"), _plain_residual("CCCUSDT")]
+    outcomes.append(outcomes[0])
+    notifications = []
+    monkeypatch.setattr("src.live.runner._notify_event", lambda settings, **kw: notifications.append(kw))
+    before = list(outcomes)
+    _alert_flip_blocked(settings, outcomes, audit,
+                        decision_time=pd.Timestamp("2026-09-14", tz="UTC"),
+                        now=pd.Timestamp("2026-09-14 01:00", tz="UTC"))
+    assert list(outcomes) == before
+    events = [json.loads(line) for line in (tmp_path / "audit.jsonl").read_text(encoding="utf-8").splitlines()]
+    alerts = [e for e in events if e["event"] == "flip_open_blocked_alert"]
+    assert sorted(e["symbol"] for e in alerts) == ["AAAUSDT", "BBBUSDT"]
+    assert {e["symbol"]: e["unfilled_qty"] for e in alerts} == {"AAAUSDT": "1.5", "BBBUSDT": "2"}
+    assert {n["discriminator"] for n in notifications} == {"symbol=AAAUSDT", "symbol=BBBUSDT"}
+    assert len(notifications) == 2
+
+
+def test_flip_blocked_alert_is_observational(tmp_path, monkeypatch) -> None:
+    import pandas as pd
+
+    import src.live.runner as runner_mod
+    from src.live.audit import AuditLog
+    from src.live.settings import LiveSettings
+
+    audit = AuditLog(tmp_path / "audit.jsonl")
+    outcomes = [_blocked_outcome("AAAUSDT")]
+
+    def _boom(*a, **k):
+        raise RuntimeError("notify down")
+
+    monkeypatch.setattr(runner_mod, "_notify_event", _boom)
+    runner_mod._alert_flip_blocked(LiveSettings(), outcomes, audit,
+                                   decision_time=pd.Timestamp("2026-09-14", tz="UTC"),
+                                   now=pd.Timestamp("2026-09-14 01:00", tz="UTC"))
+    assert list(outcomes)[0].block_reason == "blocked_by_close_leg"
+
+
+def test_flip_blocked_wired_on_cycle_paths(tmp_path, monkeypatch) -> None:
+    import json
+
+    import src.live.runner as runner_mod
+    from src.live.errors import LiveTradingError
+    from src.live.executor import ExecutionInterrupted
+    from src.live.runner import run_shadow_cycle
+    from src.live.settings import LiveSettings
+    from tests.unit.live._runner_stubs import DECISION_TIME, NOW, StubMarketClient, StubOrderClient
+
+    def _cycle_with(fake_execute, *, exc_kind: str | None = None):
+        frame_path, _, _ = _seed_policy_cycle_artifact(tmp_path)
+        tag = exc_kind or "ok"
+        monkeypatch.setattr(runner_mod, "_market_client", lambda settings, decision_time: StubMarketClient())
+        monkeypatch.setattr(runner_mod, "_order_client", lambda settings, decision_time: StubOrderClient())
+        audit_path = tmp_path / f"shadow_cycle_{tag}.jsonl"
+        if audit_path.exists():
+            audit_path.unlink()
+        monkeypatch.setattr(runner_mod, "default_audit_log_path",
+                            lambda name, for_date=None: audit_path)
+        import src.live.orderbook as ob_mod
+
+        monkeypatch.setattr(ob_mod, "capture_order_books", lambda *a, **k: [])
+        monkeypatch.setattr(ob_mod, "append_order_book_snapshots", lambda *a, **k: [])
+        monkeypatch.setattr(runner_mod, "execute_intents", fake_execute)
+        settings = LiveSettings(
+            notional_equity_usdt=2000.0,
+            ledger_path=str(tmp_path / f"ledger_flip_{exc_kind or 'ok'}.json"),
+            order_journal_path=str(tmp_path / f"journal_flip_{exc_kind or 'ok'}.jsonl"),
+            fills_dir=str(tmp_path / "fills"),
+            tax_ledger_dir=str(tmp_path / "tax"),
+            execution_quality_dir=str(tmp_path / "eq"),
+            portfolio_state_dir=str(tmp_path / "portfolio"),
+        )
+        try:
+            report = run_shadow_cycle(settings, DECISION_TIME, frame_path, now=NOW)
+        except LiveTradingError:
+            report = None
+        assert audit_path.exists()
+        events = [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()]
+        return report, [e for e in events if e["event"] == "flip_open_blocked_alert"]
+
+    def _ok(client, intents, filters, policy, audit, clock, sleep_fn, **kw):
+        from decimal import Decimal
+
+        from src.live.executor import ExecutionOutcome
+
+        outcomes = [
+            ExecutionOutcome(symbol=i.symbol, filled_qty=Decimal(0), unfilled_qty=i.quantity,
+                             avg_fill_price=None, chases=0, status="RESIDUAL",
+                             block_reason="blocked_by_close_leg")
+            for i in intents[:1]
+        ]
+        if kw.get("outcome_sink") is not None:
+            kw["outcome_sink"][:] = outcomes
+        return outcomes
+
+    report, alerts = _cycle_with(_ok)
+    assert report is not None and report.status in ("COMPLETE", "DEGRADED")
+    assert len(alerts) == 1
+
+    def _interrupted(client, intents, filters, policy, audit, clock, sleep_fn, **kw):
+        outcomes = [_blocked_outcome(intents[0].symbol)] if intents else []
+        if kw.get("outcome_sink") is not None:
+            kw["outcome_sink"][:] = outcomes
+        raise ExecutionInterrupted("stop")
+
+    report, alerts = _cycle_with(_interrupted, exc_kind="int")
+    assert report is not None and report.status == "INTERRUPTED"
+    assert len(alerts) == 1
+
+    def _halt(client, intents, filters, policy, audit, clock, sleep_fn, **kw):
+        outcomes = [_blocked_outcome(intents[0].symbol)] if intents else []
+        if kw.get("outcome_sink") is not None:
+            kw["outcome_sink"][:] = outcomes
+        exc = LiveTradingError("boom")
+        exc.partial_outcomes = tuple(outcomes)
+        raise exc
+
+    _, alerts = _cycle_with(_halt, exc_kind="halt")
+    assert len(alerts) == 1

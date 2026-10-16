@@ -137,21 +137,37 @@ def _eval_c7(evidence: ScenarioEvidence) -> Any:
 
 
 def _eval_c8(evidence: ScenarioEvidence) -> Any:
-    final_ok = bool(evidence.payload.get("final_equals_target", False))
-    residual_explicit = bool(evidence.payload.get("residual_explicit", False))
-    has_obsolete = bool(evidence.payload.get("has_obsolete_leg", False))
-    if final_ok:
-        return result_of(evidence, "C8", Verdict.PASS, (("flip_legs", True),), hypotheses=("H7",))
-    if residual_explicit and has_obsolete:
+    final = Decimal(str(evidence.payload.get("final_position", "0")))
+    target = Decimal(str(evidence.payload.get("target_qty", "0")))
+    at_target = evidence.payload["final_equals_target"] is True
+    if at_target and bool(evidence.payload.get("open_posted_after_close_filled", False)):
         return result_of(
             evidence,
             "C8",
             Verdict.PASS,
             (("flip_legs", True),),
             hypotheses=("H7",),
-            hypothesis_outcome="CONFIRMED",
+            hypothesis_outcome="REFUTED",
         )
-    return result_of(evidence, "C8", Verdict.FAIL, (("flip_legs", False),), hypotheses=("H7",))
+    blocked = bool(evidence.payload.get("blocked_open_leg", False))
+    open_posts = int(evidence.payload["open_leg_posts"])
+    never_crossed = evidence.payload["position_never_crossed_zero"] is True
+    if blocked and open_posts == 0 and never_crossed and final * target <= 0 and not at_target:
+        return result_of(
+            evidence,
+            "C8",
+            Verdict.PASS,
+            (("flip_legs", True),),
+            hypotheses=("H7",),
+        )
+    return result_of(
+        evidence,
+        "C8",
+        Verdict.FAIL,
+        (("flip_legs", False),),
+        hypotheses=("H7",),
+        hypothesis_outcome="CONFIRMED",
+    )
 
 
 def _eval_c9(evidence: ScenarioEvidence) -> Any:
