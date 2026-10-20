@@ -21,6 +21,11 @@ ALERT_WEBHOOK_TIMEOUT_S: int = 10
 SMTP_HOST: str = "smtp.gmail.com"
 SMTP_PORT: int = 587
 ALERT_EMAIL_TIMEOUT_S: int = 10
+# Mail is reserved for operator-actionable events; NOTICE (success/recovery/info) stays in the outbox and logs.
+EMAIL_SEVERITIES: frozenset[str] = frozenset({"WARNING", "CRITICAL"})
+EMAIL_SUBJECT_TAGS: dict[str, str] = {"CRITICAL": "실패", "WARNING": "경고", "NOTICE": "알림"}
+# Host paths (repo root on the VPS) holding the full evidence for an alert.
+EMAIL_EVIDENCE_HINT: str = "~/crypto-pilot/logs/live/daemon.log · data/state/alert_outbox.json · docker logs --tail 200 mhs-live-daemon"
 
 
 def event_severity(event: str) -> str:
@@ -427,79 +432,18 @@ def send_email_alert(
     decision_time: pd.Timestamp | None,
     now: pd.Timestamp,
 ) -> bool:
+    """Send a short plain-text alert card; returns False (never raises) on missing creds or SMTP failure."""
     if not gmail_user or not gmail_app_password:
         return False
     try:
-        import html
-
         info = EVENT_INFO.get(event, {**UNREGISTERED_EVENT_INFO, "title": event})
-
-        dt_kst, dt_utc, dt_iso = _format_timestamp(decision_time)
-        now_kst, now_utc, now_iso = _format_timestamp(now)
-
-        try:
-            t_now = pd.Timestamp(now)
-            t_now_utc = t_now.tz_localize("UTC") if t_now.tzinfo is None else t_now.tz_convert("UTC")
-            kst_short = t_now_utc.tz_convert("Asia/Seoul").strftime("%m/%d %H:%M KST")
-        except Exception:
-            kst_short = now_kst
-
-        subject = f"[mhs-live][{info['severity_badge']}] {info['title']} ({event}) - {kst_short}"
+        subject, body = format_email_card(info, event=event, detail=detail, decision_time=decision_time, now=now)
 
         msg = EmailMessage()
         msg["From"] = gmail_user
         msg["To"] = gmail_user
         msg["Subject"] = subject
-
-        html_content = (
-            f"<!DOCTYPE html>\n"
-            f"<html>\n"
-            f"<head>\n"
-            f"<meta charset=\"utf-8\">\n"
-            f"<style>\n"
-            f"  body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; margin: 0; padding: 20px; background-color: #f1f5f9; color: #1e293b; line-height: 1.5; }}\n"
-            f"  .container {{ max-width: 600px; margin: 0 auto; background: #ffffff; border-radius: 8px; overflow: hidden; border: 1px solid #e2e8f0; box-shadow: 0 1px 3px rgba(0,0,0,0.05); }}\n"
-            f"  .header {{ background-color: {info['header_color']}; color: #ffffff; padding: 18px 24px; }}\n"
-            f"  .header h2 {{ margin: 0; font-size: 18px; font-weight: 700; }}\n"
-            f"  .header .badge {{ display: inline-block; background: rgba(255,255,255,0.25); padding: 2px 8px; border-radius: 4px; font-size: 12px; font-weight: 600; margin-bottom: 6px; }}\n"
-            f"  .content {{ padding: 24px; }}\n"
-            f"  .impact-box {{ background-color: {info['bg_color']}; border-left: 4px solid {info['header_color']}; padding: 12px 16px; border-radius: 4px; margin-bottom: 20px; font-size: 14px; }}\n"
-            f"  table {{ width: 100%; border-collapse: collapse; margin-bottom: 20px; font-size: 13px; }}\n"
-            f"  th, td {{ padding: 8px 12px; text-align: left; border-bottom: 1px solid #f1f5f9; }}\n"
-            f"  th {{ color: #64748b; font-weight: 600; width: 30%; background-color: #f8fafc; }}\n"
-            f"  td {{ color: #0f172a; word-break: break-all; }}\n"
-            f"  .action-title {{ font-size: 13px; font-weight: 700; color: #334155; margin-bottom: 6px; }}\n"
-            f"  pre {{ background: #0f172a; color: #38bdf8; padding: 12px; border-radius: 6px; font-size: 12px; overflow-x: auto; margin: 0 0 20px 0; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }}\n"
-            f"  .footer {{ background: #f8fafc; padding: 12px 24px; font-size: 11px; color: #94a3b8; border-top: 1px solid #e2e8f0; }}\n"
-            f"</style>\n"
-            f"</head>\n"
-            f"<body>\n"
-            f"<div class=\"container\">\n"
-            f"  <div class=\"header\">\n"
-            f"    <div class=\"badge\">{html.escape(info['severity_badge'])} {html.escape(info['severity_label'])}</div>\n"
-            f"    <h2>{html.escape(info['title'])}</h2>\n"
-            f"  </div>\n"
-            f"  <div class=\"content\">\n"
-            f"    <div class=\"impact-box\">\n"
-            f"      <strong>상태 안내:</strong> {html.escape(info['impact'])}\n"
-            f"    </div>\n"
-            f"    <table>\n"
-            f"      <tr><th>이벤트</th><td><strong>{html.escape(event)}</strong></td></tr>\n"
-            f"      <tr><th>결정 시각 (KST)</th><td>{html.escape(dt_kst)} <span style=\"color:#94a3b8; font-size:11px;\">({html.escape(dt_utc)})</span></td></tr>\n"
-            f"      <tr><th>알림 시각 (KST)</th><td>{html.escape(now_kst)} <span style=\"color:#94a3b8; font-size:11px;\">({html.escape(now_utc)})</span></td></tr>\n"
-            f"      <tr><th>상세 정보</th><td><code>{html.escape(str(detail))}</code></td></tr>\n"
-            f"    </table>\n"
-            f"    <div class=\"action-title\">🛠️ 권장 조치 가이드</div>\n"
-            f"    <pre>{html.escape(info['action'])}</pre>\n"
-            f"  </div>\n"
-            f"  <div class=\"footer\">\n"
-            f"    mhs-live daemon alert • source=mhs-live • decision_time={html.escape(dt_iso)} • ts={html.escape(now_iso)}\n"
-            f"  </div>\n"
-            f"</div>\n"
-            f"</body>\n"
-            f"</html>\n"
-        )
-        msg.set_content(html_content, subtype="html")
+        msg.set_content(body)
 
         with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=ALERT_EMAIL_TIMEOUT_S) as smtp:
             smtp.starttls()
@@ -509,6 +453,32 @@ def send_email_alert(
     except Exception as exc:  # noqa: BLE001
         logger.warning("[SYS] alert email failed event=%s error=%s", event, exc)
         return False
+
+
+def format_email_card(
+    info: dict[str, str],
+    *,
+    event: str,
+    detail: str,
+    decision_time: pd.Timestamp | None,
+    now: pd.Timestamp,
+) -> tuple[str, str]:
+    """Return (subject, body) of the operator mail: at most five bullet lines, raw evidence stays on the host.
+
+    The mail only tells what failed and where to look; the fix is delegated to an AI session that reads
+    the host logs, so no log tails, HTML or canned command blocks are embedded.
+    """
+    now_kst, _, _ = _format_timestamp(now)
+    dt_kst, _, _ = _format_timestamp(decision_time)
+    tag = EMAIL_SUBJECT_TAGS.get(str(info["severity_label"]), EMAIL_SUBJECT_TAGS["CRITICAL"])
+    subject = f"[crypto][{tag}] {info['title']} ({event})"
+    lines = [
+        f"• 무엇: {info['title']} ({event})",
+        f"• 언제: {now_kst}" + (f" (결정 시각 {dt_kst})" if decision_time is not None else ""),
+        f"• 원인: {detail or '(상세 없음)'}",
+        f"• 증거: {EMAIL_EVIDENCE_HINT}",
+    ]
+    return subject, "\n".join(lines)
 
 
 def dispatch_alert(
@@ -587,6 +557,10 @@ def _deliver_record(settings: Any, record: Any, channel: str, now: pd.Timestamp)
                 )
             )
         if channel == "email":
+            if str(record.severity) not in EMAIL_SEVERITIES:
+                # Policy-suppressed, not failed: the record stays durable in the outbox and log only.
+                logger.info("[SYS] alert email suppressed event=%s severity=%s", record.event, record.severity)
+                return True
             password = settings.alert_gmail_app_password
             secret = password.get_secret_value() if password is not None else None
             return bool(

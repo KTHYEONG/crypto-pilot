@@ -22,6 +22,7 @@ _DEFAULT_DAEMON_STATE_PATH = str(DATA_DIR / "state" / "live_daemon_last_run.json
 _LIVE_LOG_DIR: Path = LOG_DIR / "live"
 LIVE_LOG_MAX_BYTES: int = 10 * 1024 * 1024
 LIVE_LOG_BACKUP_COUNT: int = 5
+CRASH_ALERT_DAY_TZ: str = "Asia/Seoul"
 
 
 def _attach_process_log(filename: str) -> Path:
@@ -79,9 +80,12 @@ def _run_shadow_cycle(args: argparse.Namespace) -> None:
     )
 
 
-def _run_daemon(args: argparse.Namespace) -> None:
-    import os
+def daemon_crash_dedupe_key(tick: pd.Timestamp) -> str:
+    """One crash mail per KST day; a restart loop re-crashing keeps every traceback in daemon.log only."""
+    return f"daemon_crashed:{tick.tz_convert(CRASH_ALERT_DAY_TZ).date().isoformat()}"
 
+
+def _run_daemon(args: argparse.Namespace) -> None:
     from src.live.alerting import dispatch_alert, drain_alerts
     from src.live.lifecycle import ShutdownFlag, install_shutdown_handlers
     from src.live.recorder_watch import build_recorder_watchdog
@@ -105,7 +109,7 @@ def _run_daemon(args: argparse.Namespace) -> None:
         except Exception as exc:  # 프로세스 경계라 광역 except 허용
             logger.exception("[SYS] daemon crashed error=%s", type(exc).__name__)
             tick = pd.Timestamp.now(tz="UTC")
-            dispatch_alert(settings, event="daemon_crashed", detail=f"error={type(exc).__name__}: {str(exc)[:300]}", decision_time=None, dedupe_key=f"daemon_crashed:{os.getpid()}:{tick.isoformat()}", now=tick)
+            dispatch_alert(settings, event="daemon_crashed", detail=f"error={type(exc).__name__}: {str(exc)[:300]}", decision_time=None, dedupe_key=daemon_crash_dedupe_key(tick), now=tick)
             drain_alerts(settings, now=tick, blocking=True)
             raise
     finally:
