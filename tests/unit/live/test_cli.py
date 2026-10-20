@@ -932,3 +932,15 @@ def test_tax_summary_uses_persisted_coverage_for_venue(monkeypatch, tmp_path) ->
     summary = json.loads(__import__("pathlib").Path(buf.getvalue().strip()).read_text())
     assert summary["reconciliation"]["status"] == "incomplete"
     assert "genesis_missing" in {issue["code"] for issue in summary["reconciliation"]["issues"]}
+
+
+
+def test_daemon_crash_dedupe_key_is_one_per_kst_day() -> None:
+    """크래시 루프여도 KST 하루 1통: 같은 날 키는 같고 KST 자정을 넘으면 바뀐다."""
+    import pandas as pd
+    from src.cli.commands.live import daemon_crash_dedupe_key
+
+    morning = daemon_crash_dedupe_key(pd.Timestamp("2026-10-20 00:30Z"))
+    assert morning == "daemon_crashed:2026-10-20"
+    assert daemon_crash_dedupe_key(pd.Timestamp("2026-10-20 14:59Z")) == morning
+    assert daemon_crash_dedupe_key(pd.Timestamp("2026-10-20 15:00Z")) == "daemon_crashed:2026-10-21"

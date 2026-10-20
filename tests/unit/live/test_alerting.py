@@ -221,10 +221,9 @@ def test_send_email_alert_orderbook_backup_impending(monkeypatch) -> None:
     )
 
     assert out is True
-    assert "백업 권장" in captured["subject"]
-    assert "orderbook_backup_impending" in captured["subject"]
-    assert "rsync" in captured["body"]
-    assert "earliest_date=2025-09-05" in captured["body"]
+    assert captured["subject"] == "[crypto][알림] 오더북 데이터 백업 권장 안내 (orderbook_backup_impending)"
+    assert "rsync" not in captured["body"]
+    assert "• 원인: earliest_date=2025-09-05 days_left=4" in captured["body"]
 
 
 def test_send_email_alert_day_skipped_uses_event_info(monkeypatch) -> None:
@@ -266,9 +265,14 @@ def test_send_email_alert_day_skipped_uses_event_info(monkeypatch) -> None:
 
     assert out is True
     assert a.EVENT_INFO["day_skipped"]["severity_label"] == "CRITICAL"
-    assert a.EVENT_INFO["day_skipped"]["title"] in captured["subject"]
-    assert "docker logs --tail 200 mhs-live-daemon" in captured["body"]
-    assert "attempts=5 cause=signal_step exit=1" in captured["body"]
+    assert captured["subject"] == f"[crypto][실패] {a.EVENT_INFO['day_skipped']['title']} (day_skipped)"
+    assert captured["body"].rstrip("\n").splitlines() == [
+        f"• 무엇: {a.EVENT_INFO['day_skipped']['title']} (day_skipped)",
+        "• 언제: 2026-09-14 11:05:00 KST (결정 시각 2026-09-14 09:00:00 KST)",
+        "• 원인: attempts=5 cause=signal_step exit=1",
+        f"• 증거: {a.EMAIL_EVIDENCE_HINT}",
+    ]
+    assert "<html" not in captured["body"].lower()
 
 
 def test_event_info_actions_reference_runnable_operator_commands() -> None:
@@ -397,7 +401,7 @@ def test_reconcile_mismatch_is_critical_on_both_channels(monkeypatch) -> None:
     assert a.post_alert("https://hook.example/abc", event="ledger_reconcile_mismatch", detail="difference=1", decision_time=None, now=now) is True
     assert payloads["severity"] == "CRITICAL"
     assert a.send_email_alert(gmail_user="bot@gmail.com", gmail_app_password="pw", event="ledger_reconcile_mismatch", detail="difference=1", decision_time=None, now=now) is True
-    assert "🚨 긴급" in captured["subject"]
+    assert captured["subject"].startswith("[crypto][실패] ")
 
 
 def test_unregistered_event_renders_critical_not_info(monkeypatch) -> None:
@@ -424,8 +428,7 @@ def test_unregistered_event_renders_critical_not_info(monkeypatch) -> None:
 
     monkeypatch.setattr(a.smtplib, "SMTP", _SMTP)
     assert a.send_email_alert(gmail_user="bot@gmail.com", gmail_app_password="pw", event="made_up_event", detail="x", decision_time=None, now=pd.Timestamp("2026-08-24T01:00:00", tz="UTC")) is True
-    assert "🚨 긴급" in captured["subject"]
-    assert "🔔 알림" not in captured["subject"]
+    assert captured["subject"] == "[crypto][실패] made_up_event (made_up_event)"
 
 
 def test_event_registry_covers_all_dispatched_events() -> None:
@@ -555,3 +558,27 @@ def test_event_info_flip_open_blocked_is_warning() -> None:
     for key in ("title", "severity_badge", "severity_label", "header_color", "bg_color", "impact", "action"):
         assert info[key]
     assert "live status" in info["action"]
+
+
+
+def test_email_channel_suppresses_notice_but_keeps_outbox_record(tmp_path, monkeypatch) -> None:
+    """NOTICE는 메일로 보내지 않지만 아웃박스에는 완료 기록으로 남고, WARNING 이상은 메일로 간다."""
+    import json
+
+    import pandas as pd
+    import src.live.alerting as a
+    from src.live.settings import LiveSettings
+
+    sent: list[str] = []
+    monkeypatch.setattr(a, "send_email_alert", lambda **k: sent.append(k["event"]) or True)
+    settings = LiveSettings(alert_gmail_user="bot@gmail.com", alert_gmail_app_password="pw", alert_outbox_path=str(tmp_path / "outbox.json"))  # noqa: S106
+    now = pd.Timestamp("2026-10-20 01:00Z")
+
+    assert a.dispatch_alert(settings, event="cycle_complete", detail="intents=3", decision_time=None, dedupe_key="n1", now=now) is True
+    assert a.dispatch_alert(settings, event="data_degraded", detail="d", decision_time=None, dedupe_key="w1", now=now) is True
+    assert a.dispatch_alert(settings, event="day_skipped", detail="d", decision_time=None, dedupe_key="c1", now=now) is True
+
+    assert sent == ["data_degraded", "day_skipped"]
+    records = {r["dedupe_key"]: r for r in json.loads((tmp_path / "outbox.json").read_text(encoding="utf-8"))["records"]}
+    assert records["n1"]["detail"] == "intents=3" and records["n1"]["completed_at"] is not None
+    assert records["n1"]["pending_channels"] == []
