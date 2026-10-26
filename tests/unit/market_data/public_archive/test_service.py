@@ -359,9 +359,11 @@ def test_headerless_aggtrades_supported(tmp_path: Path) -> None:
 
 
 def test_unlisted_recent_days_count_pending_without_coverage(tmp_path: Path) -> None:
-    end = date(2024, 1, 17)
+    from datetime import timedelta
+
+    end = pd.Timestamp.now(tz="UTC").date() - timedelta(days=1)
     fake = FakeDownloader()
-    plans = plan_collection(fake, root=tmp_path, datasets=["metrics"], symbols={"metrics": ["BTCUSDT"]}, start=date(2024, 1, 15), end=end)
+    plans = plan_collection(fake, root=tmp_path, datasets=["metrics"], symbols={"metrics": ["BTCUSDT"]}, start=end - timedelta(days=2), end=end)
     assert plans is not None
     report = execute_plan(fake, plans, root=tmp_path)
     assert report.pending == 3
