@@ -86,7 +86,9 @@ def test_depth_readiness_precedes_submission_and_never_filters_intents(
 
     monkeypatch.setattr(runner_mod, "ExecutionDepthRecorder", Recorder)
     monkeypatch.setattr(runner_mod, "execute_intents", execute)
-    settings = LiveSettings(ledger_path=str(tmp_path / "ledger.json"), exec_depth_ready_timeout_s=1.5)
+    settings = LiveSettings(
+        ledger_path=str(tmp_path / "ledger.json"), fills_dir=str(tmp_path / "fills"), exec_depth_ready_timeout_s=1.5
+    )
     shutdown = ShutdownFlag()
     report = run_shadow_cycle(settings, DECISION_TIME, artifact, now=NOW, shutdown=shutdown)
     assert report.status == "COMPLETE"
@@ -115,7 +117,7 @@ def test_depth_readiness_audit_failure_does_not_halt(artifact, live_env, tmp_pat
         return original(self, event, **kwargs)
 
     monkeypatch.setattr(AuditLog, "record", record)
-    settings = LiveSettings(ledger_path=str(tmp_path / "ledger.json"))
+    settings = LiveSettings(ledger_path=str(tmp_path / "ledger.json"), fills_dir=str(tmp_path / "fills"))
     report = run_shadow_cycle(settings, DECISION_TIME, artifact, now=NOW)
     assert report.status == "COMPLETE"
     assert [intent.symbol for intent in live_env] == ["AAAUSDT", "BUSDT"]
