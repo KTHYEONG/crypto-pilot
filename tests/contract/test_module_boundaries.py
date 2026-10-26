@@ -96,7 +96,7 @@ def test_file_size_budget() -> None:
     # frozen at measured size; growth fails, shrink requires deleting/lowering the entry.
     frozen_oversized = {
         "tests/unit/live/test_scheduler.py": 171071,  # spec 17 gate tests; IP-ban aware backoff cases.
-        "tests/unit/live/test_runner_shadow_cycle.py": 99677,
+        "tests/unit/live/test_runner_shadow_cycle.py": 99784,  # exec depth readiness stub signature and result.
         "tests/unit/live/test_runner_ledger.py": 63891,
         # venue-findings hardening: 2xx ack, ban horizon, unknown-outcome body and server-time cases.
         "tests/unit/live/test_rest.py": 62351,
@@ -384,7 +384,7 @@ def test_source_module_size_budget() -> None:
         # Cycle phases stay co-located to preserve runtime module-global test seams;
         # explicit phase contracts add lines while reducing orchestration complexity.
         # spec 17: venue snapshot passthrough, disabled-collection audit, genesis alert.
-        "src/live/runner.py": 1966,  # flip-blocked alert wiring.
+        "src/live/runner.py": 1985,  # exec depth readiness gate wiring.
         # spec 17: mainnet refuse-to-start gate (fail loud before any venue call).
         "src/live/scheduler.py": 1026,  # IP-ban aware retry backoff.
         # Shared post/unknown-submission primitives retain the executor lifecycle and contracts.
@@ -420,7 +420,7 @@ def test_source_module_size_budget() -> None:
         # LiveSettings resolved path accessors (spec 20) stay on the settings model
         # so call-site default seams keep resolving lazily at call time.
         # spec 17: live modes skip run-scoped tax ledger derivation (account-scoped venue ledger).
-        "src/live/settings.py": 752,
+        "src/live/settings.py": 753,  # exec depth readiness gate timeout.
         # Drill transport-fault scenarios share one wire-record helper set; splitting would duplicate it.
         "src/live/testnet_drill/scenarios/transport_faults.py": 710,
     }
@@ -492,7 +492,7 @@ def test_no_function_exceeds_length_budget() -> None:
     budget = 250
     # frozen at measured size; growth fails, shrink requires deleting/lowering the entry.
     frozen = {
-        "src/live/runner.py::run_shadow_cycle": 352,
+        "src/live/runner.py::run_shadow_cycle": 366,  # exec depth readiness gate wiring.
         # spec 17: mainnet refuse-to-start gate (fail loud before any venue call).
         "src/live/scheduler.py::run_daemon": 355,
         "src/live/strategy_signal.py::run_strategy_signal_step": 312,
