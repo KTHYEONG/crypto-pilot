@@ -115,6 +115,33 @@ data/
   └── manifest.json                           # SHA-256 지문 및 결손(NaN) 감사 매니페스트
 ```
 
+#### Research Inventory and VPS Mirror
+
+Drive retains backed-up live-only files after VPS pruning. Research access uses
+`ops research-mirror` (incremental Drive → `data/mirror/vps` copy, dry-run by default) and
+`ops data-inventory` (offline day coverage, gaps, incomplete hours and sizes in `inventory.json`).
+The isolated mirror is never the local daemon's state root. Inventory validates file names, not payload integrity;
+archive day presence means at least one symbol has `ok` coverage, not complete universe coverage.
+
+| dataset | source | cadence | live-only? | VPS local retention | Drive backup | research access |
+|---|---|---|---|---|---|---|
+| `book_ticker` | bookTicker websocket | 24 hourly parquet/day | yes | 180 d | copy-only + 30 d versions | `ops research-mirror` |
+| `premium_index` | premiumIndex websocket | 24 hourly parquet/day | yes | 180 d | copy-only + 30 d versions | `ops research-mirror` |
+| `exec_depth` | depth stream (execution window + post window) | per run | yes | verbatim | copy-only + 30 d versions | `ops research-mirror` |
+| `raw_book_ticker` / `raw_force_order` / `raw_premium_index` | raw websocket archives | daily `jsonl.xz` | yes | 30 d | copy-only + 30 d versions | `ops research-mirror` |
+| `ref_exchange_info` / `ref_funding_info` / `ref_asset_index` | daily REST snapshots | daily `json.gz` | yes | verbatim | copy-only + 30 d versions | `ops research-mirror` |
+| `liquidations` | forceOrder-derived stream | 24 hourly parquet/day | yes | verbatim | copy-only + 30 d versions | `ops research-mirror` |
+| `paper_audit` | paper run ledgers | per run-day `jsonl` | yes | verbatim | copy-only + 30 d versions | `ops research-mirror` |
+| `archive_metrics` / `archive_bookDepth` / `archive_aggTrades` | Binance Vision public archive | daily partitions | no (re-download) | 45 d | dedicated 7 d versions | `ops research-mirror` or re-download |
+| `ohlcv` 1h / 3m | Binance REST klines | hourly / 3-minute parquet | no (re-download) | rolling | not backed up | re-download |
+| `funding` | Binance REST funding history | 8-hourly parquet | no (re-download) | rolling | not backed up | re-download |
+| `spot` OHLCV / borrow | Binance REST spot + margin | parquet | no (re-download) | rolling | not backed up | re-download |
+
+Stable capture caveats:
+- `forceOrder` is a per-symbol 1 s latest-only snapshot stream, so liquidation counts are a lower bound.
+- `exec_depth` covers only the execution window plus `exec_depth_post_window_s`.
+
+
 ### 4.2 도메인 금융 무결성 배리어 (Financial Invariants)
 1. **3분봉 네이티브 체결 원장 (`SimulatedInventoryLedger`)**:
    매 3분봉마다 `3분봉 체결 종가 시가평가(MTM) ➔ 8시간 펀딩비 실정산 ➔ 테이커/메이커 체결` 정산 순서를 강제합니다. 지정가 매수는 봉 저가($Low < Price$), 매도는 봉 고가($High > Price$) 관통 시에만 체결을 인정합니다.
@@ -165,4 +192,3 @@ uv run pytest tests/contract/test_module_boundaries.py -k "test_architecture_doc
 - **Manual slot switch:** `docker compose up -d --no-deps capture-<idle>`, wait for `ready` 0, then `docker compose stop -t 20 capture-<old> && docker compose rm -f capture-<old>`.
 - **Rollback:** re-run the previous commit deploy; the handover gate keeps the current slot when the new image is not READY.
 - **Backup gate:** `cat deploy/backup/status/last_success.json`; older than 72 h blocks pruning with `prune_blocked`.
-
