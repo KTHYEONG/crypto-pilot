@@ -200,6 +200,15 @@ def test_account_invalid_request_rejected_before_io(tmp_path: Path, monkeypatch:
         with pytest.raises(ValueError, match=r".+"):
             run_account_replay(_account_request(tmp_path, **overrides))
 
+def test_public_input_accessor_is_pure_passthrough(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Public input accessor returns the candidate build's second element unchanged."""
+    import src.application.strategy_account as app_mod
+
+    sentinel = object()
+    monkeypatch.setattr(app_mod, "_build_account_candidate", lambda request: ("strategy", sentinel, "request"))
+    assert app_mod.build_account_replay_inputs(_account_request(tmp_path)) is sentinel
+
+
 def test_reconcile_missing_reference() -> None:
     """None reference yields a missing_reference record with null gaps."""
     rec = reconcile_unit_reference(None, unit_cagr=0.1, unit_mdd=0.05)

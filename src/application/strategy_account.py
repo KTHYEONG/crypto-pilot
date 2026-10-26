@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-__all__ = ["AccountReplayError"]
+__all__ = ["AccountReplayError", "build_account_replay_inputs"]
 
 import dataclasses
 import json
@@ -49,6 +49,7 @@ from src.strategy.targets import FLOW_MOM_TOP20_ACCOUNT_UNIT, StrategySpec, reso
 
 if TYPE_CHECKING:
     from src.core.types import ExecutionSpec
+    from src.engine.account_ledger import AccountMarkPanels
 
 _logger = logging.getLogger(__name__)
 
@@ -314,6 +315,13 @@ def _build_account_candidate(request: AccountReplayRequest) -> tuple[Any, Any, A
     except (DataIntegrityError, ValueError, OSError) as exc:
         raise AccountReplayError(f"account replay failed: {exc}") from exc
     return strategy_request.strategy, parts, strategy_request
+
+
+def build_account_replay_inputs(request: AccountReplayRequest) -> tuple[pd.DataFrame, AccountMarkPanels, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DatetimeIndex]:
+    """Public accessor for the assembled account replay inputs `(unit_weights, marks, funding_cum, adv, daily_sigma, anchor_times)`; raises AccountReplayError."""
+    from typing import cast
+
+    return cast("tuple[pd.DataFrame, AccountMarkPanels, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DatetimeIndex]", _build_account_candidate(request)[1])
 
 
 def _replay_account_ledgers(request: AccountReplayRequest, parts: Any, rules: Any, policy: Any) -> tuple[Any, Any, Any]:
