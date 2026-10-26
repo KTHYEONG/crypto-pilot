@@ -362,16 +362,16 @@ def test_spot_client_paces_between_partial_pages(monkeypatch) -> None:
     assert sleeps == [0.1]
 
 
-def test_spot_client_stops_after_transient_failures(monkeypatch) -> None:
+def test_spot_client_raises_after_transient_failures(monkeypatch) -> None:
     client = BinanceSpotClient()
     monkeypatch.setattr(client.exchange, "market", lambda symbol: {"id": symbol.replace("/", "")})
     sleeps: list[float] = []
     monkeypatch.setattr("urllib.request.urlopen", lambda *args, **kwargs: (_ for _ in ()).throw(OSError("offline")))
     monkeypatch.setattr("src.market_data.binance.spot.time.sleep", sleeps.append)
 
-    result = client.fetch_spot_ohlcv("BTC/USDT", "1h", "2024-01-01", "2024-01-01")
+    with pytest.raises(OSError, match="retries exhausted"):
+        client.fetch_spot_ohlcv("BTC/USDT", "1h", "2024-01-01", "2024-01-01")
 
-    assert result.empty
     assert sleeps == [1, 2, 3, 4, 5]
 
 
@@ -385,9 +385,9 @@ def test_spot_client_retries_server_http_failures(monkeypatch) -> None:
     sleeps: list[float] = []
     monkeypatch.setattr("src.market_data.binance.spot.time.sleep", sleeps.append)
 
-    result = client.fetch_spot_ohlcv("BTC/USDT", "1h", "2024-01-01", "2024-01-01")
+    with pytest.raises(OSError, match="retries exhausted"):
+        client.fetch_spot_ohlcv("BTC/USDT", "1h", "2024-01-01", "2024-01-01")
 
-    assert result.empty
     assert sleeps == [1, 2, 3, 4, 5]
 
 
@@ -401,9 +401,9 @@ def test_spot_client_backs_off_on_5xx(monkeypatch) -> None:
     sleeps: list[float] = []
     monkeypatch.setattr("src.market_data.binance.spot.time.sleep", sleeps.append)
 
-    result = client.fetch_spot_ohlcv("BTC/USDT", "1h", "2024-01-01", "2024-01-01")
+    with pytest.raises(OSError, match="retries exhausted"):
+        client.fetch_spot_ohlcv("BTC/USDT", "1h", "2024-01-01", "2024-01-01")
 
-    assert result.empty
     assert sleeps == [2, 4, 6, 8, 10]
 
 

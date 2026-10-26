@@ -53,6 +53,14 @@ AGG_TRADES_COLUMNS: tuple[str, ...] = (
     "rv_trade",
 )
 
+AGG_TRADES_SLICE_COLUMNS: tuple[str, ...] = (
+    "transact_time_ms",
+    "agg_trade_id",
+    "price",
+    "quantity",
+    "is_buyer_maker",
+)
+
 HISTORY_START: date = date(2021, 1, 1)
 
 # Window must contain the live execution window; a cycle crossing 00:00 UTC is not covered and Part 3 must exclude it.
