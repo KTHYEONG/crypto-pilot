@@ -20,6 +20,9 @@ logger = getLogger("DataInventory")
 DayRule = Literal["day_dir", "day_file", "liquidation_hour_file", "run_audit_file", "archive_coverage"]
 
 _LIQUIDATION_NAME = re.compile(r"liquidations_([0-9]{8})_([01][0-9]|2[0-3])\.parquet")
+# Partitions written before the hourly layout hold one whole UTC day each; retention reads both layouts.
+_LEGACY_LIQUIDATION_NAME = re.compile(r"liquidations_([0-9]{8})\.parquet")
+_HOURS_PER_DAY = 24
 _HOUR_NAME = re.compile(r"([01][0-9]|2[0-3])\.parquet")
 _DEPTH_NAME = re.compile(r"part_.+\.parquet")
 
@@ -178,12 +181,14 @@ def _scan_liquidation_hours(path: Path) -> _DayScan:
         for entry in entries:
             if not entry.is_file(follow_symlinks=False):
                 continue
-            match = _LIQUIDATION_NAME.fullmatch(entry.name)
+            hourly = _LIQUIDATION_NAME.fullmatch(entry.name)
+            legacy = None if hourly is not None else _LEGACY_LIQUIDATION_NAME.fullmatch(entry.name)
+            match = hourly or legacy
             day = _parse_compact(match.group(1)) if match is not None else None
             if day is None:
                 malformed += 1
                 continue
-            present[day] = present.get(day, 0) + 1
+            present[day] = present.get(day, 0) + (1 if hourly is not None else _HOURS_PER_DAY)
             total_bytes += _entry_size(entry)
     return _DayScan(present, total_bytes, malformed)
 
