@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from src.market_data.public_archive.mask import CensusSpan
     from src.market_data.public_archive.service import CollectionPlan
 
 logger = logging.getLogger(__name__)
@@ -63,18 +64,48 @@ def _masked_universe(
     datasets: list[str],
     start: date | None,
     end: date,
-) -> tuple[dict[str, list[str]], dict[str, dict[str, frozenset[date]]]]:
+) -> tuple[dict[str, list[str]], dict[str, dict[str, frozenset[date]]], CensusSpan]:
     """Symbols and allowed days per dataset from the PIT seat-day mask; exits 2 without a lake."""
     from src.common.errors import DataIntegrityError
     from src.common.paths import FUTURES_DATA_DIR
-    from src.market_data.public_archive.catalog import MASK_POLICIES
-    from src.market_data.public_archive.mask import allowed_days, load_daily_census, seat_day_mask
+    from src.market_data.public_archive.catalog import ARCHIVE_RETRY_HORIZON_DAYS, MASK_POLICIES
+    from src.market_data.public_archive.mask import (
+        CensusTooShortError,
+        allowed_days,
+        census_span,
+        load_daily_census,
+        require_census_coverage,
+        seat_day_mask,
+    )
 
+    census_override = getattr(args, "census_root", None)
+    census_root = Path(str(census_override)) if census_override else (FUTURES_DATA_DIR / "ohlcv" / "1h")
     try:
-        daily_close, daily_quote_volume = load_daily_census(FUTURES_DATA_DIR / "ohlcv" / "1h")
+        daily_close, daily_quote_volume = load_daily_census(census_root)
+        span = census_span(daily_close, root=census_root)
     except DataIntegrityError as exc:
         print("archive collect status=LAKE_MISSING")  # noqa: T201
         raise SystemExit(2) from exc
+    incremental = start is None and os.environ.get("ARCHIVE_INCREMENTAL") == "1"
+    first_days: dict[str, date] = {}
+    for dataset in datasets:
+        policy = MASK_POLICIES[dataset]
+        if start is not None:
+            first = start
+        elif incremental:
+            first = end - timedelta(days=ARCHIVE_RETRY_HORIZON_DAYS)
+        else:
+            first = policy.start
+        first_days[dataset] = first
+        try:
+            require_census_coverage(span, first=first, last=end)
+        except CensusTooShortError as exc:
+            print(  # noqa: T201
+                f"archive collect status=CENSUS_SHORT census_root={span.root} "
+                f"census_first={span.first_day} census_last={span.last_day} "
+                f"required_first={exc.required_first} required_last={exc.required_last}"
+            )
+            raise SystemExit(2) from exc
     symbols: dict[str, list[str]] = {}
     allowed: dict[str, dict[str, frozenset[date]]] = {}
     for dataset in datasets:
@@ -82,7 +113,7 @@ def _masked_universe(
         breadth = args.breadth if getattr(args, "breadth", None) is not None else policy.breadth
         preroll = args.preroll_days if getattr(args, "preroll_days", None) is not None else policy.preroll_days
         mask = seat_day_mask(daily_close, daily_quote_volume, breadth=breadth, preroll_days=preroll)
-        by_symbol = allowed_days(mask, first=start if start is not None else policy.start, last=end)
+        by_symbol = allowed_days(mask, first=first_days[dataset], last=end)
         if not by_symbol:
             symbols[dataset], allowed[dataset] = [], {}
             continue
@@ -92,7 +123,7 @@ def _masked_universe(
             raise SystemExit(2)
         symbols[dataset] = sorted(s for s in by_symbol if s in listed)
         allowed[dataset] = {s: by_symbol[s] for s in symbols[dataset]}
-    return symbols, allowed
+    return symbols, allowed, span
 
 
 def _plain_universe(args: argparse.Namespace, downloader: object, datasets: list[str]) -> dict[str, list[str]]:
@@ -115,6 +146,7 @@ def _print_plan(
     datasets: list[str],
     plans: list[CollectionPlan],
     allowed: dict[str, dict[str, frozenset[date]]] | None,
+    census_span: CensusSpan | None = None,
 ) -> None:
     from src.market_data.public_archive.store import load_coverage
 
@@ -136,6 +168,8 @@ def _print_plan(
             line += (
                 f" mask_symbols={len(amap)} allowed_days={sum(len(v) for v in amap.values())} missing_days={missing}"
             )
+            if census_span is not None:
+                line += f" census_first={census_span.first_day} census_last={census_span.last_day}"
         print(line)  # noqa: T201
 
 
@@ -150,8 +184,9 @@ def _run_collect(args: argparse.Namespace) -> None:
     end = _parse_day(args.end, datetime.now(UTC).date() - timedelta(days=1))
     start = date.fromisoformat(args.start) if args.start else None
     allowed: dict[str, dict[str, frozenset[date]]] | None = None
+    span = None
     if args.symbols == "all" and not getattr(args, "no_mask", False):
-        symbols, allowed = _masked_universe(args, downloader, datasets, start, end)
+        symbols, allowed, span = _masked_universe(args, downloader, datasets, start, end)
     else:
         symbols = _plain_universe(args, downloader, datasets)
     plans = service_mod.plan_collection(
@@ -171,7 +206,7 @@ def _run_collect(args: argparse.Namespace) -> None:
     if plans is None:
         print("archive collect status=LISTING_FAILED")  # noqa: T201
         raise SystemExit(2)
-    _print_plan(root, datasets, plans, allowed)
+    _print_plan(root, datasets, plans, allowed, span)
     if not args.execute:
         return
     try:
@@ -286,6 +321,7 @@ def add_archive_commands(archive_parser: argparse.ArgumentParser) -> None:
     collect.add_argument("--breadth", type=int, default=None)
     collect.add_argument("--preroll-days", type=int, default=None)
     collect.add_argument("--no-mask", action="store_true", default=False)
+    collect.add_argument("--census-root", type=Path, default=None)
     collect.add_argument("--lock-wait-s", type=float, default=1800.0)
     collect.set_defaults(handler=_run_collect)
 

@@ -31,3 +31,4 @@ def test_archive_service_resource_budget() -> None:
     block = "\n".join(_service_block())
     assert "mem_limit: 3g" in block
     assert "./data/futures/ohlcv:/app/data/futures/ohlcv:ro" in block
+    assert "./data/census:/app/data/census:ro" in block

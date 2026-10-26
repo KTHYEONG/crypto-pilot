@@ -168,3 +168,65 @@ def test_census_daily_aggregation_keeps_gaps_unknown(tmp_path: Path) -> None:
     assert pd.isna(close.iloc[1, 0])
     assert pd.isna(quote.iloc[1, 0])
     assert pd.isna(quote.iloc[2, 0])
+
+
+def test_census_span_reports_bounds() -> None:
+    from src.market_data.public_archive.mask import census_span
+
+    index = pd.DatetimeIndex(pd.date_range("2025-08-22", "2026-10-25", freq="D", tz="UTC"), tz="UTC")
+    close = pd.DataFrame({"AUSDT": 1.0, "BUSDT": 1.0, "CUSDT": 1.0}, index=index, dtype="float64")
+    span = census_span(close, root=Path("/census"))
+    assert span.first_day == date(2025, 8, 22)
+    assert span.last_day == date(2026, 10, 25)
+    assert span.symbols == 3
+    assert census_span(close.iloc[::-1], root=Path("/census")) == span
+
+
+def test_census_span_empty_raises() -> None:
+    from src.market_data.public_archive.mask import census_span
+
+    index = pd.DatetimeIndex(pd.date_range("2025-08-22", periods=3, freq="D", tz="UTC"), tz="UTC")
+    with pytest.raises(DataIntegrityError):
+        census_span(pd.DataFrame(index=index), root=Path("/census"))
+
+
+def test_short_census_fails_closed_at_start() -> None:
+    from src.market_data.public_archive.mask import CensusSpan, CensusTooShortError, require_census_coverage
+
+    span = CensusSpan(
+        root=Path("/census"), first_day=date(2025, 8, 22), last_day=date(2026, 10, 25), symbols=3
+    )
+    with pytest.raises(CensusTooShortError) as exc:
+        require_census_coverage(span, first=date(2023, 1, 1), last=date(2024, 1, 1))
+    assert exc.value.required_first == date(2022, 10, 3)
+    assert exc.value.span == span
+
+
+def test_stale_census_fails_closed_at_end() -> None:
+    from src.market_data.public_archive.mask import CensusSpan, CensusTooShortError, require_census_coverage
+
+    span = CensusSpan(
+        root=Path("/census"), first_day=date(2021, 1, 1), last_day=date(2026, 9, 30), symbols=3
+    )
+    with pytest.raises(CensusTooShortError):
+        require_census_coverage(span, first=date(2023, 1, 1), last=date(2026, 10, 25))
+
+
+@pytest.mark.parametrize("last_day", [date(2026, 10, 23), date(2026, 10, 24)])
+def test_lake_lag_within_tolerance_passes(last_day: date) -> None:
+    from src.market_data.public_archive.mask import CensusSpan, require_census_coverage
+
+    span = CensusSpan(
+        root=Path("/census"), first_day=date(2022, 10, 3), last_day=last_day, symbols=3
+    )
+    require_census_coverage(span, first=date(2023, 1, 1), last=date(2026, 10, 25))
+
+
+def test_require_census_coverage_rejects_inverted_range() -> None:
+    from src.market_data.public_archive.mask import CensusSpan, require_census_coverage
+
+    span = CensusSpan(
+        root=Path("/census"), first_day=date(2021, 1, 1), last_day=date(2026, 10, 24), symbols=3
+    )
+    with pytest.raises(ValueError, match="first"):
+        require_census_coverage(span, first=date(2024, 1, 2), last=date(2024, 1, 1))

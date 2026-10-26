@@ -90,6 +90,7 @@ services:
     volumes:
       - ./data/public_archive:/app/data/public_archive
       - ./data/futures/ohlcv:/app/data/futures/ohlcv:ro
+      - ./data/census:/app/data/census:ro
       - ./logs:/app/logs
       - ./deploy/backup/status:/app/backup_status:ro
     command: ["/app/.venv/bin/python", "-m", "src.cli.main", "archive", "collect", "--dataset", "all", "--execute", "--workers", "2"]
