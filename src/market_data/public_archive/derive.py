@@ -46,13 +46,6 @@ _PERCENT_TO_TAG: dict[float, str] = {
     5.0: "p5",
 }
 
-_SLICE_COLUMNS: tuple[str, ...] = (
-    "transact_time_ms",
-    "agg_trade_id",
-    "price",
-    "quantity",
-    "is_buyer_maker",
-)
 
 
 def _require_columns(frame: pd.DataFrame, columns: tuple[str, ...]) -> None:

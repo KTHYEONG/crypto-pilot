@@ -410,7 +410,8 @@ def test_source_module_size_budget() -> None:
         "src/lab/mhs/evaluation/folds.py": 1084,
         # spec 34 part 3: build-venue-halts operator command next to build-settlement-registry.
         # spec 43 part 1: collect-delisting-announcements operator command and atomic evidence write.
-        "src/cli/commands/data.py": 726,
+        # spot-universe registration only; the command body lives in data_spot_universe.py.
+        "src/cli/commands/data.py": 728,
         # Declare-once request schema: each MHS option is exactly one field plus CLI metadata.
         "src/lab/mhs/contracts.py": 878,
         # Checkpoint advancement, retention and the loop stay co-located for review;

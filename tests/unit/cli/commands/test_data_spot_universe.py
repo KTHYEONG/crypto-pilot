@@ -117,10 +117,10 @@ def test_partial_failure_exits_3_without_aborting_others(tmp_path, monkeypatch, 
         start="2023-01-01", end="2023-03-10", breadth=30, timeframe="1h",
         execute=True, output=str(out),
     )
-    from src.cli.commands.data import _spot_universe
+    from src.cli.commands.data_spot_universe import run_spot_universe
 
-    with caplog.at_level("INFO", logger="src.cli.commands.data"), pytest.raises(SystemExit) as exc:
-        _spot_universe(args)
+    with caplog.at_level("INFO", logger="src.cli.commands.data_spot_universe"), pytest.raises(SystemExit) as exc:
+        run_spot_universe(args)
 
     assert exc.value.code == 3
     assert sorted(collected) == ["AAAUSDT", "BBBUSDT"]
@@ -183,14 +183,14 @@ def test_no_spot_history_written_and_skipped_on_execute(tmp_path, monkeypatch) -
 
 
 def test_invalid_range_rejected(tmp_path) -> None:
-    from src.cli.commands.data import _spot_universe
+    from src.cli.commands.data_spot_universe import run_spot_universe
 
     args = argparse.Namespace(
         start="2023-03-10", end="2023-01-01", breadth=30, timeframe="1h",
         execute=False, output=str(tmp_path / "never.json"),
     )
     with pytest.raises(ValueError, match="invalid range"):
-        _spot_universe(args)
+        run_spot_universe(args)
 
 
 def test_progress_logged_during_collection(tmp_path, monkeypatch, caplog) -> None:
@@ -213,10 +213,10 @@ def test_progress_logged_during_collection(tmp_path, monkeypatch, caplog) -> Non
         start="2023-01-01", end="2023-03-10", breadth=30, timeframe="1h",
         execute=True, output=str(out),
     )
-    from src.cli.commands.data import _spot_universe
+    from src.cli.commands.data_spot_universe import run_spot_universe
 
-    with caplog.at_level("INFO", logger="src.cli.commands.data"):
-        _spot_universe(args)
+    with caplog.at_level("INFO", logger="src.cli.commands.data_spot_universe"):
+        run_spot_universe(args)
 
     assert "stage=spot_universe" in caplog.text
     assert out.exists()

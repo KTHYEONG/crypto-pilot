@@ -11,14 +11,7 @@ import pandas as pd
 from numpy.typing import NDArray
 
 from src.common.errors import DataIntegrityError
-
-_SLICE_COLUMNS = (
-    "transact_time_ms",
-    "agg_trade_id",
-    "price",
-    "quantity",
-    "is_buyer_maker",
-)
+from src.market_data.public_archive.catalog import AGG_TRADES_SLICE_COLUMNS
 
 
 def _int64_column(frame: pd.DataFrame, column: str) -> NDArray[np.int64]:
@@ -49,7 +42,7 @@ class TapeTrades:
         "Validate one symbol's aggTrades slice rows and wrap them as sorted arrays; raises DataIntegrityError."
         if not isinstance(frame, pd.DataFrame):
             raise DataIntegrityError(f"slice frame must be a DataFrame, got {type(frame).__name__}")
-        missing = [c for c in _SLICE_COLUMNS if c not in frame.columns]
+        missing = [c for c in AGG_TRADES_SLICE_COLUMNS if c not in frame.columns]
         if missing:
             raise DataIntegrityError(f"slice frame missing columns: {missing}")
         try:

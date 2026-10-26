@@ -6,6 +6,7 @@ import logging
 import pandas as pd
 
 from src.cli.commands.data_announcements import collect_delisting_announcements
+from src.cli.commands.data_spot_universe import add_spot_universe_command
 from src.market_data.services import collection
 from src.market_data.storage.gap_report import detect_internal_gaps
 
@@ -318,124 +319,6 @@ def _repair_spot_gap(args: argparse.Namespace) -> None:
     )
 
 
-def _spot_universe(args: argparse.Namespace) -> None:
-    import json
-    import time
-    from datetime import date, timedelta
-    from pathlib import Path
-
-    from src.common import paths as paths_mod
-    from src.common.durable_io import durable_write_text
-    from src.market_data.public_archive.catalog import MASK_POLICIES
-
-    start_date = date.fromisoformat(str(args.start))
-    end_date = date.fromisoformat(str(args.end))
-    if start_date > end_date:
-        raise ValueError(f"invalid range start={args.start} end={args.end}")
-
-    from dataclasses import asdict
-
-    from src.market_data.public_archive.mask import load_daily_census, seat_day_mask
-    from src.market_data.services.spot_universe import resolve_spot_companions, seated_spans
-
-    daily_close, daily_quote_volume = load_daily_census(paths_mod.FUTURES_DATA_DIR / "ohlcv" / "1h")
-    mask = seat_day_mask(
-        daily_close,
-        daily_quote_volume,
-        breadth=int(args.breadth),
-        preroll_days=MASK_POLICIES["aggTrades"].preroll_days,
-    )
-    spans = seated_spans(mask, first=start_date, last=end_date)
-
-    from src.market_data.binance.spot import BinanceSpotClient
-
-    client = BinanceSpotClient()
-    started = time.monotonic()
-    last_log = started
-    total = len(spans)
-    done = 0
-    ok = 0
-
-    def _has_bars(symbol: str, day: date, last: date) -> bool:
-        from urllib.error import HTTPError
-
-        from src.market_data.binance.futures import BinanceKlinePermanentError
-
-        upper = min(day + timedelta(days=1), last + timedelta(days=1))
-        try:
-            frame = client.fetch_spot_ohlcv(
-                symbol, "1h", day.isoformat(),
-                str(pd.Timestamp(upper, tz="UTC") - pd.Timedelta(milliseconds=1)),
-            )
-        except BinanceKlinePermanentError as exc:
-            cause = exc.__cause__
-            if isinstance(cause, HTTPError):
-                payload = json.loads(cause.read())
-                if payload.get("code") == -1121:
-                    return False
-            raise
-        return not frame.empty
-
-    def _probe(symbol: str, first: date, last: date) -> bool:
-        nonlocal last_log
-        now = time.monotonic()
-        if now - last_log >= 30.0:
-            _logger.info(
-                "[DATA] stage=spot_universe done=%d/%d ok=%d failed=%d elapsed_s=%.1f",
-                done, total, ok, 0, now - started,
-            )
-            last_log = now
-        return _has_bars(symbol, first, last) or _has_bars(symbol, first + (last - first) // 2, last)
-
-    companions = [asdict(companion) for companion in resolve_spot_companions(spans, _probe)]
-    done = total
-    ok = sum(c["status"] == "mapped" for c in companions)
-
-    output = Path(str(args.output))
-    output.parent.mkdir(parents=True, exist_ok=True)
-    durable_write_text(output, json.dumps(companions, sort_keys=True, indent=2, default=str) + "\n")
-
-    mapped = sum(1 for c in companions if c["status"] == "mapped")
-    missing = sum(1 for c in companions if c["status"] == "no_spot_history")
-    failed = 0
-    failures: list[str] = []
-    if bool(getattr(args, "execute", False)) and mapped:
-        from src.market_data.services import spot_collection as spot_collection_mod
-
-        earliest: dict[str, str] = {}
-        for c in companions:
-            if c["status"] != "mapped":
-                continue
-            spot = str(c["spot_symbol"])
-            first_seated = str(c["first_seated"])
-            if spot not in earliest or first_seated < earliest[spot]:
-                earliest[spot] = first_seated
-        end_str = str(args.end)
-        timeframe = str(getattr(args, "timeframe", "1h"))
-        for collected, spot in enumerate(sorted(earliest), start=1):
-            try:
-                spot_collection_mod.ensure_spot_ohlcv(spot, timeframe, earliest[spot], end_str)
-            except Exception as exc:  # noqa: BLE001
-                failed += 1
-                failures.append(f"{spot}: {exc}")
-                _logger.warning("[DATA] stage=spot_universe symbol=%s status=FAILED detail=%s", spot, exc)
-            now = time.monotonic()
-            if now - last_log >= 30.0:
-                _logger.info(
-                    "[DATA] stage=spot_universe done=%d/%d ok=%d failed=%d elapsed_s=%.1f",
-                    collected, len(earliest), collected - failed, failed, now - started,
-                )
-                last_log = now
-    elapsed = time.monotonic() - started
-    _logger.info(
-        "[DATA] stage=spot_universe status=COMPLETED mapped=%d no_spot_history=%d failed=%d elapsed_s=%.1f",
-        mapped, missing, failed, elapsed,
-    )
-    if failures:
-        _logger.error("[DATA] stage=spot_universe failures=%s", "; ".join(failures))
-        raise SystemExit(3)
-
-
 def _repair_ohlcv(args: argparse.Namespace) -> None:
     import pandas as pd
 
@@ -706,23 +589,7 @@ def add_data_commands(data_parser: argparse.ArgumentParser) -> None:
     spot.add_argument("--start", default=_DEFAULT_COLLECTION_START)
     spot.add_argument("--end", default=None)
     spot.set_defaults(handler=_spot_ohlcv)
-
-    from src.common.paths import DATA_DIR
-    from src.market_data.public_archive.catalog import MASK_POLICIES
-
-    spot_universe = collect_sub.add_parser(
-        "spot-universe", help="Map PIT futures universe to spot companions and collect spot OHLCV",
-    )
-    spot_universe.add_argument("--start", default="2023-01-01")
-    spot_universe.add_argument(
-        "--end",
-        default=(pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=1)).date().isoformat(),
-    )
-    spot_universe.add_argument("--breadth", type=int, default=MASK_POLICIES["aggTrades"].breadth)
-    spot_universe.add_argument("--timeframe", default="1h")
-    spot_universe.add_argument("--execute", action="store_true", default=False)
-    spot_universe.add_argument("--output", default=str(DATA_DIR / "spot" / "companions.json"))
-    spot_universe.set_defaults(handler=_spot_universe)
+    add_spot_universe_command(collect_sub)
 
     funding = collect_sub.add_parser("funding", help="Collect futures funding history")
     funding.add_argument("symbol", type=str)
