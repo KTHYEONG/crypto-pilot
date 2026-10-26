@@ -9,9 +9,13 @@ import pandas as pd
 
 from src.common.errors import DataIntegrityError
 from src.market_data.public_archive.catalog import is_perpetual_usdt
-from src.strategy.universe import PIT_ROSTER_LOOKBACK_DAYS, build_pit_roster
+from src.strategy.universe import build_pit_roster
 
 _QUOTE_CANDIDATES: tuple[str, ...] = ("quote_volume", "quote_vol")
+
+# Trailing window of build_pit_roster's traded-day count. Kept here because universe.py bytes are part of the
+# release spec digest that live preflight verifies; editing that file to export it would block trading.
+PIT_ROSTER_LOOKBACK_DAYS: int = 90
 
 
 @dataclass(frozen=True, slots=True)

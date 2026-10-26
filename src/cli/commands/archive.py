@@ -187,15 +187,14 @@ def _parse_hhmm(raw: str) -> tuple[int, int]:
     return hh, mm
 
 
-def _drain_deadline(hhmm: str) -> pd.Timestamp:
+def _drain_deadline(hhmm: str, now: pd.Timestamp | None = None) -> pd.Timestamp | None:
+    """Today's HH:MM UTC, or None once it has passed: a late run must never drain into the next day."""
     import pandas as pd
 
     hh, mm = _parse_hhmm(hhmm)
-    now = pd.Timestamp.now(tz="UTC")
+    now = pd.Timestamp.now(tz="UTC") if now is None else now
     deadline = pd.Timestamp(now.year, now.month, now.day, hh, mm, tz="UTC")
-    if deadline <= now:
-        deadline = deadline + pd.Timedelta(days=1)
-    return deadline
+    return deadline if deadline > now else None
 
 
 def _job_allowed(job: BackfillJob) -> dict[str, frozenset[date]]:
@@ -458,6 +457,8 @@ def _collect_under_lock(args: argparse.Namespace) -> None:
     root = _root(args)
     drain_until = getattr(args, "drain_jobs_until", None)
     deadline = _drain_deadline(drain_until) if drain_until else None
+    if drain_until and deadline is None:
+        logger.info("[DATA] stage=archive_backfill status=SKIPPED reason=past_deadline until=%s", drain_until)
     override = getattr(args, "job_workers", None)
     job_workers = args.workers if override is None else override
     if not 1 <= args.workers <= 8 or not 1 <= job_workers <= 8:

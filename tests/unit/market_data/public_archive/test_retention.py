@@ -323,3 +323,70 @@ def test_prune_reports_newly_sealed_months(tmp_path: Path) -> None:
     assert report.sealed_after == 2
     after = sealed_months(tmp_path, "metrics", store_mod.load_coverage(tmp_path, "metrics"))
     assert len(after) == 2
+
+
+def test_failed_day_of_any_age_keeps_its_month(tmp_path: Path) -> None:
+    from src.market_data.public_archive import store
+
+    target = _partition(tmp_path, "aggTrades", "BTCUSDT", "202403", mtime=_old_mtime())
+    slice_target = _partition(tmp_path, "aggTrades_slice", "BTCUSDT", "202403", mtime=_old_mtime())
+    other = _partition(tmp_path, "aggTrades", "BTCUSDT", "202402", mtime=_old_mtime())
+    store.append_coverage(tmp_path, store.CoverageRow(
+        dataset="aggTrades", symbol="BTCUSDT", day=pd.Timestamp("2024-03-05").date(), status="failed",
+        raw_sha256=None, rows=0, recorded_at=_NOW, detail="checksum",
+    ))
+    report = prune_backed_up_archive(tmp_path, status=_status(), now=_NOW)
+    assert target.exists()
+    assert slice_target.exists()
+    assert not other.exists()
+    assert report.pruned_files == 1
+
+
+def test_pending_backfill_job_range_is_never_pruned(tmp_path: Path) -> None:
+    from datetime import date
+
+    from src.market_data.public_archive import jobs
+
+    inside = _partition(tmp_path, "metrics", "ETHUSDT", "202402", mtime=_old_mtime())
+    edge = _partition(tmp_path, "metrics", "ETHUSDT", "202403", mtime=_old_mtime())
+    outside = _partition(tmp_path, "metrics", "ETHUSDT", "202401", mtime=_old_mtime())
+    other_dataset = _partition(tmp_path, "bookDepth", "ETHUSDT", "202402", mtime=_old_mtime())
+    jobs.enqueue_backfill(tmp_path, jobs.BackfillJob(
+        "metrics-2024-02-10-2024-03-01-20240601T000000Z", "metrics", date(2024, 2, 10), date(2024, 3, 1),
+        "/c", None, None, _NOW,
+    ))
+    report = prune_backed_up_archive(tmp_path, status=_status(), now=_NOW)
+    assert inside.exists()
+    assert edge.exists()
+    assert not outside.exists()
+    assert not other_dataset.exists()
+    assert report.pruned_files == 2
+
+
+def test_finished_backfill_job_no_longer_protects(tmp_path: Path) -> None:
+    from datetime import date
+
+    from src.market_data.public_archive import jobs
+
+    target = _partition(tmp_path, "metrics", "ETHUSDT", "202402", mtime=_old_mtime())
+    job = jobs.BackfillJob(
+        "metrics-2024-02-01-2024-02-29-20240601T000000Z", "metrics", date(2024, 2, 1), date(2024, 2, 29),
+        "/c", None, None, _NOW,
+    )
+    jobs.enqueue_backfill(tmp_path, job)
+    jobs.finish_job(tmp_path, job.job_id, summary={"ok": 1})
+    report = prune_backed_up_archive(tmp_path, status=_status(), now=_NOW)
+    assert not target.exists()
+    assert report.pruned_files == 1
+
+
+def test_malformed_pending_job_blocks_pruning(tmp_path: Path) -> None:
+    from src.common.errors import DataIntegrityError
+
+    target = _partition(tmp_path, "metrics", "BTCUSDT", "202403", mtime=_old_mtime())
+    pending = tmp_path / "_jobs" / "pending"
+    pending.mkdir(parents=True)
+    (pending / "bad.json").write_text("{", encoding="utf-8")
+    with pytest.raises(DataIntegrityError):
+        prune_backed_up_archive(tmp_path, status=_status(), now=_NOW)
+    assert target.exists()
