@@ -101,6 +101,22 @@ def test_day_files_and_liquidation_hours_scan_names(tmp_path: Path) -> None:
     assert rows["liquidations"].incomplete_days == (date(2026, 10, 20),)
 
 
+def test_legacy_daily_liquidation_partitions_count_as_complete_days(tmp_path: Path) -> None:
+    liquidations = tmp_path / "futures" / "liquidations"
+    liquidations.mkdir(parents=True)
+    (liquidations / "liquidations_20260923.parquet").write_bytes(b"xx")
+    (liquidations / "liquidations_20260924.parquet").write_bytes(b"xx")
+    for hour in range(24):
+        (liquidations / f"liquidations_20260925_{hour:02d}.parquet").write_bytes(b"x")
+    (liquidations / "liquidations_2026092.parquet").write_bytes(b"x")
+    row = _rows(tmp_path)["liquidations"]
+    assert row.first_day == date(2026, 9, 23)
+    assert row.present_days == 3
+    assert row.missing_days == ()
+    assert row.incomplete_days == ()
+    assert row.bytes == 28
+
+
 def _coverage(root: Path, symbol: str, day: date, status: str) -> CoverageRow:
     return CoverageRow(
         dataset="metrics",
