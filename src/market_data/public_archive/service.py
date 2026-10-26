@@ -9,7 +9,7 @@ import tempfile
 import threading
 import time
 from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Literal
@@ -44,6 +44,8 @@ class CollectionReport:
     pending: int
     elapsed_s: float
     sealed: int = 0
+    stopped_at_deadline: bool = False
+    remaining_days: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -200,8 +202,11 @@ def _plan_symbol(
     listed = _list_days(downloader, dataset, symbol, months, whole_symbol=allow_whole_symbol and len(months) > 3)
     wanted = set(candidates)
     days = tuple(day for day in candidates if day in listed)
+    recent_cutoff = _yesterday_utc(pd.Timestamp.now(tz="UTC")) - timedelta(days=2)
     pending = tuple(
-        day for offset in range(3) if (day := capped_end - timedelta(days=offset)) in wanted and day not in listed
+        day
+        for offset in range(3)
+        if (day := capped_end - timedelta(days=offset)) >= recent_cutoff and day in wanted and day not in listed
     )
     if not days and not pending:
         return None
@@ -260,47 +265,23 @@ def plan_collection(
                         sealed_days.append(day)
                     else:
                         open_candidates.append(day)
-                if not open_candidates:
-                    if sealed_days:
-                        plans.append(
-                            CollectionPlan(
-                                dataset=dataset,
-                                symbol=symbol,
-                                days=(),
-                                slice_hours=window,
-                                pending_days=(),
-                                sealed_days=tuple(sorted(sealed_days)),
-                            )
-                        )
-                    continue
                 plan = _plan_symbol(
-                    downloader, dataset, symbol, open_candidates, capped_end, window,
+                    downloader,
+                    dataset,
+                    symbol,
+                    open_candidates,
+                    capped_end,
+                    window,
                     allow_whole_symbol=not any(
                         sym == symbol and (kind == "derived" or sliced) for kind, sym, _ in sealed
                     ),
                 )
                 if plan is None:
                     if sealed_days:
-                        plans.append(
-                            CollectionPlan(
-                                dataset=dataset,
-                                symbol=symbol,
-                                days=(),
-                                slice_hours=window,
-                                pending_days=(),
-                                sealed_days=tuple(sorted(sealed_days)),
-                            )
-                        )
+                        plans.append(CollectionPlan(dataset, symbol, (), window, sealed_days=tuple(sealed_days)))
                 else:
                     if sealed_days:
-                        plan = CollectionPlan(
-                            dataset=plan.dataset,
-                            symbol=plan.symbol,
-                            days=plan.days,
-                            slice_hours=plan.slice_hours,
-                            pending_days=plan.pending_days,
-                            sealed_days=tuple(sorted(sealed_days)),
-                        )
+                        plan = replace(plan, sealed_days=tuple(sealed_days))
                     plans.append(plan)
     except _ListingFailedError:
         return None
@@ -416,12 +397,19 @@ class _PlanRunner:
         root: Path,
         heartbeat_s: float,
         now_fn: Callable[[], pd.Timestamp],
+        deadline: pd.Timestamp | None = None,
     ) -> None:
+        if deadline is not None:
+            stamp = pd.Timestamp(deadline)
+            if pd.isna(stamp) or stamp.tzinfo is None or stamp.utcoffset() != timedelta(0):
+                raise ValueError("deadline must be timezone-aware UTC")
+            deadline = stamp.tz_convert("UTC")
         self.downloader = downloader
         self.plans = plans
         self.root = root
         self.heartbeat_s = heartbeat_s
         self.now = now_fn
+        self.deadline, self._stop, self._started = deadline, False, 0
         self.started = now_fn()
         self.recent_cutoff = _yesterday_utc(self.started) - timedelta(days=2)
         self.total = sum(len(plan.days) for plan in plans)
@@ -621,6 +609,11 @@ class _PlanRunner:
         for day in sorted(set(plan.days)):
             groups.setdefault(day.strftime("%Y%m"), []).append(day)
         for days in groups.values():
+            with self.guard:
+                if self._stop or (self.deadline is not None and self.now() >= self.deadline):
+                    self._stop = True
+                    continue
+                self._started += len(days)
             with tempfile.TemporaryDirectory(prefix=".archive-", dir=self.root) as directory:
                 self.run_month(plan, days, Path(directory))
 
@@ -650,6 +643,8 @@ class _PlanRunner:
         self.beat(force=True)
         with self.guard:
             final = dict(self.state)
+            started = self._started
+            stopped = self._stop
         return CollectionReport(
             planned_days=self.total,
             ok=final["ok"],
@@ -658,6 +653,8 @@ class _PlanRunner:
             pending=final["pending"],
             elapsed_s=(self.now() - self.started).total_seconds(),
             sealed=sum(len(p.sealed_days) for p in self.plans),
+            stopped_at_deadline=stopped,
+            remaining_days=max(0, self.total - started),
         )
 
 
@@ -669,6 +666,7 @@ def execute_plan(
     workers: int = 4,
     heartbeat_s: float = 60.0,
     now_fn: Callable[[], pd.Timestamp] | None = None,
+    deadline: pd.Timestamp | None = None,
 ) -> CollectionReport:
     """Fetch, derive, merge, and record every planned day with bounded workers."""
     if workers < 1 or workers > 8:
@@ -679,6 +677,7 @@ def execute_plan(
         root=root,
         heartbeat_s=heartbeat_s,
         now_fn=now_fn or (lambda: pd.Timestamp.now(tz="UTC")),
+        deadline=deadline,
     )
     return runner.run(workers)
 

@@ -141,6 +141,25 @@ Stable capture caveats:
 - `forceOrder` is a per-symbol 1 s latest-only snapshot stream, so liquidation counts are a lower bound.
 - `exec_depth` covers only the execution window plus `exec_depth_post_window_s`.
 
+#### Public Archive Collection (Vision mirror)
+
+- Archive lock: `archive collect`, `archive backfill add|list|cancel` and `archive import`
+  share one exclusive `archive_lock` per archive root. Busy holders exit 75.
+- Sealed months: pruned month partitions whose coverage still holds `ok` rows are
+  sealed. Drive holds the authoritative copy. The collector never rebuilds sealed
+  months; restore them explicitly before importing.
+- Census requirement: every masked collection and every backfill job requires PIT
+  census coverage (`require_census_coverage`). Short censuses fail closed with
+  `status=CENSUS_SHORT` (exit 2) before any listing or enqueue.
+- Backfill jobs: `archive backfill add` persists a resumable job under
+  `<root>/_jobs/pending`. The daily timer drains pending jobs under the same lock,
+  root, identity and backup path as the incremental collection, bounded by
+  `--drain-jobs-until`. `archive backfill list|cancel` inspect pending, done and
+  cancelled jobs with coverage-based remaining counts.
+- `archive import`: merges another archive root's `ok` days into dest without
+  overwriting dest `ok` days, skipping sealed and hash-conflicting months.
+- Ad-hoc archive collection outside the compose `public-archive` service is
+  unsupported on or-vps.
 
 ### 4.2 도메인 금융 무결성 배리어 (Financial Invariants)
 1. **3분봉 네이티브 체결 원장 (`SimulatedInventoryLedger`)**:

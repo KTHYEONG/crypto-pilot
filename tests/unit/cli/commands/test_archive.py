@@ -195,7 +195,8 @@ def test_universe_listing_errors_fail_closed(tmp_path: Path, failure: str) -> No
         ns.handler(ns)
     assert exc.value.code == 2
     assert ns.downloader.fetch_calls == []
-    assert list(tmp_path.iterdir()) == []
+    assert set(tmp_path.iterdir()) == {tmp_path / "_status"}
+    assert set((tmp_path / "_status").iterdir()) == {tmp_path / "_status" / "archive.lock"}
 
 
 def test_archive_registered_in_main(tmp_path: Path) -> None:
@@ -703,7 +704,8 @@ def test_masked_bucket_failure_exits_before_writing(
     assert exc.value.code == 2
     assert "status=LISTING_FAILED" in capsys.readouterr().out
     assert ns.downloader.fetch_calls == []
-    assert list(tmp_path.iterdir()) == []
+    assert set(tmp_path.iterdir()) == {tmp_path / "_status"}
+    assert set((tmp_path / "_status").iterdir()) == {tmp_path / "_status" / "archive.lock"}
 
 
 def test_collect_exits_75_when_busy(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
