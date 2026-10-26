@@ -58,7 +58,11 @@ def _bucket_symbols(downloader: object, dataset: str) -> list[str]:
 
 
 def _masked_universe(
-    args: argparse.Namespace, downloader: object, datasets: list[str], start: date | None, end: date,
+    args: argparse.Namespace,
+    downloader: object,
+    datasets: list[str],
+    start: date | None,
+    end: date,
 ) -> tuple[dict[str, list[str]], dict[str, dict[str, frozenset[date]]]]:
     """Symbols and allowed days per dataset from the PIT seat-day mask; exits 2 without a lake."""
     from src.common.errors import DataIntegrityError
@@ -107,7 +111,9 @@ def _plain_universe(args: argparse.Namespace, downloader: object, datasets: list
 
 
 def _print_plan(
-    root: Path, datasets: list[str], plans: list[CollectionPlan],
+    root: Path,
+    datasets: list[str],
+    plans: list[CollectionPlan],
     allowed: dict[str, dict[str, frozenset[date]]] | None,
 ) -> None:
     from src.market_data.public_archive.store import load_coverage
@@ -116,21 +122,27 @@ def _print_plan(
     for dataset in datasets:
         ds_plans = [p for p in plans if p.dataset == dataset]
         ds_days = sum(len(p.days) for p in ds_plans)
-        line = f"plan dataset={dataset} symbols={len(ds_plans)} days={ds_days} files={ds_days}"
+        ds_sealed = sum(len(p.sealed_days) for p in ds_plans)
+        line = f"plan dataset={dataset} symbols={len(ds_plans)} days={ds_days} files={ds_days} sealed_days={ds_sealed}"
         if allowed is not None and dataset in allowed:
             coverage = load_coverage(root, dataset)
             amap = allowed[dataset]
             missing = sum(
-                1 for sym, days in amap.items() for day in days
+                1
+                for sym, days in amap.items()
+                for day in days
                 if day <= yesterday and (coverage.get((sym, day)) is None or coverage[(sym, day)].status != "ok")
             )
-            line += f" mask_symbols={len(amap)} allowed_days={sum(len(v) for v in amap.values())} missing_days={missing}"
+            line += (
+                f" mask_symbols={len(amap)} allowed_days={sum(len(v) for v in amap.values())} missing_days={missing}"
+            )
         print(line)  # noqa: T201
 
 
 def _run_collect(args: argparse.Namespace) -> None:
     from src.market_data.public_archive import service as service_mod
-    from src.market_data.public_archive.catalog import DEFAULT_DATASETS
+    from src.market_data.public_archive import store as store_mod
+    from src.market_data.public_archive.catalog import ARCHIVE_RETRY_HORIZON_DAYS, DEFAULT_DATASETS
 
     root = _root(args)
     downloader = _downloader(args)
@@ -143,10 +155,17 @@ def _run_collect(args: argparse.Namespace) -> None:
     else:
         symbols = _plain_universe(args, downloader, datasets)
     plans = service_mod.plan_collection(
-        downloader, root=root, datasets=datasets, symbols=symbols, start=start, end=end,
+        downloader,
+        root=root,
+        datasets=datasets,
+        symbols=symbols,
+        start=start,
+        end=end,
         slice_hours=(int(args.slice_hours[0]), int(args.slice_hours[1])),
         slice_symbols=symbols.get("aggTrades", ()),
-        incremental_window_days=14 if args.start is None and os.environ.get("ARCHIVE_INCREMENTAL") == "1" else None,
+        incremental_window_days=ARCHIVE_RETRY_HORIZON_DAYS
+        if args.start is None and os.environ.get("ARCHIVE_INCREMENTAL") == "1"
+        else None,
         allowed=allowed,
     )
     if plans is None:
@@ -155,10 +174,15 @@ def _run_collect(args: argparse.Namespace) -> None:
     _print_plan(root, datasets, plans, allowed)
     if not args.execute:
         return
-    report = service_mod.execute_plan(downloader, plans, root=root, workers=args.workers)
+    try:
+        with store_mod.archive_lock(root, wait_s=float(getattr(args, "lock_wait_s", 1800.0)), holder="collect"):
+            report = service_mod.execute_plan(downloader, plans, root=root, workers=args.workers)
+    except store_mod.ArchiveBusyError as exc:
+        print(f"archive collect status=BUSY holder={exc.holder or 'null'}")  # noqa: T201
+        raise SystemExit(75) from None
     print(  # noqa: T201
         f"collect planned={report.planned_days} ok={report.ok} "
-        f"failed={report.failed} absent={report.absent} pending={report.pending}"
+        f"failed={report.failed} absent={report.absent} pending={report.pending} sealed={report.sealed}"
     )
     if report.failed:
         raise SystemExit(3)
@@ -195,24 +219,41 @@ def _run_prune(args: argparse.Namespace) -> None:
     import pandas as pd
 
     from src.common.paths import BASE_DIR
+    from src.market_data.public_archive import store as store_mod
     from src.market_data.public_archive.retention import prune_backed_up_archive
     from src.market_data.streams.retention import read_backup_status
 
     root = _root(args)
-    if getattr(args, "backup_status", None):
-        status_path = Path(args.backup_status)
-    elif ARCHIVE_BACKUP_MOUNT.exists():
-        status_path = ARCHIVE_BACKUP_MOUNT
-    else:
-        status_path = BASE_DIR / "deploy" / "backup" / "status" / "last_archive_success.json"
     try:
-        status = read_backup_status(status_path)
-        report = prune_backed_up_archive(
-            root, status=status, now=pd.Timestamp.now(tz="UTC"), keep_days=int(args.keep_days)
+        with store_mod.archive_lock(root, wait_s=float(getattr(args, "lock_wait_s", 1800.0)), holder="prune"):
+            if getattr(args, "backup_status", None):
+                status_path = Path(args.backup_status)
+            elif ARCHIVE_BACKUP_MOUNT.exists():
+                status_path = ARCHIVE_BACKUP_MOUNT
+            else:
+                status_path = BASE_DIR / "deploy" / "backup" / "status" / "last_archive_success.json"
+            try:
+                status = read_backup_status(status_path)
+                report = prune_backed_up_archive(
+                    root, status=status, now=pd.Timestamp.now(tz="UTC"), keep_days=int(args.keep_days)
+                )
+            except OSError as exc:
+                print(json.dumps({"error": type(exc).__name__}))  # noqa: T201
+                raise SystemExit(4) from exc
+    except store_mod.ArchiveBusyError:
+        print(  # noqa: T201
+            json.dumps(
+                {
+                    "prune_blocked": True,
+                    "blocked_reason": "busy",
+                    "pruned_files": 0,
+                    "kept_files": 0,
+                    "sealed_after": 0,
+                },
+                sort_keys=True,
+            )
         )
-    except OSError as exc:
-        print(json.dumps({"error": type(exc).__name__}))  # noqa: T201
-        raise SystemExit(4) from exc
+        return
     print(  # noqa: T201
         json.dumps(
             {
@@ -220,6 +261,7 @@ def _run_prune(args: argparse.Namespace) -> None:
                 "blocked_reason": report.blocked_reason,
                 "pruned_files": report.pruned_files,
                 "kept_files": report.kept_files,
+                "sealed_after": report.sealed_after,
             },
             sort_keys=True,
         )
@@ -244,6 +286,7 @@ def add_archive_commands(archive_parser: argparse.ArgumentParser) -> None:
     collect.add_argument("--breadth", type=int, default=None)
     collect.add_argument("--preroll-days", type=int, default=None)
     collect.add_argument("--no-mask", action="store_true", default=False)
+    collect.add_argument("--lock-wait-s", type=float, default=1800.0)
     collect.set_defaults(handler=_run_collect)
 
     status = subparsers.add_parser("status", help="Show archive coverage per dataset")
@@ -254,4 +297,5 @@ def add_archive_commands(archive_parser: argparse.ArgumentParser) -> None:
     prune.add_argument("--keep-days", type=int, default=45)
     prune.add_argument("--backup-status", type=str, default=None)
     prune.add_argument("--root", type=str, default=None)
+    prune.add_argument("--lock-wait-s", type=float, default=1800.0)
     prune.set_defaults(handler=_run_prune)

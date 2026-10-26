@@ -68,3 +68,9 @@ def test_prune_failure_does_not_fail_job(tmp_path: Path) -> None:
     assert result.returncode == 0
     log = (tmp_path / "job.log").read_text(encoding="utf-8")
     assert "[SYS] stage=public_archive step=2 rc=4" in log
+
+
+def test_busy_collect_fails_job(tmp_path: Path) -> None:
+    result, _ = _run_job(tmp_path, (75, 0))
+    assert result.returncode != 0
+    assert result.returncode == 75

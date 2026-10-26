@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 
 import pandas as pd
@@ -21,6 +22,7 @@ class ArchivePruneReport:
     blocked_reason: str | None
     pruned_files: int
     kept_files: int
+    sealed_after: int = 0
 
 
 def _now_utc(now: pd.Timestamp) -> pd.Timestamp:
@@ -54,6 +56,9 @@ def prune_backed_up_archive(
     keep_days: int = 45,
 ) -> ArchivePruneReport:
     """Delete month partitions provably held by Drive and older than ``keep_days``."""
+    from src.market_data.public_archive import catalog as catalog_mod
+    from src.market_data.public_archive import store as store_mod
+
     if keep_days < 31:
         raise ValueError("keep_days must be >= 31")
     now_utc = _now_utc(now)
@@ -67,6 +72,31 @@ def prune_backed_up_archive(
     pruned = 0
     kept = 0
     base = Path(root)
+    horizon = catalog_mod.ARCHIVE_RETRY_HORIZON_DAYS
+    now_date = now_utc.date()
+    coverage_cache: dict[str, dict[tuple[str, date], store_mod.CoverageRow]] = {}
+
+    def _coverage_for(archive_dataset: str) -> dict[tuple[str, date], store_mod.CoverageRow]:
+        cov_dataset = "aggTrades" if archive_dataset == "aggTrades_slice" else archive_dataset
+        if cov_dataset not in coverage_cache:
+            coverage_cache[cov_dataset] = store_mod.load_coverage(base, cov_dataset)
+        return coverage_cache[cov_dataset]
+
+    def _sealed_snapshot() -> set[tuple[str, str, str, str]]:
+        snap: set[tuple[str, str, str, str]] = set()
+        for dataset in catalog_mod.DEFAULT_DATASETS:
+            cov = _coverage_for(dataset)
+            for kind, symbol, month in store_mod.sealed_months(base, dataset, cov):
+                snap.add((dataset, kind, symbol, month))
+        return snap
+
+    sealed_before = _sealed_snapshot()
+    retryable = {
+        (dataset, symbol, day.strftime("%Y%m"))
+        for dataset, coverage in coverage_cache.items()
+        for (symbol, day), row in coverage.items()
+        if row.status != "ok" and 0 <= (now_date - day).days <= horizon
+    }
     for dataset in _ARCHIVE_DATASETS:
         ds_root = base / dataset
         if not ds_root.is_dir():
@@ -86,6 +116,10 @@ def prune_backed_up_archive(
             if not _backed_up(path, started_ns):
                 kept += 1
                 continue
+            cov_dataset = "aggTrades" if dataset == "aggTrades_slice" else dataset
+            if (cov_dataset, rel.parts[0], path.stem) in retryable:
+                kept += 1
+                continue
             path.unlink()
             pruned += 1
         for symbol_dir in sorted(ds_root.iterdir()):
@@ -93,4 +127,11 @@ def prune_backed_up_archive(
                 continue
             if not any(symbol_dir.iterdir()):
                 symbol_dir.rmdir()
-    return ArchivePruneReport(prune_blocked=False, blocked_reason=None, pruned_files=pruned, kept_files=kept)
+    sealed_after_set = _sealed_snapshot()
+    return ArchivePruneReport(
+        prune_blocked=False,
+        blocked_reason=None,
+        pruned_files=pruned,
+        kept_files=kept,
+        sealed_after=len(sealed_after_set - sealed_before),
+    )
