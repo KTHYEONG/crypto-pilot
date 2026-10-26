@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import contextlib
 import fcntl
 import json
+import math
 import os
+import socket
+import threading
+import time
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Literal, cast
 
@@ -12,6 +18,101 @@ import pandas as pd
 
 from src.common.errors import DataIntegrityError
 from src.common.parquet_io import write_parquet_atomic
+
+
+class ArchiveBusyError(Exception):
+    """Another process holds the archive root lock."""
+
+    def __init__(self, holder: str = "") -> None:
+        self.holder = holder
+        super().__init__(f"Another process holds the archive root lock: {holder}")
+
+
+_held_roots: set[str] = set()
+_held_guard = threading.Lock()
+
+
+def _lock_path(root: Path) -> Path:
+    return Path(root) / "_status" / "archive.lock"
+
+
+def _busy_error(path: Path) -> ArchiveBusyError:
+    try:
+        holder = path.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeError):
+        holder = ""
+    return ArchiveBusyError(holder)
+
+
+@contextlib.contextmanager
+def archive_lock(root: Path, *, wait_s: float, holder: str = "") -> Iterator[None]:
+    """Hold the exclusive cross-process lock of an archive root; raises ArchiveBusyError after wait_s."""
+    if not math.isfinite(wait_s) or wait_s < 0:
+        raise ValueError("wait_s must be a finite non-negative number")
+    lock_path = _lock_path(root)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    key = str(lock_path.resolve())
+    with _held_guard:
+        if key in _held_roots:
+            raise _busy_error(lock_path)
+        _held_roots.add(key)
+    fd = -1
+    try:
+        fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o644)
+        deadline = time.monotonic() + wait_s
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                now = time.monotonic()
+                if now >= deadline:
+                    raise _busy_error(lock_path) from None
+                time.sleep(min(0.05, max(0.001, deadline - now)))
+        payload = {
+            "pid": os.getpid(),
+            "host": socket.gethostname(),
+            "acquired_at": datetime.now(UTC).isoformat(),
+            "command": holder,
+        }
+        os.ftruncate(fd, 0)
+        os.lseek(fd, 0, os.SEEK_SET)
+        os.write(fd, json.dumps(payload, sort_keys=True).encode("utf-8"))
+        os.fsync(fd)
+        try:
+            yield
+        finally:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            finally:
+                os.close(fd)
+                fd = -1
+    finally:
+        with _held_guard:
+            _held_roots.discard(key)
+        if fd != -1:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+
+
+def sealed_months(
+    root: Path, dataset: str, coverage: Mapping[tuple[str, date], CoverageRow]
+) -> frozenset[tuple[str, str, str]]:
+    """(kind, symbol, YYYYMM) months that coverage proves were written but whose local partition is absent."""
+    have: dict[tuple[str, str], bool] = {}
+    for (symbol, day), row in coverage.items():
+        if row.status != "ok" or row.rows <= 0:
+            continue
+        have[(symbol, day.strftime("%Y%m"))] = True
+    sealed: set[tuple[str, str, str]] = set()
+    for symbol, month in have:
+        if not partition_path(root, dataset, symbol, month, kind="derived").exists():
+            sealed.add(("derived", symbol, month))
+        if dataset == "aggTrades" and not partition_path(
+            root, dataset, symbol, month, kind="slice"
+        ).exists():
+            sealed.add(("slice", symbol, month))
+    return frozenset(sealed)
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,11 +149,7 @@ def _as_utc(value: object) -> pd.Timestamp:
 
 
 def _row_month(value: object, kind: str) -> str:
-    stamp = (
-        pd.Timestamp(cast(int, value), unit="ms", tz="UTC")
-        if kind == "slice"
-        else _as_utc(value)
-    )
+    stamp = pd.Timestamp(cast(int, value), unit="ms", tz="UTC") if kind == "slice" else _as_utc(value)
     result: str = stamp.strftime("%Y%m")
     return result
 
@@ -152,8 +249,10 @@ def _parse_coverage_line(line: str) -> CoverageRow:
         if (
             set(obj) != required
             or obj["status"] not in ("ok", "absent", "failed")
-            or type(obj["rows"]) is not int or obj["rows"] < 0
-            or not isinstance(obj["dataset"], str) or not isinstance(obj["symbol"], str)
+            or type(obj["rows"]) is not int
+            or obj["rows"] < 0
+            or not isinstance(obj["dataset"], str)
+            or not isinstance(obj["symbol"], str)
         ):
             raise ValueError("invalid coverage schema")
         return CoverageRow(

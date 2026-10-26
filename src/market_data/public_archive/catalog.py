@@ -63,6 +63,8 @@ AGG_TRADES_SLICE_COLUMNS: tuple[str, ...] = (
 
 HISTORY_START: date = date(2021, 1, 1)
 
+ARCHIVE_RETRY_HORIZON_DAYS: int = 14
+
 # Window must contain the live execution window; a cycle crossing 00:00 UTC is not covered and Part 3 must exclude it.
 TAPE_SLICE_HOURS: tuple[int, int] = (23, 24)
 

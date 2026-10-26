@@ -700,3 +700,52 @@ def test_masked_bucket_failure_exits_before_writing(
     assert "status=LISTING_FAILED" in capsys.readouterr().out
     assert ns.downloader.fetch_calls == []
     assert list(tmp_path.iterdir()) == []
+
+
+def test_collect_exits_75_when_busy(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
+    from src.market_data.public_archive import store as store_mod
+
+    days = [date(2024, 1, 15)]
+    ns = _collect_ns(
+        tmp_path,
+        [
+            "collect", "--dataset", "metrics", "--symbols", "BTCUSDT",
+            "--start", "2024-01-15", "--end", "2024-01-15", "--execute",
+            "--lock-wait-s", "0",
+        ],
+    )
+    ns.downloader = FakeDownloader(["BTCUSDT"], days)
+    with store_mod.archive_lock(tmp_path, wait_s=0, holder="other"), pytest.raises(SystemExit) as exc:
+        ns.handler(ns)
+    assert exc.value.code == 75
+    assert "status=BUSY" in capsys.readouterr().out
+    assert list((tmp_path / "_coverage").glob("*")) == [] if (tmp_path / "_coverage").exists() else True
+
+
+def test_dry_run_ignores_lock(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
+    from src.market_data.public_archive import store as store_mod
+
+    ns = _collect_ns(
+        tmp_path,
+        ["collect", "--dataset", "metrics", "--symbols", "BTCUSDT",
+         "--start", "2024-01-15", "--end", "2024-01-15"],
+    )
+    ns.downloader = FakeDownloader(["BTCUSDT"], [date(2024, 1, 15)])
+    with store_mod.archive_lock(tmp_path, wait_s=0, holder="other"):
+        ns.handler(ns)
+    assert "plan dataset=metrics" in capsys.readouterr().out
+
+
+def test_prune_reports_busy_without_failing(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
+    import json
+
+    from src.market_data.public_archive import store as store_mod
+
+    target = _old_partition(tmp_path)
+    with store_mod.archive_lock(tmp_path, wait_s=0, holder="other"):
+        ns = _prune_ns(tmp_path, ["prune", "--backup-status", str(tmp_path / "missing.json"), "--lock-wait-s", "0"])
+        ns.handler(ns)
+    payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert payload["prune_blocked"] is True
+    assert payload["blocked_reason"] == "busy"
+    assert target.exists()

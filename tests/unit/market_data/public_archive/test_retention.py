@@ -72,7 +72,7 @@ def test_modified_after_backup_is_kept(tmp_path: Path) -> None:
 def test_ledger_and_status_never_pruned(tmp_path: Path) -> None:
     coverage = tmp_path / "_coverage" / "metrics.jsonl"
     coverage.parent.mkdir(parents=True, exist_ok=True)
-    coverage.write_text("{}\n", encoding="utf-8")
+    coverage.write_text("", encoding="utf-8")
     os.utime(coverage, (_old_mtime(), _old_mtime()))
     status_dir = tmp_path / "_status"
     status_dir.mkdir(parents=True, exist_ok=True)
@@ -210,3 +210,116 @@ def test_rmdir_failure_propagates(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
         with pytest.raises(OSError, match="injected"):
             prune_backed_up_archive(tmp_path, status=_status(), now=_NOW)
     assert (tmp_path / "metrics" / "BTCUSDT").is_dir()
+
+
+def _old_partition_cov(root, dataset: str, symbol: str, month: str, *, mtime: float):
+    import os as _os
+
+    path = root / dataset / symbol / f"{month}.parquet"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"parquet-stub")
+    _os.utime(path, (mtime, mtime))
+    return path
+
+
+def test_prune_keeps_months_with_retryable_days(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import pandas as pd
+
+    from src.market_data.public_archive import store as store_mod
+    from src.market_data.public_archive import catalog
+
+    now = pd.Timestamp("2024-06-15T12:00:00Z")
+    monkeypatch.setattr(catalog, "ARCHIVE_RETRY_HORIZON_DAYS", 120)
+    recent = pd.Timestamp("2024-03-15").date()
+    target = _old_partition_cov(tmp_path, "metrics", "BTCUSDT", "202403", mtime=_old_mtime())
+    store_mod.append_coverage(
+        tmp_path,
+        store_mod.CoverageRow(
+            dataset="metrics",
+            symbol="ETHUSDT",
+            day=recent,
+            status="failed",
+            raw_sha256=None,
+            rows=0,
+            recorded_at=now - pd.Timedelta(hours=1),
+            detail="other",
+        ),
+    )
+    store_mod.append_coverage(
+        tmp_path,
+        store_mod.CoverageRow(
+            dataset="metrics",
+            symbol="BTCUSDT",
+            day=recent,
+            status="failed",
+            raw_sha256=None,
+            rows=0,
+            recorded_at=now - pd.Timedelta(hours=1),
+            detail="boom",
+        ),
+    )
+    status = _status(
+        started=now - pd.Timedelta(hours=2),
+        finished=now - pd.Timedelta(hours=1),
+    )
+    report = prune_backed_up_archive(tmp_path, status=status, now=now, keep_days=31)
+    assert target.exists()
+    assert report.pruned_files == 0
+
+
+def test_corrupt_coverage_prevents_all_pruning(tmp_path: Path) -> None:
+    from src.common.errors import DataIntegrityError
+
+    target = _partition(tmp_path, "metrics", "BTCUSDT", "202403", mtime=_old_mtime())
+    ledger = tmp_path / "_coverage" / "aggTrades.jsonl"
+    ledger.parent.mkdir()
+    ledger.write_text("{}\n", encoding="utf-8")
+    with pytest.raises(DataIntegrityError, match="malformed coverage"):
+        prune_backed_up_archive(tmp_path, status=_status(), now=_NOW)
+    assert target.exists()
+
+
+def test_retryable_day_does_not_protect_other_month(tmp_path: Path) -> None:
+    from src.market_data.public_archive import store
+
+    target = _partition(tmp_path, "metrics", "BTCUSDT", "202403", mtime=_old_mtime())
+    store.append_coverage(tmp_path, store.CoverageRow(
+        dataset="metrics", symbol="BTCUSDT", day=_NOW.date(), status="failed",
+        raw_sha256=None, rows=0, recorded_at=_NOW, detail="retry",
+    ))
+    report = prune_backed_up_archive(tmp_path, status=_status(), now=_NOW)
+    assert report.pruned_files == 1
+    assert not target.exists()
+
+
+def test_prune_reports_newly_sealed_months(tmp_path: Path) -> None:
+    import pandas as pd
+
+    from src.market_data.public_archive import store as store_mod
+    from src.market_data.public_archive.store import sealed_months
+
+    now = pd.Timestamp("2024-06-15T12:00:00Z")
+    for month in ("202403", "202404"):
+        _old_partition_cov(tmp_path, "metrics", "BTCUSDT", month, mtime=_old_mtime())
+        for day_num in (5, 6):
+            day = pd.Timestamp(f"{month[:4]}-{month[4:]}-{day_num:02d}").date()
+            store_mod.append_coverage(
+                tmp_path,
+                store_mod.CoverageRow(
+                    dataset="metrics",
+                    symbol="BTCUSDT",
+                    day=day,
+                    status="ok",
+                    raw_sha256="0" * 64,
+                    rows=1,
+                    recorded_at=now - pd.Timedelta(days=30),
+                    detail=None,
+                ),
+            )
+    before = sealed_months(tmp_path, "metrics", store_mod.load_coverage(tmp_path, "metrics"))
+    assert before == frozenset()
+    report = prune_backed_up_archive(tmp_path, status=_status(), now=now, keep_days=45)
+    assert report.pruned_files == 2
+    assert report.sealed_after == 2
+    after = sealed_months(tmp_path, "metrics", store_mod.load_coverage(tmp_path, "metrics"))
+    assert len(after) == 2

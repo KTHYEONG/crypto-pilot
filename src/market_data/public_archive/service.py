@@ -32,6 +32,7 @@ class CollectionPlan:
     days: tuple[date, ...]
     slice_hours: tuple[int, int] | None
     pending_days: tuple[date, ...] = ()
+    sealed_days: tuple[date, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,6 +43,7 @@ class CollectionReport:
     absent: int
     pending: int
     elapsed_s: float
+    sealed: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,10 +76,7 @@ def _month_starts(start: date, end: date) -> list[date]:
 
 
 def _month_prefix(dataset: str, symbol: str, month: date) -> str:
-    return (
-        f"data/futures/um/daily/{dataset}/{symbol}/"
-        f"{symbol}-{dataset}-{month.strftime('%Y-%m')}"
-    )
+    return f"data/futures/um/daily/{dataset}/{symbol}/{symbol}-{dataset}-{month.strftime('%Y-%m')}"
 
 
 def _symbol_prefix(dataset: str, symbol: str) -> str:
@@ -103,8 +102,13 @@ def _is_ok(coverage: Mapping[tuple[str, date], store.CoverageRow], symbol: str, 
 
 
 def _unmasked_first_day(
-    dataset: str, symbol: str, coverage: Mapping[tuple[str, date], store.CoverageRow],
-    *, start: date | None, end: date, incremental_window_days: int | None,
+    dataset: str,
+    symbol: str,
+    coverage: Mapping[tuple[str, date], store.CoverageRow],
+    *,
+    start: date | None,
+    end: date,
+    incremental_window_days: int | None,
 ) -> date:
     if start is not None:
         return start
@@ -119,9 +123,15 @@ def _unmasked_first_day(
 
 
 def _candidate_days(
-    dataset: str, symbol: str, coverage: Mapping[tuple[str, date], store.CoverageRow],
+    dataset: str,
+    symbol: str,
+    coverage: Mapping[tuple[str, date], store.CoverageRow],
     allow_map: Mapping[str, Collection[date]] | None,
-    *, start: date | None, end: date, capped_end: date, incremental_window_days: int | None,
+    *,
+    start: date | None,
+    end: date,
+    capped_end: date,
+    incremental_window_days: int | None,
 ) -> list[date]:
     """Days still to collect for a symbol: allowed (or cursor-derived) days not yet ``ok``."""
     if allow_map is not None:
@@ -132,7 +142,12 @@ def _candidate_days(
         pool = [day for day in wanted if floor <= day <= capped_end]
     else:
         first = _unmasked_first_day(
-            dataset, symbol, coverage, start=start, end=end, incremental_window_days=incremental_window_days,
+            dataset,
+            symbol,
+            coverage,
+            start=start,
+            end=end,
+            incremental_window_days=incremental_window_days,
         )
         span = (capped_end - first).days + 1
         pool = [first + timedelta(days=offset) for offset in range(max(span, 0))]
@@ -140,7 +155,12 @@ def _candidate_days(
 
 
 def _list_days(
-    downloader: object, dataset: str, symbol: str, months: Sequence[date], *, whole_symbol: bool,
+    downloader: object,
+    dataset: str,
+    symbol: str,
+    months: Sequence[date],
+    *,
+    whole_symbol: bool,
 ) -> set[date]:
     """Daily keys present in the bucket for the months (or the whole symbol prefix)."""
     prefixes = (
@@ -167,16 +187,21 @@ def _list_days(
 
 
 def _plan_symbol(
-    downloader: object, dataset: str, symbol: str, candidates: list[date], capped_end: date,
+    downloader: object,
+    dataset: str,
+    symbol: str,
+    candidates: list[date],
+    capped_end: date,
     window: tuple[int, int] | None,
+    *,
+    allow_whole_symbol: bool = True,
 ) -> CollectionPlan | None:
     months = sorted({date(day.year, day.month, 1) for day in candidates})
-    listed = _list_days(downloader, dataset, symbol, months, whole_symbol=len(months) > 3)
+    listed = _list_days(downloader, dataset, symbol, months, whole_symbol=allow_whole_symbol and len(months) > 3)
     wanted = set(candidates)
     days = tuple(day for day in candidates if day in listed)
     pending = tuple(
-        day for offset in range(3)
-        if (day := capped_end - timedelta(days=offset)) in wanted and day not in listed
+        day for offset in range(3) if (day := capped_end - timedelta(days=offset)) in wanted and day not in listed
     )
     if not days and not pending:
         return None
@@ -210,17 +235,72 @@ def plan_collection(
     try:
         for dataset in datasets:
             coverage = store.load_coverage(root, dataset)
+            sealed = store.sealed_months(root, dataset, coverage)
             allow_map = allowed[dataset] if allowed is not None and dataset in allowed else None
             for symbol in sorted(set(symbols.get(dataset, ()))):
                 candidates = _candidate_days(
-                    dataset, symbol, coverage, allow_map, start=start, end=end,
-                    capped_end=capped_end, incremental_window_days=incremental_window_days,
+                    dataset,
+                    symbol,
+                    coverage,
+                    allow_map,
+                    start=start,
+                    end=end,
+                    capped_end=capped_end,
+                    incremental_window_days=incremental_window_days,
                 )
                 if not candidates:
                     continue
                 window = slice_hours if dataset == "aggTrades" and symbol in slice_set else None
-                plan = _plan_symbol(downloader, dataset, symbol, candidates, capped_end, window)
-                if plan is not None:
+                sliced = window is not None
+                sealed_days: list[date] = []
+                open_candidates: list[date] = []
+                for day in candidates:
+                    month = day.strftime("%Y%m")
+                    if (("derived", symbol, month) in sealed) or (sliced and ("slice", symbol, month) in sealed):
+                        sealed_days.append(day)
+                    else:
+                        open_candidates.append(day)
+                if not open_candidates:
+                    if sealed_days:
+                        plans.append(
+                            CollectionPlan(
+                                dataset=dataset,
+                                symbol=symbol,
+                                days=(),
+                                slice_hours=window,
+                                pending_days=(),
+                                sealed_days=tuple(sorted(sealed_days)),
+                            )
+                        )
+                    continue
+                plan = _plan_symbol(
+                    downloader, dataset, symbol, open_candidates, capped_end, window,
+                    allow_whole_symbol=not any(
+                        sym == symbol and (kind == "derived" or sliced) for kind, sym, _ in sealed
+                    ),
+                )
+                if plan is None:
+                    if sealed_days:
+                        plans.append(
+                            CollectionPlan(
+                                dataset=dataset,
+                                symbol=symbol,
+                                days=(),
+                                slice_hours=window,
+                                pending_days=(),
+                                sealed_days=tuple(sorted(sealed_days)),
+                            )
+                        )
+                else:
+                    if sealed_days:
+                        plan = CollectionPlan(
+                            dataset=plan.dataset,
+                            symbol=plan.symbol,
+                            days=plan.days,
+                            slice_hours=plan.slice_hours,
+                            pending_days=plan.pending_days,
+                            sealed_days=tuple(sorted(sealed_days)),
+                        )
                     plans.append(plan)
     except _ListingFailedError:
         return None
@@ -263,7 +343,11 @@ def _merge_day_batch(
         kept = None
     parts = [frame for _, frame in batch if len(frame)]
     if kept is None or len(kept) == 0:
-        merged = pd.concat(parts, ignore_index=True) if parts else (existing.iloc[:0] if existing is not None else batch[0][1].iloc[:0])
+        merged = (
+            pd.concat(parts, ignore_index=True)
+            if parts
+            else (existing.iloc[:0] if existing is not None else batch[0][1].iloc[:0])
+        )
     else:
         merged = pd.concat([kept, *parts], ignore_index=True) if parts else kept
     if len(merged) and any(store._row_month(v, kind) != month for v in merged[key].tolist()):
@@ -325,8 +409,13 @@ class _PlanRunner:
     """One ``execute_plan`` run: bounded workers share counters, heartbeat and coverage writes."""
 
     def __init__(
-        self, downloader: object, plans: Sequence[CollectionPlan], *, root: Path,
-        heartbeat_s: float, now_fn: Callable[[], pd.Timestamp],
+        self,
+        downloader: object,
+        plans: Sequence[CollectionPlan],
+        *,
+        root: Path,
+        heartbeat_s: float,
+        now_fn: Callable[[], pd.Timestamp],
     ) -> None:
         self.downloader = downloader
         self.plans = plans
@@ -340,6 +429,11 @@ class _PlanRunner:
         self.guard = threading.Lock()
         self.beat_guard = threading.Lock()
         self.last_beat = time.monotonic()
+        self._sealed: set[tuple[str, str, str, str]] = set()
+        for dataset in {p.dataset for p in plans}:
+            cov = store.load_coverage(root, dataset)
+            for kind, symbol, month in store.sealed_months(root, dataset, cov):
+                self._sealed.add((dataset, kind, symbol, month))
 
     def _write_beat(self, force: bool) -> None:
         beat_now = time.monotonic()
@@ -357,7 +451,11 @@ class _PlanRunner:
         tmp.replace(path)
         logger.info(
             "[DATA] stage=public_archive done=%d/%d ok=%d failed=%d elapsed_s=%.1f",
-            snapshot["done"], self.total, snapshot["ok"], snapshot["failed"], (stamp - self.started).total_seconds(),
+            snapshot["done"],
+            self.total,
+            snapshot["ok"],
+            snapshot["failed"],
+            (stamp - self.started).total_seconds(),
         )
 
     def beat(self, force: bool = False) -> None:
@@ -369,10 +467,25 @@ class _PlanRunner:
             self.state[field] += 1
             self.state["done"] += 1
 
-    def record(self, plan: CollectionPlan, day: date, status: Literal["ok", "absent", "failed"], *, sha: str | None, rows: int, detail: str | None) -> bool:
+    def record(
+        self,
+        plan: CollectionPlan,
+        day: date,
+        status: Literal["ok", "absent", "failed"],
+        *,
+        sha: str | None,
+        rows: int,
+        detail: str | None,
+    ) -> bool:
         row = store.CoverageRow(
-            dataset=plan.dataset, symbol=plan.symbol, day=day, status=status,
-            raw_sha256=sha, rows=rows, recorded_at=self.now(), detail=detail,
+            dataset=plan.dataset,
+            symbol=plan.symbol,
+            day=day,
+            status=status,
+            raw_sha256=sha,
+            rows=rows,
+            recorded_at=self.now(),
+            detail=detail,
         )
         try:
             store.append_coverage(self.root, row)
@@ -380,7 +493,9 @@ class _PlanRunner:
         except Exception as exc:  # noqa: BLE001
             logger.error(
                 "[DATA] stage=public_archive coverage_failed symbol=%s day=%s detail=%s",
-                plan.symbol, day, _short_detail(exc),
+                plan.symbol,
+                day,
+                _short_detail(exc),
             )
             return False
 
@@ -396,7 +511,9 @@ class _PlanRunner:
             del zip_bytes
             frame = _derive_day(plan.dataset, raw, symbol=plan.symbol, day=day)
             sliced = (
-                derive.slice_agg_trades(raw, day=day, start_hour_utc=plan.slice_hours[0], end_hour_utc=plan.slice_hours[1])
+                derive.slice_agg_trades(
+                    raw, day=day, start_hour_utc=plan.slice_hours[0], end_hour_utc=plan.slice_hours[1]
+                )
                 if plan.slice_hours is not None
                 else None
             )
@@ -406,7 +523,10 @@ class _PlanRunner:
             return _Skipped(day=day, kind="failed", detail=_short_detail(exc))
 
     def gather_month(
-        self, plan: CollectionPlan, days: list[date], staging: Path,
+        self,
+        plan: CollectionPlan,
+        days: list[date],
+        staging: Path,
     ) -> tuple[list[tuple[date, pd.DataFrame]], list[tuple[date, Path]], list[_Outcome]]:
         derived: list[tuple[date, pd.DataFrame]] = []
         slices: list[tuple[date, Path]] = []
@@ -433,11 +553,23 @@ class _PlanRunner:
         return derived, slices, outcomes
 
     def commit_month(
-        self, plan: CollectionPlan, days: list[date], staging: Path,
-        derived: list[tuple[date, pd.DataFrame]], slices: list[tuple[date, Path]],
+        self,
+        plan: CollectionPlan,
+        days: list[date],
+        staging: Path,
+        derived: list[tuple[date, pd.DataFrame]],
+        slices: list[tuple[date, Path]],
     ) -> str | None:
         """Write the month partitions; None on success, else the failure detail after rollback."""
         month = days[0].strftime("%Y%m")
+        if derived:
+            derived_path = store.partition_path(self.root, plan.dataset, plan.symbol, month)
+            if not derived_path.exists() and (plan.dataset, "derived", plan.symbol, month) in self._sealed:
+                return "sealed_month"
+        if slices:
+            slice_path = store.partition_path(self.root, plan.dataset, plan.symbol, month, kind="slice")
+            if not slice_path.exists() and (plan.dataset, "slice", plan.symbol, month) in self._sealed:
+                return "sealed_month"
         backups: dict[Path, Path | None] = {}
         committed: list[Path] = []
         derived_path = store.partition_path(self.root, plan.dataset, plan.symbol, month)
@@ -519,8 +651,13 @@ class _PlanRunner:
         with self.guard:
             final = dict(self.state)
         return CollectionReport(
-            planned_days=self.total, ok=final["ok"], failed=final["failed"], absent=final["absent"],
-            pending=final["pending"], elapsed_s=(self.now() - self.started).total_seconds(),
+            planned_days=self.total,
+            ok=final["ok"],
+            failed=final["failed"],
+            absent=final["absent"],
+            pending=final["pending"],
+            elapsed_s=(self.now() - self.started).total_seconds(),
+            sealed=sum(len(p.sealed_days) for p in self.plans),
         )
 
 
@@ -537,7 +674,10 @@ def execute_plan(
     if workers < 1 or workers > 8:
         raise ValueError("workers must be between 1 and 8")
     runner = _PlanRunner(
-        downloader, plans, root=root, heartbeat_s=heartbeat_s,
+        downloader,
+        plans,
+        root=root,
+        heartbeat_s=heartbeat_s,
         now_fn=now_fn or (lambda: pd.Timestamp.now(tz="UTC")),
     )
     return runner.run(workers)

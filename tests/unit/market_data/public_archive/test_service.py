@@ -562,6 +562,9 @@ def test_ledger_cursor_overrides_window(tmp_path: Path) -> None:
                 raw_sha256="0" * 64, rows=1, recorded_at=_NOW, detail=None,
             ),
         )
+    part = tmp_path / "metrics" / "BTCUSDT" / "202401.parquet"
+    part.parent.mkdir(parents=True, exist_ok=True)
+    part.write_bytes(b"stub")
     plans = plan_collection(
         fake, root=tmp_path, datasets=["metrics"], symbols={"metrics": ["BTCUSDT"]},
         start=None, end=end, incremental_window_days=14,
@@ -722,6 +725,9 @@ def test_mask_widening_backfills_earlier_days(tmp_path: Path) -> None:
                 raw_sha256="0" * 64, rows=1, recorded_at=_NOW, detail=None,
             ),
         )
+    part = tmp_path / "metrics" / "BTCUSDT" / "202401.parquet"
+    part.parent.mkdir(parents=True, exist_ok=True)
+    part.write_bytes(b"stub")
     allowed = {"metrics": {"BTCUSDT": frozenset(days[1:])}}
     plans = plan_collection(
         fake, root=tmp_path, datasets=["metrics"], symbols={"metrics": ["BTCUSDT"]},
@@ -922,3 +928,230 @@ def test_masked_policy_floor_and_explicit_start(tmp_path: Path) -> None:
     explicit = plan_collection(fake, start=days[0], **kwargs)  # type: ignore[arg-type]
     assert explicit is not None
     assert [p.days for p in explicit] == [tuple(days)]
+
+
+def _ok_cov_row(symbol: str, day, rows: int = 1):
+    from src.market_data.public_archive import store as store_mod
+
+    return store_mod.CoverageRow(
+        dataset="metrics",
+        symbol=symbol,
+        day=day,
+        status="ok",
+        raw_sha256="0" * 64,
+        rows=rows,
+        recorded_at=_NOW,
+        detail=None,
+    )
+
+
+def _failed_cov_row(symbol: str, day):
+    from src.market_data.public_archive import store as store_mod
+
+    return store_mod.CoverageRow(
+        dataset="metrics",
+        symbol=symbol,
+        day=day,
+        status="failed",
+        raw_sha256=None,
+        rows=0,
+        recorded_at=_NOW,
+        detail="fetch failed",
+    )
+
+
+def test_sealed_month_never_rebuilt(tmp_path: Path) -> None:
+    from src.market_data.public_archive import store as store_mod
+
+    days = [date(2023, 3, day) for day in range(1, 11)]
+    for day in days:
+        store_mod.append_coverage(tmp_path, _ok_cov_row("BTCUSDT", day))
+    store_mod.append_coverage(tmp_path, _failed_cov_row("BTCUSDT", date(2023, 3, 11)))
+    ledger = tmp_path / "_coverage" / "metrics.jsonl"
+    before = ledger.read_bytes()
+    fake = _metrics_fake(["BTCUSDT"], [date(2023, 3, 11)])
+    fake.fail_listing = True
+    plans = plan_collection(
+        fake,
+        root=tmp_path,
+        datasets=["metrics"],
+        symbols={"metrics": ["BTCUSDT"]},
+        start=date(2023, 3, 1),
+        end=date(2023, 3, 11),
+    )
+    assert plans is not None
+    assert [date(2023, 3, 11)] == sorted({d for p in plans for d in p.sealed_days})
+    report = execute_plan(fake, plans, root=tmp_path, workers=1, now_fn=lambda: _NOW)
+    assert report.sealed == 1
+    assert ledger.read_bytes() == before
+    assert fake.fetch_calls == []
+    assert not (tmp_path / "metrics" / "BTCUSDT" / "202303.parquet").exists()
+    assert load_coverage(tmp_path, "metrics")[("BTCUSDT", date(2023, 3, 11))].status == "failed"
+
+
+def test_commit_guard_refuses_sealed_target(tmp_path: Path) -> None:
+    import tempfile as _tf
+
+    from src.market_data.public_archive import store as store_mod
+    from src.market_data.public_archive.service import _PlanRunner
+
+    day = date(2023, 3, 11)
+    store_mod.append_coverage(tmp_path, _ok_cov_row("BTCUSDT", date(2023, 3, 5)))
+    plan = CollectionPlan(dataset="metrics", symbol="BTCUSDT", days=(day,), slice_hours=None)
+    runner = _PlanRunner(
+        _metrics_fake(["BTCUSDT"], []),
+        [plan],
+        root=tmp_path,
+        heartbeat_s=60.0,
+        now_fn=lambda: _NOW,
+    )
+    with _tf.TemporaryDirectory(dir=tmp_path) as staging:
+        detail = runner.commit_month(
+            plan, [day], Path(staging), [(day, _metrics_frame(day))], []
+        )
+    assert detail == "sealed_month"
+    assert ("BTCUSDT", day) not in load_coverage(tmp_path, "metrics")
+    assert not (tmp_path / "metrics" / "BTCUSDT" / "202303.parquet").exists()
+
+
+def _metrics_frame(day: date):
+    import pandas as pd
+
+    stamp = pd.Timestamp(day, tz="UTC")
+    return pd.DataFrame({"timestamp": [stamp.as_unit("ms")], "value": [1.0]})
+
+
+def test_unsealed_absent_month_collects(tmp_path: Path) -> None:
+    day = date(2024, 1, 15)
+    fake = _metrics_fake(["BTCUSDT"], [day])
+    plans = plan_collection(
+        fake,
+        root=tmp_path,
+        datasets=["metrics"],
+        symbols={"metrics": ["BTCUSDT"]},
+        start=day,
+        end=day,
+    )
+    assert plans is not None
+    report = execute_plan(fake, plans, root=tmp_path, workers=1, now_fn=lambda: _NOW)
+    assert report.ok == 1
+    assert (tmp_path / "metrics" / "BTCUSDT" / "202401.parquet").exists()
+
+
+def test_stale_plan_records_commit_guard_failure(tmp_path: Path) -> None:
+    from src.market_data.public_archive import store
+
+    first, retry = date(2023, 3, 1), date(2023, 3, 11)
+    fake = _metrics_fake(["BTCUSDT"], [first, retry])
+    initial = CollectionPlan("metrics", "BTCUSDT", (first,), None)
+    assert execute_plan(fake, [initial], root=tmp_path).ok == 1
+    plans = plan_collection(
+        fake, root=tmp_path, datasets=["metrics"], symbols={"metrics": ["BTCUSDT"]},
+        start=retry, end=retry,
+    )
+    assert plans is not None
+    path = store.partition_path(tmp_path, "metrics", "BTCUSDT", "202303")
+    path.unlink()
+    report = execute_plan(fake, plans, root=tmp_path)
+    assert report.failed == 1
+    assert not path.exists()
+    row = load_coverage(tmp_path, "metrics")[("BTCUSDT", retry)]
+    assert row.status == "failed"
+    assert row.detail == "sealed_month"
+
+
+def test_long_range_never_lists_sealed_month(tmp_path: Path) -> None:
+    from src.market_data.public_archive import store
+
+    store.append_coverage(tmp_path, _ok_cov_row("BTCUSDT", date(2023, 3, 1)))
+
+    class MonthOnly(FakeDownloader):
+        def list_object_keys(self, *, prefix: str, timeout: int | None = None) -> list[str]:
+            assert not prefix.endswith("BTCUSDT-metrics-")
+            assert not prefix.endswith("2023-03")
+            return []
+
+    plans = plan_collection(
+        MonthOnly(), root=tmp_path, datasets=["metrics"], symbols={"metrics": ["BTCUSDT"]},
+        start=date(2023, 1, 1), end=date(2023, 8, 1),
+    )
+    assert plans is not None
+    assert len(plans[0].sealed_days) == 30
+
+
+def test_plan_none_with_sealed_days(tmp_path: Path) -> None:
+    from src.market_data.public_archive import store as store_mod
+
+    store_mod.append_coverage(tmp_path, _ok_cov_row("BTCUSDT", date(2023, 3, 1)))
+    fake = _metrics_fake(["BTCUSDT"], [])
+    allowed = {"metrics": {"BTCUSDT": frozenset({date(2023, 3, 2), date(2023, 4, 1)})}}
+    plans = plan_collection(
+        fake,
+        root=tmp_path,
+        datasets=["metrics"],
+        symbols={"metrics": ["BTCUSDT"]},
+        start=date(2023, 3, 2),
+        end=date(2023, 4, 10),
+        allowed=allowed,
+    )
+    assert plans is not None
+    assert any(len(p.sealed_days) > 0 and len(p.days) == 0 for p in plans)
+
+
+def test_plan_mixed_sealed_and_open(tmp_path: Path) -> None:
+    from src.market_data.public_archive import store as store_mod
+
+    store_mod.append_coverage(tmp_path, _ok_cov_row("BTCUSDT", date(2023, 3, 1)))
+    fake = _metrics_fake(["BTCUSDT"], [date(2023, 4, 10)])
+    plans = plan_collection(
+        fake,
+        root=tmp_path,
+        datasets=["metrics"],
+        symbols={"metrics": ["BTCUSDT"]},
+        start=date(2023, 3, 2),
+        end=date(2023, 4, 10),
+    )
+    assert plans is not None
+    mixed = [p for p in plans if len(p.sealed_days) > 0 and len(p.days) > 0]
+    assert mixed
+
+
+def test_commit_guard_refuses_sealed_slice(tmp_path: Path) -> None:
+    import tempfile as _tf
+
+    import pandas as pd
+
+    from src.market_data.public_archive import store as store_mod
+    from src.market_data.public_archive.service import _PlanRunner
+
+    day = date(2023, 3, 11)
+    store_mod.append_coverage(
+        tmp_path,
+        store_mod.CoverageRow(
+            dataset="aggTrades",
+            symbol="BTCUSDT",
+            day=date(2023, 3, 1),
+            status="ok",
+            raw_sha256="0" * 64,
+            rows=1,
+            recorded_at=_NOW,
+            detail=None,
+        ),
+    )
+    derived = tmp_path / "aggTrades" / "BTCUSDT" / "202303.parquet"
+    derived.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame({"timestamp": [pd.Timestamp(date(2023, 3, 1), tz="UTC").as_unit("ms")]}).to_parquet(derived)
+    plan = CollectionPlan(dataset="aggTrades", symbol="BTCUSDT", days=(day,), slice_hours=(23, 24))
+    runner = _PlanRunner(
+        _metrics_fake(["BTCUSDT"], []),
+        [plan],
+        root=tmp_path,
+        heartbeat_s=60.0,
+        now_fn=lambda: _NOW,
+    )
+    frame = pd.DataFrame({"transact_time_ms": [1], "x": [1.0]})
+    with _tf.TemporaryDirectory(dir=tmp_path) as staging:
+        src = Path(staging) / "slice.parquet"
+        frame.to_parquet(src)
+        detail = runner.commit_month(plan, [day], Path(staging), [(day, frame)], [(day, src)])
+    assert detail == "sealed_month"
