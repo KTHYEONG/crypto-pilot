@@ -142,6 +142,7 @@ class LiveSettings(BaseSettings):
     exec_depth_candidate_breadth: int = Field(default=30, ge=0)
     exec_depth_flush_interval_s: float = 300.0
     exec_depth_max_session_s: float = 7200.0
+    exec_depth_ready_timeout_s: float = Field(default=10.0, ge=0.0, le=60.0)
     fills_dir: str | None = None
     microstructure_dir: str | None = None
     tax_ledger_dir: str | None = None

@@ -59,6 +59,9 @@ class _FakeConnection:
             await asyncio.sleep(3600.0)
             raise AssertionError("unreachable")
         action = self._script.pop(0)
+        if isinstance(action, float):
+            await asyncio.sleep(action)
+            return await self.recv()
         if action == "drop":
             raise ConnectionError("ws dropped")
         return action
@@ -606,3 +609,293 @@ def test_truncates_candidates_at_cap() -> None:
 def test_duplicates_removed() -> None:
     """Repeated symbols in either input appear once."""
     assert select_depth_symbols(["A", "A", "B"], ["B", "C", "C"], max_symbols=10) == ["A", "B", "C"]
+
+
+def test_ready_gate_waits_for_all_symbols(tmp_path: Path) -> None:
+    """Both symbols stream; the gate returns ready before the timeout."""
+    calls: list[str] = []
+    rec = _make_recorder(
+        tmp_path, ["AAAUSDT", "BBBUSDT"],
+        [[_full_book("AAAUSDT"), 0.05, _full_book("BBBUSDT")]], calls,
+    )
+    readiness = rec.start(ready_timeout_s=2.0)
+    assert readiness.reason == "ready"
+    assert readiness.ready is True
+    assert readiness.missing == ()
+    assert readiness.seen == readiness.required == 2
+    assert 0.05 <= readiness.waited_s < 2.0
+    summary = rec.stop(post_window_s=0.0)
+    assert summary.rows_received == 2
+
+
+def test_ready_gate_timeout_names_silent(tmp_path: Path) -> None:
+    """Only one symbol streams; the gate times out naming the silent one."""
+    calls: list[str] = []
+    rec = _make_recorder(
+        tmp_path, ["AAAUSDT", "BBBUSDT"],
+        [[_full_book("AAAUSDT")]], calls,
+    )
+    readiness = rec.start(ready_timeout_s=0.5)
+    assert readiness.reason == "timeout"
+    assert readiness.ready is False
+    assert readiness.missing == ("BBBUSDT",)
+    assert readiness.waited_s >= 0.5
+    rec.stop(post_window_s=0.0)
+
+
+def test_ready_gate_subset_and_unknown(tmp_path: Path) -> None:
+    """Candidate-only symbols never block; unknown required symbols are ignored."""
+    calls: list[str] = []
+    rec = _make_recorder(
+        tmp_path, ["AAAUSDT", "CANDUSDT"],
+        [[_full_book("AAAUSDT")]], calls,
+    )
+    readiness = rec.start(ready_timeout_s=1.0, required=["AAAUSDT"])
+    assert readiness.reason == "ready"
+    rec.stop(post_window_s=0.0)
+    calls2: list[str] = []
+    rec2 = _make_recorder(tmp_path, ["AAAUSDT"], [[_full_book("AAAUSDT")]], calls2)
+    readiness2 = rec2.start(ready_timeout_s=1.0, required=["ZZZUSDT"])
+    assert readiness2.reason == "ready"
+    assert readiness2.required == 0
+    assert readiness2.missing == ()
+    rec2.stop(post_window_s=0.0)
+
+
+def test_ready_gate_zero_timeout_legacy(tmp_path: Path) -> None:
+    """Default start stays non-blocking and still captures."""
+    calls: list[str] = []
+    rec = _make_recorder(tmp_path, ["AAAUSDT"], [[_full_book("AAAUSDT")]], calls)
+    readiness = rec.start()
+    assert readiness.reason == "not_waited"
+    assert readiness.ready is False
+    _wait_for(lambda: rec._rows >= 1)
+    rec.stop(post_window_s=0.0)
+
+
+def test_ready_gate_connect_failure(tmp_path: Path) -> None:
+    """A dead venue ends the wait without raising."""
+    def _boom(url: str) -> Any:
+        raise RuntimeError("connect down")
+
+    rec = ExecutionDepthRecorder(
+        ["AAAUSDT"], decision_time=_DECISION, run_id="20260922", mode="paper", root=tmp_path,
+        stream_url="wss://test/stream", levels=5, update_ms=500,
+        flush_interval_s=3600.0, max_session_s=60.0, connect=_boom,
+        now_fn=_ticking_now(_DECISION),
+    )
+    readiness = rec.start(ready_timeout_s=1.0)
+    assert readiness.reason in {"timeout", "session_ended"}
+    assert readiness.ready is False
+    assert rec.stop(post_window_s=0.0).rows_received == 0
+
+
+def test_ready_gate_shutdown(tmp_path: Path) -> None:
+    """A requested shutdown interrupts the wait quickly."""
+    import threading as _threading
+
+    calls: list[str] = []
+    rec = _make_recorder(tmp_path, ["AAAUSDT"], [[]], calls)
+
+    class _Shutdown:
+        requested = False
+
+    shutdown = _Shutdown()
+
+    def _flip() -> None:
+        time.sleep(0.2)
+        shutdown.requested = True
+
+    flipper = _threading.Thread(target=_flip, daemon=True)
+    flipper.start()
+    readiness = rec.start(ready_timeout_s=5.0, shutdown=shutdown)
+    assert readiness.reason == "shutdown"
+    assert readiness.waited_s < 1.0
+    flipper.join(timeout=5.0)
+    rec.stop(post_window_s=0.0)
+
+
+def test_ready_gate_empty(tmp_path: Path) -> None:
+    """No requested symbols returns immediately without a thread."""
+    rec = _make_recorder(tmp_path, [], [[]], [])
+    readiness = rec.start(ready_timeout_s=5.0)
+    assert readiness.reason == "empty"
+    assert readiness.waited_s == 0.0
+
+
+def test_ready_gate_second_start(tmp_path: Path) -> None:
+    """A second start never spawns a second thread and never waits."""
+    import threading as _threading
+
+    calls: list[str] = []
+    rec = _make_recorder(tmp_path, ["AAAUSDT"], [[_full_book("AAAUSDT")]], calls)
+    first = rec.start(ready_timeout_s=1.0)
+    assert first.reason == "ready"
+    before = len([t for t in _threading.enumerate() if t.name == "exec-depth-capture"])
+    second = rec.start(ready_timeout_s=1.0)
+    after = len([t for t in _threading.enumerate() if t.name == "exec-depth-capture"])
+    assert second.waited_s == 0.0
+    assert after == before
+    rec.stop(post_window_s=0.0)
+
+
+def test_ready_gate_manifest_reconciles(tmp_path: Path) -> None:
+    """A ready-gated session persists rows that reconcile with the manifest."""
+    import json as _json
+
+    calls: list[str] = []
+    rec = _make_recorder(
+        tmp_path, ["BTCUSDT", "ETHUSDT"],
+        [[_full_book("BTCUSDT"), _full_book("ETHUSDT")]], calls,
+        flush_interval_s=0.0,
+    )
+    readiness = rec.start(ready_timeout_s=2.0)
+    assert readiness.reason == "ready"
+    _wait_for(lambda: rec._parts >= 1)
+    time.sleep(0.1)
+    summary = rec.stop(post_window_s=0.0)
+    manifests = list((tmp_path / EXEC_DEPTH_DATASET / "20260922").glob("manifest_*.json"))
+    assert len(manifests) == 1
+    manifest = _json.loads(manifests[0].read_text(encoding="utf-8"))
+    parts = _read_parts(tmp_path)
+    assert sum(item["rows_persisted"] for item in manifest["symbols"].values()) == len(parts)
+    assert summary.rows_persisted == len(parts)
+
+
+def test_ready_gate_second_start_branches(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Second-start precedence covers start_failed, not_waited, shutdown, ended and timeout."""
+    import threading as _threading
+
+    # start_failed persists on second start.
+    boom_calls: list[str] = []
+    boom_rec = _make_recorder(tmp_path, ["AAAUSDT"], [[_full_book("AAAUSDT")]], boom_calls)
+    with monkeypatch.context() as patch:
+        patch.setattr(_threading, "Thread", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("no threads")))
+        first_failed = boom_rec.start(ready_timeout_s=1.0)
+        assert first_failed.reason == "start_failed"
+        assert boom_rec.start(ready_timeout_s=1.0).reason == "start_failed"
+
+    # not_waited on second start with zero timeout.
+    silent = _make_recorder(tmp_path, ["AAAUSDT", "BBBUSDT"], [[_full_book("AAAUSDT")]], [])
+    assert silent.start(ready_timeout_s=0.5).reason == "timeout"
+    assert silent.start(ready_timeout_s=0.0).reason == "not_waited"
+    silent.stop(post_window_s=0.0)
+
+    # shutdown wins on second start when still missing.
+    pending = _make_recorder(tmp_path, ["AAAUSDT", "BBBUSDT"], [[_full_book("AAAUSDT")]], [])
+    assert pending.start(ready_timeout_s=0.5).reason == "timeout"
+
+    class _Shutdown:
+        requested = True
+
+    assert pending.start(ready_timeout_s=1.0, shutdown=_Shutdown()).reason == "shutdown"
+    # timeout when still missing, alive and no shutdown.
+    assert pending.start(ready_timeout_s=1.0).reason == "timeout"
+    pending.stop(post_window_s=0.0)
+
+    # session_ended when the capture thread already exited.
+    short = _make_recorder(
+        tmp_path, ["AAAUSDT", "BBBUSDT"], [[_full_book("AAAUSDT")]], [],
+        max_session_s=0.2,
+    )
+    assert short.start(ready_timeout_s=0.5).reason == "timeout"
+    deadline = time.monotonic() + 5.0
+    while short._thread is not None and short._thread.is_alive():
+        assert time.monotonic() < deadline
+        time.sleep(0.05)
+    assert short.start(ready_timeout_s=1.0).reason == "session_ended"
+    short.stop(post_window_s=0.0)
+
+    # Unusable required type never raises; the wait reports timeout.
+    bad = _make_recorder(tmp_path, ["AAAUSDT"], [[_full_book("AAAUSDT")]], [])
+    assert bad.start(ready_timeout_s=1.0).reason == "ready"
+    assert bad.start(ready_timeout_s=1.0, required=123).reason == "timeout"  # type: ignore[arg-type]
+    bad.stop(post_window_s=0.0)
+
+
+def test_ready_gate_wait_failure_never_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Exceptions while waiting degrade to timeout instead of raising."""
+    calls: list[str] = []
+    rec = _make_recorder(tmp_path, ["AAAUSDT", "BBBUSDT"], [[_full_book("AAAUSDT")]], calls)
+
+    class _BadShutdown:
+        @property
+        def requested(self) -> bool:
+            _wait_for(lambda: rec._rows == 1)
+            raise RuntimeError("shutdown broken")
+
+    readiness = rec.start(ready_timeout_s=0.5, shutdown=_BadShutdown())
+    assert readiness.reason == "timeout"
+    assert readiness.ready is False
+    assert readiness.missing == ("BBBUSDT",)
+    assert readiness.seen == 1
+    assert readiness.waited_s < 0.5
+    rec.stop(post_window_s=0.0)
+
+    rec2 = _make_recorder(tmp_path, ["AAAUSDT"], [[]], [])
+    def _bad_wait(timeout: float | None = None) -> bool:
+        raise RuntimeError("wait broken")
+
+    monkeypatch.setattr(rec2._ready_event, "wait", _bad_wait)
+    readiness2 = rec2.start(ready_timeout_s=1.0)
+    assert readiness2.reason == "timeout"
+    rec2.stop(post_window_s=0.0)
+
+
+def test_ready_gate_covers_dead_thread_and_foreign_symbol(tmp_path: Path) -> None:
+    """Non-required rows never trip the event; a dead thread ends the wait."""
+    rec = _make_recorder(tmp_path, ["AAAUSDT", "BBBUSDT"], [[_full_book("BBBUSDT")]], [])
+    outcome = rec.start(ready_timeout_s=0.1, required=["AAAUSDT"])
+    assert outcome.reason == "timeout"
+    assert outcome.missing == ("AAAUSDT",)
+    rec.stop(post_window_s=0.0)
+
+    def _broken_clock() -> pd.Timestamp:
+        raise RuntimeError("session startup failed")
+
+    dead = _make_recorder(tmp_path, ["AAAUSDT"], [[]], [], now=_broken_clock)
+    outcome = dead.start(ready_timeout_s=1.0)
+    assert outcome.reason == "session_ended"
+    dead.stop(post_window_s=0.0)
+
+    bad_timeout = _make_recorder(tmp_path, ["AAAUSDT"], [[_full_book("AAAUSDT")]], [])
+    readiness = bad_timeout.start(ready_timeout_s="bad")  # type: ignore[arg-type]
+    assert readiness.reason == "timeout"
+    bad_timeout.stop(post_window_s=0.0)
+
+
+def test_ready_gate_required_order_and_zero_precedence(tmp_path: Path) -> None:
+    rec = _make_recorder(tmp_path, ["AAAUSDT", "BBBUSDT", "CUSDT"], [[_full_book("AAAUSDT")]], [])
+    try:
+        outcome = rec.start(ready_timeout_s=0.1, required=["CUSDT", "BBBUSDT", "CUSDT", "UNKNOWN"])
+        assert outcome.reason == "timeout"
+        assert outcome.missing == ("CUSDT", "BBBUSDT")
+        assert outcome.required == 2
+        assert outcome.seen == 0
+        assert rec.start(required=[]).reason == "not_waited"
+        assert rec.start(ready_timeout_s=1.0, required=[]).reason == "ready"
+    finally:
+        rec.stop(post_window_s=0.0)
+
+
+@pytest.mark.parametrize("timeout", [float("inf"), float("nan"), -1.0])
+def test_ready_gate_invalid_timeout_is_bounded(tmp_path: Path, timeout: float) -> None:
+    rec = _make_recorder(tmp_path, ["AAAUSDT"], [[]], [])
+    outcome = rec.start(ready_timeout_s=timeout)
+    assert outcome.reason == "timeout"
+    assert 0 <= outcome.waited_s < 1.0
+    assert outcome.missing == ("AAAUSDT",)
+
+
+def test_ready_gate_monotonic_failure_is_fail_soft(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    rec = _make_recorder(tmp_path, ["AAAUSDT"], [[]], [])
+
+    def broken() -> float:
+        raise RuntimeError("clock unavailable")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(time, "monotonic", broken)
+        outcome = rec.start(ready_timeout_s=1.0)
+    assert outcome.reason == "timeout"
+    assert outcome.waited_s == 0.0
+    assert outcome.missing == ("AAAUSDT",)

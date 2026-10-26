@@ -117,14 +117,23 @@ def _neutralize_execution_depth_capture(monkeypatch: pytest.MonkeyPatch) -> None
     검증하는 테스트는 자체 스텁으로 덮어쓴다.
     """
     import src.live.runner as runner_mod
-    from src.live.depth_capture import DepthCaptureSummary
+    from src.live.depth_capture import DepthCaptureSummary, DepthReadiness
 
     class _NullDepthRecorder:
         def __init__(self, *args: object, **kwargs: object) -> None:
             return None
 
-        def start(self) -> None:
-            return None
+        def start(
+            self,
+            *,
+            ready_timeout_s: float = 0.0,
+            required: object = None,
+            shutdown: object = None,
+        ) -> DepthReadiness:
+            return DepthReadiness(
+                ready=False, reason="not_waited", waited_s=0.0,
+                required=0, seen=0, missing=(),
+            )
 
         def stop(self, *, post_window_s: float, shutdown: object = None) -> DepthCaptureSummary:
             return DepthCaptureSummary(

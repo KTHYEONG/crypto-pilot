@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import math
 import threading
 import time
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
@@ -13,7 +14,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import pandas as pd
 
@@ -48,6 +49,18 @@ _DEPTH_LEVELS: frozenset[int] = frozenset({5, 10, 20})
 _DEPTH_UPDATE_MS: frozenset[int] = frozenset({100, 250, 500})
 _RECONNECT_BACKOFF_MAX_S: float = 30.0
 _STOP_JOIN_TIMEOUT_S: float = 10.0
+
+
+@dataclass(frozen=True, slots=True)
+class DepthReadiness:
+    """Outcome of waiting for the execution depth stream before order submission."""
+
+    ready: bool
+    reason: Literal["ready", "timeout", "not_waited", "empty", "start_failed", "session_ended", "shutdown"]
+    waited_s: float
+    required: int
+    seen: int
+    missing: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -193,7 +206,7 @@ class ExecutionDepthRecorder:
     Runs its own asyncio loop in a daemon thread from just before order submission until a post-trade
     window has elapsed, so queue position and touch dynamics during the resting window can be replayed
     against later-downloaded trades. Capture is observability-only: no exception ever reaches the
-    trading cycle and trading never waits on it.
+    trading cycle; the optional readiness wait is bounded and never gates trading.
 
     Output: immutable part files ``<root>/exec_depth/<decision YYYYMMDD>/part_<start HHMMSS>_<seq>.parquet``
     with columns ``decision_time``, ``run_id``, ``mode``, ``received_at``, ``event_time_ms``,
@@ -239,6 +252,10 @@ class ExecutionDepthRecorder:
         self._stop_requested = False
         self._started = False
         self._start_failed = False
+        self._seen_lock = threading.Lock()
+        self._ready_event = threading.Event()
+        self._ready_required: tuple[str, ...] | None = None
+        self._ready_required_set: frozenset[str] = frozenset()
         self._summary: DepthCaptureSummary | None = None
         self._rows = 0
         self._rows_persisted = 0
@@ -252,10 +269,154 @@ class ExecutionDepthRecorder:
         self._session_start: pd.Timestamp | None = None
         self._first_part_stamp: str | None = None
 
-    def start(self) -> None:
-        """Start the capture thread; returns immediately (never blocks order submission)."""
-        if self._empty or self._started:
-            return
+    def _effective_required(self, required: Sequence[str] | None) -> list[str]:
+        requested = set(self._symbols)
+        names = self._symbols if required is None else required
+        return list(dict.fromkeys(str(symbol) for symbol in names if str(symbol) in requested))
+
+    def _snapshot_seen(self) -> set[str]:
+        with self._seen_lock:
+            return set(self._symbols_seen)
+
+    def _shutdown_requested(self, shutdown: Any | None) -> bool:
+        return shutdown is not None and bool(getattr(shutdown, "requested", False))
+
+    def _capture_alive(self) -> bool:
+        thread = self._thread
+        return thread is not None and bool(thread.is_alive())
+
+    def _missing_for(self, effective: Sequence[str], seen_set: set[str]) -> tuple[str, ...]:
+        return tuple(symbol for symbol in effective if symbol not in seen_set)
+
+    def _observe_symbol(self, symbol: str) -> None:
+        with self._seen_lock:
+            self._symbols_seen.add(symbol)
+            if self._ready_event.is_set():
+                return
+            required = self._ready_required or ()
+            if symbol not in self._ready_required_set:
+                return
+            for item in required:
+                if item not in self._symbols_seen:
+                    return
+            self._ready_event.set()
+
+    def _wait_outcome(
+        self, effective: list[str], timeout: float, shutdown: Any | None, start_mono: float
+    ) -> DepthReadiness:
+        deadline = start_mono + timeout
+        while True:
+            if self._ready_event.is_set():
+                break
+            if self._shutdown_requested(shutdown):
+                break
+            if not self._capture_alive():
+                break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            self._ready_event.wait(timeout=min(0.25, remaining))
+        waited = time.monotonic() - start_mono
+        seen_set = self._snapshot_seen()
+        missing = self._missing_for(effective, seen_set)
+        reason: Literal["ready", "shutdown", "session_ended", "timeout"]
+        if not missing:
+            reason = "ready"
+        elif self._shutdown_requested(shutdown):
+            reason = "shutdown"
+        elif not self._capture_alive():
+            reason = "session_ended"
+        else:
+            reason = "timeout"
+        readiness = DepthReadiness(
+            ready=reason == "ready", reason=reason, waited_s=max(0.0, waited),
+            required=len(effective), seen=len(effective) - len(missing), missing=missing,
+        )
+        self._log_readiness(readiness)
+        return readiness
+
+    def _second_start(
+        self, *, ready_timeout_s: float, required: Sequence[str] | None, shutdown: Any | None
+    ) -> DepthReadiness:
+        effective = self._effective_required(required)
+        seen_set = self._snapshot_seen()
+        missing = self._missing_for(effective, seen_set)
+        reason: Literal["start_failed", "not_waited", "ready", "shutdown", "session_ended", "timeout"]
+        if self._start_failed:
+            reason = "start_failed"
+        elif float(ready_timeout_s) == 0.0:
+            reason = "not_waited"
+        elif not missing:
+            reason = "ready"
+        elif self._shutdown_requested(shutdown):
+            reason = "shutdown"
+        elif not self._capture_alive():
+            reason = "session_ended"
+        else:
+            reason = "timeout"
+        readiness = DepthReadiness(
+            ready=reason == "ready", reason=reason, waited_s=0.0,
+            required=len(effective), seen=len(effective) - len(missing), missing=missing,
+        )
+        self._log_readiness(readiness)
+        return readiness
+
+    def _log_readiness(self, readiness: DepthReadiness) -> None:
+        status = "READY" if readiness.ready else "NOT_READY"
+        _logger.info(
+            "[EXEC] stage=exec_depth_capture status=%s reason=%s waited_s=%.3f seen=%d/%d",
+            status, readiness.reason, readiness.waited_s, readiness.seen, readiness.required,
+        )
+
+    def start(
+        self,
+        *,
+        ready_timeout_s: float = 0.0,
+        required: Sequence[str] | None = None,
+        shutdown: Any | None = None,
+    ) -> DepthReadiness:
+        """Start the capture thread and wait up to ready_timeout_s for a first depth row of every required symbol; never raises."""
+        effective: list[str] = []
+        started_at: float | None = None
+        repeated = self._started
+        try:
+            if self._empty:
+                return self._start_capture(0.0, effective, shutdown)
+            effective = self._effective_required(required)
+            started_at = time.monotonic()
+            timeout = float(ready_timeout_s)
+            if not math.isfinite(timeout) or timeout < 0:
+                raise ValueError("ready_timeout_s must be finite and non-negative")
+            return self._start_capture(timeout, effective, shutdown)
+        except Exception as exc:
+            _logger.warning("[EXEC] stage=exec_depth_capture status=READY_WAIT_FAILED error=%s", exc)
+            waited = 0.0
+            if started_at is not None and not repeated:
+                with contextlib.suppress(Exception):
+                    waited = max(0.0, time.monotonic() - started_at)
+            seen_set = self._snapshot_seen()
+            missing = self._missing_for(effective, seen_set)
+            outcome = DepthReadiness(False, "timeout", waited, len(effective), len(effective) - len(missing), missing)
+            self._log_readiness(outcome)
+            return outcome
+
+    def _start_capture(
+        self, timeout: float, effective: list[str], shutdown: Any | None,
+    ) -> DepthReadiness:
+        if self._empty:
+            readiness = DepthReadiness(
+                ready=False, reason="empty", waited_s=0.0, required=0, seen=0, missing=(),
+            )
+            self._log_readiness(readiness)
+            return readiness
+        if self._started:
+            return self._second_start(ready_timeout_s=timeout, required=effective, shutdown=shutdown)
+        self._ready_required = tuple(effective)
+        self._ready_required_set = frozenset(effective)
+        if len(effective) == 0:
+            self._ready_event.set()
+        else:
+            self._ready_event.clear()
         self._started = True
         try:
             thread = threading.Thread(target=self._thread_main, name="exec-depth-capture", daemon=True)
@@ -264,14 +425,40 @@ class ExecutionDepthRecorder:
         except Exception as exc:
             _logger.warning("[EXEC] stage=exec_depth_capture status=START_FAILED error=%s", exc)
             self._start_failed = True
+            readiness = DepthReadiness(
+                ready=False, reason="start_failed", waited_s=0.0,
+                required=len(effective), seen=0, missing=tuple(effective),
+            )
+            self._log_readiness(readiness)
+            return readiness
+        if not effective and timeout != 0.0:
+            readiness = DepthReadiness(
+                ready=True, reason="ready", waited_s=0.0,
+                required=0, seen=0, missing=(),
+            )
+            self._log_readiness(readiness)
+            return readiness
+        if timeout == 0.0:
+            seen_set = self._snapshot_seen()
+            missing = self._missing_for(effective, seen_set)
+            readiness = DepthReadiness(
+                ready=False, reason="not_waited", waited_s=0.0,
+                required=len(effective), seen=len(effective) - len(missing), missing=missing,
+            )
+            self._log_readiness(readiness)
+            return readiness
+        start_mono = time.monotonic()
+        return self._wait_outcome(effective, timeout, shutdown, start_mono)
 
     def _build_summary(self) -> DepthCaptureSummary:
-        missing = tuple(symbol for symbol in self._symbols if symbol not in self._symbols_seen)
+        with self._seen_lock:
+            seen = set(self._symbols_seen)
+        missing = tuple(symbol for symbol in self._symbols if symbol not in seen)
         return DepthCaptureSummary(
             rows_received=self._rows,
             rows_persisted=self._rows_persisted,
             symbols_requested=len(self._symbols),
-            symbols_seen=len(self._symbols_seen),
+            symbols_seen=len(seen),
             symbols_missing=missing,
             reconnects=self._reconnects,
             parts=self._parts,
@@ -447,7 +634,7 @@ class ExecutionDepthRecorder:
                             buffer.append(row)
                             self._rows += 1
                             symbol = str(row["symbol"])
-                            self._symbols_seen.add(symbol)
+                            self._observe_symbol(symbol)
                             received = _as_utc(pd.Timestamp(row["received_at"]))
                             if symbol not in self._symbol_first:
                                 self._symbol_first[symbol] = received

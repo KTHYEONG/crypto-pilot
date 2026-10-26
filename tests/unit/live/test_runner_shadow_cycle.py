@@ -957,7 +957,7 @@ from typing import Any
 import pandas as pd
 
 import src.live.runner as runner_mod
-from src.live.depth_capture import DepthCaptureSummary
+from src.live.depth_capture import DepthCaptureSummary, DepthReadiness
 from src.live.executor import ExecutionOutcome
 from src.live.runner import run_shadow_cycle
 from src.live.settings import LiveSettings
@@ -975,8 +975,9 @@ class _StubDepthRecorder:
         self.stops: list[float] = []
         _StubDepthRecorder.instances.append(self)
 
-    def start(self) -> None:
+    def start(self, **kwargs: Any) -> DepthReadiness:
         self.starts += 1
+        return DepthReadiness(False, "not_waited", 0.0, 0, 0, ())
 
     def stop(self, *, post_window_s: float, shutdown: Any = None) -> DepthCaptureSummary:
         self.stops.append(float(post_window_s))

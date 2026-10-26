@@ -1643,7 +1643,21 @@ def run_shadow_cycle(
                 max_session_s=settings.exec_depth_max_session_s,
             )
             depth_recorders.append(depth_recorder)
-            depth_recorder.start()
+            depth_readiness = depth_recorder.start(
+                ready_timeout_s=settings.exec_depth_ready_timeout_s,
+                required=_exec_depth_required_symbols(kept),
+                shutdown=shutdown,
+            )
+            with contextlib.suppress(Exception):
+                audit.record(
+                    "exec_depth_ready",
+                    ready=depth_readiness.ready,
+                    reason=depth_readiness.reason,
+                    waited_s=depth_readiness.waited_s,
+                    seen=depth_readiness.seen,
+                    required=depth_readiness.required,
+                    missing=",".join(depth_readiness.missing),
+                )
 
         for sym, reason in _uncovered_positions(current_positions, targets, filters, marks, kept):
             with contextlib.suppress(Exception):
@@ -1811,6 +1825,11 @@ class TickerMarks:
 
     marks: dict[str, Decimal]
     quotes: Mapping[str, BookQuote]
+
+
+def _exec_depth_required_symbols(kept: Sequence[OrderIntent]) -> list[str]:
+    """Traded intent symbols that the depth readiness gate waits for."""
+    return [intent.symbol for intent in kept]
 
 
 def _apply_unresolved_freeze(

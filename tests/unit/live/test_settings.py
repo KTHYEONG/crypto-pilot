@@ -725,3 +725,13 @@ def test_candidate_breadth_validated() -> None:
         LiveSettings(exec_depth_candidate_breadth=-1)
     assert LiveSettings(exec_depth_candidate_breadth=0).exec_depth_candidate_breadth == 0
     assert LiveSettings().exec_depth_candidate_breadth == 30
+
+
+@pytest.mark.parametrize("value", [-1, 0, 10, 60, 61])
+def test_exec_depth_ready_timeout_bounds(value: float) -> None:
+    assert LiveSettings().exec_depth_ready_timeout_s == 10.0
+    if value in (-1, 61):
+        with pytest.raises(ValueError, match="exec_depth_ready_timeout_s"):
+            LiveSettings(exec_depth_ready_timeout_s=value)
+    else:
+        assert LiveSettings(exec_depth_ready_timeout_s=value).exec_depth_ready_timeout_s == value
