@@ -9,9 +9,6 @@ from src.common.errors import DataIntegrityError
 
 _LIQUIDITY_FLOOR_USD = 1_000_000.0
 
-PIT_ROSTER_LOOKBACK_DAYS: int = 90
-PIT_ROSTER_MIN_TRADED_DAYS: int = 85
-
 
 def build_pit_roster(
     daily_close: pd.DataFrame,
@@ -61,9 +58,9 @@ def build_pit_roster(
     if bool(close_bad.any()) or bool(qv_bad.any()):
         raise DataIntegrityError("observed closes must be positive finite and turnover nonnegative finite")
     traded = daily_close.notna() & daily_quote_volume.notna() & (daily_quote_volume > 0.0)
-    traded_count = traded.astype(np.int64).rolling(PIT_ROSTER_LOOKBACK_DAYS, min_periods=1).sum()
+    traded_count = traded.astype(np.int64).rolling(90, min_periods=1).sum()
     median_turnover = daily_quote_volume.rolling(30, min_periods=30).median()
-    eligible_src = traded & (traded_count >= PIT_ROSTER_MIN_TRADED_DAYS) & (median_turnover >= _LIQUIDITY_FLOOR_USD)
+    eligible_src = traded & (traded_count >= 85) & (median_turnover >= _LIQUIDITY_FLOOR_USD)
     median_src = median_turnover.where(eligible_src)
     med_mat = median_src.to_numpy(dtype="float64", na_value=np.nan)
     elig_mat = eligible_src.to_numpy(dtype=bool)

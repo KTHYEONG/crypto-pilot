@@ -81,6 +81,10 @@ else
   ARCHIVE_RC=0
   "$RCLONE_BIN" copy "$ARCHIVE_SRC" "$REMOTE_ROOT/data/public_archive" \
     --exclude ".archive-*/**" \
+    --exclude ".import-*" \
+    --exclude ".import-*/**" \
+    --exclude ".job-*" \
+    --exclude "_status/archive.lock" \
     --exclude "*.tmp" \
     --exclude "*.tmp-*" \
     --exclude "*.partial" \

@@ -267,6 +267,8 @@ def test_archive_step_has_own_backup_dir(tmp_path: Path) -> None:
     assert call[call.index("--transfers") + 1] == "4"
     argv = " ".join(call)
     assert ".archive-*/**" in argv
+    for staging in (".import-*", ".import-*/**", ".job-*", "_status/archive.lock"):
+        assert staging in call
     assert "*.partial" in argv
     assert "*.tmp" in call
     assert "*.tmp-*" in call

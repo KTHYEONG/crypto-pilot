@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pandas as pd
 
 from src.market_data.streams.retention import BackupStatus
+
+if TYPE_CHECKING:
+    from src.market_data.public_archive.store import CoverageRow
 
 _ARCHIVE_DATASETS: tuple[str, ...] = ("metrics", "bookDepth", "aggTrades", "aggTrades_slice")
 _MONTH_RE = re.compile(r"^(\d{4})(\d{2})\.parquet$")
@@ -48,6 +53,45 @@ def _backed_up(path: Path, started_ns: int) -> bool:
     return path.stat().st_mtime_ns < started_ns
 
 
+def _coverage_dataset(archive_dataset: str) -> str:
+    return "aggTrades" if archive_dataset == "aggTrades_slice" else archive_dataset
+
+
+def _sealed_snapshot(base: Path, coverage: Mapping[str, Mapping[tuple[str, date], CoverageRow]]) -> set[tuple[str, ...]]:
+    from src.market_data.public_archive import store as store_mod
+
+    return {
+        (dataset, *sealed)
+        for dataset, rows in coverage.items()
+        for sealed in store_mod.sealed_months(base, dataset, rows)
+    }
+
+
+def _retained_months(
+    base: Path, coverage: Mapping[str, Mapping[tuple[str, date], CoverageRow]], now_date: date
+) -> tuple[set[tuple[str, str, str]], set[tuple[str, str]]]:
+    """(dataset, symbol, YYYYMM) months that still owe a retry, and (dataset, YYYYMM) months a pending job spans.
+
+    Sealing such a month would make the collector skip its missing days forever, so they stay local.
+    """
+    from src.market_data.public_archive import catalog as catalog_mod
+    from src.market_data.public_archive import jobs as jobs_mod
+
+    horizon = catalog_mod.ARCHIVE_RETRY_HORIZON_DAYS
+    retry = {
+        (dataset, symbol, day.strftime("%Y%m"))
+        for dataset, rows in coverage.items()
+        for (symbol, day), row in rows.items()
+        if row.status == "failed" or (row.status != "ok" and 0 <= (now_date - day).days <= horizon)
+    }
+    job_months = {
+        (job.dataset, month.strftime("%Y%m"))
+        for job in jobs_mod.pending_jobs(base)
+        for month in pd.date_range(job.start.replace(day=1), job.end, freq="MS")
+    }
+    return retry, job_months
+
+
 def prune_backed_up_archive(
     root: Path,
     *,
@@ -55,7 +99,7 @@ def prune_backed_up_archive(
     now: pd.Timestamp,
     keep_days: int = 45,
 ) -> ArchivePruneReport:
-    """Delete month partitions provably held by Drive and older than ``keep_days``."""
+    """Delete month partitions provably held by Drive, older than ``keep_days`` and owing no retry or backfill."""
     from src.market_data.public_archive import catalog as catalog_mod
     from src.market_data.public_archive import store as store_mod
 
@@ -69,69 +113,40 @@ def prune_backed_up_archive(
     prev = now_utc.replace(day=1) - pd.Timedelta(days=1)
     protected = {(now_utc.year, now_utc.month), (prev.year, prev.month)}
     started_ns = int(status.started_at.value)
+    base = Path(root)
+    coverage = {dataset: store_mod.load_coverage(base, dataset) for dataset in catalog_mod.DEFAULT_DATASETS}
+    sealed_before = _sealed_snapshot(base, coverage)
+    retry, job_months = _retained_months(base, coverage, now_utc.date())
+
+    def _prunable(dataset: str, symbol: str, path: Path) -> bool:
+        ym = _covered_month(path.name)
+        if ym is None or ym in protected:
+            return False
+        if _next_month_start(*ym) + pd.Timedelta(days=keep_days) >= now_utc or not _backed_up(path, started_ns):
+            return False
+        cov_dataset = _coverage_dataset(dataset)
+        return (cov_dataset, symbol, path.stem) not in retry and (cov_dataset, path.stem) not in job_months
+
     pruned = 0
     kept = 0
-    base = Path(root)
-    horizon = catalog_mod.ARCHIVE_RETRY_HORIZON_DAYS
-    now_date = now_utc.date()
-    coverage_cache: dict[str, dict[tuple[str, date], store_mod.CoverageRow]] = {}
-
-    def _coverage_for(archive_dataset: str) -> dict[tuple[str, date], store_mod.CoverageRow]:
-        cov_dataset = "aggTrades" if archive_dataset == "aggTrades_slice" else archive_dataset
-        if cov_dataset not in coverage_cache:
-            coverage_cache[cov_dataset] = store_mod.load_coverage(base, cov_dataset)
-        return coverage_cache[cov_dataset]
-
-    def _sealed_snapshot() -> set[tuple[str, str, str, str]]:
-        snap: set[tuple[str, str, str, str]] = set()
-        for dataset in catalog_mod.DEFAULT_DATASETS:
-            cov = _coverage_for(dataset)
-            for kind, symbol, month in store_mod.sealed_months(base, dataset, cov):
-                snap.add((dataset, kind, symbol, month))
-        return snap
-
-    sealed_before = _sealed_snapshot()
-    retryable = {
-        (dataset, symbol, day.strftime("%Y%m"))
-        for dataset, coverage in coverage_cache.items()
-        for (symbol, day), row in coverage.items()
-        if row.status != "ok" and 0 <= (now_date - day).days <= horizon
-    }
     for dataset in _ARCHIVE_DATASETS:
         ds_root = base / dataset
         if not ds_root.is_dir():
             continue
         for path in sorted(ds_root.rglob("*.parquet")):
             rel = path.relative_to(ds_root)
-            if len(rel.parts) != 2:
-                kept += 1
-                continue
-            ym = _covered_month(path.name)
-            if ym is None or ym in protected:
-                kept += 1
-                continue
-            if _next_month_start(*ym) + pd.Timedelta(days=keep_days) >= now_utc:
-                kept += 1
-                continue
-            if not _backed_up(path, started_ns):
-                kept += 1
-                continue
-            cov_dataset = "aggTrades" if dataset == "aggTrades_slice" else dataset
-            if (cov_dataset, rel.parts[0], path.stem) in retryable:
+            if len(rel.parts) != 2 or not _prunable(dataset, rel.parts[0], path):
                 kept += 1
                 continue
             path.unlink()
             pruned += 1
         for symbol_dir in sorted(ds_root.iterdir()):
-            if not symbol_dir.is_dir():
-                continue
-            if not any(symbol_dir.iterdir()):
+            if symbol_dir.is_dir() and not any(symbol_dir.iterdir()):
                 symbol_dir.rmdir()
-    sealed_after_set = _sealed_snapshot()
     return ArchivePruneReport(
         prune_blocked=False,
         blocked_reason=None,
         pruned_files=pruned,
         kept_files=kept,
-        sealed_after=len(sealed_after_set - sealed_before),
+        sealed_after=len(_sealed_snapshot(base, coverage) - sealed_before),
     )

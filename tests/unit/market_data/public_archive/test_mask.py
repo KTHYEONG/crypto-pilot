@@ -230,3 +230,12 @@ def test_require_census_coverage_rejects_inverted_range() -> None:
     )
     with pytest.raises(ValueError, match="first"):
         require_census_coverage(span, first=date(2024, 1, 2), last=date(2024, 1, 1))
+
+
+def test_census_lookback_matches_pit_roster_window() -> None:
+    import inspect
+
+    from src.market_data.public_archive.mask import PIT_ROSTER_LOOKBACK_DAYS
+    from src.strategy.universe import build_pit_roster
+
+    assert f"rolling({PIT_ROSTER_LOOKBACK_DAYS}, min_periods=1)" in inspect.getsource(build_pit_roster)

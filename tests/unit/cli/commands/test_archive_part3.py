@@ -187,8 +187,10 @@ def test_edge_branches(tmp_path, monkeypatch, capsys):
         am._parse_hhmm("bad")
     with pytest.raises(ValueError, match="HH:MM"):
         am._parse_hhmm("25:00")
-    d = am._drain_deadline("00:00")
-    assert d is not None
+    noon = pd.Timestamp("2026-10-26T12:00:00Z")
+    assert am._drain_deadline("21:00", noon) == pd.Timestamp("2026-10-26T21:00:00Z")
+    assert am._drain_deadline("12:00", noon) is None
+    assert am._drain_deadline("00:00", noon) is None
     # _job_remaining exception path
     import src.market_data.public_archive.store as sm
 
@@ -389,8 +391,14 @@ def test_drain_exec_and_finish_fail(tmp_path, monkeypatch, capsys):
     assert "PARTIAL" in capsys.readouterr().out
 
 
-def test_corrupt_queue_does_not_fail_incremental(tmp_path, caplog):
+def _future_drain_deadline(monkeypatch):
+    from src.cli.commands import archive as am
 
+    monkeypatch.setattr(am, "_drain_deadline", lambda hhmm: pd.Timestamp.now(tz="UTC") + pd.Timedelta(hours=1))
+
+
+def test_corrupt_queue_does_not_fail_incremental(tmp_path, caplog, monkeypatch):
+    _future_drain_deadline(monkeypatch)
     pending = tmp_path / "_jobs/pending"
     pending.mkdir(parents=True)
     (pending / "bad.json").write_text("{")
@@ -433,6 +441,7 @@ def test_job_failures_retry_and_lock_covers_incremental_and_job(tmp_path, monkey
     from src.market_data.public_archive import jobs, store
 
     _census(monkeypatch)
+    _future_drain_deadline(monkeypatch)
     first, last = date(2024, 1, 15), date(2024, 1, 16)
     now = pd.Timestamp.now(tz="UTC")
     job = jobs.BackfillJob(
@@ -572,3 +581,45 @@ def test_drain_deadline_keeps_committed_month_and_resumes(tmp_path, monkeypatch,
 def test_repeated_import_dataset_flags_preserve_all(tmp_path):
     ns = _ns(tmp_path, ["import", "--from", "/source", "--dataset", "metrics", "--dataset", "bookDepth", "aggTrades"])
     assert ns.dataset == ["metrics", "bookDepth", "aggTrades"]
+
+
+def test_collect_past_drain_deadline_skips_jobs(tmp_path, monkeypatch, capsys):
+    from src.cli.commands import archive as am
+    from src.market_data.public_archive import jobs
+
+    job = jobs.BackfillJob(
+        "metrics-2024-01-15-2024-01-15-20240101T000000Z",
+        "metrics",
+        date(2024, 1, 15),
+        date(2024, 1, 15),
+        "/c",
+        None,
+        None,
+        pd.Timestamp.now(tz="UTC"),
+    )
+    jobs.enqueue_backfill(tmp_path, job)
+    monkeypatch.setattr(am, "_drain_deadline", lambda hhmm: None)
+    drained = []
+    monkeypatch.setattr(am, "_drain_jobs", lambda *a, **k: drained.append(a))
+    ns = _ns(
+        tmp_path,
+        [
+            "collect",
+            "--dataset",
+            "metrics",
+            "--symbols",
+            "BTCUSDT",
+            "--start",
+            "2024-01-16",
+            "--end",
+            "2024-01-16",
+            "--execute",
+            "--drain-jobs-until",
+            "21:00",
+        ],
+    )
+    ns.downloader = Fake([date(2024, 1, 16)])
+    ns.handler(ns)
+    assert drained == []
+    assert jobs.pending_jobs(tmp_path) == [job]
+    assert "backfill job=" not in capsys.readouterr().out
