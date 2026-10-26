@@ -22,6 +22,8 @@ VENUE_RULES_DIR: Path = FUTURES_DATA_DIR / "venue_rules"
 LIVE_CAPTURE_DIR: Path = DATA_DIR / "live_capture"
 """Root of live-only captured market sources (never re-downloadable); backed up verbatim, never auto-pruned."""
 PUBLIC_ARCHIVE_DIR: Path = DATA_DIR / "public_archive"
+VPS_MIRROR_DIR: Path = DATA_DIR / "mirror" / "vps"
+"""Isolated local mirror of live-only VPS data; never the local live/state paths."""
 
 
 def _safe_symbol(symbol: str) -> str:
