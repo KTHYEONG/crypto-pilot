@@ -228,6 +228,8 @@ def _run_prune(args: argparse.Namespace) -> None:
 
 def add_archive_commands(archive_parser: argparse.ArgumentParser) -> None:
     """Register ``collect``, ``status`` and ``prune`` on the ``archive`` parser."""
+    from src.market_data.public_archive.catalog import TAPE_SLICE_HOURS
+
     subparsers = archive_parser.add_subparsers(dest="archive_command", required=True)
 
     collect = subparsers.add_parser("collect", help="Mirror Vision archives into compact parquet (dry-run by default)")
@@ -235,7 +237,7 @@ def add_archive_commands(archive_parser: argparse.ArgumentParser) -> None:
     collect.add_argument("--start", type=str, default=None)
     collect.add_argument("--end", type=str, default=None)
     collect.add_argument("--symbols", type=str, default="all")
-    collect.add_argument("--slice-hours", nargs=2, type=int, default=[23, 24])
+    collect.add_argument("--slice-hours", nargs=2, type=int, default=list(TAPE_SLICE_HOURS))
     collect.add_argument("--workers", type=int, default=4)
     collect.add_argument("--execute", action="store_true", default=False)
     collect.add_argument("--root", type=str, default=None)
