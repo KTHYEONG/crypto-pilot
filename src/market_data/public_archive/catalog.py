@@ -55,6 +55,9 @@ AGG_TRADES_COLUMNS: tuple[str, ...] = (
 
 HISTORY_START: date = date(2021, 1, 1)
 
+# Window must contain the live execution window; a cycle crossing 00:00 UTC is not covered and Part 3 must exclude it.
+TAPE_SLICE_HOURS: tuple[int, int] = (23, 24)
+
 
 @dataclass(frozen=True, slots=True)
 class MaskPolicy:
@@ -66,10 +69,11 @@ class MaskPolicy:
 MASK_POLICIES: Mapping[str, MaskPolicy] = {
     "metrics": MaskPolicy(breadth=50, preroll_days=30, start=date(2021, 1, 1)),
     "bookDepth": MaskPolicy(breadth=30, preroll_days=30, start=date(2023, 1, 1)),
-    "aggTrades": MaskPolicy(breadth=20, preroll_days=30, start=date(2023, 1, 1)),
+    # Mirrors LiveSettings.exec_depth_candidate_breadth so tape and exec depth share the PIT top-volume set.
+    "aggTrades": MaskPolicy(breadth=30, preroll_days=30, start=date(2023, 1, 1)),
 }
 
-DEFAULT_DATASETS: tuple[str, ...] = ("metrics", "bookDepth")
+DEFAULT_DATASETS: tuple[str, ...] = ("metrics", "bookDepth", "aggTrades")
 
 
 @dataclass(frozen=True, slots=True)

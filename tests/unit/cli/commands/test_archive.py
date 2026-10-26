@@ -12,7 +12,7 @@ import pytest
 
 from src.cli.commands.archive import add_archive_commands
 from src.cli.main import build_root_parser
-from src.market_data.public_archive.catalog import daily_key
+from src.market_data.public_archive.catalog import TAPE_SLICE_HOURS, daily_key
 from src.market_data.public_archive.store import load_coverage
 
 _METRICS_HEADER = (
@@ -71,6 +71,12 @@ def _collect_ns(tmp_path: Path, argv: list[str]) -> argparse.Namespace:
     add_archive_commands(parser)
     ns = parser.parse_args([*argv, "--root", str(tmp_path)])
     return ns
+
+
+def test_slice_hours_default_follows_catalog_constant() -> None:
+    parser = argparse.ArgumentParser()
+    add_archive_commands(parser)
+    assert parser.parse_args(["collect"]).slice_hours == list(TAPE_SLICE_HOURS)
 
 
 def test_dry_run_default_writes_nothing(tmp_path: Path) -> None:
@@ -155,6 +161,7 @@ def test_explicit_symbols_pass_through(tmp_path: Path, monkeypatch: pytest.Monke
     assert captured == {
         "metrics": ["BTCUSDT", "ETHUSDT"],
         "bookDepth": ["BTCUSDT", "ETHUSDT"],
+        "aggTrades": ["BTCUSDT", "ETHUSDT"],
     }
 
 
@@ -307,6 +314,7 @@ def test_each_dataset_uses_its_bucket_universe(tmp_path: Path, monkeypatch: pyte
     assert captured == {
         "metrics": ["DELISTEDUSDT"],
         "bookDepth": ["DEPTHUSDT"],
+        "aggTrades": ["DEPTHUSDT"],
     }
 
 
@@ -494,13 +502,58 @@ def test_all_means_default_datasets(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     out = capsys.readouterr().out
     assert "plan dataset=metrics" in out
     assert "plan dataset=bookDepth" in out
-    assert "plan dataset=aggTrades" not in out
+    assert "plan dataset=aggTrades" in out
 
 
-def test_aggtrades_explicit_uses_breadth_twenty(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_collect_all_schedules_aggtrades_with_tape_slices(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.cli.commands import archive as archive_mod
+    from src.market_data.public_archive.service import CollectionPlan
+
+    symbols = ["BTCUSDT", "ETHUSDT"]
+    days = [date(2024, 1, 15), date(2024, 1, 16)]
+    _patch_census(monkeypatch, symbols)
+    monkeypatch.delenv("ARCHIVE_INCREMENTAL", raising=False)
+    captured: list[CollectionPlan] = []
+
+    class _Universe(FakeDownloader):
+        def __init__(self) -> None:
+            super().__init__(symbols, days)
+            self.keys.extend(daily_key("bookDepth", symbol, day) for symbol in symbols for day in days)
+
+        def list_all_symbols(self, **kwargs: object) -> list[str]:
+            del kwargs
+            return list(symbols)
+
+    def capture(
+        root: Path, datasets: list[str], plans: list[CollectionPlan],
+        allowed: dict[str, dict[str, frozenset[date]]] | None,
+    ) -> None:
+        captured.extend(plans)
+
+    monkeypatch.setattr(archive_mod, "_print_plan", capture)
+    ns = _collect_ns(tmp_path, ["collect", "--dataset", "all", "--end", "2024-01-16"])
+    ns.downloader = _Universe()
+    ns.handler(ns)
+
+    assert [(plan.dataset, plan.symbol) for plan in captured] == [
+        (dataset, symbol) for dataset in ("metrics", "bookDepth", "aggTrades") for symbol in symbols
+    ]
+    for plan in captured:
+        assert plan.days == tuple(days)
+        if plan.dataset == "aggTrades":
+            assert plan.slice_hours == TAPE_SLICE_HOURS
+        else:
+            assert plan.slice_hours is None
+    assert ns.downloader.fetch_calls == []
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_aggtrades_explicit_uses_breadth_thirty(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from src.market_data.public_archive import service
 
-    symbols = [f"S{i:02d}USDT" for i in range(25)]
+    symbols = [f"S{i:02d}USDT" for i in range(35)]
     _patch_census(monkeypatch, symbols)
     captured: dict[str, object] = {}
 
@@ -518,8 +571,8 @@ def test_aggtrades_explicit_uses_breadth_twenty(tmp_path: Path, monkeypatch: pyt
     ns.handler(ns)
     allowed = captured["allowed"]
     assert set(allowed.keys()) == {"aggTrades"}
-    assert captured["symbols"] == {"aggTrades": symbols[:20]}
-    assert set(allowed["aggTrades"]) == set(symbols[:20])
+    assert captured["symbols"] == {"aggTrades": symbols[:30]}
+    assert set(allowed["aggTrades"]) == set(symbols[:30])
     for days in allowed["aggTrades"].values():
         assert min(days) == date(2023, 1, 1)
 
