@@ -17,6 +17,7 @@ from tests.unit.application._fill_calibration_helpers import (
     _ts,
     _request,
     _toy_parts,
+    _install_backtest,
     _install_tape,
     _slice_frame,
     _coverage_row,
@@ -108,11 +109,13 @@ def test_paper_confusion_uses_observed_queue(tmp_path: Path, monkeypatch: pytest
     assert paper_fills == pytest.approx({"through_only": 0.0, "queue_observed": 2 / 5, "front_of_queue": 1.0})
 
 
-def test_non_paper_run_dir_rejected(tmp_path: Path) -> None:
+def test_non_paper_run_dir_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _install_backtest(monkeypatch, _toy_parts())
+    _install_tape(monkeypatch, tmp_path / "archive", {}, {})
     run_dir = tmp_path / "run"
     run_dir.mkdir()
     (run_dir / "run_manifest.json").write_text(json.dumps({"mode": "live"}), encoding="utf-8")
-    with pytest.raises(DataIntegrityError):
+    with pytest.raises(DataIntegrityError, match="non-paper run directory"):
         run_fill_calibration(
             _request(tmp_path, paper_run_dir=run_dir, live_capture_root=tmp_path), output_dir=tmp_path / "out"
         )
