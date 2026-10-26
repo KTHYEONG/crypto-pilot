@@ -475,8 +475,8 @@ def test_collect_incremental_env_and_explicit_start(
     assert ns.downloader.fetch_calls == []
 
 
-def _mask_census(symbols: list[str], periods: int = 120) -> tuple:
-    index = pd.DatetimeIndex(pd.date_range("2021-01-01", periods=periods, freq="D", tz="UTC"), tz="UTC")
+def _mask_census(symbols: list[str], periods: int = 1500) -> tuple:
+    index = pd.DatetimeIndex(pd.date_range("2020-01-01", periods=periods, freq="D", tz="UTC"), tz="UTC")
     close = pd.DataFrame(dict.fromkeys(symbols, 100.0), index=index, dtype="float64")
     qv = pd.DataFrame(dict.fromkeys(symbols, 10_000_000.0), index=index, dtype="float64")
     return close, qv
@@ -529,6 +529,7 @@ def test_collect_all_schedules_aggtrades_with_tape_slices(
     def capture(
         root: Path, datasets: list[str], plans: list[CollectionPlan],
         allowed: dict[str, dict[str, frozenset[date]]] | None,
+        census_span: object = None,
     ) -> None:
         captured.extend(plans)
 
@@ -662,8 +663,11 @@ def test_breadth_override_applies(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
 
 
 def test_mask_empty_allowed_plans_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture) -> None:
-    _patch_census(monkeypatch, ["BTCUSDT"])
-    ns = _collect_ns(tmp_path, ["collect", "--dataset", "metrics", "--end", "2020-01-05"])
+    import src.market_data.public_archive.mask as mask_mod
+
+    close, qv = _mask_census(["BTCUSDT"])
+    monkeypatch.setattr(mask_mod, "load_daily_census", lambda path: (close, qv * 0.0))
+    ns = _collect_ns(tmp_path, ["collect", "--dataset", "metrics", "--end", "2024-01-16"])
     ns.downloader = FakeDownloader(["BTCUSDT"], [date(2024, 1, 15)])
     ns.handler(ns)
     out = capsys.readouterr().out
@@ -749,3 +753,130 @@ def test_prune_reports_busy_without_failing(tmp_path: Path, capsys: pytest.Captu
     assert payload["prune_blocked"] is True
     assert payload["blocked_reason"] == "busy"
     assert target.exists()
+
+
+def _short_census() -> tuple:
+    index = pd.DatetimeIndex(pd.date_range("2025-08-22", "2026-10-25", freq="D", tz="UTC"), tz="UTC")
+    close = pd.DataFrame({"BTCUSDT": 100.0}, index=index, dtype="float64")
+    qv = pd.DataFrame({"BTCUSDT": 10_000_000.0}, index=index, dtype="float64")
+    return close, qv
+
+
+@pytest.mark.parametrize("incremental", ["0", "1"])
+def test_collect_rejects_short_census(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture,
+    incremental: str,
+) -> None:
+    import src.market_data.public_archive.mask as mask_mod
+
+    close, qv = _short_census()
+    monkeypatch.setenv("ARCHIVE_INCREMENTAL", incremental)
+    calls: list[str] = []
+
+    def fake_census(path):
+        del path
+        return close, qv
+
+    monkeypatch.setattr(mask_mod, "load_daily_census", fake_census)
+
+    class _Tracking(FakeDownloader):
+        def list_all_symbols(self, **kwargs: object) -> list[str]:
+            calls.append("listing")
+            return ["BTCUSDT"]
+
+    from src.market_data.public_archive import service
+
+    def no_plan(*args: object, **kwargs: object) -> list:
+        calls.append("plan")
+        return []
+
+    monkeypatch.setattr(service, "plan_collection", no_plan)
+    ns = _collect_ns(tmp_path, [
+        "collect", "--dataset", "aggTrades", "--start", "2023-01-01", "--end", "2024-01-15",
+    ])
+    ns.downloader = _Tracking(["BTCUSDT"], [date(2024, 1, 15)])
+    with pytest.raises(SystemExit) as exc:
+        ns.handler(ns)
+    assert exc.value.code == 2
+    out = capsys.readouterr().out
+    assert "status=CENSUS_SHORT" in out
+    assert "census_first=2025-08-22" in out
+    assert "required_first=2022-10-03" in out
+    assert calls == []
+
+
+def test_census_root_override_is_used(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture,
+) -> None:
+    import src.market_data.public_archive.mask as mask_mod
+
+    short_close, short_qv = _short_census()
+    long_close, long_qv = _mask_census(["BTCUSDT"])
+
+    def fake_census(path):
+        if str(path).endswith("long"):
+            return long_close, long_qv
+        return short_close, short_qv
+
+    monkeypatch.setattr(mask_mod, "load_daily_census", fake_census)
+    ns = _collect_ns(tmp_path, [
+        "collect", "--dataset", "aggTrades", "--start", "2023-01-05", "--end", "2023-01-07",
+        "--census-root", str(tmp_path / "long"),
+    ])
+    ns.downloader = FakeDownloader(["BTCUSDT"], [date(2023, 1, 5), date(2023, 1, 6), date(2023, 1, 7)])
+    ns.handler(ns)
+    out = capsys.readouterr().out
+    assert "allowed_days=3" in out
+    assert "plan dataset=aggTrades symbols=1 days=3" in out
+    assert "census_first=2020-01-01" in out
+
+
+def test_incremental_mode_checks_only_retry_horizon(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture,
+) -> None:
+    import src.market_data.public_archive.mask as mask_mod
+
+    close, qv = _short_census()
+    monkeypatch.setattr(mask_mod, "load_daily_census", lambda path: (close, qv))
+    monkeypatch.setenv("ARCHIVE_INCREMENTAL", "1")
+    ns = _collect_ns(tmp_path, ["collect", "--dataset", "metrics", "--end", "2026-10-25"])
+    ns.downloader = FakeDownloader(["BTCUSDT"], [date(2026, 10, 25)])
+    ns.handler(ns)
+    out = capsys.readouterr().out
+    assert "plan dataset=metrics" in out
+    assert "allowed_days=15" in out
+
+
+def test_collect_rejects_stale_census_before_listing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture,
+) -> None:
+    import src.market_data.public_archive.mask as mask_mod
+
+    close, qv = _short_census()
+    monkeypatch.setattr(mask_mod, "load_daily_census", lambda path: (close.iloc[:-25], qv.iloc[:-25]))
+    ns = _collect_ns(tmp_path, [
+        "collect", "--dataset", "aggTrades", "--start", "2026-01-01", "--end", "2026-10-25",
+    ])
+
+    class _NoListing(FakeDownloader):
+        def list_all_symbols(self, **kwargs: object) -> list[str]:
+            pytest.fail("stale census must be rejected before listing")
+
+    ns.downloader = _NoListing([], [])
+    with pytest.raises(SystemExit) as exc:
+        ns.handler(ns)
+    assert exc.value.code == 2
+    out = capsys.readouterr().out
+    assert "status=CENSUS_SHORT" in out
+    assert "required_last=2026-10-23" in out
+    assert "plan dataset=" not in out
+
+
+def test_collect_rejects_inverted_mask_range(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_census(monkeypatch, ["BTCUSDT"])
+    ns = _collect_ns(tmp_path, [
+        "collect", "--dataset", "metrics", "--start", "2024-01-16", "--end", "2024-01-15",
+    ])
+    ns.downloader = FakeDownloader([], [])
+    with pytest.raises(ValueError, match=r"first .* is after last"):
+        ns.handler(ns)

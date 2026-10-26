@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -8,9 +9,60 @@ import pandas as pd
 
 from src.common.errors import DataIntegrityError
 from src.market_data.public_archive.catalog import is_perpetual_usdt
-from src.strategy.universe import build_pit_roster
+from src.strategy.universe import PIT_ROSTER_LOOKBACK_DAYS, build_pit_roster
 
 _QUOTE_CANDIDATES: tuple[str, ...] = ("quote_volume", "quote_vol")
+
+
+@dataclass(frozen=True, slots=True)
+class CensusSpan:
+    root: Path
+    first_day: date
+    last_day: date
+    symbols: int
+
+
+def census_span(daily_close: pd.DataFrame, *, root: Path) -> CensusSpan:
+    """Calendar span and symbol count of a loaded daily census."""
+    if daily_close.empty:
+        raise DataIntegrityError(f"empty daily census: {root}")
+    idx = daily_close.index
+    first_day = pd.Timestamp(idx.min()).date()
+    last_day = pd.Timestamp(idx.max()).date()
+    return CensusSpan(root=Path(root), first_day=first_day, last_day=last_day, symbols=len(daily_close.columns))
+
+
+class CensusTooShortError(DataIntegrityError):
+    """The census cannot support a PIT mask over the requested days."""
+
+    def __init__(
+        self,
+        span: CensusSpan,
+        required_first: date,
+        required_last: date,
+        message: str | None = None,
+    ) -> None:
+        self.span = span
+        self.required_first = required_first
+        self.required_last = required_last
+        super().__init__(
+            message
+            or (
+                f"census too short: root={span.root} "
+                f"census_first={span.first_day} census_last={span.last_day} "
+                f"required_first={required_first} required_last={required_last}"
+            )
+        )
+
+
+def require_census_coverage(span: CensusSpan, *, first: date, last: date, lake_lag_days: int = 2) -> None:
+    """Raise CensusTooShortError unless the census covers first − roster lookback through last − lake_lag_days."""  # noqa: RUF002
+    if first > last:
+        raise ValueError(f"first {first} is after last {last}")
+    required_first = first - timedelta(days=PIT_ROSTER_LOOKBACK_DAYS)
+    required_last = last - timedelta(days=lake_lag_days)
+    if span.first_day > required_first or span.last_day < required_last:
+        raise CensusTooShortError(span, required_first, required_last)
 
 
 def _coerce_ts(raw: pd.Series) -> pd.Series:
