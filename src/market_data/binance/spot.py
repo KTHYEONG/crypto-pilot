@@ -120,8 +120,7 @@ class BinanceSpotClient:
                     self.logger.error("Error (%d/5) for %s: %s", attempt + 1, symbol, e)
                     time.sleep(attempt + 1)
             else:
-                self.logger.error("Failed chunks for %s. Skipping.", symbol)
-                break
+                raise OSError(f"spot kline retries exhausted: symbol={symbol} timeframe={timeframe}")
 
             if not data:
                 break
