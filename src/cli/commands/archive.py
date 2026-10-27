@@ -437,13 +437,14 @@ def _drain_jobs(
 
 
 def _run_collect(args: argparse.Namespace) -> None:
-    from src.market_data.public_archive import store
+    from src.market_data.public_archive import service, store
 
     if not args.execute:
         _collect_under_lock(args)
         return
     try:
         with store.archive_lock(_root(args), wait_s=float(getattr(args, "lock_wait_s", 1800.0)), holder="collect"):
+            service.remove_stale_staging(_root(args))
             _collect_under_lock(args)
     except store.ArchiveBusyError as exc:
         print(f"archive collect status=BUSY holder={exc.holder or 'null'}")  # noqa: T201
