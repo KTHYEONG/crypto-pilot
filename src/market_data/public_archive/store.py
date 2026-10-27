@@ -3,8 +3,10 @@ from __future__ import annotations
 import contextlib
 import fcntl
 import json
+import logging
 import math
 import os
+import shutil
 import socket
 import threading
 import time
@@ -18,6 +20,10 @@ import pandas as pd
 
 from src.common.errors import DataIntegrityError
 from src.common.parquet_io import write_parquet_atomic
+
+logger = logging.getLogger(__name__)
+
+STAGING_PREFIX = ".archive-"
 
 
 class ArchiveBusyError(Exception):
@@ -93,6 +99,18 @@ def archive_lock(root: Path, *, wait_s: float, holder: str = "") -> Iterator[Non
         if fd != -1:
             with contextlib.suppress(OSError):
                 os.close(fd)
+
+
+def remove_stale_staging(root: Path) -> int:
+    """Delete month staging dirs a killed collect left behind; caller holds the archive lock."""
+    removed = 0
+    for path in Path(root).glob(f"{STAGING_PREFIX}*"):
+        if path.is_dir():
+            shutil.rmtree(path, ignore_errors=True)
+            removed += 1
+    if removed:
+        logger.info("[DATA] stage=public_archive stale_staging_removed count=%d", removed)
+    return removed
 
 
 def sealed_months(
