@@ -16,6 +16,9 @@ import pyarrow.parquet as pq
 from src.common.errors import DataIntegrityError
 from src.market_data.public_archive import catalog, store
 
+# mkstemp creates 0600; the Drive backup runs as a different user than the root container, so it must stay readable.
+_PARTITION_MODE = 0o644
+
 
 @dataclass(frozen=True, slots=True)
 class ImportReport:
@@ -70,6 +73,7 @@ def _copy_atomic(src: Path, dest: Path) -> None:
     os.close(fd)
     try:
         shutil.copyfile(src, tmp_name)
+        os.chmod(tmp_name, _PARTITION_MODE)
         with open(tmp_name, "rb") as handle:
             os.fsync(handle.fileno())
         os.replace(tmp_name, dest)

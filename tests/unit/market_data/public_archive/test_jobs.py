@@ -121,3 +121,10 @@ def test_filename_mismatch_and_finish_errors(tmp_path: Path, monkeypatch: pytest
     with pytest.raises(OSError, match="replace failed"):
         jobs.enqueue_backfill(tmp_path, _job("bookDepth"))
     assert list(path.parent.glob(".job-*")) == []
+
+
+def test_job_files_are_readable_by_the_backup_user(tmp_path: Path) -> None:
+    path = jobs.enqueue_backfill(tmp_path, _job())
+    assert path.stat().st_mode & 0o044 == 0o044
+    done = jobs.finish_job(tmp_path, _job().job_id, summary={"ok": 1})
+    assert done.stat().st_mode & 0o044 == 0o044
