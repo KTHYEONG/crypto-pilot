@@ -145,3 +145,12 @@ def test_copy_failure_leaves_no_partition(tmp_path: Path, monkeypatch: pytest.Mo
     with pytest.raises(OSError, match="copy failed"):
         importer.import_archive(src, dst, datasets=["metrics"])
     assert not list(dst.rglob("*.parquet"))
+
+
+def test_copied_partitions_are_readable_by_the_backup_user(tmp_path: Path) -> None:
+    src, dst = tmp_path / "src", tmp_path / "dst"
+    _write(src, (1,), dataset="aggTrades")
+    importer.import_archive(src, dst, datasets=["aggTrades"])
+    for kind in ("derived", "slice"):
+        mode = store.partition_path(dst, "aggTrades", "BTCUSDT", "202401", kind=kind).stat().st_mode
+        assert mode & 0o044 == 0o044

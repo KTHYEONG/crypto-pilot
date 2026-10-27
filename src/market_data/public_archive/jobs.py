@@ -114,6 +114,7 @@ def _write_atomic(path: Path, payload: dict[str, object]) -> None:
             handle.write(json.dumps(payload, sort_keys=True))
             handle.flush()
             os.fsync(handle.fileno())
+        os.chmod(tmp_name, 0o644)
         os.replace(tmp_name, path)
     except BaseException:
         import contextlib
