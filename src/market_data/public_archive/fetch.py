@@ -4,9 +4,13 @@ import hashlib
 import io
 import re
 import zipfile
+from collections.abc import Iterator
+from typing import IO
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
+import pyarrow.csv as pacsv
 
 from src.common.errors import DataIntegrityError
 from src.market_data.binance.vision import BinanceVisionDownloader
@@ -37,6 +41,19 @@ _AGG_HEADERLESS_COLUMNS = (
     "transact_time",
     "is_buyer_maker",
 )
+
+_AGG_ARROW_TYPES: dict[str, pa.DataType] = {
+    "agg_trade_id": pa.int64(),
+    "price": pa.float64(),
+    "quantity": pa.float64(),
+    "first_trade_id": pa.int64(),
+    "last_trade_id": pa.int64(),
+    "transact_time": pa.int64(),
+    "is_buyer_maker": pa.bool_(),
+}
+
+# Bounds per-day parse memory independently of the day's trade count (heavy days reach ~8M rows).
+AGG_STREAM_BLOCK_BYTES: int = 1 << 22
 
 _KNOWN_FIRST_COLUMNS = frozenset({
     "create_time",
@@ -127,16 +144,44 @@ def fetch_verified_zip(
     return zip_bytes, actual
 
 
+def _single_member(zf: zipfile.ZipFile) -> str:
+    members = [name for name in zf.namelist() if name.endswith(".csv")]
+    if len(members) != 1:
+        raise DataIntegrityError(f"expected one csv member, found {len(members)}")
+    return members[0]
+
+
+def _has_header(handle: IO[bytes]) -> bool:
+    first_line = handle.readline().decode("utf-8-sig", errors="strict")
+    first_cell = first_line.split(",", 1)[0].strip().strip('"').strip("'").lower()
+    return first_cell in _KNOWN_FIRST_COLUMNS
+
+
+def iter_agg_trade_batches(zip_bytes: bytes, *, block_bytes: int = AGG_STREAM_BLOCK_BYTES) -> Iterator[pa.RecordBatch]:
+    """Typed aggTrades record batches in file order; pyarrow errors propagate for rows that do not parse."""
+    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+        member = _single_member(zf)
+        with zf.open(member) as handle:
+            named = _has_header(handle)
+        with zf.open(member) as handle:
+            reader = pacsv.open_csv(
+                handle,
+                read_options=pacsv.ReadOptions(
+                    column_names=None if named else list(_AGG_HEADERLESS_COLUMNS), block_size=block_bytes
+                ),
+                convert_options=pacsv.ConvertOptions(
+                    column_types=_AGG_ARROW_TYPES, include_columns=list(_AGG_HEADERLESS_COLUMNS)
+                ),
+            )
+            yield from reader
+
+
 def read_single_csv(zip_bytes: bytes) -> pd.DataFrame:
     """Read the single CSV member of a Vision zip."""
     with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
-        members = [name for name in zf.namelist() if name.endswith(".csv")]
-        if len(members) != 1:
-            raise DataIntegrityError(f"expected one csv member, found {len(members)}")
-        with zf.open(members[0]) as handle:
-            first_line = handle.readline().decode("utf-8-sig", errors="strict")
-            first_cell = first_line.split(",", 1)[0].strip().strip('"').strip("'").lower()
-            named = first_cell in _KNOWN_FIRST_COLUMNS
+        member = _single_member(zf)
+        with zf.open(member) as handle:
+            named = _has_header(handle)
             handle.seek(0)
             frame = pd.read_csv(handle, header=0 if named else None, low_memory=False)
     frame = _coerce_agg_frame(frame, named=named)

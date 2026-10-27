@@ -1157,3 +1157,64 @@ def test_commit_guard_refuses_sealed_slice(tmp_path: Path) -> None:
         frame.to_parquet(src)
         detail = runner.commit_month(plan, [day], Path(staging), [(day, frame)], [(day, src)])
     assert detail == "sealed_month"
+
+
+def _agg_rows_zip(day: date, rows: list[tuple[int, float, float, str]], *, header: bool = True) -> bytes:
+    start = int(pd.Timestamp(day, tz="UTC").value // 10**6)
+    lines = [f"{i},{price},{qty},{i},{i},{start + offset},{maker}" for i, (offset, price, qty, maker) in enumerate(rows)]
+    return _zip_csv(("\n".join([_AGG_HEADER, *lines]) if header else "\n".join(lines)) + "\n")
+
+
+@pytest.mark.parametrize(
+    "rows",
+    [
+        [(23 * 3_600_000 + 5_000, 101.0, 1.0, "true"), (1_000, 100.0, 2.0, "false")],
+        [(1_000, 100.0, 2.0, " true "), (23 * 3_600_000, 101.0, 1.0, " false ")],
+    ],
+    ids=["unordered_rows", "padded_maker"],
+)
+def test_aggtrades_fallback_matches_full_frame_path(tmp_path: Path, rows: list[tuple[int, float, float, str]]) -> None:
+    from src.market_data.public_archive import derive, fetch
+
+    day = date(2024, 1, 15)
+    payload = _agg_rows_zip(day, rows)
+    fake = FakeDownloader()
+    fake.add_zip(daily_key("aggTrades", "BTCUSDT", day), payload)
+    report = execute_plan(fake, [CollectionPlan("aggTrades", "BTCUSDT", (day,), (23, 24))], root=tmp_path)
+    assert report.ok == 1
+    raw = fetch.read_single_csv(payload)
+    expected_bars = derive.derive_agg_trades(raw, symbol="BTCUSDT", day=day)
+    expected_slice = derive.slice_agg_trades(raw, day=day, start_hour_utc=23, end_hour_utc=24)
+    pd.testing.assert_frame_equal(pd.read_parquet(tmp_path / "aggTrades/BTCUSDT/202401.parquet"), expected_bars)
+    pd.testing.assert_frame_equal(pd.read_parquet(tmp_path / "aggTrades_slice/BTCUSDT/202401.parquet"), expected_slice)
+
+
+def test_aggtrades_invalid_row_fails_with_full_frame_error(tmp_path: Path) -> None:
+    day = date(2024, 1, 15)
+    fake = FakeDownloader()
+    fake.add_zip(daily_key("aggTrades", "BTCUSDT", day), _agg_rows_zip(day, [(1_000, 0.0, 1.0, "true")]))
+    report = execute_plan(fake, [CollectionPlan("aggTrades", "BTCUSDT", (day,), (23, 24))], root=tmp_path)
+    assert report.failed == 1
+    row = load_coverage(tmp_path, "aggTrades")[("BTCUSDT", day)]
+    assert row.status == "failed"
+    assert row.detail is not None
+    assert "non-positive" in row.detail
+
+
+def test_aggtrades_stream_path_skips_full_frame_read(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from src.market_data.public_archive import fetch
+
+    def forbid(*args: object, **kwargs: object) -> None:
+        raise AssertionError("ordered valid day must not materialize the full frame")
+
+    monkeypatch.setattr(fetch, "read_single_csv", forbid)
+    day = date(2024, 1, 15)
+    fake = FakeDownloader()
+    fake.add_zip(
+        daily_key("aggTrades", "BTCUSDT", day),
+        _agg_rows_zip(day, [(1_000, 100.0, 2.0, "false"), (23 * 3_600_000, 101.0, 1.0, "true")], header=False),
+    )
+    report = execute_plan(fake, [CollectionPlan("aggTrades", "BTCUSDT", (day,), (23, 24))], root=tmp_path)
+    assert report.ok == 1
+    assert len(pd.read_parquet(tmp_path / "aggTrades/BTCUSDT/202401.parquet")) == 2
+    assert len(pd.read_parquet(tmp_path / "aggTrades_slice/BTCUSDT/202401.parquet")) == 1

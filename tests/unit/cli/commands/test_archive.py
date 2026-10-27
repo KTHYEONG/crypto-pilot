@@ -116,6 +116,22 @@ def test_execute_success_exits_zero(tmp_path: Path) -> None:
     assert (tmp_path / "metrics" / "BTCUSDT" / "202401.parquet").exists()
 
 
+def test_execute_removes_staging_left_by_killed_run(tmp_path: Path) -> None:
+    stale = tmp_path / ".archive-killed"
+    (stale / "derived.backup").mkdir(parents=True)
+    keep = tmp_path / ".archive-note"
+    keep.write_text("not a staging dir", encoding="utf-8")
+    ns = _collect_ns(tmp_path, [
+        "collect", "--dataset", "metrics", "--symbols", "BTCUSDT",
+        "--start", "2024-01-15", "--end", "2024-01-15", "--execute",
+    ])
+    ns.downloader = FakeDownloader(["BTCUSDT"], [date(2024, 1, 15)])
+    ns.handler(ns)
+    assert not stale.exists()
+    assert keep.exists()
+    assert (tmp_path / "metrics" / "BTCUSDT" / "202401.parquet").exists()
+
+
 def test_aggtrades_uses_bucket_universe(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
     days = [date(2024, 1, 15), date(2024, 1, 16)]
 

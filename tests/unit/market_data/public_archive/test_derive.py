@@ -6,9 +6,13 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import pyarrow as pa
+
 from src.common.errors import DataIntegrityError
 from src.market_data.public_archive.derive import (
+    StreamFallbackError,
     derive_agg_trades,
+    derive_agg_trades_streamed,
     derive_book_depth,
     derive_metrics,
     slice_agg_trades,
@@ -189,3 +193,123 @@ def test_slice_window_bounds() -> None:
         ms(day_start + pd.Timedelta(hours=23)),
         ms(day_start + pd.Timedelta(hours=23, minutes=59, seconds=59)),
     ]
+
+
+_ARROW_TYPES = {
+    "agg_trade_id": pa.int64(),
+    "price": pa.float64(),
+    "quantity": pa.float64(),
+    "first_trade_id": pa.int64(),
+    "last_trade_id": pa.int64(),
+    "transact_time": pa.int64(),
+    "is_buyer_maker": pa.bool_(),
+}
+
+
+def _random_trades(n: int, *, seed: int = 7) -> pd.DataFrame:
+    rng = np.random.default_rng(seed)
+    times = np.sort(rng.integers(_DAY_START_MS, _DAY_START_MS + 86_400_000, size=n))
+    times[10:14] = times[10]
+    first = np.cumsum(rng.integers(1, 4, size=n))
+    return pd.DataFrame({
+        "agg_trade_id": np.arange(n, dtype="int64"),
+        "price": 100.0 * np.exp(np.cumsum(rng.normal(0, 1e-3, size=n))),
+        "quantity": rng.uniform(0.01, 5.0, size=n),
+        "first_trade_id": first,
+        "last_trade_id": first + rng.integers(0, 3, size=n),
+        "transact_time": times,
+        "is_buyer_maker": rng.random(n) < 0.5,
+    })
+
+
+def _batches(frame: pd.DataFrame, size: int) -> list[pa.RecordBatch]:
+    schema = pa.schema(list(_ARROW_TYPES.items()))
+    table = pa.Table.from_pandas(frame, schema=schema, preserve_index=False)
+    return table.to_batches(max_chunksize=size)
+
+
+@pytest.mark.parametrize("batch_rows", [1, 7, 333, 10_000])
+def test_streamed_matches_full_frame_across_batch_boundaries(batch_rows: int) -> None:
+    frame = _random_trades(4_000)
+    bars, sliced = derive_agg_trades_streamed(_batches(frame, batch_rows), day=_DAY, slice_hours=(23, 24))
+    expected = derive_agg_trades(frame, symbol="BTCUSDT", day=_DAY)
+    pd.testing.assert_frame_equal(bars, expected, check_exact=False, rtol=1e-12, atol=1e-15)
+    expected_slice = slice_agg_trades(frame, day=_DAY, start_hour_utc=23, end_hour_utc=24)
+    assert sliced is not None
+    pd.testing.assert_frame_equal(sliced, expected_slice, check_exact=True)
+
+
+def test_streamed_rv_chains_within_bar_across_batches() -> None:
+    frame = _agg_frame([
+        (_DAY_START_MS + 1_000, 100.0, 1.0, False),
+        (_DAY_START_MS + 2_000, 110.0, 1.0, False),
+        (_DAY_START_MS + 3_000, 99.0, 1.0, True),
+    ])
+    bars, sliced = derive_agg_trades_streamed(_batches(frame, 1), day=_DAY, slice_hours=None)
+    expected = (np.log(110.0) - np.log(100.0)) ** 2 + (np.log(99.0) - np.log(110.0)) ** 2
+    assert bars["rv_trade"].iloc[0] == pytest.approx(expected, rel=1e-12)
+    assert sliced is None
+
+
+def test_streamed_slice_without_window_rows_is_typed_empty() -> None:
+    frame = _agg_frame([(_DAY_START_MS + 1_000, 100.0, 1.0, False)])
+    _, sliced = derive_agg_trades_streamed(_batches(frame, 10), day=_DAY, slice_hours=(23, 24))
+    assert sliced is not None
+    assert sliced.empty
+    assert sliced.dtypes.equals(slice_agg_trades(frame, day=_DAY, start_hour_utc=0, end_hour_utc=1).iloc[:0].dtypes)
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda f: f.assign(transact_time=f["transact_time"].iloc[::-1].to_numpy()),
+        lambda f: f.assign(price=np.r_[f["price"].iloc[:-1].to_numpy(), 0.0]),
+        lambda f: f.assign(transact_time=np.r_[f["transact_time"].iloc[:-1].to_numpy(), _DAY_START_MS + 86_400_000]),
+        lambda f: f.assign(last_trade_id=f["first_trade_id"] - 1),
+        lambda f: f.iloc[:0],
+    ],
+    ids=["unordered", "nonpositive_price", "outside_day", "trade_id_range", "empty"],
+)
+def test_streamed_falls_back_instead_of_deriving_invalid_input(mutate) -> None:
+    frame = mutate(_random_trades(50))
+    with pytest.raises(StreamFallbackError):
+        derive_agg_trades_streamed(_batches(frame, 7), day=_DAY, slice_hours=(23, 24))
+
+
+def test_streamed_unordered_across_batch_boundary_falls_back() -> None:
+    frame = _random_trades(20)
+    swapped = pd.concat([frame.iloc[10:], frame.iloc[:10]], ignore_index=True)
+    with pytest.raises(StreamFallbackError):
+        derive_agg_trades_streamed(_batches(swapped, 10), day=_DAY, slice_hours=None)
+
+
+def test_streamed_null_field_falls_back() -> None:
+    batch = _batches(_random_trades(20).iloc[:5], 5)[0]
+    nulled = batch.set_column(1, "price", pa.array([1.0, None, 1.0, 1.0, 1.0], type=pa.float64()))
+    with pytest.raises(StreamFallbackError):
+        derive_agg_trades_streamed([nulled], day=_DAY, slice_hours=None)
+
+
+def test_streamed_arrow_parse_error_falls_back() -> None:
+    def broken():
+        raise pa.ArrowInvalid("bad row")
+        yield
+
+    with pytest.raises(StreamFallbackError):
+        derive_agg_trades_streamed(broken(), day=_DAY, slice_hours=None)
+
+
+def test_streamed_rejects_invalid_slice_window() -> None:
+    with pytest.raises(ValueError, match="invalid slice window"):
+        derive_agg_trades_streamed([], day=_DAY, slice_hours=(5, 5))
+
+
+def test_streamed_skips_empty_batches_and_legacy_empty_slice_is_typed() -> None:
+    frame = _random_trades(30)
+    batches = _batches(frame, 10)
+    empty = batches[0].slice(0, 0)
+    bars, _ = derive_agg_trades_streamed([empty, *batches, empty], day=_DAY, slice_hours=None)
+    assert int(bars["n_agg_trades"].sum()) == 30
+    legacy = slice_agg_trades(frame.iloc[:0], day=_DAY, start_hour_utc=23, end_hour_utc=24)
+    assert legacy.empty
+    assert [str(d) for d in legacy.dtypes] == ["int64", "int64", "float64", "float64", "bool"]

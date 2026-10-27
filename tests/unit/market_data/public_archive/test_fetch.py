@@ -191,7 +191,8 @@ def test_fetch_verified_zip_accepts_non_ascii_filename_in_checksum() -> None:
     }
     downloader = _downloader_with(mapping)
     result = fetch_verified_zip(downloader, "data/futures/um/daily/metrics/币安人生USDT/f")
-    assert result is not None and result[1] == digest
+    assert result is not None
+    assert result[1] == digest
 
 
 def test_fetch_verified_zip_rejects_non_hex_checksum() -> None:
@@ -203,3 +204,27 @@ def test_fetch_verified_zip_rejects_non_hex_checksum() -> None:
     downloader = _downloader_with(mapping)
     with pytest.raises(DataIntegrityError, match="malformed checksum"):
         fetch_verified_zip(downloader, "data/futures/um/daily/metrics/BTCUSDT/f")
+
+
+def test_agg_batches_stream_in_blocks_for_header_and_headerless() -> None:
+    import pyarrow as pa
+
+    from src.market_data.public_archive.fetch import iter_agg_trade_batches
+
+    rows = "".join(f"{i},100.5,2.25,{i},{i},{1705270200000 + i},{'true' if i % 2 else 'false'}\n" for i in range(2_000))
+    for body in (f"{_AGG_HEADER}\n{rows}", rows):
+        batches = list(iter_agg_trade_batches(_zip_bytes({"a.csv": body}), block_bytes=4_096))
+        assert len(batches) > 1
+        table = pa.Table.from_batches(batches)
+        assert table.num_rows == 2_000
+        assert table.column("agg_trade_id").to_pylist() == list(range(2_000))
+        assert table.schema.field("is_buyer_maker").type == pa.bool_()
+        assert table.schema.field("transact_time").type == pa.int64()
+
+
+def test_agg_batches_require_single_csv_member() -> None:
+    from src.market_data.public_archive.fetch import iter_agg_trade_batches
+
+    payload = _zip_bytes({"a.csv": "x\n", "b.csv": "y\n"})
+    with pytest.raises(DataIntegrityError):
+        list(iter_agg_trade_batches(payload))

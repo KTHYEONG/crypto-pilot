@@ -5,6 +5,7 @@ import heapq
 import json
 import logging
 import os
+import shutil
 import tempfile
 import threading
 import time
@@ -23,6 +24,8 @@ from src.common.parquet_io import write_parquet_atomic
 from src.market_data.public_archive import catalog, derive, fetch, store
 
 logger = logging.getLogger(__name__)
+
+_STAGING_PREFIX = ".archive-"
 
 
 @dataclass(frozen=True, slots=True)
@@ -288,6 +291,28 @@ def plan_collection(
     return plans
 
 
+def _stream_agg_trades(
+    zip_bytes: bytes, day: date, slice_hours: tuple[int, int] | None
+) -> tuple[pd.DataFrame, pd.DataFrame | None] | None:
+    try:
+        return derive.derive_agg_trades_streamed(fetch.iter_agg_trade_batches(zip_bytes), day=day, slice_hours=slice_hours)
+    except derive.StreamFallbackError as exc:
+        logger.debug("[DATA] stage=public_archive stream_fallback day=%s reason=%s", day, exc)
+        return None
+
+
+def remove_stale_staging(root: Path) -> int:
+    """Delete month staging dirs a killed run left behind; caller holds the archive lock."""
+    removed = 0
+    for path in Path(root).glob(f"{_STAGING_PREFIX}*"):
+        if path.is_dir():
+            shutil.rmtree(path, ignore_errors=True)
+            removed += 1
+    if removed:
+        logger.info("[DATA] stage=public_archive stale_staging_removed count=%d", removed)
+    return removed
+
+
 def _derive_day(dataset: str, raw: pd.DataFrame, *, symbol: str, day: date) -> pd.DataFrame:
     if dataset == "metrics":
         return derive.derive_metrics(raw, symbol=symbol, day=day)
@@ -495,6 +520,10 @@ class _PlanRunner:
                 return _Skipped(day=day, kind="pending" if day >= self.recent_cutoff else "absent", detail=None)
             zip_bytes, sha = fetched
             del fetched
+            if plan.dataset == "aggTrades":
+                streamed = _stream_agg_trades(zip_bytes, day, plan.slice_hours)
+                if streamed is not None:
+                    return _Ready(day=day, frame=streamed[0], sliced=streamed[1], sha=sha)
             raw = fetch.read_single_csv(zip_bytes)
             del zip_bytes
             frame = _derive_day(plan.dataset, raw, symbol=plan.symbol, day=day)
@@ -614,7 +643,7 @@ class _PlanRunner:
                     self._stop = True
                     continue
                 self._started += len(days)
-            with tempfile.TemporaryDirectory(prefix=".archive-", dir=self.root) as directory:
+            with tempfile.TemporaryDirectory(prefix=_STAGING_PREFIX, dir=self.root) as directory:
                 self.run_month(plan, days, Path(directory))
 
     def run_symbol(self, group: list[CollectionPlan]) -> None:

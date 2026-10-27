@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from datetime import date
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
 
 from src.common.errors import DataIntegrityError
 
@@ -302,6 +304,16 @@ def derive_agg_trades(raw: pd.DataFrame, *, symbol: str, day: date) -> pd.DataFr
     return out[columns].sort_values("timestamp", kind="mergesort").reset_index(drop=True)
 
 
+def _empty_slice() -> pd.DataFrame:
+    return pd.DataFrame({
+        "transact_time_ms": pd.Series(dtype="int64"),
+        "agg_trade_id": pd.Series(dtype="int64"),
+        "price": pd.Series(dtype="float64"),
+        "quantity": pd.Series(dtype="float64"),
+        "is_buyer_maker": pd.Series(dtype="bool"),
+    })
+
+
 def slice_agg_trades(
     raw: pd.DataFrame, *, day: date, start_hour_utc: int, end_hour_utc: int
 ) -> pd.DataFrame:
@@ -311,15 +323,8 @@ def slice_agg_trades(
     _require_columns(
         raw, ("agg_trade_id", "price", "quantity", "transact_time", "is_buyer_maker")
     )
-    empty = pd.DataFrame({
-        "transact_time_ms": pd.Series(dtype="int64"),
-        "agg_trade_id": pd.Series(dtype="int64"),
-        "price": pd.Series(dtype="float64"),
-        "quantity": pd.Series(dtype="float64"),
-        "is_buyer_maker": pd.Series(dtype="bool"),
-    })
     if len(raw) == 0:
-        return empty
+        return _empty_slice()
     ms = _integers(raw["transact_time"])
     ms_values = ms.to_numpy(dtype="int64")
     day_start = pd.Timestamp(day, tz="UTC")
@@ -339,3 +344,140 @@ def slice_agg_trades(
     return out.sort_values(["transact_time_ms", "agg_trade_id"], kind="mergesort").reset_index(
         drop=True
     )
+
+
+class StreamFallbackError(Exception):
+    """Streamed aggTrades input breaks a fast-path assumption; derive from the full frame instead."""
+
+
+_AGG_BAR_MS = 180_000
+_DAY_MS = 86_400_000
+_AGG_BARS_PER_DAY = _DAY_MS // _AGG_BAR_MS
+_SLICE_SOURCE_COLUMNS = ("transact_time", "agg_trade_id", "price", "quantity", "is_buyer_maker")
+
+
+class _AggTradeStream:
+    """Exact per-bar reductions over (transact_time, agg_trade_id)-ordered batches.
+
+    Order is required, not restored: it keeps each bar's trades contiguous so rv_trade chains log-price
+    differences across batch boundaries, and keeps slice rows in the legacy sort order without a sort.
+    """
+
+    def __init__(self, day: date, slice_hours: tuple[int, int] | None) -> None:
+        self.start = int(pd.Timestamp(day, tz="UTC").value // 10**6)
+        self.slice_ms = (
+            None
+            if slice_hours is None
+            else (self.start + slice_hours[0] * 3_600_000, self.start + slice_hours[1] * 3_600_000)
+        )
+        self.count = np.zeros(_AGG_BARS_PER_DAY, dtype="int64")
+        self.trades = np.zeros(_AGG_BARS_PER_DAY, dtype="int64")
+        # taker_buy_qty, taker_sell_qty, taker_buy_notional, taker_sell_notional, total_qty, total_notional
+        self.sums = np.zeros((6, _AGG_BARS_PER_DAY), dtype="float64")
+        self.max_notional = np.full(_AGG_BARS_PER_DAY, -np.inf)
+        self.rv = np.zeros(_AGG_BARS_PER_DAY, dtype="float64")
+        self.tail: tuple[int, int, int, float] | None = None
+        self.slices: list[pa.RecordBatch] = []
+
+    def _ordered(self, stamps: np.ndarray, ids: np.ndarray) -> bool:
+        if self.tail is not None:
+            last_t, last_id = self.tail[0], self.tail[1]
+            if stamps[0] < last_t or (stamps[0] == last_t and ids[0] < last_id):
+                return False
+        step_t = stamps[1:] - stamps[:-1]
+        return not bool(np.any((step_t < 0) | ((step_t == 0) & (ids[1:] < ids[:-1]))))
+
+    def _validated(self, batch: pa.RecordBatch) -> tuple[np.ndarray, ...]:
+        if any(column.null_count for column in batch.columns):
+            raise StreamFallbackError("null field")
+        stamps = batch.column("transact_time").to_numpy()
+        ids = batch.column("agg_trade_id").to_numpy()
+        price = batch.column("price").to_numpy()
+        qty = batch.column("quantity").to_numpy()
+        first = batch.column("first_trade_id").to_numpy()
+        n_trades = batch.column("last_trade_id").to_numpy() - first + 1
+        if stamps[0] < self.start or stamps[-1] >= self.start + _DAY_MS or not self._ordered(stamps, ids):
+            raise StreamFallbackError("unordered or outside day")
+        if ids.min() < 0 or first.min() < 0 or n_trades.min() < 1:
+            raise StreamFallbackError("invalid trade ids")
+        with np.errstate(over="ignore", invalid="ignore"):
+            notional = price * qty
+            valid = bool(np.isfinite(notional).all() and (price > 0).all() and (qty > 0).all())
+        if not valid:
+            raise StreamFallbackError("invalid price/quantity")
+        maker = batch.column("is_buyer_maker").to_numpy(zero_copy_only=False)
+        return stamps, ids, price, qty, notional, n_trades, maker
+
+    def add(self, batch: pa.RecordBatch) -> None:
+        if batch.num_rows == 0:
+            return
+        stamps, ids, price, qty, notional, n_trades, maker = self._validated(batch)
+        bar = (stamps - self.start) // _AGG_BAR_MS
+        starts = np.flatnonzero(np.r_[True, bar[1:] != bar[:-1]])
+        bars = bar[starts]
+        buy = ~maker
+        self.count[bars] += np.diff(np.r_[starts, len(bar)])
+        self.trades[bars] += np.add.reduceat(n_trades, starts)
+        for row, values in enumerate((
+            np.where(buy, qty, 0.0), np.where(buy, 0.0, qty),
+            np.where(buy, notional, 0.0), np.where(buy, 0.0, notional), qty, notional,
+        )):
+            self.sums[row, bars] += np.add.reduceat(values, starts)
+        self.max_notional[bars] = np.maximum(self.max_notional[bars], np.maximum.reduceat(notional, starts))
+        log_price = np.log(price)
+        step = np.empty_like(log_price)
+        step[1:] = log_price[1:] - log_price[:-1]
+        step[0] = log_price[0] - self.tail[3] if self.tail is not None and self.tail[2] == bar[0] else 0.0
+        step[starts[1:]] = 0.0
+        self.rv[bars] += np.add.reduceat(step * step, starts)
+        self.tail = (int(stamps[-1]), int(ids[-1]), int(bar[-1]), float(log_price[-1]))
+        if self.slice_ms is not None:
+            keep = (stamps >= self.slice_ms[0]) & (stamps < self.slice_ms[1])
+            if keep.any():
+                self.slices.append(batch.select(list(_SLICE_SOURCE_COLUMNS)).filter(pa.array(keep)))
+
+    def bars(self) -> pd.DataFrame:
+        used = np.flatnonzero(self.count)
+        sums = self.sums[:, used]
+        stamps = pd.to_datetime(self.start + used * _AGG_BAR_MS, unit="ms", utc=True).as_unit("ms")
+        return pd.DataFrame({
+            "timestamp": stamps,
+            "n_agg_trades": self.count[used],
+            "n_trades": self.trades[used],
+            "taker_buy_qty": sums[0],
+            "taker_sell_qty": sums[1],
+            "taker_buy_notional": sums[2],
+            "taker_sell_notional": sums[3],
+            "max_agg_notional": self.max_notional[used],
+            "vwap": sums[5] / sums[4],
+            "rv_trade": self.rv[used],
+        })
+
+    def sliced(self) -> pd.DataFrame | None:
+        if self.slice_ms is None:
+            return None
+        if not self.slices:
+            return _empty_slice()
+        frame = pa.Table.from_batches(self.slices).to_pandas()
+        return frame.rename(columns={"transact_time": "transact_time_ms"}).reset_index(drop=True)
+
+
+def derive_agg_trades_streamed(
+    batches: Iterable[pa.RecordBatch], *, day: date, slice_hours: tuple[int, int] | None
+) -> tuple[pd.DataFrame, pd.DataFrame | None]:
+    """3m bars and optional hour-window slice from ordered batches, matching derive/slice_agg_trades.
+
+    Raises StreamFallbackError when input is empty, unparseable, unordered or invalid, so the caller can
+    rerun the full-frame path and surface its exact error.
+    """
+    if slice_hours is not None and not (0 <= slice_hours[0] < slice_hours[1] <= 24):
+        raise ValueError("invalid slice window")
+    stream = _AggTradeStream(day, slice_hours)
+    try:
+        for batch in batches:
+            stream.add(batch)
+    except pa.ArrowException as exc:
+        raise StreamFallbackError(f"unparseable csv: {type(exc).__name__}") from exc
+    if not stream.count.any():
+        raise StreamFallbackError("no trades")
+    return stream.bars(), stream.sliced()
