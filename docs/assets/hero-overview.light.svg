@@ -1,0 +1,83 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 560" width="1200" height="560" role="img" style="font-family: Pretendard, Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+  <title>Crypto-Pilot 핵심 엔지니어링 지표 및 E2E 무인 파이프라인</title>
+  <desc>3분봉 체결 원장, 인과적 베이지안 Kelly 비중 배분, 24/7 무중단 라이브 집행 파이프라인 요약</desc>
+  <defs>
+    <marker id="ah-edge-line" viewBox="0 0 12 12" refX="10" refY="6" markerWidth="11.25" markerHeight="11.25" markerUnits="userSpaceOnUse" orient="auto-start-reverse">
+      <path d="M2 2 L10 6 L2 10" fill="none" data-stroke-role="edge-line" stroke="#2E6DA4" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="ah-compute-line" viewBox="0 0 12 12" refX="10" refY="6" markerWidth="11.25" markerHeight="11.25" markerUnits="userSpaceOnUse" orient="auto-start-reverse">
+      <path d="M2 2 L10 6 L2 10" fill="none" data-stroke-role="compute-line" stroke="#3F8F72" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="ah-api-line" viewBox="0 0 12 12" refX="10" refY="6" markerWidth="11.25" markerHeight="11.25" markerUnits="userSpaceOnUse" orient="auto-start-reverse">
+      <path d="M2 2 L10 6 L2 10" fill="none" data-stroke-role="api-line" stroke="#5B54A8" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="ah-data-line" viewBox="0 0 12 12" refX="10" refY="6" markerWidth="11.25" markerHeight="11.25" markerUnits="userSpaceOnUse" orient="auto-start-reverse">
+      <path d="M2 2 L10 6 L2 10" fill="none" data-stroke-role="data-line" stroke="#636A75" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="ah-focus" viewBox="0 0 12 12" refX="10" refY="6" markerWidth="11.25" markerHeight="11.25" markerUnits="userSpaceOnUse" orient="auto-start-reverse">
+      <path d="M2 2 L10 6 L2 10" fill="none" data-stroke-role="focus" stroke="#2E6DA4" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="ah-positive" viewBox="0 0 12 12" refX="10" refY="6" markerWidth="11.25" markerHeight="11.25" markerUnits="userSpaceOnUse" orient="auto-start-reverse">
+      <path d="M2 2 L10 6 L2 10" fill="none" data-stroke-role="positive" stroke="#3F8F72" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="ah-warning" viewBox="0 0 12 12" refX="10" refY="6" markerWidth="11.25" markerHeight="11.25" markerUnits="userSpaceOnUse" orient="auto-start-reverse">
+      <path d="M2 2 L10 6 L2 10" fill="none" data-stroke-role="warning" stroke="#B08434" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="ah-danger" viewBox="0 0 12 12" refX="10" refY="6" markerWidth="11.25" markerHeight="11.25" markerUnits="userSpaceOnUse" orient="auto-start-reverse">
+      <path d="M2 2 L10 6 L2 10" fill="none" data-stroke-role="danger" stroke="#B45A50" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+  <rect width="1200" height="560" data-fill-role="canvas" fill="#F7F7F5"/>
+  <text x="56" y="42" font-size="14.5" font-weight="700" dominant-baseline="central" data-fill-role="focus" fill="#2E6DA4">CRYPTO-PILOT · SYSTEM OVERVIEW &amp; GUARANTEES</text>
+  <rect x="40" y="60" width="5" height="34" rx="2.5" data-fill-role="focus" fill="#2E6DA4"/>
+  <text x="56" y="77" font-size="28" font-weight="700" dominant-baseline="central" data-fill-role="ink" fill="#252B35">인과적 3분봉 체결 원장과 무중단 거버넌스로 증명한 24/7 선물 트레이딩</text>
+  <text x="56" y="110" font-size="15.5" font-weight="600" dominant-baseline="central" data-fill-role="muted" fill="#363A40">바이낸스 USDT-M 무기한 선물 · 5.25개년 실측 리플레이 (2021.04 ~ 2026.07) 및 AST 정적 아키텍처 계약 강제</text>
+  <rect x="40" y="142" width="352" height="196" rx="12" data-fill-role="surface" fill="#FFFFFF" data-stroke-role="edge-line" stroke="#2E6DA4" stroke-width="2"/>
+  <rect x="60" y="160" width="168" height="26" rx="13" data-fill-role="edge-fill" fill="#EAF0F6" data-stroke-role="edge-line" stroke="#2E6DA4" stroke-width="1"/>
+  <text x="144" y="173" font-size="13" font-weight="700" text-anchor="middle" dominant-baseline="central" data-fill-role="edge-ink" fill="#193C5A">EXECUTION REALISM</text>
+  <circle cx="354" cy="178" r="22" data-fill-role="edge-fill" fill="#EAF0F6" data-stroke-role="edge-line" stroke="#2E6DA4" stroke-width="1.5"/>
+  <path transform="translate(342,166)" d="M2 12 L7 12 L10 5 L14 19 L17 12 L22 12" fill="none" data-stroke-role="edge-line" stroke="#2E6DA4" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="60" y="224" font-size="33" font-weight="700" dominant-baseline="central" data-fill-role="edge-ink" fill="#193C5A">+151.5% ~ +220.4%</text>
+  <text x="60" y="264" font-size="18" font-weight="700" dominant-baseline="central" data-fill-role="ink" fill="#252B35">5.25개년 연환산 복리 수익률 (CAGR)</text>
+  <text x="60" y="294" font-size="14.5" font-weight="600" dominant-baseline="central" data-fill-role="muted" fill="#363A40">3분봉 고저가 관통 메이커 체결 원장</text>
+  <text x="60" y="317" font-size="14.5" font-weight="600" dominant-baseline="central" data-fill-role="muted" fill="#363A40">단위북 +44.0% · 베이지안 Kelly 동적 복리</text>
+  <rect x="424" y="142" width="352" height="196" rx="12" data-fill-role="surface" fill="#FFFFFF" data-stroke-role="compute-line" stroke="#3F8F72" stroke-width="2"/>
+  <rect x="444" y="160" width="168" height="26" rx="13" data-fill-role="compute-fill" fill="#ECF4F1" data-stroke-role="compute-line" stroke="#3F8F72" stroke-width="1"/>
+  <text x="528" y="173" font-size="13" font-weight="700" text-anchor="middle" dominant-baseline="central" data-fill-role="compute-ink" fill="#234F3F">RUIN DEFENSE</text>
+  <circle cx="738" cy="178" r="22" data-fill-role="compute-fill" fill="#ECF4F1" data-stroke-role="compute-line" stroke="#3F8F72" stroke-width="1.5"/>
+  <path transform="translate(726,166)" d="M12 3 L20 6 V12 C20 17 16 20 12 21 C8 20 4 17 4 12 V6 Z" fill="none" data-stroke-role="compute-line" stroke="#3F8F72" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="444" y="224" font-size="33" font-weight="700" dominant-baseline="central" data-fill-role="compute-ink" fill="#234F3F">0 Liquidations</text>
+  <text x="444" y="264" font-size="18" font-weight="700" dominant-baseline="central" data-fill-role="ink" fill="#252B35">5개년 실계좌 강제 청산 0회 보장</text>
+  <text x="444" y="294" font-size="14.5" font-weight="600" dominant-baseline="central" data-fill-role="muted" fill="#363A40">바이낸스 유지증거금(MMR) 브래킷 사다리</text>
+  <text x="444" y="317" font-size="14.5" font-weight="600" dominant-baseline="central" data-fill-role="muted" fill="#363A40">봉별 불리 고저가(Low/High) 증거금 검증</text>
+  <rect x="808" y="142" width="352" height="196" rx="12" data-fill-role="surface" fill="#FFFFFF" data-stroke-role="api-line" stroke="#5B54A8" stroke-width="2"/>
+  <rect x="828" y="160" width="168" height="26" rx="13" data-fill-role="api-fill" fill="#EFEEF6" data-stroke-role="api-line" stroke="#5B54A8" stroke-width="1"/>
+  <text x="912" y="173" font-size="13" font-weight="700" text-anchor="middle" dominant-baseline="central" data-fill-role="api-ink" fill="#322E5C">CONTINUITY &amp; QA</text>
+  <circle cx="1122" cy="178" r="22" data-fill-role="api-fill" fill="#EFEEF6" data-stroke-role="api-line" stroke="#5B54A8" stroke-width="1.5"/>
+  <path transform="translate(1110,166)" d="M6 11 H18 V20 H6 Z M9 11 V8 A3 3 0 0 1 15 8 V11" fill="none" data-stroke-role="api-line" stroke="#5B54A8" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="828" y="224" font-size="33" font-weight="700" dominant-baseline="central" data-fill-role="api-ink" fill="#322E5C">20s · 3s · 7,875</text>
+  <text x="828" y="264" font-size="18" font-weight="700" dominant-baseline="central" data-fill-role="ink" fill="#252B35">20초 시세 동기화 &amp; 정적 계약 검증</text>
+  <text x="828" y="294" font-size="14.5" font-weight="600" dominant-baseline="central" data-fill-role="muted" fill="#363A40">로컬 디스크 Tail 2시간 증분 패치 (29m→20s)</text>
+  <text x="828" y="317" font-size="14.5" font-weight="600" dominant-baseline="central" data-fill-role="muted" fill="#363A40">Blue/Green 3초 전환 · 7,875개 테스트 통과</text>
+  <rect x="40" y="362" width="1120" height="164" rx="14" data-fill-role="strip" fill="#F7F9FB" data-stroke-role="rule" stroke="#DEE0E2" stroke-width="1.5"/>
+  <text x="64" y="390" font-size="16" font-weight="700" dominant-baseline="central" data-fill-role="edge-ink" fill="#193C5A">END-TO-END AUTONOMOUS PIPELINE · 일일 결정 창(22:45 ~ 02:00 UTC) 무인 운전 흐름</text>
+  <rect x="74" y="414" width="236" height="92" rx="10" data-fill-role="edge-fill" fill="#EAF0F6" data-stroke-role="edge-line" stroke="#2E6DA4" stroke-width="1.5"/>
+  <text x="90" y="438" font-size="13" font-weight="700" dominant-baseline="central" data-fill-role="edge-ink" fill="#193C5A">STAGE 1 · INGEST</text>
+  <text x="90" y="463" font-size="16.5" font-weight="700" dominant-baseline="central" data-fill-role="ink" fill="#252B35">원본 캡처 &amp; 증분 패치</text>
+  <text x="90" y="487" font-size="14" font-weight="600" dominant-baseline="central" data-fill-role="muted" fill="#363A40">Blue/Green WS · Tail 20초</text>
+  <path d="M316 460 H336" fill="none" data-stroke-role="edge-line" stroke="#2E6DA4" stroke-width="2.5" stroke-linecap="round" marker-end="url(#ah-edge-line)"/>
+  <rect x="346" y="414" width="236" height="92" rx="10" data-fill-role="compute-fill" fill="#ECF4F1" data-stroke-role="compute-line" stroke="#3F8F72" stroke-width="1.5"/>
+  <text x="362" y="438" font-size="13" font-weight="700" dominant-baseline="central" data-fill-role="compute-ink" fill="#234F3F">STAGE 2 · ALPHA</text>
+  <text x="362" y="463" font-size="16.5" font-weight="700" dominant-baseline="central" data-fill-role="ink" fill="#252B35">PIT 유니버스 &amp; 신호</text>
+  <text x="362" y="487" font-size="14" font-weight="600" dominant-baseline="central" data-fill-role="muted" fill="#363A40">Flow-Mom Top-20 직교 결합</text>
+  <path d="M588 460 H608" fill="none" data-stroke-role="edge-line" stroke="#2E6DA4" stroke-width="2.5" stroke-linecap="round" marker-end="url(#ah-edge-line)"/>
+  <rect x="618" y="414" width="236" height="92" rx="10" data-fill-role="api-fill" fill="#EFEEF6" data-stroke-role="api-line" stroke="#5B54A8" stroke-width="1.5"/>
+  <text x="634" y="438" font-size="13" font-weight="700" dominant-baseline="central" data-fill-role="api-ink" fill="#322E5C">STAGE 3 · LEDGER</text>
+  <text x="634" y="463" font-size="16.5" font-weight="700" dominant-baseline="central" data-fill-role="ink" fill="#252B35">베이지안 Kelly &amp; 원장</text>
+  <text x="634" y="487" font-size="14" font-weight="600" dominant-baseline="central" data-fill-role="muted" fill="#363A40">3분봉 메이커 · MMR 사다리</text>
+  <path d="M860 460 H880" fill="none" data-stroke-role="edge-line" stroke="#2E6DA4" stroke-width="2.5" stroke-linecap="round" marker-end="url(#ah-edge-line)"/>
+  <rect x="890" y="414" width="236" height="92" rx="10" data-fill-role="surface" fill="#FFFFFF" data-stroke-role="focus" stroke="#2E6DA4" stroke-width="1.5"/>
+  <text x="906" y="438" font-size="13" font-weight="700" dominant-baseline="central" data-fill-role="edge-ink" fill="#193C5A">STAGE 4 · LIVE GUARD</text>
+  <text x="906" y="463" font-size="16.5" font-weight="700" dominant-baseline="central" data-fill-role="ink" fill="#252B35">Peg-Chase &amp; 멱등 장부</text>
+  <text x="906" y="487" font-size="14" font-weight="600" dominant-baseline="central" data-fill-role="muted" fill="#363A40">결정 창 가드 · GDrive 백업</text>
+</svg>
