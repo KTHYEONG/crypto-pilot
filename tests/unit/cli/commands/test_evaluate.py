@@ -279,15 +279,15 @@ def test_evaluate_builder_guards_and_holdout(tmp_path, monkeypatch) -> None:
     )
     assert inputs.funding_by_symbol == {}
     _write_unit_run(holdout, n=70, start="2026-07-01")
-    with pytest.raises(DataIntegrityError, match="one-look journal"):
+    with pytest.raises(DataIntegrityError, match="journaled look"):
         evaluate_mod.build_evaluation_inputs(strategy_id="flow_mom_top20", unit_run=unit,
                                             account_run=account, holdout_run=holdout)
     import src.strategy.release as release_mod
-    from src.evaluation.holdout import consume_holdout_look
+    from src.evaluation.holdout import record_holdout_look
 
     release = load_release("flow_mom_top20")
     look_path = tmp_path / "flow_mom.holdout.jsonl"
-    consume_holdout_look("flow_mom_top20", release.spec_digest,
+    record_holdout_look("flow_mom_top20", release.spec_digest,
                          (pd.Timestamp("2026-07-01", tz="UTC"), pd.Timestamp("2026-09-09", tz="UTC")), path=look_path,
                          signal_digest=_current_signal())
     original = release_mod.releases_dir
@@ -301,12 +301,19 @@ def test_evaluate_builder_guards_and_holdout(tmp_path, monkeypatch) -> None:
     assert held.holdout is not None
     assert held.holdout_returns is not None
     assert len(held.holdout_returns) == 70
+    record_holdout_look("flow_mom_top20", release.spec_digest,
+                        (pd.Timestamp("2026-08-01", tz="UTC"), pd.Timestamp("2026-08-15", tz="UTC")), path=look_path,
+                        signal_digest="logic-before-change")
+    with pytest.raises(DataIntegrityError, match="observed by another signal digest"):
+        evaluate_mod.build_evaluation_inputs(
+            strategy_id="flow_mom_top20", unit_run=unit, account_run=account, holdout_run=holdout,
+        )
 
 
 def test_signal_digest_mismatch_fails_closed(tmp_path, monkeypatch) -> None:
     """A holdout result with another signal_digest raises."""
     from src.common.errors import DataIntegrityError
-    from src.evaluation.holdout import consume_holdout_look
+    from src.evaluation.holdout import record_holdout_look
 
     import src.strategy.release as release_mod
 
@@ -319,7 +326,7 @@ def test_signal_digest_mismatch_fails_closed(tmp_path, monkeypatch) -> None:
     (holdout / "result.json").write_text(json.dumps(raw), encoding="utf-8")
     release = load_release("flow_mom_top20")
     look_path = tmp_path / "flow_mom.holdout.jsonl"
-    consume_holdout_look("flow_mom_top20", release.spec_digest,
+    record_holdout_look("flow_mom_top20", release.spec_digest,
                          (pd.Timestamp("2026-07-01", tz="UTC"), pd.Timestamp("2026-09-09", tz="UTC")), path=look_path,
                          signal_digest=_current_signal())
     import shutil
@@ -349,13 +356,13 @@ def test_holdout_account_run_is_informational(tmp_path, monkeypatch) -> None:
     _write_unit_run(unit)
     _write_account_run(account)
     _write_unit_run(holdout, n=70, start="2026-07-01")
-    from src.evaluation.holdout import consume_holdout_look
+    from src.evaluation.holdout import record_holdout_look
 
     import src.strategy.release as release_mod
 
     release = load_release("flow_mom_top20")
     look_path = tmp_path / "flow_mom.holdout.jsonl"
-    consume_holdout_look("flow_mom_top20", release.spec_digest,
+    record_holdout_look("flow_mom_top20", release.spec_digest,
                          (pd.Timestamp("2026-07-01", tz="UTC"), pd.Timestamp("2026-09-09", tz="UTC")), path=look_path,
                          signal_digest=_current_signal())
     import shutil

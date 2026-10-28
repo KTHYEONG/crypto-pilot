@@ -14,7 +14,7 @@ import pandas as pd
 from src.application.strategy_account import strategy_execution_specs
 from src.backtests.catalog import append_backtest_index
 from src.cli.commands.backtest_calibration import add_fill_calibration_command
-from src.cli.commands.backtest_holdout import enforce_holdout_gate, require_journaled_holdout
+from src.cli.commands.backtest_holdout import record_post_design_look
 from src.common.paths import STRATEGY_BACKTESTS_DIR, VENUE_RULES_DIR
 from src.core.params import (
     ACCOUNT_DEFAULT_CAPITAL_USDT,
@@ -100,7 +100,7 @@ def add_backtest_commands(backtest_parser: argparse.ArgumentParser) -> None:
     )
     strategy.add_argument(
         "--evaluate-holdout", action="store_true", default=False,
-        help="Record the one-look holdout journal entry before running on a consumed holdout window.",
+        help="Mark the run as a holdout evaluation (earlier run dirs are kept from retention pruning).",
     )
     strategy.set_defaults(handler=run_strategy_backtest_command)
     exposure = sub.add_parser(
@@ -358,12 +358,11 @@ def _record_trial_for_window(
 
 
 def _holdout_gate(
-    strategy_id: str, start: pd.Timestamp, end: pd.Timestamp, evaluate_holdout: bool,
-    *, strategy: StrategySpec | None = None,
+    strategy_id: str, start: pd.Timestamp, end: pd.Timestamp, *, strategy: StrategySpec | None = None,
 ) -> None:
-    """Refuse windows overlapping a consumed holdout unless the one look is recorded first."""
+    """Journal any post-design part of the window as observed by this strategy's signal."""
     spec = strategy if strategy is not None else _strategy_policy(40 if strategy_id == "flow_mom_top40_control" else 20)
-    enforce_holdout_gate(strategy_id, _trial_family(strategy_id), spec, start, end, evaluate_holdout)
+    record_post_design_look(strategy_id, _trial_family(strategy_id), spec, start, end, purpose="strategy_backtest")
 
 
 def _neighbor_specs(strategy: Any) -> list[Any]:
@@ -491,9 +490,10 @@ def run_strategy_backtest_command(args: argparse.Namespace) -> None:
         breadth, variant = selected_breadth, selected_variant
     strategy = _strategy_policy(breadth, variant)
     evaluate_holdout = bool(getattr(args, "evaluate_holdout", False))
-    if evaluate_holdout and bool(getattr(args, "neighbors", False)):
+    if bool(getattr(args, "neighbors", False)) and (evaluate_holdout or end > strategy.design_data_cutoff):
+        # Neighbors are a selection set: scoring them on post-design data would pick a variant on the holdout.
         raise SystemExit("holdout evaluation cannot run discovery neighbors")
-    _holdout_gate(strategy.strategy_id, start, end, evaluate_holdout, strategy=strategy)
+    _holdout_gate(strategy.strategy_id, start, end, strategy=strategy)
     execution = getattr(args, "execution", "taker")
     if execution not in ("taker", "maker"):
         raise SystemExit(f"execution must be 'taker' or 'maker', got {execution!r}")
@@ -648,7 +648,9 @@ def run_account_replay_command(args: argparse.Namespace) -> None:
         raise SystemExit(f"--fixed-exposure must be a positive finite exposure, got {raw_fixed!r}")
     if not 0 < capital < float("inf"):
         raise SystemExit(f"--capital must be a positive finite capital, got {getattr(args, 'capital', None)!r}")
-    require_journaled_holdout(end)
+    from src.strategy.targets import FLOW_MOM_TOP20
+
+    record_post_design_look("flow_mom_top20", "flow_mom", FLOW_MOM_TOP20, start, end, purpose="account_replay")
     from src.application.strategy_account import AccountReplayError, AccountReplayRequest, run_account_replay
 
     raw_venue = getattr(args, "venue_rules", None)

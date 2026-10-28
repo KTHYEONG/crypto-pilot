@@ -283,7 +283,7 @@ def build_evaluation_inputs(
             pd.Timestamp(str(holdout_payload["evaluation_start"])).tz_convert("UTC"),
             pd.Timestamp(str(holdout_payload["evaluation_end"])).tz_convert("UTC"),
         )
-        from src.evaluation.holdout import holdout_look_recorded
+        from src.evaluation.holdout import foreign_holdout_looks, holdout_look_recorded
         from src.strategy.release import strategy_signal_digest
 
         current_signal = strategy_signal_digest({
@@ -296,7 +296,14 @@ def build_evaluation_inputs(
         if unit_payload.get("signal_digest") != current_signal:
             raise DataIntegrityError("signal digest mismatch")
         if not holdout_look_recorded(release.strategy_id, current_signal, holdout_window):
-            raise DataIntegrityError("holdout run has no matching one-look journal entry")
+            raise DataIntegrityError("holdout run has no matching journaled look")
+        foreign = foreign_holdout_looks(release.strategy_id, current_signal, holdout_window)
+        if foreign:
+            seen_until = max(pd.Timestamp(str(row["window_end"])) for row in foreign)
+            raise DataIntegrityError(
+                f"holdout window was observed by another signal digest (through {seen_until.isoformat()}); "
+                "acceptance needs data the current logic did not adapt to"
+            )
         holdout_daily = pd.read_parquet(Path(holdout_run) / "daily.parquet")
         holdout_returns = _utc_series(
             pd.Series(holdout_daily["base_return"].to_numpy(dtype="float64"), index=holdout_daily.index),
