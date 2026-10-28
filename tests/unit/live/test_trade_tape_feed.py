@@ -58,6 +58,10 @@ def test_buy_fills_only_on_seller_print_strictly_below() -> None:
     )
     try:
         _start(tape)
+        deadline = time.monotonic() + 5.0
+        while tape.traded_through("XUSDT", "BUY", Decimal("100.0"), since_ms=0) is None:
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
         assert tape.traded_through("XUSDT", "BUY", Decimal("100.0"), since_ms=0) == 1100
     finally:
         tape.stop()

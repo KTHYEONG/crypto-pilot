@@ -104,7 +104,7 @@ def _as_ms(value: object) -> int:
     return int(stamp.value // 10**6)
 
 
-def _collect_intents(eq: pd.DataFrame, fills: pd.DataFrame) -> list[dict[str, object]]:
+def _require_frame_columns(eq: pd.DataFrame, fills: pd.DataFrame) -> None:
     missing = [c for c in _EQ_REQUIRED if c not in eq.columns]
     if missing:
         raise DataIntegrityError(f"execution_quality missing columns: {missing}")
@@ -112,66 +112,91 @@ def _collect_intents(eq: pd.DataFrame, fills: pd.DataFrame) -> list[dict[str, ob
         missing_f = [c for c in _FILLS_REQUIRED if c not in fills.columns]
         if missing_f:
             raise DataIntegrityError(f"fills missing columns: {missing_f}")
-    grouped: dict[tuple[int, str, int], pd.DataFrame] = {}
-    if len(fills):
-        try:
-            key_ms = [_as_ms(v) for v in fills["decision_time"].tolist()]
-            leg = [int(v) for v in fills["leg_index"].tolist()]
-        except (ValueError, TypeError) as exc:
-            raise DataIntegrityError(f"malformed fills key: {exc}") from exc
-        syms = [str(v) for v in fills["symbol"].tolist()]
-        fills = fills.copy()
-        fills["_key_ms"] = key_ms
-        fills["_leg"] = leg
-        fills["_sym"] = syms
-        for key, part in fills.groupby(["_key_ms", "_sym", "_leg"]):
-            grouped[(int(key[0]), str(key[1]), int(key[2]))] = part
+
+
+def _group_fills(fills: pd.DataFrame) -> dict[tuple[int, str, int], pd.DataFrame]:
+    if not len(fills):
+        return {}
+    try:
+        key_ms = [_as_ms(v) for v in fills["decision_time"].tolist()]
+        leg = [int(v) for v in fills["leg_index"].tolist()]
+    except (ValueError, TypeError) as exc:
+        raise DataIntegrityError(f"malformed fills key: {exc}") from exc
+    work = fills.copy()
+    work["_key_ms"] = key_ms
+    work["_leg"] = leg
+    work["_sym"] = [str(v) for v in fills["symbol"].tolist()]
+    return {
+        (int(key[0]), str(key[1]), int(key[2])): part
+        for key, part in work.groupby(["_key_ms", "_sym", "_leg"])
+    }
+
+
+def _eq_row_values(row: pd.Series) -> tuple[float, float, float, int] | None:
+    """(ref, avg_fill, filled_qty, leg_index) of an execution-quality row, or None when nothing filled."""
+    try:
+        ref = float(row["mark_price_at_decision"])
+        avg = float(row["avg_fill_price"])
+        filled = float(row["filled_qty"])
+    except (ValueError, TypeError) as exc:
+        raise DataIntegrityError(f"malformed execution_quality row: {exc}") from exc
+    if not np.isfinite(filled) or filled < 0:
+        raise DataIntegrityError(f"malformed execution_quality filled_qty: {row.to_dict()!r}")
+    if filled == 0:
+        return None
+    if not (np.isfinite(ref) and np.isfinite(avg)):
+        raise DataIntegrityError(f"malformed execution_quality prices: {row.to_dict()!r}")
+    if not (ref > 0 and avg > 0):
+        raise DataIntegrityError(f"malformed execution_quality non-positive price: {row.to_dict()!r}")
+    try:
+        leg_index = int(row["leg_index"])
+    except (ValueError, TypeError) as exc:
+        raise DataIntegrityError(f"malformed execution_quality leg_index: {exc}") from exc
+    return ref, avg, filled, leg_index
+
+
+def _fills_side_and_fee(part: pd.DataFrame) -> tuple[str, float] | None:
+    """(side, notional-weighted fee bps) of one intent's fills, or None when they net to zero."""
+    try:
+        deltas = pd.to_numeric(part["quantity_delta"], errors="coerce").to_numpy(dtype="float64")
+        prices = pd.to_numeric(part["fill_price"], errors="coerce").to_numpy(dtype="float64")
+        fees = pd.to_numeric(part["fee_bps"], errors="coerce").to_numpy(dtype="float64")
+    except (ValueError, TypeError) as exc:
+        raise DataIntegrityError(f"malformed fills row: {exc}") from exc
+    if not (np.isfinite(deltas).all() and np.isfinite(prices).all() and np.isfinite(fees).all()):
+        raise DataIntegrityError("fills hold non-finite quantity, price or fee")
+    if bool((prices <= 0).any()):
+        raise DataIntegrityError("fills hold non-positive price")
+    net = float(np.sum(deltas))
+    if net == 0.0:
+        return None
+    weights = np.abs(deltas) * prices
+    denom = float(np.sum(weights))
+    if not np.isfinite(denom) or denom <= 0:
+        raise DataIntegrityError("fills hold non-positive notional")
+    fee_w = float(np.sum(weights * fees) / denom)
+    if not np.isfinite(fee_w):
+        raise DataIntegrityError("fills fee mean is non-finite")
+    return ("BUY" if net > 0 else "SELL"), fee_w
+
+
+def _collect_intents(eq: pd.DataFrame, fills: pd.DataFrame) -> list[dict[str, object]]:
+    _require_frame_columns(eq, fills)
+    grouped = _group_fills(fills)
     intents: list[dict[str, object]] = []
     for _, row in eq.iterrows():
-        try:
-            ref = float(row["mark_price_at_decision"])
-            avg = float(row["avg_fill_price"])
-            filled = float(row["filled_qty"])
-        except (ValueError, TypeError) as exc:
-            raise DataIntegrityError(f"malformed execution_quality row: {exc}") from exc
-        if not np.isfinite(filled) or filled < 0:
-            raise DataIntegrityError(f"malformed execution_quality filled_qty: {row.to_dict()!r}")
-        if filled == 0:
+        values = _eq_row_values(row)
+        if values is None:
             continue
-        if not (np.isfinite(ref) and np.isfinite(avg)):
-            raise DataIntegrityError(f"malformed execution_quality prices: {row.to_dict()!r}")
-        if not (ref > 0 and avg > 0):
-            raise DataIntegrityError(f"malformed execution_quality non-positive price: {row.to_dict()!r}")
-        try:
-            leg_index = int(row["leg_index"])
-        except (ValueError, TypeError) as exc:
-            raise DataIntegrityError(f"malformed execution_quality leg_index: {exc}") from exc
+        ref, avg, filled, leg_index = values
         symbol = str(row["symbol"])
-        key = (_as_ms(row["decision_time"]), symbol, leg_index)
-        part = grouped.get(key)
+        part = grouped.get((_as_ms(row["decision_time"]), symbol, leg_index))
         if part is None or not len(part):
             raise DataIntegrityError(f"fills missing for {(row['decision_time'], symbol, leg_index)}")
-        try:
-            deltas = pd.to_numeric(part["quantity_delta"], errors="coerce").to_numpy(dtype="float64")
-            prices = pd.to_numeric(part["fill_price"], errors="coerce").to_numpy(dtype="float64")
-            fees = pd.to_numeric(part["fee_bps"], errors="coerce").to_numpy(dtype="float64")
-        except (ValueError, TypeError) as exc:
-            raise DataIntegrityError(f"malformed fills row: {exc}") from exc
-        if not (np.isfinite(deltas).all() and np.isfinite(prices).all() and np.isfinite(fees).all()):
-            raise DataIntegrityError("fills hold non-finite quantity, price or fee")
-        if bool((prices <= 0).any()):
-            raise DataIntegrityError("fills hold non-positive price")
-        net = float(np.sum(deltas))
-        if net == 0.0:
+        side_fee = _fills_side_and_fee(part)
+        if side_fee is None:
             continue
-        side = "BUY" if net > 0 else "SELL"
-        weights = np.abs(deltas) * prices
-        denom = float(np.sum(weights))
-        if not np.isfinite(denom) or denom <= 0:
-            raise DataIntegrityError("fills hold non-positive notional")
-        fee_w = float(np.sum(weights * fees) / denom)
-        if not np.isfinite(fee_w):
-            raise DataIntegrityError("fills fee mean is non-finite")
+        side, fee_w = side_fee
         sign = 1.0 if side == "BUY" else -1.0
         paper_is = sign * (avg - ref) / ref * 1e4 + fee_w
         if not np.isfinite(paper_is):

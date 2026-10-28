@@ -14,12 +14,9 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
 
-from src.live.depth_capture import _default_connect
+from src.live.depth_capture import _RECONNECT_BACKOFF_MAX_S, _STOP_JOIN_TIMEOUT_S, _default_connect
 
 _logger = logging.getLogger(__name__)
-
-_RECONNECT_BACKOFF_MAX_S: float = 30.0
-_STOP_JOIN_TIMEOUT_S: float = 10.0
 
 
 @dataclass(frozen=True, slots=True)

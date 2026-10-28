@@ -2930,7 +2930,7 @@ def test_missing_active_execution_bar_not_filled_from_hourly() -> None:
         initial_equity=1000.0, execution_bound="OHLCV_IMMEDIATE_TAKER", spec=spec,
     )
     gapped_closes = w2.closes.copy()
-    fill_pos = 1
+    fill_pos = 0  # submission bar opens at the release (signal_available_at == grid[0])
     gapped_closes.iloc[fill_pos, gapped_closes.columns.get_loc("AUSDT")] = np.nan
     gapped = dataclasses.replace(w2, closes=gapped_closes, marks=None)
     result = replay_process_execution(
