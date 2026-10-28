@@ -1201,7 +1201,7 @@ class TestBlockedExitFunding:
         grid = pd.date_range("2025-01-01", periods=6, freq="3min", tz="UTC")
         px = pd.DataFrame({"BTCUSDT": 100.0}, index=grid)
         known = px.notna()
-        known.iloc[4, 0] = False
+        known.iloc[3, 0] = False
         w = ExecutionReplayWindow(
             grid[0], grid[-1], ("BTCUSDT",), ("BTCUSDT",), grid, px, px, px, px, px * 0.0,
             pd.DataFrame({"BTCUSDT": [1.0, 0.0]}, index=[grid[0], grid[3]]),

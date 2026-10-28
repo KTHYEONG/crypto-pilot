@@ -108,7 +108,7 @@ def _exit_setup(periods: int = 60, exit_at: int = 20) -> tuple[pd.DatetimeIndex,
 
 def test_symbol_freeze_exit_defers_to_first_viable_bar() -> None:
     grid, decisions, weights = _exit_setup()
-    w = _window(grid, decisions, weights, zero_bars={str(grid[21])})
+    w = _window(grid, decisions, weights, zero_bars={str(grid[20])})
     result = replay_execution_windows((w,), 10000.0, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec())
     assert result.termination_counts.get("SYMBOL_NO_TRADE_DEFERRED_EXIT") == 1
     assert len(result.exit_block_disclosures) == 1
@@ -116,8 +116,8 @@ def test_symbol_freeze_exit_defers_to_first_viable_bar() -> None:
     assert block.cause == "SYMBOL_NO_TRADE"
     assert block.halt_id is None
     assert block.outcome == "deferred_fill"
-    assert block.blocked_bar == grid[21]
-    assert block.filled_bar == grid[22]
+    assert block.blocked_bar == grid[20]
+    assert block.filled_bar == grid[21]
     taker = result.simulated_fills[
         (result.simulated_fills["reason"] == "timeout_taker") & (result.simulated_fills["quantity_delta"] < 0)
     ]
@@ -131,7 +131,7 @@ def test_symbol_freeze_through_timeout_retries_then_exits() -> None:
     grid = _grid(periods=80)
     decisions = [str(grid[0]), str(grid[20]), str(grid[40]), str(grid[60])]
     weights = {"AUSDT": [0.5, 0.0, 0.0, 0.0], "BUSDT": [0.0, 0.0, 0.0, 0.0]}
-    w = _window(grid, decisions, weights, zero_bars={str(grid[i]) for i in range(21, 61)})
+    w = _window(grid, decisions, weights, zero_bars={str(grid[i]) for i in range(20, 60)})
     result = replay_execution_windows((w,), 10000.0, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec())
     assert result.termination_counts.get("BLOCKED_EXIT_SYMBOL_NO_TRADE") == 2
     assert result.termination_counts.get("SYMBOL_NO_TRADE_DEFERRED_EXIT", 0) == 0
@@ -146,7 +146,7 @@ def test_symbol_freeze_through_timeout_retries_then_exits() -> None:
 
 def test_entry_on_frozen_symbol_is_unchanged() -> None:
     grid = _grid(periods=40)
-    w = _window(grid, [str(grid[0])], {"AUSDT": [0.5], "BUSDT": [0.0]}, zero_bars={str(grid[1])})
+    w = _window(grid, [str(grid[0])], {"AUSDT": [0.5], "BUSDT": [0.0]}, zero_bars={str(grid[0])})
     result = replay_execution_windows((w,), 10000.0, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec())
     assert result.termination_counts.get("NO_VOLUME_UNFILLED") == 1
     assert result.exit_block_disclosures == ()
@@ -156,7 +156,7 @@ def test_entry_on_frozen_symbol_is_unchanged() -> None:
 
 def test_nan_quote_volume_exit_stays_fatal() -> None:
     grid, decisions, weights = _exit_setup()
-    w = _window(grid, decisions, weights, nan_qv_at={str(grid[21])})
+    w = _window(grid, decisions, weights, nan_qv_at={str(grid[20])})
     result = replay_execution_windows((w,), 10000.0, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec())
     assert not result.ledger.primary_valid
     assert any(g.code == "ZERO_OR_UNKNOWN_VOLUME" for g in result.data_gaps)
@@ -165,7 +165,7 @@ def test_nan_quote_volume_exit_stays_fatal() -> None:
 
 def test_unknown_funding_on_frozen_exit_stays_fatal() -> None:
     grid, decisions, weights = _exit_setup()
-    bar = {str(grid[21])}
+    bar = {str(grid[20])}
     w = _window(grid, decisions, weights, zero_bars=bar, funding_unknown_at=bar)
     result = replay_execution_windows((w,), 10000.0, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec())
     assert not result.ledger.primary_valid
@@ -175,7 +175,7 @@ def test_unknown_funding_on_frozen_exit_stays_fatal() -> None:
 
 def test_invalid_mark_on_frozen_exit_stays_fatal() -> None:
     grid, decisions, weights = _exit_setup()
-    w = _window(grid, decisions, weights, zero_bars={str(grid[21])}, nan_mark_at={str(grid[21])})
+    w = _window(grid, decisions, weights, zero_bars={str(grid[20])}, nan_mark_at={str(grid[20])})
     result = replay_execution_windows((w,), 10000.0, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec())
     assert not result.ledger.primary_valid
     assert any(g.code == "KNOWN_ZERO_VOLUME" for g in result.data_gaps)
@@ -214,7 +214,7 @@ def test_episode_resets_after_inventory_change() -> None:
     grid = _grid(periods=640)
     decisions = [str(grid[20 * k]) for k in range(31)]
     weights = {"AUSDT": [0.5] + [0.0] * 11 + [0.25] + [0.0] * 18, "BUSDT": [0.0] * 31}
-    zero = {str(grid[i]) for i in range(20, 640)} - {str(grid[241])}
+    zero = {str(grid[i]) for i in range(20, 640)} - {str(grid[240])}
     w = _window(grid, decisions, weights, zero_bars=zero)
     result = replay_execution_windows((w,), 10000.0, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec())
     assert result.termination_counts.get("EXIT_BLOCK_BOUND_EXCEEDED", 0) == 0
@@ -231,7 +231,7 @@ def test_episode_resets_after_exit_and_reentry_at_same_inventory() -> None:
     round_trip_fees = 2 * initial_units * 100.0 * (spec.taker_fee_bps + spec.taker_slippage_bps) / 1e4
     reentry_weight = initial_units * 100.0 / (10000.0 - round_trip_fees)
     weights = {"AUSDT": [0.5, 0.0, 0.0, reentry_weight, 0.0], "BUSDT": [0.0] * 5}
-    zero = {str(grid[i]) for i in range(21, 32)} | {str(grid[i]) for i in range(621, 660)}
+    zero = {str(grid[i]) for i in range(20, 32)} | {str(grid[i]) for i in range(620, 660)}
     result = replay_execution_windows((_window(grid, decisions, weights, zero_bars=zero),),
                                       10000.0, "OHLCV_IMMEDIATE_TAKER", spec)
     first, second = result.exit_block_disclosures
@@ -244,20 +244,20 @@ def test_episode_resets_after_exit_and_reentry_at_same_inventory() -> None:
 
 def test_halt_wins_cause_precedence_over_zero_volume() -> None:
     grid, decisions, weights = _exit_setup()
-    w = _window(grid, decisions, weights, halt_bars={str(grid[i]) for i in (21, 22, 23)})
+    w = _window(grid, decisions, weights, halt_bars={str(grid[i]) for i in (20, 21, 22)})
     result = replay_execution_windows((w,), 10000.0, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec())
     assert result.termination_counts.get("VENUE_HALT_DEFERRED_EXIT") == 1
     block = result.exit_block_disclosures[0]
     assert block.cause == "VENUE_HALT"
-    assert block.halt_id == "2022-01-14T01:03Z"
-    assert block.filled_bar == grid[24]
+    assert block.halt_id == "2022-01-14T01:00Z"
+    assert block.filled_bar == grid[23]
 
 
 def test_zero_volume_cannot_hide_invalid_submit_timing() -> None:
     grid, decisions, weights = _exit_setup()
-    window = _window(grid, decisions, weights, zero_bars={str(grid[21])})
+    window = _window(grid, decisions, weights, zero_bars={str(grid[20])})
     availability = list(window.bar_available_at)
-    availability[21] = grid[20]
+    availability[20] = grid[19]
     window = dataclasses.replace(window, bar_available_at=pd.DatetimeIndex(availability))
     result = replay_execution_windows((window,), 10000.0, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec())
     assert not result.ledger.primary_valid
@@ -268,9 +268,9 @@ def test_zero_volume_cannot_hide_invalid_submit_timing() -> None:
 
 def test_no_lookahead_past_order_deadline() -> None:
     grid, decisions, weights = _exit_setup()
-    frozen = {str(grid[i]) for i in range(21, 32)}
+    frozen = {str(grid[i]) for i in range(20, 31)}
     viable = _window(grid, decisions, weights, zero_bars=frozen)
-    zeroed = _window(grid, decisions, weights, zero_bars=frozen | {str(grid[32])})
+    zeroed = _window(grid, decisions, weights, zero_bars=frozen | {str(grid[31])})
     first = replay_execution_windows((viable,), 10000.0, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec())
     second = replay_execution_windows((zeroed,), 10000.0, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec())
     assert first.exit_block_disclosures == second.exit_block_disclosures

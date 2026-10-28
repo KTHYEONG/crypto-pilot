@@ -144,3 +144,102 @@ def test_consume_rejects_foreign_staging_before_mutation() -> None:
     assert np.array_equal(acc.units_arr, units)
     assert len(acc.fill_ts) == fills
     assert len(acc.equity_chunks) == chunks
+
+
+def _release_grid() -> pd.DatetimeIndex:
+    return pd.date_range("2024-03-14 22:00", periods=40, freq="3min", tz="UTC")
+
+
+def _release_window(grid, signals, *, avail_step: str = "3min"):  # type: ignore[no-untyped-def]
+    """One BUY intent released at ``signals``; distinct trending closes, flat
+    200.0 lows/highs so a strict resting order never touches."""
+    closes = pd.DataFrame({"A": 100.0 + np.arange(len(grid), dtype="float64")}, index=grid)
+    flat = pd.DataFrame({"A": np.full(len(grid), 200.0)}, index=grid)
+    idx = pd.DatetimeIndex(signals)
+    return ExecutionReplayWindow(
+        window_start=grid[0], window_end=grid[-1], columns=("A",), symbols=("A",),
+        minute_grid=grid, highs=flat, lows=flat, closes=closes, marks=closes,
+        bar_funding=closes * 0.0,
+        target_weights=pd.DataFrame({"A": [0.5] * len(idx)}, index=idx),
+        signal_available_at=idx,
+        quote_volumes=flat * 0.0 + 1000.0, funding_known=flat.notna(),
+        bar_available_at=grid + pd.Timedelta(avail_step),
+    )
+
+
+def test_submission_bar_opens_at_on_grid_release() -> None:
+    grid = _release_grid()
+    release = grid[20]
+    staged = stage_window_arrays(_release_window(grid, [release]))
+    assert int(staged.spos_all[0]) == 20
+
+
+def test_off_grid_release_submits_on_next_label() -> None:
+    grid = _release_grid()
+    staged = stage_window_arrays(_release_window(grid, [grid[20] + pd.Timedelta(seconds=70)]))
+    assert int(staged.spos_all[0]) == 21
+
+
+def test_off_grid_decision_uses_last_completed_bar() -> None:
+    from src.engine.execution import ExecutionSpec, replay_execution_windows
+
+    grid = _release_grid()
+    release = grid[20] + pd.Timedelta(seconds=70)
+    result = replay_execution_windows(
+        (_release_window(grid, [release]),), 10000.0, "OHLCV_IMMEDIATE_TAKER",
+        ExecutionSpec(decision_anchor="submit_bar"),
+    )
+    assert float(result.simulated_fills.iloc[0]["quantity_delta"]) == pytest.approx(5000.0 / 119.0)
+
+
+def test_submit_anchor_without_completed_bar_fails_closed() -> None:
+    from src.engine.execution import ExecutionSpec, replay_execution_windows
+
+    grid = _release_grid()
+    result = replay_execution_windows(
+        (_release_window(grid, [grid[0]]),), 10000.0, "OHLCV_IMMEDIATE_TAKER",
+        ExecutionSpec(decision_anchor="submit_bar"),
+    )
+    assert result.simulated_fills.empty
+    assert any(g.code == "MISSING_DECISION_MARK" for g in result.data_gaps)
+
+
+def test_decision_price_is_release_closing_bar() -> None:
+    from src.engine.execution import ExecutionSpec, replay_execution_windows
+
+    grid = _release_grid()
+    release = grid[20]
+    result = replay_execution_windows(
+        (_release_window(grid, [release]),), 10000.0, "OHLCV_IMMEDIATE_TAKER",
+        ExecutionSpec(decision_anchor="submit_bar"),
+    )
+    assert result.ledger.primary_valid
+    assert float(result.simulated_fills.iloc[0]["quantity_delta"]) == pytest.approx(5000.0 / 119.0)
+    assert pd.Timestamp(result.simulated_fills.iloc[0]["timestamp"]) == release + pd.Timedelta(minutes=3)
+
+
+def test_no_future_data_gap_at_on_grid_release() -> None:
+    from src.engine.execution import ExecutionSpec, replay_execution_windows
+
+    grid = _release_grid()
+    result = replay_execution_windows(
+        (_release_window(grid, [grid[20]]),), 10000.0, "OHLCV_IMMEDIATE_TAKER",
+        ExecutionSpec(decision_anchor="submit_bar"),
+    )
+    assert result.ledger.primary_valid
+    assert not any(g.code == "FUTURE_DATA_REFERENCE" for g in result.ledger.data_gaps)
+
+
+def test_passive_timeout_bar_moves_with_submission() -> None:
+    from src.engine.execution import ExecutionSpec, replay_execution_windows
+
+    grid = _release_grid()
+    release = grid[20]
+    result = replay_execution_windows(
+        (_release_window(grid, [release]),), 10000.0, "OHLCV_STRICT_PROXY",
+        ExecutionSpec(decision_anchor="submit_bar"),
+    )
+    assert result.ledger.primary_valid
+    fills = result.simulated_fills
+    assert (fills["reason"] == "timeout_taker").all()
+    assert float(fills.iloc[0]["fill_price"]) == pytest.approx(float(100.0 + 30.0))

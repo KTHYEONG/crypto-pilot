@@ -231,7 +231,7 @@ def test_assemble_account_inputs_held_symbols_only(tmp_path: Path, monkeypatch: 
     assert list(unit.columns) == ["AAA"]
     assert seen["stage"] == "account_marks"
     assert marks.close.dtypes.iloc[0] == np.dtype("float32")
-    assert marks.close.index[0] == entries[0] - pd.Timedelta(hours=1)
+    assert marks.close.index[0] == entries[0] - pd.Timedelta(hours=1, minutes=3)
     assert marks.close.index[-1] == entries[-1] + pd.Timedelta(days=1) - pd.Timedelta(minutes=3)
     # 펀딩 누적은 진입 시각에서 표본화되어 replay_account의 일간 인덱스와 정렬돼야 한다.
     assert funding_cum.index.equals(unit.index)

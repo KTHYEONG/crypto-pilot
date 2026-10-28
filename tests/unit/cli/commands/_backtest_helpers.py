@@ -97,7 +97,7 @@ def _assemble_fixture(tmp_path: Path) -> tuple:
         signal_available_at=pd.DatetimeIndex(entries - pd.Timedelta(hours=1)),
         strategy=FLOW_MOM_TOP20,
     )
-    grid = _write_held_parquet(tmp_path, "AAA", entries[0] - pd.Timedelta(hours=1), 1000)
+    grid = _write_held_parquet(tmp_path, "AAA", entries[0] - pd.Timedelta(hours=1, minutes=3), 1000)
     days = pd.date_range("2021-01-01", periods=92, freq="D", tz="UTC")
     qv = pd.DataFrame({"AAA": 5_000_000.0, "BBB": 1_000_000.0}, index=days, dtype="float64")
     drift = pd.DataFrame(

@@ -26,6 +26,14 @@ from tests.unit.application._fill_calibration_helpers import (
 )
 
 
+def test_intent_window_starts_at_release_bar() -> None:
+    intent = {"anchor": pd.Timestamp("2023-01-02T22:57:00Z"), "anchor_pos": 0}
+    day, active_from, active_until = fcb._intent_window(intent, 180_000, 10)
+    assert day == date(2023, 1, 2)
+    assert active_from == int(pd.Timestamp("2023-01-02T23:00:00Z").value // 10**6)
+    assert active_until == int(pd.Timestamp("2023-01-02T23:30:00Z").value // 10**6)
+
+
 def test_ohlcv_rule_matches_account_ledger_maker_decision(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     parts = _toy_parts()
     raw_marks = parts[1]

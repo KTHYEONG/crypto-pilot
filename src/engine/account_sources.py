@@ -53,11 +53,12 @@ def assemble_account_inputs(
     """Unit weights (held columns only), 3m marks, funding cumulative at each entry's anchor,
     causal ADV and daily sigma, and the per-entry submit anchors for the candidate's held symbols.
 
-    The anchor of an entry is the last 3m bar whose label is at or before the entry's
-    ``signal_available_at`` -- the bar whose close is the last price observable when the order
-    is submitted on the next bar. This is the canonical inventory ledger's ``submit_bar``
-    anchor and the live submission time; anchoring at the entry label instead delays every
-    rebalance by the release-to-entry gap (one hour for the strategy book) and understates CAGR.
+    The anchor of an entry is the last 3m bar whose close (label + 3m) is at or
+    before the entry's ``signal_available_at`` -- the bar whose close is the last price
+    observable when the order is submitted on the next bar. This is the canonical
+    inventory ledger's ``submit_bar`` anchor and the live submission time; anchoring at
+    the entry label instead delays every rebalance by the release-to-entry gap (one hour
+    for the strategy book) and understates CAGR.
 
     The 3m grid starts at the first anchor so that every anchor is a grid bar. Funding is
     cumulated on the grid (each print settles on the first bar at or after its timestamp) and
@@ -79,7 +80,7 @@ def assemble_account_inputs(
     held = [column for column in weights.columns if bool((weights[column] != 0).any())]
     entries = weights.index
     releases = pd.DatetimeIndex(pd.to_datetime(candidate.signal_available_at, utc=True))
-    anchor_times = releases.floor("3min").tz_convert("UTC")
+    anchor_times = (releases - pd.Timedelta(minutes=3)).floor("3min").tz_convert("UTC")
     if bool(anchor_times.duplicated().any()):
         raise DataIntegrityError("two entries share one anchor bar")
     grid = pd.date_range(anchor_times[0], entries[-1] + pd.Timedelta(days=1), freq="3min", inclusive="left")
