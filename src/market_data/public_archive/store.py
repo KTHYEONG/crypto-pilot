@@ -25,6 +25,10 @@ logger = logging.getLogger(__name__)
 
 STAGING_PREFIX = ".archive-"
 
+# "defective": the published file matched its checksum but failed content validation, so a retry downloads the same
+# bytes; such days are settled for planning and job completion but never readable as data.
+SETTLED_STATUSES: frozenset[str] = frozenset({"ok", "defective"})
+
 
 class ArchiveBusyError(Exception):
     """Another process holds the archive root lock."""
@@ -138,7 +142,7 @@ class CoverageRow:
     dataset: str
     symbol: str
     day: date
-    status: Literal["ok", "absent", "failed"]
+    status: Literal["ok", "absent", "failed", "defective"]
     raw_sha256: str | None
     rows: int
     recorded_at: pd.Timestamp
@@ -220,6 +224,48 @@ def merge_partition(
     return len(merged)
 
 
+def merge_day_batch(
+    root: Path,
+    dataset: str,
+    symbol: str,
+    batch: list[tuple[date, pd.DataFrame]],
+    *,
+    kind: str = "derived",
+) -> None:
+    """Replace the batch's days in their month partition; raises DataIntegrityError on schema or month mismatch."""
+    month = batch[0][0].strftime("%Y%m")
+    path = partition_path(root, dataset, symbol, month, kind=kind)  # type: ignore[arg-type]
+    key = "transact_time_ms" if kind == "slice" else "timestamp"
+    for _day, frame in batch:
+        if len(frame) and key not in frame.columns:
+            raise DataIntegrityError(f"missing sort column: {key}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    existing = pd.read_parquet(path) if path.exists() else None
+    if existing is not None and len(existing) and key not in existing.columns:
+        raise DataIntegrityError(f"partition missing sort column: {key}")
+    drop = {day for day, _ in batch}
+    if existing is not None and len(existing):
+        keep = [_row_day(v, kind) not in drop for v in existing[key].tolist()]
+        kept = existing.loc[keep]
+    else:
+        kept = None
+    parts = [frame for _, frame in batch if len(frame)]
+    if kept is None or len(kept) == 0:
+        merged = (
+            pd.concat(parts, ignore_index=True)
+            if parts
+            else (existing.iloc[:0] if existing is not None else batch[0][1].iloc[:0])
+        )
+    else:
+        merged = pd.concat([kept, *parts], ignore_index=True) if parts else kept
+    if len(merged) and any(_row_month(v, kind) != month for v in merged[key].tolist()):
+        raise DataIntegrityError("partition row outside partition month")
+    merged = merged.sort_values(key, kind="mergesort").reset_index(drop=True)
+    if existing is None and not len(merged):
+        return
+    write_parquet_atomic(merged, path, compression="zstd")
+
+
 def _coverage_path(root: Path, dataset: str) -> Path:
     return Path(root) / "_coverage" / f"{dataset}.jsonl"
 
@@ -266,7 +312,7 @@ def _parse_coverage_line(line: str) -> CoverageRow:
         required = {"dataset", "symbol", "day", "status", "raw_sha256", "rows", "recorded_at", "detail"}
         if (
             set(obj) != required
-            or obj["status"] not in ("ok", "absent", "failed")
+            or obj["status"] not in ("ok", "absent", "failed", "defective")
             or type(obj["rows"]) is not int
             or obj["rows"] < 0
             or not isinstance(obj["dataset"], str)

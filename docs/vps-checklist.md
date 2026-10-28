@@ -259,7 +259,7 @@ data); use `status` and read-only checks.
 |---|---|---|---|
 | P1 | Last run | `cat ~/crypto-pilot/data/public_archive/_status/collect_heartbeat.json` | `ts` within 26 h, `failed == 0` |
 | P2 | Log | `grep -h 'rc=' ~/logs/crypto-pilot-public-archive-$(date -u +%F).log` | steps rc 0 |
-| P3 | Coverage lag | `docker compose --profile archive run --rm public-archive /app/.venv/bin/python -m src.cli.main archive status` | last `ok` day per dataset ≤ 3 days behind today; the default run covers metrics + bookDepth under the PIT mask |
+| P3 | Coverage lag | `docker compose --profile archive run --rm public-archive /app/.venv/bin/python -m src.cli.main archive status` | last `ok` day per dataset ≤ 3 days behind today; the default run covers metrics + bookDepth under the PIT mask; `defective` days (checksum-valid publisher files that fail validation, e.g. zero-quantity aggTrades rows) stay gaps and are never retried unless `collect --retry-defective` |
 | P4 | Drive copy | `rclone lsf gdrive:quant-lake/live/crypto-pilot/data/public_archive --dirs-only` | `metrics/`, `bookDepth/`, `_coverage/` present; `aggTrades/` and `aggTrades_slice/` only after an explicitly requested backfill |
 | P5 | Prune gate | archive prune JSON | `prune_blocked=false` |
 | P6 | Archive backup marker | `cat ~/crypto-pilot/deploy/backup/status/last_archive_success.json` | `finished_at` within 36 h |

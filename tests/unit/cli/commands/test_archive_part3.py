@@ -623,3 +623,34 @@ def test_collect_past_drain_deadline_skips_jobs(tmp_path, monkeypatch, capsys):
     assert drained == []
     assert jobs.pending_jobs(tmp_path) == [job]
     assert "backfill job=" not in capsys.readouterr().out
+
+
+def test_defective_day_settles_backfill_job(tmp_path, monkeypatch, capsys):
+    _census(monkeypatch)
+    from src.market_data.public_archive import jobs as jm
+    from src.market_data.public_archive import store as sm
+
+    day = date(2024, 1, 15)
+    fake = Fake([day])
+    stamp = pd.Timestamp(day, tz="UTC").strftime("%Y-%m-%d %H:%M:%S")
+    bad = _zip(f"{_HDR}\n{stamp},ETHUSDT,1,2,3,4,5,6\n")
+    key = daily_key("metrics", "BTCUSDT", day)
+    stripped = key.removeprefix("data/futures/um/")
+    fake.blobs[stripped] = bad
+    fake.blobs[stripped + ".CHECKSUM"] = f"{hashlib.sha256(bad).hexdigest()}  {key}\n".encode()
+    job = jm.BackfillJob("metrics-2024-01-15-2024-01-15-20240101T000000Z", "metrics", day, day, "/c", None, None,
+                         pd.Timestamp.now(tz="UTC"))
+    jm.enqueue_backfill(tmp_path, job)
+    ns = _ns(tmp_path, ["collect", "--dataset", "metrics", "--symbols", "BTCUSDT", "--start", "2024-01-16",
+                        "--end", "2024-01-16", "--execute", "--drain-jobs-until", "23:59"])
+    ns.downloader = fake
+    ns.handler(ns)
+    assert "status=DONE" in capsys.readouterr().out
+    assert sm.load_coverage(tmp_path, "metrics")[("BTCUSDT", day)].status == "defective"
+    listing = _ns(tmp_path, ["backfill", "list"])
+    listing.handler(listing)
+    out = capsys.readouterr().out
+    assert "remaining=0 failed=0 defective=1 status=DONE" in out
+    status = _ns(tmp_path, ["status"])
+    status.handler(status)
+    assert "failed=0 defective=1" in capsys.readouterr().out
