@@ -407,7 +407,7 @@ def test_assemble_account_inputs_shares_causal_adv_sigma(tmp_path: Path) -> None
     expected_sigma.index = entries
     pd.testing.assert_frame_equal(adv, expected_adv)
     pd.testing.assert_frame_equal(sigma, expected_sigma)
-    pd.testing.assert_index_equal(anchors, pd.DatetimeIndex(entries))
+    pd.testing.assert_index_equal(anchors, pd.DatetimeIndex(entries - pd.Timedelta(minutes=3)))
 
 
 def test_history_validation_rejects_bad_inputs() -> None:
@@ -471,10 +471,11 @@ def test_assembled_anchors_follow_release_time(tmp_path: Path) -> None:
     sym = "AAAUSDT"
     entries = pd.DatetimeIndex(["2021-02-01", "2021-02-02"], tz="UTC")
     releases = pd.DatetimeIndex(entries - pd.Timedelta(hours=1))
-    grid = pd.date_range(releases[0], entries[-1] + pd.Timedelta(days=1), freq="3min", inclusive="left")
+    anchor_start = releases[0] - pd.Timedelta(minutes=3)
+    grid = pd.date_range(anchor_start, entries[-1] + pd.Timedelta(days=1), freq="3min", inclusive="left")
     unit, marks, _, adv, _, anchors = _assemble_context(tmp_path, sym, entries, releases, grid)
-    pd.testing.assert_index_equal(anchors, releases)
-    assert marks.close.index[0] == releases[0]
+    pd.testing.assert_index_equal(anchors, releases - pd.Timedelta(minutes=3))
+    assert marks.close.index[0] == anchor_start
     assert len(anchors) == len(unit)
 
 
@@ -482,12 +483,13 @@ def test_assembled_funding_sampled_at_anchors(tmp_path: Path) -> None:
     sym = "AAAUSDT"
     entries = pd.DatetimeIndex(["2021-02-01", "2021-02-02"], tz="UTC")
     releases = pd.DatetimeIndex(entries - pd.Timedelta(hours=1))
-    grid = pd.date_range(releases[0], entries[-1] + pd.Timedelta(days=1), freq="3min", inclusive="left")
+    anchor_start = releases[0] - pd.Timedelta(minutes=3)
+    grid = pd.date_range(anchor_start, entries[-1] + pd.Timedelta(days=1), freq="3min", inclusive="left")
     funding = pd.Series([0.001], index=pd.DatetimeIndex([entries[0]], tz="UTC"), dtype="float64")
     _, _, funding_cum, _, _, anchors = _assemble_context(
         tmp_path, sym, entries, releases, grid, funding_by_symbol={sym: funding},
     )
-    assert anchors[0] == releases[0]
+    assert anchors[0] == anchor_start
     assert funding_cum.loc[entries[0], sym] == 0.0
     assert funding_cum.loc[entries[1], sym] == 0.001
 

@@ -77,7 +77,7 @@ class _WindowFrame:
         funding_matrix: Per-bar funding rates, same shape.
         last_close_idx: Last finite-close row index at or before each row, ``-1`` when none.
         decision_ns_all: Decision labels in nanoseconds, one per target row.
-        spos_all: First grid position strictly after each signal availability.
+        spos_all: First grid position at or after each signal availability.
         dpos_all: Grid position of each decision label (``searchsorted`` left).
         on_grid_all: Whether each decision label is an exact grid label.
         target_values: Target weights, shape ``(n_decisions, n_local)``.
@@ -590,10 +590,10 @@ class _BoundExecutionReplayAccumulator:
         A fill bar with zero/unknown/non-positive quote volume is untradable
         (INV-EXECUTION-VIABILITY); unknown funding at the fill bar cannot
         price the order (INV-FUNDING-KNOWLEDGE); an order whose submit time
-        falls outside ``(signal, availability]`` has no causal standing
+        falls outside ``[signal, availability]`` has no causal standing
         (INV-BAR-AVAILABILITY). Returns the blocking gap, else ``None``.
         """
-        if not (int(signal_ns) < int(submit_ns) <= int(avail_submit_ns)):
+        if not (int(signal_ns) <= int(submit_ns) <= int(avail_submit_ns)):
             return ExecutionDataGap(
                 code="CAUSAL_TIMING_VIOLATION", symbol=sym,
                 timestamp=decision_ts, decision_time=decision_ts, signal_time=signal_ts,
@@ -976,20 +976,23 @@ class _BoundExecutionReplayAccumulator:
         # Carry forward only bars available up to the final decision to prevent future leakage.
         self.last_liquid_ns[frame.gpos] = np.maximum(self.last_liquid_ns[frame.gpos], cand)
 
-    def _consume_decision_price(self, frame: _WindowFrame, col: int, on_grid: bool, dpos: int, spos: int) -> float | None:
+    def _consume_decision_price(self, frame: _WindowFrame, col: int, on_grid: bool, dpos: int, spos: int, signal_ns: int | None = None) -> float | None:
         """Resolve the anchor price for one intent, carried closes included."""
         if on_grid and frame.mark_valid[dpos, col]:
             return float(frame.marks_values[dpos, col])
-        j = int(frame.last_close_idx[spos - 1, col]) if spos > 0 else -1
+        end = spos
+        if signal_ns is not None:
+            end = int(np.searchsorted(frame.grid_ns, signal_ns - frame.bar_ns, side="right"))
+        j = int(frame.last_close_idx[end - 1, col]) if end > 0 else -1
         if j >= 0 and frame.mark_valid[j, col]:
             return float(frame.marks_values[j, col])
         sym = frame.local_cols[col]
         carried_ts = self.last_close_ts.get(sym)
-        if carried_ts is not None:
+        if carried_ts is not None and (signal_ns is None or int(carried_ts.value) + frame.bar_ns <= signal_ns):
             carried_mark = self.last_close_mark[sym]
             if np.isfinite(carried_mark) and carried_mark > 0.0:
                 return float(carried_mark)
-        if spos < frame.n_grid and frame.mark_valid[spos, col]:
+        if signal_ns is None and spos < frame.n_grid and frame.mark_valid[spos, col]:
             return float(frame.marks_values[spos, col])
         return None
 
@@ -1132,7 +1135,10 @@ class _BoundExecutionReplayAccumulator:
         if self._delivery_submit_cancelled(frame, gcol, spos):
             self._record_delivery_cancel()
             return True
-        decision_price = self._consume_decision_price(frame, col, on_grid and not frame.submit_anchored, dpos, spos)
+        decision_price = self._consume_decision_price(
+            frame, col, on_grid and not frame.submit_anchored, dpos, spos,
+            int(sig_index[i].value) if frame.submit_anchored else None,
+        )
         if decision_price is None:
             self.termination_counts["MISSING_DATA"] += 1
             self.data_gaps.append(

@@ -468,7 +468,7 @@ class TestLadderedExecutionReplay:
         lows = pd.DataFrame({"A": [99.0] * len(grid)}, index=grid)
         marks = px.copy()
         closes = px.copy()
-        closes.iloc[1, 0] = np.nan
+        closes.iloc[0, 0] = np.nan
         funding = pd.DataFrame(0.0, index=grid, columns=["A"])
         target = pd.DataFrame({"A": [1.0]}, index=[pd.Timestamp("2021-01-01 11:00", tz="UTC")])
         signal_at = pd.DatetimeIndex([pd.Timestamp("2021-01-01 12:00", tz="UTC")])

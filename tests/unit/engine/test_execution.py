@@ -363,7 +363,7 @@ def test_fill_effective_time_is_not_before_bar_availability() -> None:
     available = grid + pd.Timedelta(minutes=3)
     w = ExecutionReplayWindow(grid[0], grid[-1], ('BTCUSDT',), ('BTCUSDT',), grid, px, px, px, px, px*0.0, pd.DataFrame({'BTCUSDT': [1.0]}, index=[grid[0]]), pd.DatetimeIndex([grid[0]]), quote_volumes=px*0.0+1.0, funding_known=px.notna(), bar_available_at=available)
     result = replay_execution_windows((w,), 1000.0, 'OHLCV_IMMEDIATE_TAKER', ExecutionSpec())
-    assert (pd.to_datetime(result.simulated_fills['timestamp'], utc=True) >= available[1]).all()
+    assert (pd.to_datetime(result.simulated_fills['timestamp'], utc=True) >= available[0]).all()
 
 
 def test_strategy_replay_delegates_to_causal_window_engine(monkeypatch) -> None:
@@ -413,7 +413,7 @@ def test_replay_flags_unknown_funding_on_held_and_active() -> None:
     # 체결 시도는 보유 리스크가 없어(체결 전) KNOWN_ZERO_VOLUME과 동일하게 무효화
     # 없이 미체결·재시도된다(NO_FUNDING_UNFILLED).
     blocked_known = px.notna()
-    blocked_known.iloc[1, 0] = False
+    blocked_known.iloc[0, 0] = False
     wb = ExecutionReplayWindow(grid[0], grid[-1], ('BTCUSDT',), ('BTCUSDT',), grid, px, px, px, px, px*0.0, pd.DataFrame({'BTCUSDT': [1.0]}, index=[grid[0]]), pd.DatetimeIndex([grid[0]]), quote_volumes=px*0.0+1.0, funding_known=blocked_known, bar_available_at=grid+pd.Timedelta(minutes=3))
     blocked = replay_execution_windows((wb,), 1000.0, 'OHLCV_IMMEDIATE_TAKER', ExecutionSpec())
     assert blocked.fill_count == 0

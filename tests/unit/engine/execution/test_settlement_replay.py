@@ -110,7 +110,10 @@ def test_decision_after_delivery_sizes_on_settled_cash() -> None:
     settle_ts = fills[fills["reason"] == "delist_settlement"].iloc[0]["timestamp"]
     later = fills[fills["timestamp"] > settle_ts]
     assert len(later) >= 1
-    assert later.iloc[0]["pre_trade_equity"] == pytest.approx(result.ledger.equity.loc[grid[40]])
+    # The post-delivery intent is sized on settled cash: the MTM of the last bar
+    # before its decision bar (the fill now books on the decision bar itself, so
+    # that bar's MTM is already net of the fill fee).
+    assert later.iloc[0]["pre_trade_equity"] == pytest.approx(result.ledger.equity.loc[grid[39]])
     assert result.termination_counts.get("DELIST_SETTLEMENT") == 1
 
 
@@ -361,10 +364,10 @@ def test_interleaved_funding_reconciles_decision_cash_and_delivery_valuation() -
 @pytest.mark.parametrize("bound", ["OHLCV_STRICT_PROXY", "OHLCV_LADDERED_PROXY"])
 def test_timeout_equal_last_trade_cancels_before_dead_close(bound) -> None:
     grid = _grid(periods=60)
-    event = _event(delivery=str(grid[35]), last_trade=str(grid[11]))
+    event = _event(delivery=str(grid[35]), last_trade=str(grid[10]))
     window = _window(grid, [str(grid[0])], {"AUSDT": [0.5], "BUSDT": [0.0]}, events=(event,))
     closes = window.closes.copy()
-    closes.loc[grid[11]:, "AUSDT"] = np.nan
+    closes.loc[grid[10]:, "AUSDT"] = np.nan
     window = dataclasses.replace(window, closes=closes)
     result = replay_execution_windows((window,), 10000.0, bound, ExecutionSpec())
     assert result.simulated_fills.empty
@@ -519,4 +522,4 @@ def test_announcement_difference_starts_at_first_informed_decision() -> None:
     assert r_b.termination_counts.get("DELISTING_ENTRY_BLOCKED", 0) in (None, 0)
     assert len(r_a.simulated_fills) + 1 == len(r_b.simulated_fills)
     first_new = r_b.simulated_fills[~r_b.simulated_fills["timestamp"].isin(r_a.simulated_fills["timestamp"])]
-    assert first_new["timestamp"].tolist() == [grid[47]]
+    assert first_new["timestamp"].tolist() == [grid[46]]

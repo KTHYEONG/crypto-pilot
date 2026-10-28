@@ -119,8 +119,8 @@ def replay_account(
     """Replay a unit-exposure target book as one real USDT account.
 
     At each entry the policy picks exposure from equity marked at the entry's
-    anchor bar close (``anchor_times``: the last close observable at submission, the canonical
-    ``submit_bar`` anchor); orders are sized and priced there, and quantities are held until the
+    anchor bar close (``anchor_times``: label of the last 3m bar whose close, label + 3m,
+    is at or before the signal release, the canonical ``submit_bar`` anchor); orders are sized and priced there, and quantities are held until the
     next entry's anchor. Between entries quantities are fixed
     and marked on 3m closes; maintenance margin is evaluated on each bar's adverse low/high, and
     the first bar whose adverse equity falls below total maintenance margin liquidates the account

@@ -82,7 +82,7 @@ def _engine_window(
 def _engine_case() -> tuple[StrategyTargets, list[ExecutionReplayWindow]]:
     labels = [_DAY1 + pd.Timedelta(days=i) for i in (1, 2, 3)]
     candidate = _candidate(labels)
-    first = _engine_window(pd.date_range(labels[0] - pd.Timedelta(hours=1), labels[1] + pd.Timedelta(hours=1), freq="3min", tz="UTC"), candidate, labels[:1])
+    first = _engine_window(pd.date_range(labels[0] - pd.Timedelta(hours=1, minutes=3), labels[1] + pd.Timedelta(hours=1), freq="3min", tz="UTC"), candidate, labels[:1])
     second = _engine_window(pd.date_range(labels[1] - pd.Timedelta(hours=2), labels[2] + pd.Timedelta(hours=2), freq="3min", tz="UTC"), candidate, labels[1:])
     return candidate, [first, second]
 
@@ -226,7 +226,7 @@ def test_evaluate_fails_closed_on_unpriced_exit() -> None:
 def test_evaluate_uses_actual_funding_event_holdings() -> None:
     """Longs pay and shorts receive at the settlement bars they actually hold."""
     labels = [_DAY1 + pd.Timedelta(days=i) for i in (1, 2)]
-    grid = pd.date_range(labels[0] - pd.Timedelta(hours=1), labels[1] + pd.Timedelta(hours=2), freq="3min", tz="UTC")
+    grid = pd.date_range(labels[0] - pd.Timedelta(hours=1, minutes=3), labels[1] + pd.Timedelta(hours=2), freq="3min", tz="UTC")
     long_candidate = _candidate(labels, aaa=0.10, bbb=0.0)
     frames = _frames(grid)
     frames["bar_funding"].loc[grid[(grid >= labels[0] + pd.Timedelta(hours=12)) & (grid < labels[0] + pd.Timedelta(hours=13))]] = 0.0001

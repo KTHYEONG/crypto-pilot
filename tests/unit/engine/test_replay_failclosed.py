@@ -177,7 +177,7 @@ class TestCapitalInvariantFailFast:
             replay_execution_windows([window], 1.0, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec())
         msg = str(exc_info.value)
         assert "AAAUSDT" in msg
-        assert "00:10" in msg
+        assert "00:05" in msg
         assert "decision_price=0.5" in msg
         assert "qty=np.float64(inf)" in msg
 

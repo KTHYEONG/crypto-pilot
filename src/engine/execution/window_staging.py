@@ -46,7 +46,7 @@ class StagedWindowArrays:
         avail_explicit: Whether ``bar_available_at`` supplied ``avail_ns``.
         mark_avail: Mark availability (one bar behind ``avail_ns``), ``(n_grid, n_local)``.
         decision_ns_all: Decision labels in nanoseconds.
-        spos_all: First grid position strictly after each signal availability.
+        spos_all: First grid position at or after each signal availability.
         dpos_all: Grid position of each decision label (searchsorted left).
         on_grid_all: Whether each decision label is an exact grid label.
         target_values: Target weights, ``(n_decisions, n_local)``.
@@ -158,7 +158,7 @@ def stage_window_arrays(w: ExecutionReplayWindow) -> StagedWindowArrays:
     last_close_idx = np.maximum.accumulate(close_row, axis=0)
     decision_ns_all = np.asarray(w.target_weights.index, dtype="datetime64[ns]").astype("int64")
     signal_ns_all = np.asarray(w.signal_available_at, dtype="datetime64[ns]").astype("int64")
-    spos_all = np.searchsorted(grid_ns, signal_ns_all, side="right")
+    spos_all = np.searchsorted(grid_ns, signal_ns_all, side="left")
     dpos_all = np.searchsorted(grid_ns, decision_ns_all, side="left")
     dpos_clipped = np.minimum(dpos_all, n_grid - 1)
     on_grid_all = np.where(dpos_all < n_grid, grid_ns[dpos_clipped] == decision_ns_all, False)

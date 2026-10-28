@@ -273,7 +273,7 @@ def test_same_bar_multiple_fills_last_booked_level() -> None:
     import pandas as pd
 
     grid = pd.date_range("2025-01-01 00:00", periods=10, freq="3min", tz="UTC")
-    decisions = [grid[2], grid[2] + pd.Timedelta(minutes=1)]
+    decisions = [grid[2] - pd.Timedelta(minutes=1), grid[2]]
     window = _ledger_window(
         grid, ["BTCUSDT"], decisions,
         {"BTCUSDT": [0.1, 0.2]},
@@ -504,7 +504,7 @@ def test_pre_trade_equity_independent_of_own_fill() -> None:
     grid = pd.date_range("2025-01-01 00:00", periods=10, freq="3min", tz="UTC")
     window = _ledger_window(grid, ["BTCUSDT"], [grid[0]], {"BTCUSDT": [0.1]})
     bumped_closes = window.closes.copy()
-    bumped_closes.iloc[1, 0] *= 1.05
+    bumped_closes.iloc[0, 0] *= 1.05
     _base, base_acc = _replay_with_acc(window)
     _bump, bump_acc = _replay_with_acc(dataclasses.replace(window, closes=bumped_closes))
     assert bump_acc.fill_price[0] == pytest.approx(base_acc.fill_price[0] * 1.05)
@@ -517,7 +517,7 @@ def test_same_bar_multi_fill_does_not_compound() -> None:
     import pytest
 
     grid = pd.date_range("2025-01-01 00:00", periods=10, freq="3min", tz="UTC")
-    decisions = [grid[2], grid[2] + pd.Timedelta(minutes=1)]
+    decisions = [grid[2] - pd.Timedelta(minutes=1), grid[2]]
     window = _ledger_window(
         grid, ["BTCUSDT"], decisions,
         {"BTCUSDT": [0.1, 0.2]},
