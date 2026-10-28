@@ -10,7 +10,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -663,6 +663,53 @@ def _default_expected_by(
     return base + pd.Timedelta(seconds=grace)
 
 
+@dataclass(slots=True)
+class _PrefetchSlot:
+    """One best-effort pre-release step, run at most once per decision target."""
+
+    label: str
+    enabled: bool
+    fn: Callable[[pd.Timestamp], Any]
+    done_for: pd.Timestamp | None = None
+
+    def pending(self, target: pd.Timestamp) -> bool:
+        return self.enabled and self.done_for != target
+
+
+def _run_due_prefetches(
+    slots: Sequence[tuple[_PrefetchSlot, pd.Timestamp]],
+    target: pd.Timestamp,
+    now_fn: Callable[[], pd.Timestamp],
+    run: Callable[[Callable[[], Any]], Any],
+) -> None:
+    for slot, due_at in slots:
+        if slot.pending(target) and now_fn() >= due_at:
+            slot.done_for = target
+            try:
+                run(functools.partial(slot.fn, target))
+            except Exception:  # noqa: BLE001 - a prefetch never blocks the cycle
+                logger.exception("[SYS] %s prefetch failed decision_time=%s", slot.label, target)
+
+
+def _prefetch_wait_cap(
+    slots: Sequence[tuple[_PrefetchSlot, pd.Timestamp]], target: pd.Timestamp, tick: pd.Timestamp, wait_s: float,
+) -> float:
+    for slot, due_at in slots:
+        if slot.pending(target):
+            wait_s = min(wait_s, max(0.0, (due_at - tick).total_seconds()))
+    return wait_s
+
+
+def _run_idle_until(
+    run_with_pulse: Callable[[str, pd.Timestamp | None, Callable[[], Any]], Any],
+    settings: LiveSettings,
+    now_fn: Callable[[], pd.Timestamp],
+    until: pd.Timestamp,
+    fn: Callable[[], Any],
+) -> Any:
+    return run_with_pulse("idle", _default_expected_by(settings, "idle", now_fn(), until), fn)
+
+
 def default_step_fns(settings: LiveSettings, weights_path: Path) -> dict[str, Callable[[pd.Timestamp], Any]]:
     """Bind the production step functions so each takes only the decision time.
 
@@ -817,8 +864,8 @@ def run_daemon(
                 logger.warning("[SYS] heartbeat pulse thread still alive decision_time=%s", target)
     consecutive_halts = _restore_consecutive_halts(heartbeat_path)
     buffer_td = pd.Timedelta(minutes=settings.daemon_catchup_buffer_minutes)
-    prefetched_target: pd.Timestamp | None = None
-    prefetched_klines_target: pd.Timestamp | None = None
+    funding_slot = _PrefetchSlot("funding", settings.funding_prefetch_enabled, prefetch_fn)
+    kline_slot = _PrefetchSlot("kline", settings.kline_prefetch_enabled, kline_prefetch_fn)
     startup = _read_heartbeat(heartbeat_path)
     logger.info("[SYS] daemon start mode=%s pid=%d weights=%s state=%s heartbeat_stage=%s heartbeat_status=%s", settings.mode.value, os.getpid(), weights_path, state_path, (startup or {}).get("stage"), (startup or {}).get("status"))
     _handle_interrupted_stage(settings, heartbeat_path, now_fn())
@@ -855,48 +902,23 @@ def run_daemon(
 
         wait_until = target + DECISION_RELEASE_OFFSET + buffer_td
         remaining_seconds = (wait_until - now_fn()).total_seconds()
-        prefetch_at = target + pd.Timedelta(hours=settings.funding_prefetch_offset_hours)
-        kline_prefetch_at = wait_until - pd.Timedelta(minutes=settings.kline_prefetch_lead_minutes)
+        prefetch_slots = (
+            (funding_slot, target + pd.Timedelta(hours=settings.funding_prefetch_offset_hours)),
+            (kline_slot, wait_until - pd.Timedelta(minutes=settings.kline_prefetch_lead_minutes)),
+        )
         while remaining_seconds > 0:
             if shutdown is not None and shutdown.requested:
                 break
-            if (
-                settings.funding_prefetch_enabled
-                and prefetched_target != target
-                and now_fn() >= prefetch_at
-            ):
-                prefetched_target = target
-                try:
-                    _run_with_pulse(
-                        "idle",
-                        _default_expected_by(settings, "idle", now_fn(), wait_until),
-                        functools.partial(prefetch_fn, target),
-                    )
-                except Exception:  # noqa: BLE001
-                    logger.exception("[SYS] funding prefetch failed decision_time=%s", target)
-            if (
-                settings.kline_prefetch_enabled
-                and prefetched_klines_target != target
-                and now_fn() >= kline_prefetch_at
-            ):
-                prefetched_klines_target = target
-                try:
-                    _run_with_pulse(
-                        "idle",
-                        _default_expected_by(settings, "idle", now_fn(), wait_until),
-                        functools.partial(kline_prefetch_fn, target),
-                    )
-                except Exception:  # noqa: BLE001
-                    logger.exception("[SYS] kline prefetch failed decision_time=%s", target)
+            _run_due_prefetches(
+                prefetch_slots, target, now_fn,
+                functools.partial(_run_idle_until, _run_with_pulse, settings, now_fn, wait_until),
+            )
             remaining_seconds = (wait_until - now_fn()).total_seconds()
             if remaining_seconds <= 0:
                 break
-            wait_seconds = min(remaining_seconds, DAEMON_POLL_INTERVAL_SECONDS)
-            tick = now_fn()
-            if settings.funding_prefetch_enabled and prefetched_target != target:
-                wait_seconds = min(wait_seconds, max(0.0, (prefetch_at - tick).total_seconds()))
-            if settings.kline_prefetch_enabled and prefetched_klines_target != target:
-                wait_seconds = min(wait_seconds, max(0.0, (kline_prefetch_at - tick).total_seconds()))
+            wait_seconds = _prefetch_wait_cap(
+                prefetch_slots, target, now_fn(), min(remaining_seconds, DAEMON_POLL_INTERVAL_SECONDS),
+            )
             _wait(wait_seconds, until=wait_until)
             if shutdown is not None and shutdown.requested:
                 break
