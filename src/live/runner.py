@@ -1430,6 +1430,7 @@ def run_shadow_cycle(
     now_ts = now if now is not None else pd.Timestamp.now(tz="UTC")
     # 사이클이 어느 지점에서 끝나든 호가 캡처 스레드를 즉시 멈춰 저장한다(세션 상한까지 방치 금지).
     depth_recorders: list[ExecutionDepthRecorder] = []
+    paper_tape: Any | None = None
     try:
         _assert_run_manifest_compatible(settings)
         ledger_path = settings.resolved_ledger_path(default_ledger_path)
@@ -1681,13 +1682,38 @@ def run_shadow_cycle(
             policy = backtest_parity_execution_policy(fee_schedule, settings.taker_slippage_bps)
         audit.record("execution_policy_selected", policy=settings.execution_policy)
         paper_fill_model = settings.paper_fill_model if settings.mode is ExecutionMode.PAPER else None
+        if (
+            settings.mode is ExecutionMode.PAPER
+            and settings.paper_fill_model == "tape_through"
+            and kept
+        ):
+            from src.live.trade_tape_feed import LiveTradeTape  # noqa: PLC0415
+
+            paper_tape = LiveTradeTape(
+                sorted({i.symbol for i in kept}),
+                stream_url=settings.exec_depth_stream_url,
+                max_trades_per_symbol=settings.paper_tape_max_trades_per_symbol,
+                stale_after_s=settings.paper_tape_stale_after_s,
+            )
+            tape_readiness = paper_tape.start(
+                ready_timeout_s=settings.paper_tape_ready_timeout_s, shutdown=shutdown,
+            )
+            with contextlib.suppress(Exception):
+                audit.record(
+                    "paper_tape_ready",
+                    ready=tape_readiness.ready,
+                    seen=tape_readiness.seen,
+                    required=tape_readiness.required,
+                    missing=",".join(tape_readiness.missing),
+                    waited_s=tape_readiness.waited_s,
+                )
         sink: list[ExecutionOutcome] = []
         outcomes: list[ExecutionOutcome] = []
         final_state: LedgerState | None = None
         attempt = journal.begin_attempt(decision_time=decision_time, run_id=run_id, mode=settings.mode.value, pre_trade_equity=equity, sizing_anchor=_sizing_anchor, decision_marks={i.symbol: decision_marks[i.symbol] for i in kept if i.symbol in decision_marks}, started_at=now_ts)
         try:
             try:
-                outcomes = list(execute_intents(order_client, kept, filters, policy, audit, _clock, time.sleep, rate_limits=rate_limits, outcome_sink=sink, shutdown=shutdown, paper_fill_model=paper_fill_model, journal=journal, attempt=attempt, shutdown_cleanup_budget_s=settings.execution_shutdown_cleanup_budget_s, order_identity_tolerance_ms=settings.order_identity_tolerance_ms))
+                outcomes = list(execute_intents(order_client, kept, filters, policy, audit, _clock, time.sleep, rate_limits=rate_limits, outcome_sink=sink, shutdown=shutdown, paper_fill_model=paper_fill_model, journal=journal, attempt=attempt, shutdown_cleanup_budget_s=settings.execution_shutdown_cleanup_budget_s, order_identity_tolerance_ms=settings.order_identity_tolerance_ms, paper_tape=paper_tape))
                 _alert_reject_cluster(settings, outcomes, audit, decision_time=decision_time, now=now_ts)
                 _alert_flip_blocked(settings, outcomes, audit, decision_time=decision_time, now=now_ts)
                 final_state = _commit_and_record(settings, ledger_path, ledger_state, journal, audit, fallback_attempt=attempt, equity=equity, executed_decision_time=None if (derisk_active or bool(frozen_symbols)) else decision_time, funding_records=funding_records, settlement_records=settlement_records, reconcile_cash_before=cash_before)
@@ -1731,6 +1757,15 @@ def run_shadow_cycle(
         depth_summary = _stop_depth(settings.exec_depth_post_window_s)
         if depth_summary is not None:
             audit.record("exec_depth_capture", **dataclasses.asdict(depth_summary))
+        if paper_tape is not None:
+            stopping_tape, paper_tape = paper_tape, None
+            try:
+                tape_summary = stopping_tape.stop()
+            except Exception:
+                tape_summary = None
+            if tape_summary is not None:
+                with contextlib.suppress(Exception):
+                    audit.record("paper_tape_summary", **dataclasses.asdict(tape_summary))
         _collect_live_tax_fail_soft(
             settings, audit, order_client=order_client, symbols=wanted_symbols, snapshot=snapshot,
             decision_time=decision_time, now=now_ts,
@@ -1782,6 +1817,11 @@ def run_shadow_cycle(
             intent_count=0,
         )
     finally:
+        if paper_tape is not None:
+            with contextlib.suppress(Exception):
+                tape_summary = paper_tape.stop()
+                with contextlib.suppress(Exception):
+                    audit.record("paper_tape_summary", **dataclasses.asdict(tape_summary))
         while depth_recorders:
             depth_recorders.pop().stop(post_window_s=0.0)
 

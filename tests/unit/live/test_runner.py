@@ -1053,3 +1053,160 @@ def test_flip_blocked_wired_on_cycle_paths(tmp_path, monkeypatch) -> None:
 
     _, alerts = _cycle_with(_halt, exc_kind="halt")
     assert len(alerts) == 1
+
+
+def test_paper_tape_through_wires_live_feed_into_execution(tmp_path, monkeypatch) -> None:
+    import json
+
+    import src.live.runner as runner_mod
+    import src.live.trade_tape_feed as tape_mod
+    from src.live.settings import ExecutionMode, LiveSettings
+    from tests.unit.live._runner_stubs import DECISION_TIME, NOW
+
+    path, _, _ = _seed_policy_cycle_artifact(tmp_path)
+    captured: dict = {}
+    _install_policy_cycle_stubs(tmp_path, monkeypatch, captured)
+
+    seen: dict = {}
+    recorder = runner_mod.execute_intents
+
+    def _recording(client, intents, filters, policy, audit, clock, sleep_fn, **kwargs):
+        seen.update(kwargs)
+        return recorder(client, intents, filters, policy, audit, clock, sleep_fn, **kwargs)
+
+    monkeypatch.setattr(runner_mod, "execute_intents", _recording)
+
+    built: dict = {}
+
+    class _FakeTape:
+        def __init__(self, symbols, *, stream_url, max_trades_per_symbol, stale_after_s):
+            built["symbols"] = list(symbols)
+            built["stream_url"] = stream_url
+            built["max_trades"] = max_trades_per_symbol
+            built["stale_after_s"] = stale_after_s
+
+        def start(self, *, ready_timeout_s, shutdown=None):
+            built["ready_timeout_s"] = ready_timeout_s
+            return tape_mod.TapeReadiness(
+                ready=True, seen=len(built["symbols"]), required=len(built["symbols"]),
+                missing=(), waited_s=0.01,
+            )
+
+        def stop(self):
+            return tape_mod.TapeSummary(
+                trades_received=3, symbols_seen=len(built["symbols"]),
+                reconnects=0, dropped_oldest=0,
+            )
+
+    monkeypatch.setattr(tape_mod, "LiveTradeTape", _FakeTape)
+    settings = LiveSettings(
+        mode=ExecutionMode.PAPER,
+        execution_policy="strict_passive",
+        paper_fill_model="tape_through",
+        ledger_path=str(tmp_path / "ledger_tape.json"),
+        exec_depth_capture_enabled=False,
+    )
+    report = runner_mod.run_shadow_cycle(settings, DECISION_TIME, path, now=NOW)
+
+    assert report.status == "COMPLETE"
+    assert built["symbols"] == sorted(built["symbols"])
+    assert len(built["symbols"]) > 0
+    assert built["ready_timeout_s"] == settings.paper_tape_ready_timeout_s
+    assert isinstance(seen.get("paper_tape"), _FakeTape)
+    audit_path = tmp_path / "shadow_cycle.jsonl"
+    events = [json.loads(line)["event"] for line in audit_path.read_text(encoding="utf-8").splitlines()]
+    assert "paper_tape_ready" in events
+    assert events.count("paper_tape_summary") == 1
+
+
+def test_paper_tape_stop_failure_never_halts_cycle(tmp_path, monkeypatch) -> None:
+    import src.live.runner as runner_mod
+    import src.live.trade_tape_feed as tape_mod
+    from src.live.settings import ExecutionMode, LiveSettings
+    from tests.unit.live._runner_stubs import DECISION_TIME, NOW
+
+    path, _, _ = _seed_policy_cycle_artifact(tmp_path)
+    captured: dict = {}
+    _install_policy_cycle_stubs(tmp_path, monkeypatch, captured)
+
+    seen: dict = {}
+    recorder = runner_mod.execute_intents
+
+    def _recording(client, intents, filters, policy, audit, clock, sleep_fn, **kwargs):
+        seen.update(kwargs)
+        return recorder(client, intents, filters, policy, audit, clock, sleep_fn, **kwargs)
+
+    monkeypatch.setattr(runner_mod, "execute_intents", _recording)
+
+    class _BoomStopTape:
+        def __init__(self, symbols, **kwargs):
+            pass
+
+        def start(self, *, ready_timeout_s, shutdown=None):
+            return tape_mod.TapeReadiness(
+                ready=False, seen=0, required=1, missing=("AAAUSDT",), waited_s=0.0,
+            )
+
+        def stop(self):
+            raise RuntimeError("stop boom")
+
+    monkeypatch.setattr(tape_mod, "LiveTradeTape", _BoomStopTape)
+    settings = LiveSettings(
+        mode=ExecutionMode.PAPER,
+        execution_policy="strict_passive",
+        paper_fill_model="tape_through",
+        ledger_path=str(tmp_path / "ledger_tape_boom.json"),
+        exec_depth_capture_enabled=False,
+    )
+    report = runner_mod.run_shadow_cycle(settings, DECISION_TIME, path, now=NOW)
+
+    assert report.status == "COMPLETE"
+    assert seen.get("paper_tape") is not None
+
+
+def test_paper_tape_stopped_once_when_execution_aborts(tmp_path, monkeypatch) -> None:
+    import json
+
+    import pytest
+
+    import src.live.runner as runner_mod
+    import src.live.trade_tape_feed as tape_mod
+    from src.live.settings import ExecutionMode, LiveSettings
+    from tests.unit.live._runner_stubs import DECISION_TIME, NOW
+
+    path, _, _ = _seed_policy_cycle_artifact(tmp_path)
+    captured: dict = {}
+    _install_policy_cycle_stubs(tmp_path, monkeypatch, captured)
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("execution boom")
+
+    monkeypatch.setattr(runner_mod, "execute_intents", _boom)
+    stops: list[int] = []
+
+    class _FakeTape:
+        def __init__(self, symbols, **kwargs):
+            pass
+
+        def start(self, *, ready_timeout_s, shutdown=None):
+            return tape_mod.TapeReadiness(ready=True, seen=1, required=1, missing=(), waited_s=0.0)
+
+        def stop(self):
+            stops.append(1)
+            return tape_mod.TapeSummary(trades_received=0, symbols_seen=0, reconnects=0, dropped_oldest=0)
+
+    monkeypatch.setattr(tape_mod, "LiveTradeTape", _FakeTape)
+    settings = LiveSettings(
+        mode=ExecutionMode.PAPER,
+        execution_policy="strict_passive",
+        paper_fill_model="tape_through",
+        ledger_path=str(tmp_path / "ledger_tape_abort.json"),
+        exec_depth_capture_enabled=False,
+    )
+    with pytest.raises(RuntimeError, match="execution boom"):
+        runner_mod.run_shadow_cycle(settings, DECISION_TIME, path, now=NOW)
+
+    assert len(stops) == 1
+    audit_path = tmp_path / "shadow_cycle.jsonl"
+    events = [json.loads(line)["event"] for line in audit_path.read_text(encoding="utf-8").splitlines()]
+    assert events.count("paper_tape_summary") == 1
