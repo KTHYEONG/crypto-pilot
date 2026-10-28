@@ -33,7 +33,7 @@ from src.live.audit import AUDIT_LOG_ROOT, prune_old_audit_logs
 from src.live.deadman import DeadmanPinger
 from src.live.derisk import UNRESOLVED_ORDERS_REASON
 from src.live.lifecycle import ShutdownFlag, install_shutdown_handlers  # noqa: F401
-from src.live.runner import CycleReport, run_shadow_cycle
+from src.live.runner import CycleReport, cycle_stage_durations, run_shadow_cycle
 from src.live.settings import LiveSettings
 from src.strategy.targets import FLOW_MOM_TOP20
 
@@ -297,6 +297,53 @@ def _default_funding_prefetch(
         report.total, report.fetched, report.fresh, report.failed, report.elapsed_s,
     )
     return report
+
+
+def _default_kline_prefetch(
+    settings: LiveSettings, weights_path: Path, decision_time: pd.Timestamp,
+) -> Any:
+    """Best-effort klines+funding prefetch before the release; never raises."""
+    from src.core.params import LIVE_SIGNAL_WARMUP_DAYS
+    from src.live.data_refresh import build_refresh_universe, refresh_live_market_data
+    from src.live.venue_listing import latest_venue_listing_or_none
+
+    try:
+        listing_root = DATA_DIR / "state" / "venue_listing"
+        previous = latest_venue_listing_or_none(listing_root)
+        if previous is None:
+            return None
+        try:
+            raw = json.loads(NON_CRYPTO_SYMBOLS_PATH.read_text(encoding="utf-8"))
+            symbols_raw = raw.get("symbols")
+            non_crypto = frozenset(str(s) for s in symbols_raw) if isinstance(symbols_raw, list) else frozenset()
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            non_crypto = frozenset()
+        required = _required_symbols(settings, weights_path)
+        universe = build_refresh_universe(
+            previous, required_symbols=required, non_crypto=non_crypto, now=_utc_now(),
+        )
+        fetch_set = sorted({*universe.trading, *universe.tracked_pending, *universe.tracked_settled})
+        report = refresh_live_market_data(
+            FUTURES_DATA_DIR,
+            now=_utc_now(),
+            lookback_days=settings.refresh_lookback_days,
+            max_workers=settings.refresh_max_workers,
+            deadline_s=settings.refresh_deadline_s,
+            min_symbols=settings.min_universe_symbols,
+            max_fail_fraction=settings.refresh_max_fail_fraction,
+            symbols=fetch_set,
+            klines_only_symbols=frozenset(universe.tracked_settled),
+            seed_lookback_days=LIVE_SIGNAL_WARMUP_DAYS + 30,
+            required_symbols=frozenset(required) & set(fetch_set),
+        )
+        logger.info(
+            "[DATA] stage=kline_prefetch total=%d refreshed=%d elapsed_s=%.1f",
+            report.total, report.refreshed, report.elapsed_s,
+        )
+        return report
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[DATA] stage=kline_prefetch status=failed error=%s", exc)
+        return None
 
 
 def _default_venue_capture(settings: LiveSettings, decision_time: pd.Timestamp) -> str:
@@ -631,6 +678,7 @@ def default_step_fns(settings: LiveSettings, weights_path: Path) -> dict[str, Ca
         "refresh": functools.partial(_default_data_refresh, settings, weights_path),
         "venue": functools.partial(_default_venue_capture, settings),
         "prefetch": functools.partial(_default_funding_prefetch, settings, weights_path),
+        "kline_prefetch": functools.partial(_default_kline_prefetch, settings, weights_path),
     }
 
 
@@ -682,11 +730,13 @@ def run_daemon(
     prune_fn: Callable[[], None] = _default_data_prune,
     venue_fn: Callable[[pd.Timestamp], Any] | None = None,
     prefetch_fn: Callable[[pd.Timestamp], Any] | None = None,
+    kline_prefetch_fn: Callable[[pd.Timestamp], Any] | None = None,
 ) -> None:
     """Merged autonomous loop: venue snapshot + data refresh + strategy step + execution.
 
-    ``refresh_fn`` / ``signal_step_fn`` / ``venue_fn`` / ``prefetch_fn`` default to the live
-    wiring and are injected only by tests -- there is no path-sniffing test detection.
+    ``refresh_fn`` / ``signal_step_fn`` / ``venue_fn`` / ``prefetch_fn`` /
+    ``kline_prefetch_fn`` default to the live wiring and are injected only by
+    tests -- there is no path-sniffing test detection.
     """
     _run_startup_gates(settings)
     defaults = default_step_fns(settings, weights_path)
@@ -699,6 +749,8 @@ def run_daemon(
         venue_fn = defaults["venue"]
     if prefetch_fn is None:
         prefetch_fn = defaults["prefetch"]
+    if kline_prefetch_fn is None:
+        kline_prefetch_fn = defaults["kline_prefetch"]
     iteration = 0
     wait_fn: Callable[[float], object] = sleep_fn if sleep_fn is not None else (shutdown.wait if shutdown is not None else time.sleep)
     heartbeat_path = _resolve_heartbeat_path(settings)
@@ -766,6 +818,7 @@ def run_daemon(
     consecutive_halts = _restore_consecutive_halts(heartbeat_path)
     buffer_td = pd.Timedelta(minutes=settings.daemon_catchup_buffer_minutes)
     prefetched_target: pd.Timestamp | None = None
+    prefetched_klines_target: pd.Timestamp | None = None
     startup = _read_heartbeat(heartbeat_path)
     logger.info("[SYS] daemon start mode=%s pid=%d weights=%s state=%s heartbeat_stage=%s heartbeat_status=%s", settings.mode.value, os.getpid(), weights_path, state_path, (startup or {}).get("stage"), (startup or {}).get("status"))
     _handle_interrupted_stage(settings, heartbeat_path, now_fn())
@@ -803,6 +856,7 @@ def run_daemon(
         wait_until = target + DECISION_RELEASE_OFFSET + buffer_td
         remaining_seconds = (wait_until - now_fn()).total_seconds()
         prefetch_at = target + pd.Timedelta(hours=settings.funding_prefetch_offset_hours)
+        kline_prefetch_at = wait_until - pd.Timedelta(minutes=settings.kline_prefetch_lead_minutes)
         while remaining_seconds > 0:
             if shutdown is not None and shutdown.requested:
                 break
@@ -820,7 +874,30 @@ def run_daemon(
                     )
                 except Exception:  # noqa: BLE001
                     logger.exception("[SYS] funding prefetch failed decision_time=%s", target)
-            _wait(min(remaining_seconds, DAEMON_POLL_INTERVAL_SECONDS), until=wait_until)
+            if (
+                settings.kline_prefetch_enabled
+                and prefetched_klines_target != target
+                and now_fn() >= kline_prefetch_at
+            ):
+                prefetched_klines_target = target
+                try:
+                    _run_with_pulse(
+                        "idle",
+                        _default_expected_by(settings, "idle", now_fn(), wait_until),
+                        functools.partial(kline_prefetch_fn, target),
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.exception("[SYS] kline prefetch failed decision_time=%s", target)
+            remaining_seconds = (wait_until - now_fn()).total_seconds()
+            if remaining_seconds <= 0:
+                break
+            wait_seconds = min(remaining_seconds, DAEMON_POLL_INTERVAL_SECONDS)
+            tick = now_fn()
+            if settings.funding_prefetch_enabled and prefetched_target != target:
+                wait_seconds = min(wait_seconds, max(0.0, (prefetch_at - tick).total_seconds()))
+            if settings.kline_prefetch_enabled and prefetched_klines_target != target:
+                wait_seconds = min(wait_seconds, max(0.0, (kline_prefetch_at - tick).total_seconds()))
+            _wait(wait_seconds, until=wait_until)
             if shutdown is not None and shutdown.requested:
                 break
             remaining_seconds = (wait_until - now_fn()).total_seconds()
@@ -848,6 +925,7 @@ def run_daemon(
             logger.exception("[SYS] data refresh failed")
             err = exc
         finally:
+            refresh_s = time.monotonic() - stage_started
             _log_stage_elapsed("refresh", target, stage_started)
         refresh_note = _refresh_note(report, err)
         refresh_ok = err is None and (report is None or bool(getattr(report, "ok", True)))
@@ -903,6 +981,7 @@ def run_daemon(
             signal_status = "HALT"
             failure_cause = f"strategy_step {type(exc).__name__}: {exc}"
         finally:
+            signal_s = time.monotonic() - stage_started
             _log_stage_elapsed("signal", target, stage_started)
 
         if signal_status == "HALT":
@@ -946,6 +1025,7 @@ def run_daemon(
         execute_expected = _default_expected_by(settings, "execute", now_fn(), None)
         _beat("RUNNING", "execute", expected_by=execute_expected)
         stage_started = time.monotonic()
+        durations_token = cycle_stage_durations.set((refresh_s, signal_s))
         try:
             report = _run_with_pulse("execute", execute_expected, functools.partial(_run_cycle_at, settings, target, weights_path, now_fn, shutdown))
             logger.info("[EVAL] daemon cycle decision_time=%s status=%s reason=%s", target, report.status, report.reason)
@@ -956,6 +1036,7 @@ def run_daemon(
             status = "HALT"
             failure_cause = f"cycle crashed {type(exc).__name__}"
         finally:
+            cycle_stage_durations.reset(durations_token)
             _log_stage_elapsed("execute", target, stage_started)
 
         if status == "INTERRUPTED":

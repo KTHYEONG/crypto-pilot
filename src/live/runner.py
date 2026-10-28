@@ -8,13 +8,14 @@ I-LEDGER-DURABLE: 집행 구간은 try/finally 로 감싸 어떤 예외 경로�
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import dataclasses
 import hashlib
 import json
 import logging
 import os
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
@@ -126,6 +127,9 @@ from src.live.tax_ledger import (
 )
 
 logger = logging.getLogger("LiveRunner")
+cycle_stage_durations: contextvars.ContextVar[tuple[float, float] | None] = contextvars.ContextVar(
+    "cycle_stage_durations", default=None
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1417,6 +1421,66 @@ def _collect_live_tax_fail_soft(
         logger.warning("[SYS] tax_ledger write failed error=%s", exc)
 
 
+def _release_at(decision_time: pd.Timestamp) -> pd.Timestamp:
+    """Signal release time: the decision day midnight plus the strategy release hour."""
+    from src.strategy.targets import FLOW_MOM_TOP20  # noqa: PLC0415
+
+    return decision_time.normalize() + pd.Timedelta(hours=float(FLOW_MOM_TOP20.release_hour_utc))
+
+
+def _record_execution_latency(
+    audit: AuditLog,
+    *,
+    decision_time: pd.Timestamp,
+    release_at: pd.Timestamp,
+    first_post_at: pd.Timestamp | None,
+    refresh_s: float | None,
+    signal_s: float | None,
+    depth_wait_s: float,
+) -> float | None:
+    """Audit one execution-latency row and warn when the first post missed the 60 s budget."""
+    seconds = (first_post_at - release_at).total_seconds() if first_post_at is not None else None
+    audit.record(
+        "execution_latency",
+        release_at=release_at,
+        first_post_at=first_post_at,
+        seconds_after_release=seconds,
+        refresh_s=refresh_s,
+        signal_s=signal_s,
+        depth_wait_s=float(depth_wait_s),
+    )
+    logger.info(
+        "[EXEC] stage=execution_latency seconds_after_release=%s release_at=%s first_post_at=%s",
+        seconds, release_at.isoformat(), first_post_at.isoformat() if first_post_at is not None else None,
+    )
+    if first_post_at is not None and seconds is not None and seconds > 60:
+        logger.warning(
+            "[EXEC] stage=execution_latency status=SLOW seconds_after_release=%.1f "
+            "refresh_s=%s signal_s=%s depth_wait_s=%.1f release_at=%s first_post_at=%s",
+            seconds, refresh_s, signal_s, depth_wait_s,
+            release_at.isoformat(), first_post_at.isoformat(),
+        )
+    return seconds
+
+
+class _FirstPostAudit:
+    """AuditLog proxy that fires once right after the first ``order_posted`` event."""
+
+    def __init__(self, inner: AuditLog, on_first_post: Callable[[], None]) -> None:
+        self._inner = inner
+        self._on_first_post = on_first_post
+        self._fired = False
+
+    def record(self, event: str, **fields: Any) -> None:
+        self._inner.record(event, **fields)
+        if event == "order_posted" and not self._fired:
+            self._fired = True
+            self._on_first_post()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+
 def run_shadow_cycle(
     settings: LiveSettings,
     decision_time: pd.Timestamp,
@@ -1428,6 +1492,26 @@ def run_shadow_cycle(
     """게이트 순서: 인과성/스테일 -> 거래소 메타 -> 계좌 -> 고아 정리 -> 재조정 ->
     에쿼티/드로다운 -> 신호 -> 목표수량 -> 계획 -> 리스크 게이트 -> 집행 -> 원장 영속."""
     now_ts = now if now is not None else pd.Timestamp.now(tz="UTC")
+    release_at = _release_at(decision_time)
+    stage_durations = cycle_stage_durations.get()
+    refresh_s, signal_s = stage_durations if stage_durations is not None else (None, None)
+    depth_wait_s = 0.0
+    latency_recorded = False
+
+    def _note_execution_latency(posted: bool = False) -> None:
+        nonlocal latency_recorded
+        if latency_recorded:
+            return
+        latency_recorded = True
+        try:
+            first_post_at = pd.Timestamp(_clock(), unit="s", tz="UTC") if posted else None
+            _record_execution_latency(
+                audit, decision_time=decision_time, release_at=release_at,
+                first_post_at=first_post_at, refresh_s=refresh_s,
+                signal_s=signal_s, depth_wait_s=depth_wait_s,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[SYS] execution_latency audit failed error=%s", exc)
     # 사이클이 어느 지점에서 끝나든 호가 캡처 스레드를 즉시 멈춰 저장한다(세션 상한까지 방치 금지).
     depth_recorders: list[ExecutionDepthRecorder] = []
     paper_tape: Any | None = None
@@ -1649,6 +1733,7 @@ def run_shadow_cycle(
                 required=_exec_depth_required_symbols(kept),
                 shutdown=shutdown,
             )
+            depth_wait_s = float(depth_readiness.waited_s)
             with contextlib.suppress(Exception):
                 audit.record(
                     "exec_depth_ready",
@@ -1713,13 +1798,18 @@ def run_shadow_cycle(
         attempt = journal.begin_attempt(decision_time=decision_time, run_id=run_id, mode=settings.mode.value, pre_trade_equity=equity, sizing_anchor=_sizing_anchor, decision_marks={i.symbol: decision_marks[i.symbol] for i in kept if i.symbol in decision_marks}, started_at=now_ts)
         try:
             try:
-                outcomes = list(execute_intents(order_client, kept, filters, policy, audit, _clock, time.sleep, rate_limits=rate_limits, outcome_sink=sink, shutdown=shutdown, paper_fill_model=paper_fill_model, journal=journal, attempt=attempt, shutdown_cleanup_budget_s=settings.execution_shutdown_cleanup_budget_s, order_identity_tolerance_ms=settings.order_identity_tolerance_ms, paper_tape=paper_tape))
+                from typing import cast  # noqa: PLC0415
+
+                latency_audit = cast("AuditLog", _FirstPostAudit(audit, lambda: _note_execution_latency(True)))
+                outcomes = list(execute_intents(order_client, kept, filters, policy, latency_audit, _clock, time.sleep, rate_limits=rate_limits, outcome_sink=sink, shutdown=shutdown, paper_fill_model=paper_fill_model, journal=journal, attempt=attempt, shutdown_cleanup_budget_s=settings.execution_shutdown_cleanup_budget_s, order_identity_tolerance_ms=settings.order_identity_tolerance_ms, paper_tape=paper_tape))
+                _note_execution_latency()
                 _alert_reject_cluster(settings, outcomes, audit, decision_time=decision_time, now=now_ts)
                 _alert_flip_blocked(settings, outcomes, audit, decision_time=decision_time, now=now_ts)
                 final_state = _commit_and_record(settings, ledger_path, ledger_state, journal, audit, fallback_attempt=attempt, equity=equity, executed_decision_time=None if (derisk_active or bool(frozen_symbols)) else decision_time, funding_records=funding_records, settlement_records=settlement_records, reconcile_cash_before=cash_before)
                 _write_execution_quality_once(settings, audit, decision_time=decision_time, weights=weights, marks=marks, intents=kept, outcomes=outcomes, observed_at=now_ts)
             except ExecutionInterrupted as exc:
                 partial = list(sink) if sink else _partial_outcomes(exc)
+                _note_execution_latency()
                 _commit_on_abort(settings, ledger_path, ledger_state, journal, audit, attempt=attempt, equity=equity, stage="interrupted")
                 if partial:
                     _write_execution_quality_once(settings, audit, decision_time=decision_time, weights=weights, marks=marks, intents=kept, outcomes=partial, observed_at=now_ts)
@@ -1736,6 +1826,7 @@ def run_shadow_cycle(
                 )
             except LiveTradingError as exc:
                 to_persist = sink if sink else _partial_outcomes(exc)
+                _note_execution_latency()
                 _commit_on_abort(settings, ledger_path, ledger_state, journal, audit, attempt=attempt, equity=equity, stage="halt")
                 if to_persist:
                     if not outcomes:
@@ -1747,6 +1838,7 @@ def run_shadow_cycle(
         except LiveTradingError:
             raise
         except BaseException:
+            _note_execution_latency()
             _commit_on_abort(settings, ledger_path, ledger_state, journal, audit, attempt=attempt, equity=equity, stage="abort")
             raise
         assert final_state is not None
