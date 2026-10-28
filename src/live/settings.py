@@ -117,7 +117,7 @@ class LiveSettings(BaseSettings):
     # 한다. 다음날 02:00까지만 유효하다. env: LIVE_MAX_SIGNAL_STALENESS_HOURS.
     max_signal_staleness_hours: float = 26.0
     max_weights_staleness_hours: float = 96.0
-    daemon_catchup_buffer_minutes: float = 3.0
+    daemon_catchup_buffer_minutes: float = 0.25
     daemon_max_attempts_per_day: int = 5
     heartbeat_path: str | None = None
     maker_fee_bps: float = ExecutionSpec().maker_fee_bps
@@ -131,7 +131,7 @@ class LiveSettings(BaseSettings):
     # otherwise. env: LIVE_REPEG_INTERVAL_S. Default mirrors
     # src.live.executor.EXECUTION_BAR_SECONDS (imported lazily to avoid a
     # settings<->executor/rest circular import).
-    repeg_interval_s: float = 180.0
+    repeg_interval_s: float = 60.0
     paper_fill_model: str = "immediate_taker"
     paper_tape_max_trades_per_symbol: int = Field(default=2_000_000, ge=10_000)
     paper_tape_stale_after_s: float = 5.0
@@ -214,12 +214,14 @@ class LiveSettings(BaseSettings):
     strategy_digest: str | None = None
     data_retention_days: int = SIGNAL_PANEL_WINDOW_DAYS + 30
     orderbook_retention_days: int = 365
-    refresh_max_workers: int = 12
+    refresh_max_workers: int = 32
     refresh_lookback_days: int = 40
     refresh_deadline_s: float = 900.0
     refresh_max_fail_fraction: float = 0.15
     funding_prefetch_enabled: bool = True
     funding_prefetch_offset_hours: float = 20.25
+    kline_prefetch_enabled: bool = True
+    kline_prefetch_lead_minutes: float = 10.0
     refresh_decision_bar_max_missing_fraction: float = 0.05
     venue_rules_warn_age_days: float = 2.0
     venue_rules_max_age_days: float = 7.0
@@ -479,6 +481,20 @@ class LiveSettings(BaseSettings):
     def _bounded_refresh_workers(cls, value: int) -> int:
         if not 1 <= value <= 64:
             raise ValueError("refresh_max_workers must be in [1, 64]")
+        return value
+
+    @field_validator("daemon_catchup_buffer_minutes")
+    @classmethod
+    def _bounded_catchup_buffer(cls, value: float) -> float:
+        if not 0.05 <= value <= 10:
+            raise ValueError("daemon_catchup_buffer_minutes must be in [0.05, 10]")
+        return value
+
+    @field_validator("kline_prefetch_lead_minutes")
+    @classmethod
+    def _bounded_kline_prefetch_lead(cls, value: float) -> float:
+        if not 2 <= value <= 60:
+            raise ValueError("kline_prefetch_lead_minutes must be in [2, 60]")
         return value
 
     @field_validator("funding_prefetch_offset_hours")

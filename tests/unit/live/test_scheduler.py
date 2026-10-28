@@ -249,7 +249,7 @@ def test_SCENARIO_RESIL_04_intraday_retry_bounded(tmp_path, monkeypatch):  # noq
         cur[0] += pd.Timedelta(seconds=s)
 
     run_daemon(
-        LiveSettings(daemon_catchup_buffer_minutes=20.0, daemon_max_attempts_per_day=5),
+        LiveSettings(daemon_catchup_buffer_minutes=10.0, daemon_max_attempts_per_day=5),
         artifact,
         state_path,
         sleep_fn=sleep_fn,
@@ -280,7 +280,7 @@ def test_SCENARIO_RESIL_04_intraday_retry_bounded(tmp_path, monkeypatch):  # noq
         cur2[0] += pd.Timedelta(seconds=s)
 
     run_daemon(
-        LiveSettings(daemon_catchup_buffer_minutes=20.0, daemon_max_attempts_per_day=5),
+        LiveSettings(daemon_catchup_buffer_minutes=10.0, daemon_max_attempts_per_day=5),
         artifact,
         state_path2,
         sleep_fn=sleep_fn2,
@@ -325,7 +325,7 @@ def test_SCENARIO_RESIL_06_graceful_shutdown(tmp_path, monkeypatch):  # noqa: D1
             flag.request("SIGTERM")
 
     run_daemon(
-        LiveSettings(daemon_catchup_buffer_minutes=20.0),
+        LiveSettings(daemon_catchup_buffer_minutes=10.0),
         artifact,
         state_path,
         sleep_fn=sleep_fn,
@@ -397,7 +397,7 @@ def test_SCENARIO_RESIL_10_heartbeat_bounded(tmp_path, monkeypatch):  # noqa: D1
         cur[0] += pd.Timedelta(seconds=s)
 
     run_daemon(
-        LiveSettings(daemon_catchup_buffer_minutes=20.0, heartbeat_path=str(hb_path)),
+        LiveSettings(daemon_catchup_buffer_minutes=10.0, heartbeat_path=str(hb_path)),
         artifact,
         state_path,
         sleep_fn=sleep_fn_cur,
@@ -416,7 +416,7 @@ def test_SCENARIO_RESIL_10_heartbeat_bounded(tmp_path, monkeypatch):  # noqa: D1
         cur2[0] += pd.Timedelta(seconds=s)
 
     run_daemon(
-        LiveSettings(daemon_catchup_buffer_minutes=20.0, heartbeat_path=str(hb_path)),
+        LiveSettings(daemon_catchup_buffer_minutes=10.0, heartbeat_path=str(hb_path)),
         artifact,
         state_path,
         sleep_fn=sleep_fn_cur2,
@@ -443,7 +443,7 @@ def test_SCENARIO_RESIL_10_heartbeat_bounded(tmp_path, monkeypatch):  # noqa: D1
         cur3[0] += pd.Timedelta(seconds=s)
 
     run_daemon(
-        LiveSettings(daemon_catchup_buffer_minutes=20.0, heartbeat_path=str(hb_path)),
+        LiveSettings(daemon_catchup_buffer_minutes=10.0, heartbeat_path=str(hb_path)),
         artifact,
         tmp_path / "state3.json",
         sleep_fn=sleep_fn_cur3,
@@ -1908,7 +1908,7 @@ def test_run_daemon_persists_signal_halt_cause_to_heartbeat(tmp_path, monkeypatc
 
     # When
     sched.run_daemon(
-        LiveSettings(daemon_catchup_buffer_minutes=20.0, heartbeat_path=str(hb_path)),
+        LiveSettings(daemon_catchup_buffer_minutes=10.0, heartbeat_path=str(hb_path)),
         artifact, state_path,
         sleep_fn=sleep_fn, now_fn=now_fn, max_iterations=1,
         refresh_fn=lambda *a, **k: None, signal_step_fn=boom_signal_step, prune_fn=lambda: None,
@@ -1950,7 +1950,7 @@ def test_run_daemon_persists_execute_halt_cause_to_heartbeat(tmp_path, monkeypat
 
     # When
     sched.run_daemon(
-        LiveSettings(daemon_catchup_buffer_minutes=20.0, heartbeat_path=str(hb_path)),
+        LiveSettings(daemon_catchup_buffer_minutes=10.0, heartbeat_path=str(hb_path)),
         artifact, state_path,
         sleep_fn=sleep_fn, now_fn=now_fn, max_iterations=1,
         refresh_fn=lambda *a, **k: None, signal_step_fn=lambda *a, **k: None, prune_fn=lambda: None,
@@ -1991,7 +1991,7 @@ def test_run_daemon_persists_awaiting_data_detail_to_heartbeat(tmp_path, monkeyp
 
     # When
     sched.run_daemon(
-        LiveSettings(daemon_catchup_buffer_minutes=20.0, heartbeat_path=str(hb_path), max_market_data_staleness_hours=6.0),
+        LiveSettings(daemon_catchup_buffer_minutes=10.0, heartbeat_path=str(hb_path), max_market_data_staleness_hours=6.0),
         artifact, state_path,
         sleep_fn=sleep_fn, now_fn=now_fn, max_iterations=1,
         refresh_fn=boom_refresh, signal_step_fn=lambda *a, **k: None, prune_fn=lambda: None,
@@ -2359,7 +2359,7 @@ def test_daemon_waits_until_release_plus_buffer(tmp_path, monkeypatch) -> None:
         venue_fn=_venue,
     )
 
-    assert first_stage_at and first_stage_at[0] >= pd.Timestamp("2026-08-24 23:03Z")
+    assert first_stage_at and first_stage_at[0] >= pd.Timestamp("2026-08-24 23:00:15Z")
 
 
 def test_daemon_frozen_step_integrity_error_halts_with_cause(tmp_path, monkeypatch) -> None:
@@ -3882,7 +3882,7 @@ def test_idle_wait_keeps_expected_by_in_future(tmp_path, monkeypatch) -> None:
         cur[0] += pd.Timedelta(seconds=seconds)
 
     run_daemon(
-        LiveSettings(daemon_catchup_buffer_minutes=20.0),
+        LiveSettings(daemon_catchup_buffer_minutes=10.0),
         tmp_path / "w.parquet",
         tmp_path / "state.json",
         sleep_fn=sleep_fn,
@@ -3930,7 +3930,7 @@ def test_halt_backoff_keeps_expected_by_and_pings_fail(tmp_path, monkeypatch) ->
         in_wait[0] = True
 
     run_daemon(
-        LiveSettings(daemon_catchup_buffer_minutes=20.0, daemon_max_attempts_per_day=5),
+        LiveSettings(daemon_catchup_buffer_minutes=10.0, daemon_max_attempts_per_day=5),
         tmp_path / "w.parquet",
         tmp_path / "state.json",
         sleep_fn=sleep_fn,
@@ -3966,7 +3966,7 @@ def test_stage_pulse_receives_deadman_pinger(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(sched, "run_shadow_cycle", lambda settings, decision_time, artifact, now=None, **k: _report(decision_time))
     monkeypatch.setattr(sched, "prune_old_audit_logs", lambda *a, **k: 0)
     run_daemon(
-        LiveSettings(daemon_catchup_buffer_minutes=20.0),
+        LiveSettings(daemon_catchup_buffer_minutes=10.0),
         tmp_path / "w.parquet",
         tmp_path / "state.json",
         sleep_fn=lambda s: None,

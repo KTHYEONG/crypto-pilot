@@ -166,7 +166,7 @@ def test_live_settings_refresh_field_defaults_and_bounds(monkeypatch) -> None:
             monkeypatch.delenv(k, raising=False)
 
     s = LiveSettings()
-    assert s.refresh_max_workers == 12
+    assert s.refresh_max_workers == 32
     assert s.refresh_lookback_days == 40
     assert s.refresh_deadline_s == 900.0
     assert s.refresh_max_fail_fraction == 0.15
@@ -190,7 +190,7 @@ def test_live_settings_backtest_parity_defaults() -> None:
     settings = LiveSettings()
     assert SIGNAL_PANEL_WINDOW_DAYS == 400
     assert settings.data_retention_days == MARKET_DATA_MIN_RETENTION_DAYS == 430
-    assert settings.daemon_catchup_buffer_minutes == 3.0
+    assert settings.daemon_catchup_buffer_minutes == 0.25
     assert settings.max_daily_turnover_fraction == 2.0 * settings.max_gross_leverage
     with pytest.raises(ValidationError):
         LiveSettings(max_symbol_notional_fraction=0.05)
@@ -763,3 +763,38 @@ def test_paper_tape_bounds_rejected() -> None:
         LiveSettings(paper_tape_stale_after_s=61.0)
     with pytest.raises(ValidationError, match="paper_tape_ready_timeout_s"):
         LiveSettings(paper_tape_ready_timeout_s=31.0)
+
+
+def test_exec_parity_part3_live_release_latency_defaults() -> None:
+    from src.live.settings import LiveSettings
+
+    settings = LiveSettings()
+    assert settings.daemon_catchup_buffer_minutes == 0.25
+    assert settings.repeg_interval_s == 60.0
+    assert settings.refresh_max_workers == 32
+    assert settings.kline_prefetch_enabled is True
+    assert settings.kline_prefetch_lead_minutes == 10.0
+
+
+def test_exec_parity_part3_buffer_bounds() -> None:
+    from pydantic import ValidationError
+
+    from src.live.settings import LiveSettings
+
+    assert LiveSettings(daemon_catchup_buffer_minutes=0.05).daemon_catchup_buffer_minutes == 0.05
+    assert LiveSettings(daemon_catchup_buffer_minutes=10.0).daemon_catchup_buffer_minutes == 10.0
+    for bad in (0, 11):
+        with pytest.raises(ValidationError, match="daemon_catchup_buffer_minutes"):
+            LiveSettings(daemon_catchup_buffer_minutes=bad)
+
+
+def test_exec_parity_part3_prefetch_lead_bounds() -> None:
+    from pydantic import ValidationError
+
+    from src.live.settings import LiveSettings
+
+    assert LiveSettings(kline_prefetch_lead_minutes=2.0).kline_prefetch_lead_minutes == 2.0
+    assert LiveSettings(kline_prefetch_lead_minutes=60.0).kline_prefetch_lead_minutes == 60.0
+    for bad in (1, 61):
+        with pytest.raises(ValidationError, match="kline_prefetch_lead_minutes"):
+            LiveSettings(kline_prefetch_lead_minutes=bad)
