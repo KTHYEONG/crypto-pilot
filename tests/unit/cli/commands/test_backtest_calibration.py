@@ -12,40 +12,28 @@ from tests.unit.application._fill_calibration_helpers import (
 
 
 
-def test_holdout_gate_before_inputs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    import src.cli.commands.backtest_calibration as cli
+def test_post_design_calibration_journals_look_before_inputs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import json
 
-    called: list = []
     import src.application.fill_calibration as cal
+    import src.cli.commands.backtest_calibration as cli
+    from tests.unit.cli.commands._backtest_helpers import _patch_releases_root
 
-    def _boom(request):
-        called.append(request)
-        raise AssertionError("must not load")
+    root = _patch_releases_root(monkeypatch, tmp_path)
+    journal = root / "flow_mom.holdout.jsonl"
+    journaled_first: list[bool] = []
 
-    monkeypatch.setattr(cal, "_load_backtest_inputs", _boom)
-    import src.evaluation.holdout as holdout_mod
+    def fake(request, *, output_dir):
+        journaled_first.append(journal.exists())
+        return cal.FillCalibrationReport({}, None, {}, tmp_path / "i", tmp_path / "r")
 
-    monkeypatch.setattr(holdout_mod, "holdout_covered", lambda *a, **k: False)
-    args = type("A", (), {})()
-    args.start = "2026-08-01"
-    args.end = "2026-09-01"
-    args.archive_root = None
-    args.paper_run_dir = None
-    args.live_capture_root = None
-    args.k_bars = None
-    args.touch_lookback_s = None
-    args.queue_ahead_fraction = None
-    args.bootstrap_samples = None
-    args.seed = None
-    args.output_dir = str(tmp_path / "out")
-    args.data_root = None
-    args.total_tree_pss_bytes = None
-    args.replay_tree_pss_bytes = None
-    args.min_available_bytes = None
-    with pytest.raises(SystemExit):
-        cli.run_fill_calibration_command(args)
-    assert called == []
-
+    monkeypatch.setattr(cal, "run_fill_calibration", fake)
+    cli.run_fill_calibration_command(_args(start="2026-08-01", end="2026-09-01", output_dir=str(tmp_path / "out")))
+    assert journaled_first == [True]
+    rows = [json.loads(line) for line in journal.read_text(encoding="utf-8").splitlines()]
+    assert [(r["window_start"], r["window_end"], r["purpose"]) for r in rows] == [
+        ("2026-08-01T00:00:00+00:00", "2026-09-01T00:00:00+00:00", "fill_calibration"),
+    ]
 
 def test_cli_preserves_zero_controls(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import src.application.fill_calibration as cal
@@ -110,11 +98,9 @@ def test_cli_happy_and_error_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPat
 
         raise _D("journal unreadable")
 
-    monkeypatch.setattr(holdout_mod, "holdout_covered", _integrity)
-    with pytest.raises(SystemExit) as exc:
+    monkeypatch.setattr(holdout_mod, "record_holdout_look", _integrity)
+    with pytest.raises(SystemExit, match="journal unreadable"):
         cli.run_fill_calibration_command(_args(start="2026-08-01", end="2026-09-01", output_dir=str(tmp_path / "out3")))
-    assert exc.value.code == 2
-    assert "journal unreadable" in capsys.readouterr().err
 
     def _nan_run(request, *, output_dir):
         return cal.FillCalibrationReport(backtest={"periods": {"design": {"rules": {}, "marketable_anchor_share": None}}}, paper=None, exclusions={}, intents_path=tmp_path / "i.parquet", report_path=tmp_path / "r.json")

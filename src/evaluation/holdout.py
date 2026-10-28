@@ -1,4 +1,8 @@
-"""One-look holdout journal: a holdout window is evidence only once."""
+"""Holdout look journal: every post-design observation is recorded with the signal digest that made it.
+
+Looks are unlimited. What keeps a holdout honest is that the logic judged on it never changed after seeing
+it: acceptance evidence must come from a window no other signal digest of the family has observed.
+"""
 
 from __future__ import annotations
 
@@ -18,6 +22,16 @@ def _require_utc(ts: pd.Timestamp, label: str) -> pd.Timestamp:
     if ts.tzinfo is None or ts.utcoffset() is None or ts.utcoffset().total_seconds() != 0:
         raise DataIntegrityError(f"{label} must be timezone-aware UTC")
     return ts.tz_convert("UTC")
+
+
+def _window_bounds(window: tuple[pd.Timestamp, pd.Timestamp]) -> tuple[pd.Timestamp, pd.Timestamp]:
+    if not isinstance(window, tuple) or len(window) != 2:
+        raise DataIntegrityError("window must be a (start, end) tuple")
+    start = _require_utc(window[0], "window_start")
+    end = _require_utc(window[1], "window_end")
+    if end <= start:
+        raise DataIntegrityError("window_end must be after window_start")
+    return start, end
 
 
 def _read_rows(path: Path) -> list[dict[str, object]]:
@@ -81,51 +95,18 @@ def holdout_look_recorded(
     *,
     root: Path | None = None,
 ) -> bool:
-    """Whether this exact window was looked at once for this signal digest."""
+    """Whether this exact window is journaled as observed by this signal digest."""
     if not isinstance(strategy_id, str) or not strategy_id:
         raise DataIntegrityError("strategy_id must be a non-empty string")
     if not isinstance(signal_digest, str) or not signal_digest:
         raise DataIntegrityError("signal_digest must be a non-empty string")
-    if not isinstance(window, tuple) or len(window) != 2:
-        raise DataIntegrityError("window must be a (start, end) tuple")
-    start = _require_utc(window[0], "window_start")
-    end = _require_utc(window[1], "window_end")
-    if end <= start:
-        raise DataIntegrityError("window_end must be after window_start")
+    start, end = _window_bounds(window)
     return any(
         _same_family(strategy_id, row) and row.get("signal_digest") == signal_digest
         and pd.Timestamp(str(row["window_start"])) == start
         and pd.Timestamp(str(row["window_end"])) == end
         for row in read_holdout_looks(strategy_id, root=root)
     )
-
-
-def holdout_covered(
-    strategy_id: str,
-    signal_digest: str,
-    window: tuple[pd.Timestamp, pd.Timestamp],
-    *,
-    root: Path | None = None,
-) -> bool:
-    """Whether a journaled look for this signal digest contains the whole window."""
-    if not isinstance(strategy_id, str) or not strategy_id:
-        raise DataIntegrityError("strategy_id must be a non-empty string")
-    if not isinstance(signal_digest, str) or not signal_digest:
-        raise DataIntegrityError("signal_digest must be a non-empty string")
-    if not isinstance(window, tuple) or len(window) != 2:
-        raise DataIntegrityError("window must be a (start, end) tuple")
-    start = _require_utc(window[0], "window_start")
-    end = _require_utc(window[1], "window_end")
-    if end <= start:
-        raise DataIntegrityError("window_end must be after window_start")
-    for row in read_holdout_looks(strategy_id, root=root):
-        if not _same_family(strategy_id, row) or row.get("signal_digest") != signal_digest:
-            continue
-        row_start = pd.Timestamp(str(row["window_start"])).tz_convert("UTC")
-        row_end = pd.Timestamp(str(row["window_end"])).tz_convert("UTC")
-        if row_start <= start and end <= row_end:
-            return True
-    return False
 
 
 def _overlaps(start: pd.Timestamp, end: pd.Timestamp, row: dict[str, object]) -> bool:
@@ -137,27 +118,25 @@ def _overlaps(start: pd.Timestamp, end: pd.Timestamp, row: dict[str, object]) ->
     return bool(start < row_end and row_start < end)
 
 
-def consume_holdout_look(
+def record_holdout_look(
     strategy_id: str,
     spec_digest: str,
     window: tuple[pd.Timestamp, pd.Timestamp],
     *,
     path: Path,
     signal_digest: str,
+    purpose: str = "evaluation",
 ) -> bool:
-    """Journal the one look; returns False when the identical (family, window, signal_digest) look already exists."""
+    """Journal one look; False when the identical (family, window, signal_digest) look is already recorded."""
     if not isinstance(strategy_id, str) or not strategy_id:
         raise DataIntegrityError("strategy_id must be a non-empty string")
     if not isinstance(spec_digest, str) or not spec_digest:
         raise DataIntegrityError("spec_digest must be a non-empty string")
     if not isinstance(signal_digest, str) or not signal_digest:
         raise DataIntegrityError("signal_digest must be a non-empty string")
-    if not isinstance(window, tuple) or len(window) != 2:
-        raise DataIntegrityError("window must be a (start, end) tuple")
-    start = _require_utc(window[0], "window_start")
-    end = _require_utc(window[1], "window_end")
-    if end <= start:
-        raise DataIntegrityError("window_end must be after window_start")
+    if not isinstance(purpose, str) or not purpose:
+        raise DataIntegrityError("purpose must be a non-empty string")
+    start, end = _window_bounds(window)
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
     payload = {
@@ -166,28 +145,21 @@ def consume_holdout_look(
         "signal_digest": signal_digest,
         "window_start": start.isoformat(),
         "window_end": end.isoformat(),
+        "purpose": purpose,
+        "recorded_at": pd.Timestamp.now(tz="UTC").isoformat(),
     }
     with target.open("a+", encoding="utf-8") as handle:
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
         rows = _read_rows(target)
         for row in rows:
             _validate_holdout_row(row)
-        identical = False
-        for row in rows:
-            if not _same_family(strategy_id, row):
-                continue
-            if _overlaps(start, end, row):
-                if (
-                    row.get("signal_digest") == signal_digest
-                    and pd.Timestamp(str(row["window_start"])) == start
-                    and pd.Timestamp(str(row["window_end"])) == end
-                ):
-                    identical = True
-                    continue
-                raise DataIntegrityError(
-                    f"holdout window already consumed for {strategy_id}: {row.get('window_start')}..{row.get('window_end')}"
-                )
-        if identical:
+        if any(
+            _same_family(strategy_id, row)
+            and row.get("signal_digest") == signal_digest
+            and pd.Timestamp(str(row["window_start"])) == start
+            and pd.Timestamp(str(row["window_end"])) == end
+            for row in rows
+        ):
             return False
         handle.write(json.dumps(payload, sort_keys=True) + "\n")
         handle.flush()
@@ -195,16 +167,19 @@ def consume_holdout_look(
         return True
 
 
-def holdout_overlaps(strategy_id: str, window: tuple[pd.Timestamp, pd.Timestamp], *, path: Path) -> bool:
-    """True when a window overlaps an already-consumed holdout look."""
-    if not isinstance(window, tuple) or len(window) != 2:
-        raise DataIntegrityError("window must be a (start, end) tuple")
-    start = _require_utc(window[0], "window_start")
-    end = _require_utc(window[1], "window_end")
-    target = Path(path)
-    for row in _read_rows(target):
-        if not _same_family(strategy_id, row):
-            continue
-        if _overlaps(start, end, row):
-            return True
-    return False
+def foreign_holdout_looks(
+    strategy_id: str,
+    signal_digest: str,
+    window: tuple[pd.Timestamp, pd.Timestamp],
+    *,
+    root: Path | None = None,
+) -> tuple[dict[str, object], ...]:
+    """Family looks overlapping the window that another (or an unrecorded) signal digest made."""
+    if not isinstance(signal_digest, str) or not signal_digest:
+        raise DataIntegrityError("signal_digest must be a non-empty string")
+    start, end = _window_bounds(window)
+    return tuple(
+        row
+        for row in read_holdout_looks(strategy_id, root=root)
+        if _same_family(strategy_id, row) and row.get("signal_digest") != signal_digest and _overlaps(start, end, row)
+    )

@@ -20,6 +20,7 @@
 - **Statistical Humility:** Never present backtest metrics from repeated trial-and-error as independent discoveries without explicit statistical haircuts or adjustments for trial multiplicity.
 - **Parameter Surface Robustness:** Never rely on isolated parameter spikes ("knife-edge alpha"). Parameter sensitivity must demonstrate stable performance plateaus across neighboring regimes.
 - **Strict Out-of-Sample Isolation:** Maintain strict temporal separation between discovery/training and evaluation. Never leak validation statistics back into model formulation.
+- **Observe Freely, Never Adapt:** Post-design (holdout) data may be observed any number of times, but every observation is journaled with the signal digest that made it. Logic changed after observing a window may not use that window as acceptance evidence; it needs data no other signal digest has seen.
 
 ## 5. Tail-Risk & Ruin Prevention (Deterministic Fail-Closed)
 - **Conservation Law:** Accounting ledgers (cash, asset units, fees, taxes) must reconcile exactly with zero leakage when using exact discrete representations (e.g. integer base units such as KRW/cents/satoshis, or `Decimal`). For continuous valuations, mark-to-market calculations, and floating-point metrics, verify conservation within strict numerical tolerances (`rtol`/`atol`, `pytest.approx`) rather than artificial exact-equality tests.

@@ -41,7 +41,7 @@ def run_fill_calibration_command(args: argparse.Namespace) -> None:
     from src.application.fill_calibration import FillCalibrationRequest
     from src.application.strategy_account import AccountReplayError
     from src.cli.commands.backtest import _resolve_budget, _utc_timestamp
-    from src.cli.commands.backtest_holdout import require_journaled_holdout
+    from src.cli.commands.backtest_holdout import record_post_design_look
     from src.common.errors import DataIntegrityError
     from src.common.paths import EXEC_CALIBRATION_DIR, PUBLIC_ARCHIVE_DIR
     from src.core.params import PROCESS_EVALUATION_CEILING
@@ -54,8 +54,7 @@ def run_fill_calibration_command(args: argparse.Namespace) -> None:
     try:
         from src.strategy.targets import FLOW_MOM_TOP20
 
-        if end > FLOW_MOM_TOP20.design_data_cutoff:
-            require_journaled_holdout(end)
+        record_post_design_look("flow_mom_top20", "flow_mom", FLOW_MOM_TOP20, start, end, purpose="fill_calibration")
     except SystemExit:
         raise
     except (DataIntegrityError, ValueError) as exc:
