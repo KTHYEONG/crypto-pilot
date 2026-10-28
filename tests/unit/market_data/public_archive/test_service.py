@@ -290,7 +290,7 @@ def test_bookdepth_and_unknown_dataset(tmp_path: Path) -> None:
 
 
 def test_merge_batch_guards(tmp_path: Path) -> None:
-    from src.market_data.public_archive.service import _merge_day_batch
+    from src.market_data.public_archive.store import merge_day_batch as _merge_day_batch
 
     day = date(2024, 1, 15)
     with pytest.raises(DataIntegrityError, match="sort column"):
@@ -1189,16 +1189,57 @@ def test_aggtrades_fallback_matches_full_frame_path(tmp_path: Path, rows: list[t
     pd.testing.assert_frame_equal(pd.read_parquet(tmp_path / "aggTrades_slice/BTCUSDT/202401.parquet"), expected_slice)
 
 
-def test_aggtrades_invalid_row_fails_with_full_frame_error(tmp_path: Path) -> None:
+def test_checksummed_file_failing_validation_is_recorded_defective(tmp_path: Path) -> None:
     day = date(2024, 1, 15)
+    payload = _agg_rows_zip(day, [(1_000, 100.0, 0.0, "true")])
     fake = FakeDownloader()
-    fake.add_zip(daily_key("aggTrades", "BTCUSDT", day), _agg_rows_zip(day, [(1_000, 0.0, 1.0, "true")]))
+    fake.add_zip(daily_key("aggTrades", "BTCUSDT", day), payload)
     report = execute_plan(fake, [CollectionPlan("aggTrades", "BTCUSDT", (day,), (23, 24))], root=tmp_path)
-    assert report.failed == 1
+    assert (report.ok, report.failed, report.defective) == (0, 0, 1)
     row = load_coverage(tmp_path, "aggTrades")[("BTCUSDT", day)]
-    assert row.status == "failed"
+    assert row.status == "defective"
+    assert row.raw_sha256 == hashlib.sha256(payload).hexdigest()
     assert row.detail is not None
     assert "non-positive" in row.detail
+    assert not (tmp_path / "aggTrades/BTCUSDT/202401.parquet").exists()
+
+
+def test_defective_day_is_settled_unless_retry_requested(tmp_path: Path) -> None:
+    day = date(2024, 1, 15)
+    fake = FakeDownloader()
+    fake.add_zip(daily_key("aggTrades", "BTCUSDT", day), _agg_rows_zip(day, [(1_000, 100.0, 0.0, "true")]))
+    execute_plan(fake, [CollectionPlan("aggTrades", "BTCUSDT", (day,), (23, 24))], root=tmp_path)
+    common = {
+        "root": tmp_path, "datasets": ["aggTrades"], "symbols": {"aggTrades": ["BTCUSDT"]},
+        "start": day, "end": day, "slice_symbols": ["BTCUSDT"],
+    }
+    assert plan_collection(fake, **common) == []
+    retry = plan_collection(fake, **common, retry_defective=True)
+    assert retry is not None
+    assert [p.days for p in retry] == [(day,)]
+
+
+def test_checksum_mismatch_stays_failed_not_defective(tmp_path: Path) -> None:
+    day = date(2024, 1, 15)
+    fake = FakeDownloader()
+    fake.add_corrupt(daily_key("aggTrades", "BTCUSDT", day), _agg_zip("BTCUSDT", day))
+    report = execute_plan(fake, [CollectionPlan("aggTrades", "BTCUSDT", (day,), (23, 24))], root=tmp_path)
+    assert (report.failed, report.defective) == (1, 0)
+    assert load_coverage(tmp_path, "aggTrades")[("BTCUSDT", day)].status == "failed"
+
+
+def test_defective_record_write_failure_counts_failed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from src.market_data.public_archive import store
+
+    def fail(*args: object, **kwargs: object) -> None:
+        raise OSError("disk failure")
+
+    monkeypatch.setattr(store, "append_coverage", fail)
+    day = date(2024, 1, 15)
+    fake = FakeDownloader()
+    fake.add_zip(daily_key("aggTrades", "BTCUSDT", day), _agg_rows_zip(day, [(1_000, 100.0, 0.0, "true")]))
+    report = execute_plan(fake, [CollectionPlan("aggTrades", "BTCUSDT", (day,), (23, 24))], root=tmp_path)
+    assert (report.failed, report.defective) == (1, 0)
 
 
 def test_aggtrades_stream_path_skips_full_frame_read(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

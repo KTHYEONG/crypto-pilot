@@ -46,6 +46,7 @@ class CollectionReport:
     sealed: int = 0
     stopped_at_deadline: bool = False
     remaining_days: int = 0
+    defective: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,6 +62,7 @@ class _Skipped:
     day: date
     kind: str
     detail: str | None
+    sha: str | None = None
 
 
 def _yesterday_utc(now: pd.Timestamp) -> date:
@@ -98,9 +100,11 @@ class _ListingFailedError(Exception):
     """A bucket listing failed; the whole plan is abandoned (fail closed)."""
 
 
-def _is_ok(coverage: Mapping[tuple[str, date], store.CoverageRow], symbol: str, day: date) -> bool:
+def _is_settled(
+    coverage: Mapping[tuple[str, date], store.CoverageRow], symbol: str, day: date, *, retry_defective: bool
+) -> bool:
     row = coverage.get((symbol, day))
-    return row is not None and row.status == "ok"
+    return row is not None and (row.status == "ok" or (row.status == "defective" and not retry_defective))
 
 
 def _unmasked_first_day(
@@ -134,8 +138,9 @@ def _candidate_days(
     end: date,
     capped_end: date,
     incremental_window_days: int | None,
+    retry_defective: bool = False,
 ) -> list[date]:
-    """Days still to collect for a symbol: allowed (or cursor-derived) days not yet ``ok``."""
+    """Days still to collect for a symbol: allowed (or cursor-derived) days not yet settled."""
     if allow_map is not None:
         wanted = set(allow_map.get(symbol, ()))
         floor = start if start is not None else catalog.MASK_POLICIES[dataset].start
@@ -153,7 +158,7 @@ def _candidate_days(
         )
         span = (capped_end - first).days + 1
         pool = [first + timedelta(days=offset) for offset in range(max(span, 0))]
-    return sorted(day for day in pool if not _is_ok(coverage, symbol, day))
+    return sorted(day for day in pool if not _is_settled(coverage, symbol, day, retry_defective=retry_defective))
 
 
 def _list_days(
@@ -225,6 +230,7 @@ def plan_collection(
     slice_symbols: Collection[str] = (),
     incremental_window_days: int | None = None,
     allowed: Mapping[str, Mapping[str, Collection[date]]] | None = None,
+    retry_defective: bool = False,
 ) -> list[CollectionPlan] | None:
     """List missing bucket days per symbol without downloading anything."""
     for dataset in datasets:
@@ -252,6 +258,7 @@ def plan_collection(
                     end=end,
                     capped_end=capped_end,
                     incremental_window_days=incremental_window_days,
+                    retry_defective=retry_defective,
                 )
                 if not candidates:
                     continue
@@ -288,6 +295,23 @@ def plan_collection(
     return plans
 
 
+def _derive_zip(plan: CollectionPlan, day: date, zip_bytes: bytes) -> tuple[pd.DataFrame, pd.DataFrame | None]:
+    if plan.dataset == "aggTrades":
+        try:
+            return derive.derive_agg_trades_streamed(
+                fetch.iter_agg_trade_batches(zip_bytes), day=day, slice_hours=plan.slice_hours
+            )
+        except derive.StreamFallbackError as exc:
+            logger.debug("[DATA] stage=public_archive stream_fallback day=%s reason=%s", day, exc)
+    raw = fetch.read_single_csv(zip_bytes)
+    frame = _derive_day(plan.dataset, raw, symbol=plan.symbol, day=day)
+    if plan.slice_hours is None:
+        return frame, None
+    return frame, derive.slice_agg_trades(
+        raw, day=day, start_hour_utc=plan.slice_hours[0], end_hour_utc=plan.slice_hours[1]
+    )
+
+
 def _derive_day(dataset: str, raw: pd.DataFrame, *, symbol: str, day: date) -> pd.DataFrame:
     if dataset == "metrics":
         return derive.derive_metrics(raw, symbol=symbol, day=day)
@@ -295,48 +319,7 @@ def _derive_day(dataset: str, raw: pd.DataFrame, *, symbol: str, day: date) -> p
         return derive.derive_book_depth(raw, symbol=symbol, day=day)
     if dataset == "aggTrades":
         return derive.derive_agg_trades(raw, symbol=symbol, day=day)
-    raise DataIntegrityError(f"unknown archive dataset: {dataset!r}")
-
-
-def _merge_day_batch(
-    root: Path,
-    dataset: str,
-    symbol: str,
-    batch: list[tuple[date, pd.DataFrame]],
-    *,
-    kind: str = "derived",
-) -> None:
-    month = batch[0][0].strftime("%Y%m")
-    path = store.partition_path(root, dataset, symbol, month, kind=kind)  # type: ignore[arg-type]
-    key = "transact_time_ms" if kind == "slice" else "timestamp"
-    for _day, frame in batch:
-        if len(frame) and key not in frame.columns:
-            raise DataIntegrityError(f"missing sort column: {key}")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    existing = pd.read_parquet(path) if path.exists() else None
-    if existing is not None and len(existing) and key not in existing.columns:
-        raise DataIntegrityError(f"partition missing sort column: {key}")
-    drop = {day for day, _ in batch}
-    if existing is not None and len(existing):
-        keep = [store._row_day(v, kind) not in drop for v in existing[key].tolist()]
-        kept = existing.loc[keep]
-    else:
-        kept = None
-    parts = [frame for _, frame in batch if len(frame)]
-    if kept is None or len(kept) == 0:
-        merged = (
-            pd.concat(parts, ignore_index=True)
-            if parts
-            else (existing.iloc[:0] if existing is not None else batch[0][1].iloc[:0])
-        )
-    else:
-        merged = pd.concat([kept, *parts], ignore_index=True) if parts else kept
-    if len(merged) and any(store._row_month(v, kind) != month for v in merged[key].tolist()):
-        raise DataIntegrityError("partition row outside partition month")
-    merged = merged.sort_values(key, kind="mergesort").reset_index(drop=True)
-    if existing is None and not len(merged):
-        return
-    write_parquet_atomic(merged, path, compression="zstd")
+    raise ValueError(f"unknown archive dataset: {dataset!r}")
 
 
 def _heartbeat_path(root: Path) -> Path:
@@ -413,7 +396,10 @@ class _PlanRunner:
         self.started = now_fn()
         self.recent_cutoff = _yesterday_utc(self.started) - timedelta(days=2)
         self.total = sum(len(plan.days) for plan in plans)
-        self.state = {"done": 0, "ok": 0, "failed": 0, "absent": 0, "pending": sum(len(p.pending_days) for p in plans)}
+        self.state = {
+            "done": 0, "ok": 0, "failed": 0, "absent": 0, "defective": 0,
+            "pending": sum(len(p.pending_days) for p in plans),
+        }
         self.guard = threading.Lock()
         self.beat_guard = threading.Lock()
         self.last_beat = time.monotonic()
@@ -459,7 +445,7 @@ class _PlanRunner:
         self,
         plan: CollectionPlan,
         day: date,
-        status: Literal["ok", "absent", "failed"],
+        status: Literal["ok", "absent", "failed", "defective"],
         *,
         sha: str | None,
         rows: int,
@@ -489,34 +475,22 @@ class _PlanRunner:
 
     def run_unit(self, plan: CollectionPlan, day: date) -> _Ready | _Skipped:
         try:
-            key = catalog.daily_key(plan.dataset, plan.symbol, day)
-            fetched = fetch.fetch_verified_zip(self.downloader, key)  # type: ignore[arg-type]
-            if fetched is None:
-                return _Skipped(day=day, kind="pending" if day >= self.recent_cutoff else "absent", detail=None)
-            zip_bytes, sha = fetched
-            del fetched
-            if plan.dataset == "aggTrades":
-                try:
-                    bars, bar_slice = derive.derive_agg_trades_streamed(
-                        fetch.iter_agg_trade_batches(zip_bytes), day=day, slice_hours=plan.slice_hours
-                    )
-                    return _Ready(day=day, frame=bars, sliced=bar_slice, sha=sha)
-                except derive.StreamFallbackError as exc:
-                    logger.debug("[DATA] stage=public_archive stream_fallback day=%s reason=%s", day, exc)
-            raw = fetch.read_single_csv(zip_bytes)
-            del zip_bytes
-            frame = _derive_day(plan.dataset, raw, symbol=plan.symbol, day=day)
-            sliced = (
-                derive.slice_agg_trades(
-                    raw, day=day, start_hour_utc=plan.slice_hours[0], end_hour_utc=plan.slice_hours[1]
-                )
-                if plan.slice_hours is not None
-                else None
+            fetched = fetch.fetch_verified_zip(
+                self.downloader, catalog.daily_key(plan.dataset, plan.symbol, day)  # type: ignore[arg-type]
             )
-            del raw
-            return _Ready(day=day, frame=frame, sliced=sliced, sha=sha)
         except Exception as exc:  # noqa: BLE001
             return _Skipped(day=day, kind="failed", detail=_short_detail(exc))
+        if fetched is None:
+            return _Skipped(day=day, kind="pending" if day >= self.recent_cutoff else "absent", detail=None)
+        zip_bytes, sha = fetched
+        del fetched
+        try:
+            frame, sliced = _derive_zip(plan, day, zip_bytes)
+        except DataIntegrityError as exc:
+            return _Skipped(day=day, kind="defective", detail=_short_detail(exc), sha=sha)
+        except Exception as exc:  # noqa: BLE001
+            return _Skipped(day=day, kind="failed", detail=_short_detail(exc))
+        return _Ready(day=day, frame=frame, sliced=sliced, sha=sha)
 
     def gather_month(
         self,
@@ -530,8 +504,14 @@ class _PlanRunner:
         for day in days:
             result = self.run_unit(plan, day)
             if isinstance(result, _Skipped):
-                outcomes.append((result.day, result.kind, result.detail, 0))
-                self.bump("failed" if result.kind == "failed" else result.kind)
+                kind = result.kind
+                if kind == "defective" and not self.record(
+                    plan, day, "defective", sha=result.sha, rows=0, detail=result.detail
+                ):
+                    kind = "failed"
+                elif kind == "failed":
+                    outcomes.append((result.day, kind, result.detail, 0))
+                self.bump(kind)
                 self.beat()
                 continue
             derived.append((result.day, result.frame))
@@ -580,7 +560,7 @@ class _PlanRunner:
                     else:
                         backups[path] = None
             if derived:
-                _merge_day_batch(self.root, plan.dataset, plan.symbol, derived)
+                store.merge_day_batch(self.root, plan.dataset, plan.symbol, derived)
                 if slices:
                     committed.append(derived_path)
             if slices:
@@ -658,6 +638,7 @@ class _PlanRunner:
             ok=final["ok"],
             failed=final["failed"],
             absent=final["absent"],
+            defective=final["defective"],
             pending=final["pending"],
             elapsed_s=(self.now() - self.started).total_seconds(),
             sealed=sum(len(p.sealed_days) for p in self.plans),

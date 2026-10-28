@@ -151,7 +151,7 @@ def _print_plan(
     allowed: dict[str, dict[str, frozenset[date]]] | None,
     census_span: CensusSpan | None = None,
 ) -> None:
-    from src.market_data.public_archive.store import load_coverage
+    from src.market_data.public_archive.store import SETTLED_STATUSES, load_coverage
 
     yesterday = datetime.now(UTC).date() - timedelta(days=1)
     for dataset in datasets:
@@ -166,7 +166,8 @@ def _print_plan(
                 1
                 for sym, days in amap.items()
                 for day in days
-                if day <= yesterday and (coverage.get((sym, day)) is None or coverage[(sym, day)].status != "ok")
+                if day <= yesterday
+                and (coverage.get((sym, day)) is None or coverage[(sym, day)].status not in SETTLED_STATUSES)
             )
             line += (
                 f" mask_symbols={len(amap)} allowed_days={sum(len(v) for v in amap.values())} missing_days={missing}"
@@ -220,14 +221,14 @@ def _job_allowed(job: BackfillJob) -> dict[str, frozenset[date]]:
 
 
 def _job_remaining(root: Path, job: BackfillJob) -> int:
-    from src.market_data.public_archive.store import load_coverage
+    from src.market_data.public_archive.store import SETTLED_STATUSES, load_coverage
 
     coverage = load_coverage(root, job.dataset)
     return sum(
         1
         for symbol, days in _job_allowed(job).items()
         for day in days
-        if (symbol, day) not in coverage or coverage[symbol, day].status != "ok"
+        if (symbol, day) not in coverage or coverage[symbol, day].status not in SETTLED_STATUSES
     )
 
 
@@ -310,12 +311,11 @@ def _run_backfill_list(args: argparse.Namespace) -> None:
                 for job in items:
                     remaining = _job_remaining(root, job)
                     coverage = store_mod.load_coverage(root, job.dataset)
-                    failed = sum(
-                        row.status == "failed" and job.start <= row.day <= job.end for row in coverage.values()
-                    )
+                    in_job = [row.status for row in coverage.values() if job.start <= row.day <= job.end]
                     print(  # noqa: T201
                         f"backfill {state} job={job.job_id} dataset={job.dataset} "
-                        f"start={job.start.isoformat()} end={job.end.isoformat()} remaining={remaining} failed={failed} "
+                        f"start={job.start.isoformat()} end={job.end.isoformat()} remaining={remaining} "
+                        f"failed={in_job.count('failed')} defective={in_job.count('defective')} "
                         f"status={state.upper()}"
                     )
     except store_mod.ArchiveBusyError as exc:
@@ -487,6 +487,7 @@ def _collect_under_lock(args: argparse.Namespace) -> None:
         if args.start is None and os.environ.get("ARCHIVE_INCREMENTAL") == "1"
         else None,
         allowed=allowed,
+        retry_defective=bool(getattr(args, "retry_defective", False)),
     )
     if plans is None:
         print("archive collect status=LISTING_FAILED")  # noqa: T201
@@ -497,7 +498,8 @@ def _collect_under_lock(args: argparse.Namespace) -> None:
     report = service_mod.execute_plan(downloader, plans, root=root, workers=args.workers)
     print(  # noqa: T201
         f"collect planned={report.planned_days} ok={report.ok} "
-        f"failed={report.failed} absent={report.absent} pending={report.pending} sealed={report.sealed}"
+        f"failed={report.failed} absent={report.absent} pending={report.pending} sealed={report.sealed} "
+        f"defective={report.defective}"
     )
     if deadline is not None:
         _drain_jobs(args, root, downloader, deadline, int(job_workers))
@@ -519,11 +521,12 @@ def _run_status(args: argparse.Namespace) -> None:
     for dataset in DATASETS:
         coverage = load_coverage(root, dataset)
         ok_days = [(sym, row.day) for (sym, _), row in coverage.items() if row.status == "ok"]
-        failed = sum(1 for row in coverage.items() if row[1].status == "failed")
+        failed = sum(1 for row in coverage.values() if row.status == "failed")
+        defective = sum(1 for row in coverage.values() if row.status == "defective")
         symbols = sorted({sym for sym, _ in ok_days})
         first = min((day for _, day in ok_days), default=None)
         last = max((day for _, day in ok_days), default=None)
-        print(f"status dataset={dataset} symbols={len(symbols)} first={first} last={last} failed={failed}")  # noqa: T201
+        print(f"status dataset={dataset} symbols={len(symbols)} first={first} last={last} failed={failed} defective={defective}")  # noqa: T201
     if heartbeat:
         print(  # noqa: T201
             f"heartbeat ts={heartbeat.get('ts')} done={heartbeat.get('done')}/{heartbeat.get('total')} failed={heartbeat.get('failed')}"
@@ -603,6 +606,10 @@ def add_archive_commands(archive_parser: argparse.ArgumentParser) -> None:
     collect.add_argument("--breadth", type=int, default=None)
     collect.add_argument("--preroll-days", type=int, default=None)
     collect.add_argument("--no-mask", action="store_true", default=False)
+    collect.add_argument(
+        "--retry-defective", action="store_true", default=False,
+        help="Re-collect days recorded defective (e.g. after a validation fix); off by default.",
+    )
     collect.add_argument("--census-root", type=Path, default=None)
     collect.add_argument("--lock-wait-s", type=float, default=1800.0)
     collect.add_argument("--drain-jobs-until", type=str, default=None)
