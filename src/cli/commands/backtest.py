@@ -13,7 +13,7 @@ import pandas as pd
 
 from src.application.strategy_account import strategy_execution_specs
 from src.backtests.catalog import append_backtest_index
-from src.cli.commands.backtest_calibration import add_fill_calibration_command
+from src.cli.commands.backtest_calibration import add_fill_calibration_command, add_fill_parity_command
 from src.cli.commands.backtest_holdout import record_post_design_look
 from src.common.paths import STRATEGY_BACKTESTS_DIR, VENUE_RULES_DIR
 from src.core.params import (
@@ -136,6 +136,7 @@ def add_backtest_commands(backtest_parser: argparse.ArgumentParser) -> None:
     account.add_argument("--min-available-bytes", type=int, default=None, help="Minimum effective physical headroom in bytes.")
     account.set_defaults(handler=run_account_replay_command)
     add_fill_calibration_command(sub)
+    add_fill_parity_command(sub)
 
 
 def _strategy_policy(breadth: int, variant: str = "primary") -> StrategySpec:

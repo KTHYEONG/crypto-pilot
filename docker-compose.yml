@@ -92,6 +92,9 @@ services:
       - ./data/public_archive:/app/data/public_archive
       - ./data/futures/ohlcv:/app/data/futures/ohlcv:ro
       - ./data/census:/app/data/census:ro
+      - ./data/state/runs:/app/data/state/runs:ro
+      - ./data/live_capture:/app/data/live_capture:ro
+      - ./data/state/exec_parity:/app/data/state/exec_parity
       - ./logs:/app/logs
       - ./deploy/backup/status:/app/backup_status:ro
     command: ["/app/.venv/bin/python", "-m", "src.cli.main", "archive", "collect", "--dataset", "all", "--execute", "--workers", "2", "--drain-jobs-until", "21:00"]
