@@ -12,6 +12,7 @@ ceil(window_deadline_s / poll_interval_s) + 1 로 유도된다.
 
 from __future__ import annotations
 
+import contextlib
 import math
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -57,8 +58,12 @@ from src.live.rest import (
 
 if TYPE_CHECKING:
     from src.live.order_journal import JournalAttempt, JournalFill, JournalSubmit
+    from src.live.trade_tape_feed import LiveTradeTape
 
 _BPS_DENOMINATOR = Decimal(10_000)
+
+#: Ack latency between a PAPER post and the first tape print that may fill it.
+PAPER_TAPE_ACK_DELAY_MS: int = 50
 
 #: 부모 intent의 최대 슬라이스 노셔널(등록 상수).
 MAX_SLICE_NOTIONAL = Decimal("500")
@@ -829,18 +834,38 @@ def _simulate_paper_fill(
     time_in_force: str,
     price: Decimal,
     post_qty: Decimal,
+    *,
+    tape: LiveTradeTape | None = None,
+    now: float | None = None,
 ) -> Decimal:
     """PAPER 로컬 체결 시뮬레이터: 이번 tick 의 관측 touch 만 사용한다(I4).
 
     GTX는 관측된 opposite touch 가 게시 가격을 관통할 때만(엄밀 trade-through)
     메이커로 전량 체결되고, IOC는 캡 가격이 이미 마케터블이므로 즉시 전량
     체결된다. 미래 호가 참조는 금지며, 체결 실패 시 0 을 반환해 chase 루프가
-    다음 tick 을 이어간다.
+    다음 tick 을 이어간다. ``tape`` 가 주어지면 GTX 휴지 주문은 동일한
+    through-only 규칙으로 테이프 print 에 의해서도 체결된다.
     """
     bid, ask = touch
     is_buy = rt.intent.side == "BUY"
     if time_in_force == "GTX":
         traded_through = (ask < price) if is_buy else (bid > price)
+        if not traded_through and tape is not None and now is not None:
+            try:
+                now_ms = int(float(now) * 1000)
+                live = tape.is_live(rt.intent.symbol, now_ms)
+            except Exception:
+                live = False
+            if live:
+                try:
+                    since_ms = int(float(rt.posted_at) * 1000) + PAPER_TAPE_ACK_DELAY_MS
+                    fill_ms = tape.traded_through(
+                        rt.intent.symbol, rt.intent.side, price, since_ms
+                    )
+                    if fill_ms is not None and int(fill_ms) <= now_ms:
+                        traded_through = True
+                except Exception:
+                    traded_through = False
         if not traded_through:
             return _ZERO
     return post_qty
@@ -1120,6 +1145,7 @@ def execute_intents(
     attempt: JournalAttempt | None = None,
     shutdown_cleanup_budget_s: float | None = None,
     order_identity_tolerance_ms: int | None = None,
+    paper_tape: LiveTradeTape | None = None,
 ) -> tuple[ExecutionOutcome, ...]:
     """단일 협조 루프(post-all/poll-all/예산 스로틀). 반환 순서는 intents 와 1:1.
 
@@ -1216,6 +1242,7 @@ def execute_intents(
             shutdown,
             shutdown_cleanup_budget_s,
             effective_window_s=effective_window_s,
+            paper_tape=paper_tape,
         )
     except BaseException as exc:
         _cleanup_on_abort(client, runtimes, audit, clock)
@@ -1241,10 +1268,12 @@ def _run_loop(
     shutdown: Any | None = None,
     shutdown_cleanup_budget_s: float | None = None,
     effective_window_s: float | None = None,
+    paper_tape: LiveTradeTape | None = None,
 ) -> None:
     live = [rt for rt in runtimes if not rt.done]
     if not live:
         return
+    degraded_symbols: set[str] = set()
     symbols = sorted({rt.intent.symbol for rt in live})
     start = clock()
     window_s = (
@@ -1300,6 +1329,8 @@ def _run_loop(
                     audit,
                     rate_limits,
                     cycle_flags,
+                    paper_tape,
+                    degraded_symbols,
                 )
         ticks += 1
         if all(rt.done for rt in live):
@@ -1585,6 +1616,8 @@ def _poll_active(
     now: float,
     policy: PassiveExecutionPolicy,
     audit: AuditLog,
+    paper_tape: LiveTradeTape | None = None,
+    degraded_symbols: set[str] | None = None,
 ) -> None:
     """Poll one active order and advance its phase; transient reads propagate to the caller."""
     assert rt.filters is not None
@@ -1600,7 +1633,10 @@ def _poll_active(
         ):
             resting_qty = rt.active_post_qty - rt.reported_executed
             if resting_qty > _ZERO:
-                resting_fill = _simulate_paper_fill(rt, touch, "GTX", rt.active_price, resting_qty)
+                resting_fill = _paper_resting_fill(
+                    rt, touch, resting_qty, now=now, audit=audit,
+                    paper_tape=paper_tape, degraded_symbols=degraded_symbols,
+                )
                 if resting_fill > _ZERO:
                     order_cumulative = rt.reported_executed + resting_fill
                     _apply_fill(
@@ -1831,6 +1867,43 @@ def _record_order_posted(
     audit.record("order_posted", **fields)
 
 
+def _note_paper_tape_degraded(
+    audit: AuditLog, symbol: str, degraded_symbols: set[str] | None,
+) -> None:
+    if degraded_symbols is None:
+        return
+    if symbol in degraded_symbols:
+        return
+    degraded_symbols.add(symbol)
+    with contextlib.suppress(Exception):
+        audit.record("paper_tape_degraded", symbol=symbol)
+
+
+def _paper_resting_fill(
+    rt: _IntentRuntime,
+    touch: tuple[Decimal, Decimal],
+    post_qty: Decimal,
+    *,
+    now: float,
+    audit: AuditLog | None = None,
+    paper_tape: LiveTradeTape | None = None,
+    degraded_symbols: set[str] | None = None,
+) -> Decimal:
+    if paper_tape is None:
+        return _simulate_paper_fill(rt, touch, "GTX", rt.active_price, post_qty)
+    try:
+        live = bool(paper_tape.is_live(rt.intent.symbol, int(float(now) * 1000)))
+    except Exception:
+        live = False
+    if not live:
+        if audit is not None:
+            _note_paper_tape_degraded(audit, rt.intent.symbol, degraded_symbols)
+        return _simulate_paper_fill(rt, touch, "GTX", rt.active_price, post_qty)
+    return _simulate_paper_fill(
+        rt, touch, "GTX", rt.active_price, post_qty, tape=paper_tape, now=now,
+    )
+
+
 def _settle_paper_post(
     rt: _IntentRuntime,
     audit: AuditLog,
@@ -1841,6 +1914,8 @@ def _settle_paper_post(
     post_qty: Decimal,
     touch: tuple[Decimal, Decimal],
     now: float,
+    paper_tape: LiveTradeTape | None = None,
+    degraded_symbols: set[str] | None = None,
 ) -> None:
     """Settle one suppressed PAPER post against this tick's observed touch only.
 
@@ -1848,8 +1923,21 @@ def _settle_paper_post(
     FILLED with ``paper_filled`` evidence and no ``order_posted``; otherwise the order
     rests (GTX) or is announced as an attempted IOC like a LIVE post.
     """
-    executed_qty = _simulate_paper_fill(rt, touch, time_in_force, price, post_qty)
     _mark_posted(rt, order_id=order_id, price=price, post_qty=post_qty, now=now, simulated=True)
+    if time_in_force == "GTX" and paper_tape is not None:
+        try:
+            live = bool(paper_tape.is_live(rt.intent.symbol, int(float(now) * 1000)))
+        except Exception:
+            live = False
+        if not live:
+            _note_paper_tape_degraded(audit, rt.intent.symbol, degraded_symbols)
+            executed_qty = _simulate_paper_fill(rt, touch, time_in_force, price, post_qty)
+        else:
+            executed_qty = _simulate_paper_fill(
+                rt, touch, time_in_force, price, post_qty, tape=paper_tape, now=now,
+            )
+    else:
+        executed_qty = _simulate_paper_fill(rt, touch, time_in_force, price, post_qty)
     if executed_qty > _ZERO:
         _apply_fill(
             rt,
@@ -1892,6 +1980,8 @@ def _poll_or_post(
     audit: AuditLog,
     rate_limits: RateLimits | None = None,
     cycle_flags: _CycleFlags | None = None,
+    paper_tape: LiveTradeTape | None = None,
+    degraded_symbols: set[str] | None = None,
 ) -> None:
     assert rt.filters is not None  # filters 부재 intent 는 생성 시 즉시 RESIDUAL 처리된다
     if _apply_close_gate(rt, now, audit):
@@ -1914,7 +2004,7 @@ def _poll_or_post(
     # 1) 활성 주문 조회: 체결 누적 및 상태 전이(FILL/CHASE/HOLD/IOC).
     if rt.active_id is not None:
         try:
-            _poll_active(client, rt, touch, now, policy, audit)
+            _poll_active(client, rt, touch, now, policy, audit, paper_tape, degraded_symbols)
         except TransientReadError:
             rt.read_failures += 1
             audit.record(
@@ -2064,6 +2154,7 @@ def _poll_or_post(
         _settle_paper_post(
             rt, audit, order_id=order_id, time_in_force=time_in_force, price=price,
             post_qty=post_qty, touch=touch, now=now,
+            paper_tape=paper_tape, degraded_symbols=degraded_symbols,
         )
         return
     _mark_posted(rt, order_id=order_id, price=price, post_qty=post_qty, now=now, simulated=False)

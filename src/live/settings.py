@@ -133,6 +133,9 @@ class LiveSettings(BaseSettings):
     # settings<->executor/rest circular import).
     repeg_interval_s: float = 180.0
     paper_fill_model: str = "immediate_taker"
+    paper_tape_max_trades_per_symbol: int = Field(default=2_000_000, ge=10_000)
+    paper_tape_stale_after_s: float = 5.0
+    paper_tape_ready_timeout_s: float = Field(default=5.0, ge=0.0, le=30.0)
     exec_depth_capture_enabled: bool = True
     exec_depth_stream_url: str = "wss://fstream.binance.com/stream"
     exec_depth_levels: int = 5
@@ -353,8 +356,15 @@ class LiveSettings(BaseSettings):
     @field_validator("paper_fill_model")
     @classmethod
     def _validate_paper_fill_model(cls, value: str) -> str:
-        if value not in {"immediate_taker", "peg_chase"}:
-            raise ValueError(f"paper_fill_model must be one of immediate_taker, peg_chase, got {value!r}")
+        if value not in {"immediate_taker", "peg_chase", "tape_through"}:
+            raise ValueError(f"paper_fill_model must be one of immediate_taker, peg_chase, tape_through, got {value!r}")
+        return value
+
+    @field_validator("paper_tape_stale_after_s")
+    @classmethod
+    def _bounded_paper_tape_stale(cls, value: float) -> float:
+        if not 0 < value <= 60:
+            raise ValueError(f"paper_tape_stale_after_s must be in (0, 60], got {value!r}")
         return value
 
     @field_validator("exec_depth_levels")

@@ -735,3 +735,31 @@ def test_exec_depth_ready_timeout_bounds(value: float) -> None:
             LiveSettings(exec_depth_ready_timeout_s=value)
     else:
         assert LiveSettings(exec_depth_ready_timeout_s=value).exec_depth_ready_timeout_s == value
+
+
+def test_paper_tape_through_accepted_with_strict_passive_policies() -> None:
+    from pydantic import ValidationError
+
+    for policy in ("strict_passive", "strict_passive_repeg"):
+        settings = LiveSettings(
+            mode="paper", execution_policy=policy, paper_fill_model="tape_through",
+        )
+        assert settings.paper_fill_model == "tape_through"
+        assert settings.paper_tape_max_trades_per_symbol == 2_000_000
+        assert settings.paper_tape_stale_after_s == 5.0
+        assert settings.paper_tape_ready_timeout_s == 5.0
+    with pytest.raises(ValidationError, match="paper_fill_model"):
+        LiveSettings(paper_fill_model="bogus")  # type: ignore[arg-type]
+
+
+def test_paper_tape_bounds_rejected() -> None:
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="paper_tape_max_trades_per_symbol"):
+        LiveSettings(paper_tape_max_trades_per_symbol=9_999)
+    with pytest.raises(ValidationError, match="paper_tape_stale_after_s"):
+        LiveSettings(paper_tape_stale_after_s=0.0)
+    with pytest.raises(ValidationError, match="paper_tape_stale_after_s"):
+        LiveSettings(paper_tape_stale_after_s=61.0)
+    with pytest.raises(ValidationError, match="paper_tape_ready_timeout_s"):
+        LiveSettings(paper_tape_ready_timeout_s=31.0)

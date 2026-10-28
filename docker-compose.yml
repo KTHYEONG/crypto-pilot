@@ -8,7 +8,7 @@ services:
     environment:
       - LIVE_MODE=paper
       - LIVE_EXECUTION_POLICY=strict_passive_repeg
-      - LIVE_PAPER_FILL_MODEL=peg_chase
+      - LIVE_PAPER_FILL_MODEL=tape_through
       - LIVE_NOTIONAL_EQUITY_USDT=2100
       - LIVE_RECORD_RUN_ID=frozen_top20_v2_repeg_fillcap_20261002
       - LIVE_TAX_COLLECTION_ENABLED=false
