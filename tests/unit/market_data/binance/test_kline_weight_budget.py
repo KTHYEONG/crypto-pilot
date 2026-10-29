@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import urllib.parse
 
+import pandas as pd
 import pytest
 
 from src.market_data.binance import futures as fut
@@ -76,7 +77,57 @@ def test_daily_tail_fetch_requests_small_limit_and_charges_its_weight(monkeypatc
     frame = client.fetch_ohlcv_with_taker("BTCUSDT", "1h", "2026-09-26T00:00:00Z", "2026-09-27T00:00:00Z")
 
     assert len(frame) == 25
+    assert len(urls) == 1
     limits = [int(urllib.parse.parse_qs(urllib.parse.urlparse(u).query)["limit"][0]) for u in urls]
     assert limits
     assert all(limit < 100 for limit in limits)
     assert charged == [1] * len(urls)
+
+
+def test_paging_continues_only_while_pages_are_full(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(fut.time, "sleep", lambda _s: None)
+    hour = 3_600_000
+    first = 1_790_380_800_000
+    total = 1_200
+    urls: list[str] = []
+
+    class _Resp:
+        def __init__(self, payload: list) -> None:
+            self.headers = {"x-mbx-used-weight-1m": "10"}
+            self._payload = payload
+
+        def __enter__(self) -> _Resp:
+            return self
+
+        def __exit__(self, *exc: object) -> bool:
+            return False
+
+        def read(self) -> bytes:
+            return json.dumps(self._payload).encode()
+
+    def _urlopen(req: object, timeout: float = 0) -> _Resp:
+        url = req.full_url  # type: ignore[attr-defined]
+        urls.append(url)
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+        start, limit = int(query["startTime"][0]), int(query["limit"][0])
+        opens = [first + i * hour for i in range(total) if first + i * hour >= start][:limit]
+        return _Resp([[t, "1", "1", "1", "1", "1", 0, "1", 1, "0.5", "0.5", "0"] for t in opens])
+
+    monkeypatch.setattr(fut.urllib.request, "urlopen", _urlopen)
+    client = fut.BinanceClient()
+    monkeypatch.setattr(client.exchange, "market", lambda symbol: {"id": "BTCUSDT"})
+    end = first + total * hour
+
+    frame = client.fetch_ohlcv_with_taker(
+        "BTCUSDT", "1h", pd.Timestamp(first, unit="ms", tz="UTC").isoformat(),
+        pd.Timestamp(end, unit="ms", tz="UTC").isoformat(),
+    )
+
+    assert len(frame) == total
+    assert len(urls) == 2
+
+
+def test_used_weight_pause_grows_with_ip_budget_pressure() -> None:
+    assert [fut._used_weight_pause_s(w) for w in (0, 1000, 1001, 1500, 1501, 2000, 2001)] == [
+        0.1, 0.1, 0.5, 0.5, 2.0, 2.0, 10.0,
+    ]

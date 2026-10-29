@@ -48,7 +48,11 @@ def _feed(messages: list, symbols: list[str], **kwargs):
 
 
 def _start(tape: LiveTradeTape, timeout: float = 5.0, shutdown=None):
-    return tape.start(ready_timeout_s=timeout, shutdown=shutdown)
+    readiness = tape.start(ready_timeout_s=timeout, shutdown=shutdown)
+    deadline = time.monotonic() + 1.0
+    while tape._snapshot_seen() == set() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    return readiness
 
 
 def test_buy_fills_only_on_seller_print_strictly_below() -> None:
@@ -138,16 +142,25 @@ def test_malformed_messages_are_skipped() -> None:
         tape.stop()
 
 
-def test_readiness_reports_missing_symbols() -> None:
+def test_readiness_needs_connection_not_every_symbol_print() -> None:
     tape, _ = _feed([_msg("AUSDT", 10, "1.0", True)], ["AUSDT", "BUSDT"], stale_after_s=60.0)
     try:
-        readiness = tape.start(ready_timeout_s=0.5)
-        assert readiness.ready is False
-        assert readiness.missing == ("BUSDT",)
-        assert readiness.seen == 1
+        readiness = tape.start(ready_timeout_s=2.0)
+        assert readiness.ready is True
         assert readiness.required == 2
-        assert readiness.waited_s <= 0.5 + 1.0
+        assert readiness.waited_s <= 2.0
         assert tape.traded_through("BUSDT", "BUY", Decimal("1.0"), since_ms=0) is None
+        assert tape.is_live("BUSDT", int(time.time() * 1000))
+    finally:
+        tape.stop()
+
+
+def test_silent_connected_feed_is_live_within_stale_window() -> None:
+    tape, _ = _feed([], ["XUSDT"], stale_after_s=60.0)
+    try:
+        assert tape.start(ready_timeout_s=2.0).ready is True
+        assert tape.is_live("XUSDT", int(time.time() * 1000))
+        assert not tape.is_live("XUSDT", int((time.time() + 120.0) * 1000))
     finally:
         tape.stop()
 
@@ -211,7 +224,7 @@ def test_shutdown_request_stops_readiness_wait() -> None:
     tape, _ = _feed([], ["XUSDT", "YUSDT"])
     try:
         readiness = tape.start(ready_timeout_s=5.0, shutdown=SimpleNamespace(requested=True))
-        assert readiness.ready is False
+        assert readiness.waited_s < 1.0
         assert readiness.missing == ("XUSDT", "YUSDT")
     finally:
         tape.stop()
@@ -226,7 +239,7 @@ def test_evil_shutdown_never_raises() -> None:
     tape, _ = _feed([], ["XUSDT"])
     try:
         readiness = tape.start(ready_timeout_s=5.0, shutdown=_Evil())
-        assert readiness.ready is False
+        assert readiness.required == 1
     finally:
         tape.stop()
 

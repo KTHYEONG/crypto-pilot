@@ -135,7 +135,9 @@ class LiveSettings(BaseSettings):
     paper_fill_model: str = "immediate_taker"
     paper_tape_max_trades_per_symbol: int = Field(default=2_000_000, ge=10_000)
     paper_tape_stale_after_s: float = 5.0
-    paper_tape_ready_timeout_s: float = Field(default=5.0, ge=0.0, le=30.0)
+    paper_tape_ready_timeout_s: float = Field(default=2.0, ge=0.0, le=30.0)
+    # aggTrade is served only under /market/stream; /stream and /public/stream stay silent for it.
+    paper_tape_stream_url: str = "wss://fstream.binance.com/market/stream"
     exec_depth_capture_enabled: bool = True
     exec_depth_stream_url: str = "wss://fstream.binance.com/stream"
     exec_depth_levels: int = 5

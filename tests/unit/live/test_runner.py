@@ -1112,6 +1112,7 @@ def test_paper_tape_through_wires_live_feed_into_execution(tmp_path, monkeypatch
     assert built["symbols"] == sorted(built["symbols"])
     assert len(built["symbols"]) > 0
     assert built["ready_timeout_s"] == settings.paper_tape_ready_timeout_s
+    assert built["stream_url"] == settings.paper_tape_stream_url
     assert isinstance(seen.get("paper_tape"), _FakeTape)
     audit_path = tmp_path / "shadow_cycle.jsonl"
     events = [json.loads(line)["event"] for line in audit_path.read_text(encoding="utf-8").splitlines()]

@@ -67,7 +67,11 @@ def _parse_agg_trade(message: Any) -> tuple[str, int, float, bool] | None:
 
 
 class LiveTradeTape:
-    """In-memory aggTrade feed for the traded symbols during one execution window."""
+    """In-memory aggTrade feed for the traded symbols during one execution window.
+
+    Readiness means the socket is connected, not that every symbol has printed: fills only need
+    prints after the post, and an illiquid symbol may stay silent for longer than any sane wait.
+    """
 
     def __init__(
         self,
@@ -92,12 +96,13 @@ class LiveTradeTape:
         }
         self._last_seen_s: dict[str, float] = {}
         self._last_any_s: float = 0.0
+        self._connected_at_s: float = 0.0
         self._connected = False
         self._trades_received = 0
         self._dropped_oldest = 0
         self._malformed = 0
         self._reconnects = 0
-        self._ready_event = threading.Event()
+        self._connected_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._stop_requested = False
         self._started = False
@@ -114,8 +119,6 @@ class LiveTradeTape:
             self._trades_received += 1
             self._last_seen_s[symbol] = now_s
             self._last_any_s = now_s
-            if not self._ready_event.is_set() and all(s in self._last_seen_s for s in self._symbols):
-                self._ready_event.set()
 
     def _snapshot_seen(self) -> set[str]:
         with self._lock:
@@ -142,10 +145,9 @@ class LiveTradeTape:
             if self._started:
                 seen = self._snapshot_seen()
                 missing = tuple(s for s in self._symbols if s not in seen)
-                return TapeReadiness(ready=not missing, seen=len(seen), required=len(self._symbols),
+                return TapeReadiness(ready=self._connected_event.is_set(), seen=len(seen), required=len(self._symbols),
                                      missing=missing, waited_s=0.0)
             self._started = True
-            self._ready_event.clear()
             thread = threading.Thread(target=self._thread_main, name="paper-trade-tape", daemon=True)
             thread.start()
             self._thread = thread
@@ -156,7 +158,7 @@ class LiveTradeTape:
                                      missing=missing, waited_s=0.0)
             deadline = start_mono + timeout
             while True:
-                if self._ready_event.is_set():
+                if self._connected_event.is_set():
                     break
                 if shutdown is not None and bool(getattr(shutdown, "requested", False)):
                     break
@@ -166,11 +168,11 @@ class LiveTradeTape:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     break
-                self._ready_event.wait(timeout=min(0.25, remaining))
+                self._connected_event.wait(timeout=min(0.25, remaining))
             waited = max(0.0, time.monotonic() - start_mono)
             seen = self._snapshot_seen()
             missing = tuple(s for s in self._symbols if s not in seen)
-            return TapeReadiness(ready=not missing, seen=len(seen), required=len(self._symbols),
+            return TapeReadiness(ready=self._connected_event.is_set(), seen=len(seen), required=len(self._symbols),
                                  missing=missing, waited_s=waited)
         except Exception as exc:
             _logger.warning("[EXEC] stage=paper_tape status=READY_WAIT_FAILED error=%s", exc)
@@ -211,7 +213,7 @@ class LiveTradeTape:
             stale_ms = self._stale_after_s * 1000.0
             now_s = float(now_ms) / 1000.0
             with self._lock:
-                last_any = self._last_any_s
+                last_any = max(self._last_any_s, self._connected_at_s)
                 last_sym = self._last_seen_s.get(str(symbol), 0.0)
             if last_any > 0.0 and (now_s - last_any) * 1000.0 <= stale_ms:
                 return True
@@ -277,7 +279,10 @@ class LiveTradeTape:
                         with self._lock:
                             self._reconnects += 1
                     connected_once = True
+                    with self._lock:
+                        self._connected_at_s = time.time()
                     self._connected = True
+                    self._connected_event.set()
                     backoff = 1.0
                     while not self._stop_requested:
                         try:
