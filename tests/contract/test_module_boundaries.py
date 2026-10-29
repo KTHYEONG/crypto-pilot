@@ -420,7 +420,7 @@ def test_source_module_size_budget() -> None:
         # LiveSettings resolved path accessors (spec 20) stay on the settings model
         # so call-site default seams keep resolving lazily at call time.
         # spec 17: live modes skip run-scoped tax ledger derivation (account-scoped venue ledger).
-        "src/live/settings.py": 779,  # exec depth readiness gate timeout; paper tape and release-latency settings.
+        "src/live/settings.py": 781,  # exec depth readiness gate timeout; paper tape (incl. its own aggTrade stream URL) and release-latency settings.
         # Drill transport-fault scenarios share one wire-record helper set; splitting would duplicate it.
         "src/live/testnet_drill/scenarios/transport_faults.py": 710,
     }

@@ -43,7 +43,9 @@ FUNDING_RATE_REQUEST_LIMIT: int = 100
 REQUEST_WEIGHT_LIMIT_PER_MINUTE: int = 2400
 KLINE_WEIGHT_UTILIZATION: float = 0.5
 KLINE_WEIGHT_PER_SECOND: float = REQUEST_WEIGHT_LIMIT_PER_MINUTE * KLINE_WEIGHT_UTILIZATION / 60.0
-KLINE_WEIGHT_BURST: int = 60
+# One full-universe refresh is ~520 weight (1 per symbol); a bucket that size lets the time-critical
+# release refresh run without queueing while the sustained rate stays at half the IP budget.
+KLINE_WEIGHT_BURST: int = 600
 KLINE_MAX_LIMIT: int = 1000
 _KLINE_INTERVAL_MS: dict[str, int] = {
     "1m": 60_000, "3m": 180_000, "5m": 300_000, "15m": 900_000, "30m": 1_800_000,
@@ -73,6 +75,17 @@ def kline_page_limit(interval: str, since_ms: int, end_ms: int) -> int:
     if step is None or end_ms <= since_ms:
         return KLINE_MAX_LIMIT
     return max(1, min(KLINE_MAX_LIMIT, (end_ms - since_ms) // step + 2))
+
+
+def _used_weight_pause_s(used_weight: int) -> float:
+    """Pause between kline pages as the IP's one-minute used weight approaches the 2400 limit."""
+    if used_weight > 2000:
+        return 10.0
+    if used_weight > 1500:
+        return 2.0
+    if used_weight > 1000:
+        return 0.5
+    return 0.1
 
 
 @dataclass(eq=False)
@@ -286,6 +299,8 @@ class BinanceClient:
 
             if not data:
                 break
+            if len(data) < page_limit:
+                break
             last_ts = int(data[-1][0])
             since = last_ts + 1
             cur_d = datetime.fromtimestamp(last_ts / 1000).strftime("%Y-%m-%d")
@@ -293,14 +308,7 @@ class BinanceClient:
             if last_ts >= end_timestamp:
                 break
 
-            if used_weight > 2000:
-                time.sleep(10)
-            elif used_weight > 1500:
-                time.sleep(2.0)
-            elif used_weight > 1000:
-                time.sleep(0.5)
-            else:
-                time.sleep(0.1)
+            time.sleep(_used_weight_pause_s(used_weight))
 
         if not all_rows:
             return pd.DataFrame(columns=[

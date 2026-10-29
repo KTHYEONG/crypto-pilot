@@ -367,8 +367,12 @@ def refresh_live_market_data(
         tail = kline_state[sym][0]
         return tail is not None and tail >= expected_tail and funding_fresh[sym]
 
-    for sym in symbols_list:
-        _observe(sym)
+    def _observe_all(names: Iterable[str]) -> None:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+            list(pool.map(_observe, names))
+
+    _observe_all(symbols_list)
+    funding_fresh_before = dict(funding_fresh)
 
     def _priority_order(names: Iterable[str]) -> list[str]:
         names = list(names)
@@ -438,7 +442,12 @@ def refresh_live_market_data(
         return "funding_ok"
 
     t_funding = time.perf_counter()
-    funding_pending = [sym for sym in pending if sym not in klines_only and klines_outcome.get(sym) not in ("deadline", "ip", "ip_skip", "klines_failed")]
+    funding_pending = [
+        sym for sym in pending
+        if sym not in klines_only
+        and not funding_fresh_before[sym]
+        and klines_outcome.get(sym) not in ("deadline", "ip", "ip_skip", "klines_failed")
+    ]
     if funding_pending and not ip_blocked.is_set():
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
             futures = {pool.submit(_fetch_funding, sym): sym for sym in _priority_order(funding_pending)}
@@ -457,8 +466,7 @@ def refresh_live_market_data(
     deadline_skipped = 0
     incomplete = 0
     not_current: list[str] = []
-    for sym in pending:
-        _observe(sym)
+    _observe_all(pending)
     for sym in symbols_list:
         if sym in fresh_set:
             continue

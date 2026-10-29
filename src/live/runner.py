@@ -1776,7 +1776,7 @@ def run_shadow_cycle(
 
             paper_tape = LiveTradeTape(
                 sorted({i.symbol for i in kept}),
-                stream_url=settings.exec_depth_stream_url,
+                stream_url=settings.paper_tape_stream_url,
                 max_trades_per_symbol=settings.paper_tape_max_trades_per_symbol,
                 stale_after_s=settings.paper_tape_stale_after_s,
             )

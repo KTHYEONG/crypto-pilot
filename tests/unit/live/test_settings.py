@@ -747,7 +747,9 @@ def test_paper_tape_through_accepted_with_strict_passive_policies() -> None:
         assert settings.paper_fill_model == "tape_through"
         assert settings.paper_tape_max_trades_per_symbol == 2_000_000
         assert settings.paper_tape_stale_after_s == 5.0
-        assert settings.paper_tape_ready_timeout_s == 5.0
+        assert settings.paper_tape_ready_timeout_s == 2.0
+        assert settings.paper_tape_stream_url.endswith("/market/stream")
+        assert settings.paper_tape_stream_url != settings.exec_depth_stream_url
     with pytest.raises(ValidationError, match="paper_fill_model"):
         LiveSettings(paper_fill_model="bogus")  # type: ignore[arg-type]
 
