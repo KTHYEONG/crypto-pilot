@@ -280,3 +280,51 @@ def test_fill_parity_fmt_nan_and_integrity_error(tmp_path: Path, monkeypatch: py
         cli.run_fill_parity_command(_parity_args(day="2023-01-02", paper_run_dir=str(run_dir), output=str(tmp_path / "o3.jsonl")))
     assert exc.value.code == 2
     assert "parity boom" in capsys.readouterr().err
+
+
+def test_fill_parity_lookback_measures_days_with_audit_oldest_first(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture) -> None:
+    import datetime as _dt
+
+    import pandas as pd
+
+    import src.application.fill_parity as parity
+    import src.cli.commands.backtest_calibration as cli
+
+    runs = tmp_path / "runs"
+    for name in ("2023-01-09", "2023-01-07"):
+        (runs / "run1" / "audit").mkdir(parents=True, exist_ok=True)
+        (runs / "run1" / "audit" / f"{name}.jsonl").write_text("", encoding="utf-8")
+    monkeypatch.setattr("src.common.paths.DATA_DIR", tmp_path)
+    (tmp_path / "state").mkdir()
+    (tmp_path / "state" / "runs").symlink_to(runs)
+    measured: list[_dt.date] = []
+
+    def _fake_measure(day, *, paper_run_dir, archive_root, live_capture_root):
+        measured.append(day)
+        return parity.FillParityRow(
+            day=day, run_id="run1", n_intents=0, n_posts=0, through_agreement=None, paper_is_bps=None,
+            rule_is_bps=None, gap_bps=None, status="SKIPPED", detail="tape_missing",
+        )
+
+    monkeypatch.setattr(parity, "measure_fill_parity", _fake_measure)
+    monkeypatch.setattr(parity, "trailing_breach", lambda path, thresholds: None)
+    monkeypatch.setattr(pd.Timestamp, "now", staticmethod(lambda tz=None: pd.Timestamp(_dt.date(2023, 1, 10), tz="UTC")))
+
+    cli.run_fill_parity_command(_parity_args(lookback_days=3, output=str(tmp_path / "out.jsonl")))
+
+    assert measured == [_dt.date(2023, 1, 7), _dt.date(2023, 1, 9)]
+    assert capsys.readouterr().out.count("fill-parity day=") == 2
+
+
+def test_fill_parity_lookback_flag_parses_and_rejects_non_positive(tmp_path: Path) -> None:
+    import argparse
+
+    import src.cli.commands.backtest_calibration as cli
+
+    parser = argparse.ArgumentParser()
+    cli.add_fill_parity_command(parser.add_subparsers())
+    args = parser.parse_args(["fill-parity", "--lookback-days", "3"])
+    assert args.lookback_days == 3
+    with pytest.raises(SystemExit) as excinfo:
+        cli.run_fill_parity_command(_parity_args(lookback_days=-1, output=str(tmp_path / "o.jsonl")))
+    assert excinfo.value.code == 2
