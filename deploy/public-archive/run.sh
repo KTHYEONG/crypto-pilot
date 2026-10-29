@@ -21,7 +21,7 @@ RC3=0
 docker compose --profile archive run --rm public-archive >> "$LOG_FILE" 2>&1 || RC1=$?
 log_rc 1 "$RC1"
 
-docker compose --profile archive run --rm public-archive /app/.venv/bin/python -m src.cli.main backtest fill-parity >> "$LOG_FILE" 2>&1 || RC3=$?
+docker compose --profile archive run --rm public-archive /app/.venv/bin/python -m src.cli.main backtest fill-parity --lookback-days 3 >> "$LOG_FILE" 2>&1 || RC3=$?
 log_rc 3 "$RC3"
 
 docker compose --profile archive run --rm public-archive /app/.venv/bin/python -m src.cli.main archive prune >> "$LOG_FILE" 2>&1 || RC2=$?

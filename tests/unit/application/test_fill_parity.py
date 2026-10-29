@@ -232,3 +232,14 @@ def test_report_file_readable_by_backup_user(tmp_path: Path) -> None:
     append_parity_row(_ok_row(date(2023, 1, 2), "run1", 1, 0.0), path)
     mode = stat.S_IMODE(os.stat(path).st_mode)
     assert mode == 0o644
+
+
+def test_partition_without_the_days_window_is_tape_missing_not_ok(tmp_path: Path) -> None:
+    day = _day()
+    legs = [{"symbol": "BTCUSDT", "leg_index": 0, "ref": 100.0, "avg": 100.0, "qty": 0.01, "fee": 2.0, "side": "BUY"}]
+    run_dir = _make_run(tmp_path / "r", day, run_id="run1", legs=legs)
+    archive = tmp_path / "archive"
+    _install_tape(archive, _day(day=1), "BTCUSDT", [99.0] * 10)
+    row = measure_fill_parity(day, paper_run_dir=run_dir, archive_root=archive, live_capture_root=tmp_path / "live")
+    assert row.status == "SKIPPED"
+    assert row.detail == "tape_missing"

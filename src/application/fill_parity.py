@@ -243,6 +243,9 @@ def _rule_outcome(
             raise FileNotFoundError(str(path))
         partition = read_tape_partition(path)
         day_tape(partition, symbol, day)
+        times = partition["transact_time_ms"].to_numpy()
+        if not bool(((times >= start_ms) & (times < end_ms)).any()):
+            raise FileNotFoundError(f"{symbol} {day} tape window empty")
         partitions[symbol] = partition
     maker_outcomes: list[tuple[dict[str, object], bool, float]] = []
     excluded = 0
