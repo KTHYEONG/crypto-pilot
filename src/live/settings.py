@@ -222,8 +222,6 @@ class LiveSettings(BaseSettings):
     refresh_max_fail_fraction: float = 0.15
     funding_prefetch_enabled: bool = True
     funding_prefetch_offset_hours: float = 20.25
-    kline_prefetch_enabled: bool = True
-    kline_prefetch_lead_minutes: float = 10.0
     refresh_decision_bar_max_missing_fraction: float = 0.05
     venue_rules_warn_age_days: float = 2.0
     venue_rules_max_age_days: float = 7.0
@@ -490,13 +488,6 @@ class LiveSettings(BaseSettings):
     def _bounded_catchup_buffer(cls, value: float) -> float:
         if not 0.05 <= value <= 10:
             raise ValueError("daemon_catchup_buffer_minutes must be in [0.05, 10]")
-        return value
-
-    @field_validator("kline_prefetch_lead_minutes")
-    @classmethod
-    def _bounded_kline_prefetch_lead(cls, value: float) -> float:
-        if not 2 <= value <= 60:
-            raise ValueError("kline_prefetch_lead_minutes must be in [2, 60]")
         return value
 
     @field_validator("funding_prefetch_offset_hours")

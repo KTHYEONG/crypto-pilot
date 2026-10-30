@@ -774,8 +774,6 @@ def test_exec_parity_part3_live_release_latency_defaults() -> None:
     assert settings.daemon_catchup_buffer_minutes == 0.25
     assert settings.repeg_interval_s == 60.0
     assert settings.refresh_max_workers == 32
-    assert settings.kline_prefetch_enabled is True
-    assert settings.kline_prefetch_lead_minutes == 10.0
 
 
 def test_exec_parity_part3_buffer_bounds() -> None:
@@ -788,15 +786,3 @@ def test_exec_parity_part3_buffer_bounds() -> None:
     for bad in (0, 11):
         with pytest.raises(ValidationError, match="daemon_catchup_buffer_minutes"):
             LiveSettings(daemon_catchup_buffer_minutes=bad)
-
-
-def test_exec_parity_part3_prefetch_lead_bounds() -> None:
-    from pydantic import ValidationError
-
-    from src.live.settings import LiveSettings
-
-    assert LiveSettings(kline_prefetch_lead_minutes=2.0).kline_prefetch_lead_minutes == 2.0
-    assert LiveSettings(kline_prefetch_lead_minutes=60.0).kline_prefetch_lead_minutes == 60.0
-    for bad in (1, 61):
-        with pytest.raises(ValidationError, match="kline_prefetch_lead_minutes"):
-            LiveSettings(kline_prefetch_lead_minutes=bad)
