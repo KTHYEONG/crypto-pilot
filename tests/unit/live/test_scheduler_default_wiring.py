@@ -12,7 +12,7 @@ from src.live import scheduler
 from src.live.settings import LiveSettings
 
 
-@pytest.mark.parametrize("name", ["signal", "refresh", "venue", "prefetch", "kline_prefetch"])
+@pytest.mark.parametrize("name", ["signal", "refresh", "venue", "prefetch"])
 def test_default_step_fns_bind_decision_time_positionally(name: str, tmp_path: Path) -> None:
     fns = scheduler.default_step_fns(LiveSettings(), tmp_path / "w.parquet")
     bound = inspect.signature(fns[name]).bind(pd.Timestamp("2026-09-26", tz="UTC"))
@@ -28,10 +28,9 @@ def test_default_refresh_receives_decision_time_in_its_own_parameter(monkeypatch
 
     monkeypatch.setattr(scheduler, "_default_data_refresh", fake)
     monkeypatch.setattr(scheduler, "_default_funding_prefetch", fake)
-    monkeypatch.setattr(scheduler, "_default_kline_prefetch", fake)
     settings = LiveSettings()
     target = pd.Timestamp("2026-09-26", tz="UTC")
-    for name in ("refresh", "prefetch", "kline_prefetch"):
+    for name in ("refresh", "prefetch"):
         seen.clear()
         assert scheduler.default_step_fns(settings, tmp_path / "w.parquet")[name](target) == "ok"
         assert seen["settings"] is settings
