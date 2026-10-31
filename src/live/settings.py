@@ -180,7 +180,8 @@ class LiveSettings(BaseSettings):
     alert_outbox_retention_s: float = 604800.0
     alert_outbox_max_records: int = 1000
     liveness_stage_grace_s: float = 900.0
-    liveness_execute_budget_s: float = 3960.0
+    # Flip days run two passive windows plus the depth post-window: 2*30 + 30 min, with margin.
+    liveness_execute_budget_s: float = 6300.0
     liveness_heartbeat_stale_s: float = 900.0
     deadman_ping_url: SecretStr | None = None
     deadman_ping_interval_s: float = 300.0

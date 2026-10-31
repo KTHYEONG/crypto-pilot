@@ -786,3 +786,9 @@ def test_exec_parity_part3_buffer_bounds() -> None:
     for bad in (0, 11):
         with pytest.raises(ValidationError, match="daemon_catchup_buffer_minutes"):
             LiveSettings(daemon_catchup_buffer_minutes=bad)
+
+
+def test_liveness_execute_budget_covers_flip_day_worst_case() -> None:
+    settings = LiveSettings()
+    worst_case_s = 2 * settings.passive_timeout_minutes * 60 + settings.exec_depth_post_window_s
+    assert settings.liveness_execute_budget_s >= worst_case_s
