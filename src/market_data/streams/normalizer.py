@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
-from pydantic import BaseModel, ConfigDict, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, ValidationInfo, field_validator, model_validator
 
 from src.capture.journal import is_successful_rest_status, iter_complete_records, last_complete_offset
 from src.common.errors import DataIntegrityError
@@ -78,6 +78,7 @@ class NormalizerConfig(BaseModel):
     archive_lzma_preset: int = 6
     raw_archive_local_retention_days: int = 30
     parquet_local_retention_days: int = 180
+    exec_depth_local_retention_days: int = 90
     backup_status_max_age_h: float = 72.0
     partial_sweep_age_s: float = 3600.0
     retention_interval_s: float = 3600.0
@@ -154,11 +155,11 @@ class NormalizerConfig(BaseModel):
             raise ValueError("archive_lzma_preset must be in 0..9")
         return value
 
-    @field_validator("raw_archive_local_retention_days")
+    @field_validator("raw_archive_local_retention_days", "exec_depth_local_retention_days")
     @classmethod
-    def _archive_retention(cls, value: int) -> int:
+    def _archive_retention(cls, value: int, info: ValidationInfo) -> int:
         if value < 2:
-            raise ValueError("raw_archive_local_retention_days must be >= 2")
+            raise ValueError(f"{info.field_name} must be >= 2")
         return value
 
     @field_validator(
