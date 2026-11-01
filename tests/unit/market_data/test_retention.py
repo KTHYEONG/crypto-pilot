@@ -611,3 +611,46 @@ def test_rmdir_failures_skipped(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(Path, "rmdir", _flaky_rmdir)
     assert _remove_empty_dirs([tmp_path / "raw" / "hot"]) == 0
     assert day_dir.exists()
+
+
+def _exec_depth_day(root: Path, day: str, days_ago: float) -> list[Path]:
+    day_dir = root / "exec_depth" / day
+    day_dir.mkdir(parents=True, exist_ok=True)
+    paths = [day_dir / "part_000000_1.parquet", day_dir / "manifest_000000_1.json"]
+    for path in paths:
+        path.write_bytes(b"x")
+        _touch_old(path, days_ago)
+    return paths
+
+
+def test_exec_depth_prunes_backed_up_days_past_its_own_window(tmp_path) -> None:
+    """91-day exec_depth partitions (parts and manifests) prune, 89-day stays, empty dirs go."""
+    old = _exec_depth_day(tmp_path, "20260627", 91.0)
+    kept = _exec_depth_day(tmp_path, "20260629", 89.0)
+    report = prune_backed_up(
+        tmp_path, tmp_path / "liq", status=_norm_status(), config=NormalizerConfig(), now=_norm_now()
+    )
+    assert report.prune_blocked is False
+    assert not any(path.exists() for path in old)
+    assert not old[0].parent.exists()
+    assert all(path.exists() for path in kept)
+
+
+def test_exec_depth_day_modified_after_backup_start_or_blocked_is_kept(tmp_path) -> None:
+    fresh = _exec_depth_day(tmp_path, "20260627", 91.0)
+    _touch_now(fresh[0])
+    prune_backed_up(tmp_path, tmp_path / "liq", status=_norm_status(), config=NormalizerConfig(), now=_norm_now())
+    assert all(path.exists() for path in fresh)
+    old = _exec_depth_day(tmp_path, "20260626", 92.0)
+    blocked = prune_backed_up(tmp_path, tmp_path / "liq", status=None, config=NormalizerConfig(), now=_norm_now())
+    assert blocked.prune_blocked is True
+    assert all(path.exists() for path in old)
+
+
+def test_exec_depth_retention_window_bounds() -> None:
+    import pytest
+    from pydantic import ValidationError
+
+    assert NormalizerConfig().exec_depth_local_retention_days == 90
+    with pytest.raises(ValidationError, match="exec_depth_local_retention_days"):
+        NormalizerConfig(exec_depth_local_retention_days=1)

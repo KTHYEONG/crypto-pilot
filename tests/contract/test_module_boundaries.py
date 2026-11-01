@@ -416,7 +416,7 @@ def test_source_module_size_budget() -> None:
         "src/lab/mhs/contracts.py": 878,
         # Checkpoint advancement, retention and the loop stay co-located for review;
         # _run_retention_pass persists the checkpoint and is not split out.
-        "src/market_data/streams/normalizer.py": 1112,
+        "src/market_data/streams/normalizer.py": 1113,
         # LiveSettings resolved path accessors (spec 20) stay on the settings model
         # so call-site default seams keep resolving lazily at call time.
         # spec 17: live modes skip run-scoped tax ledger derivation (account-scoped venue ledger).

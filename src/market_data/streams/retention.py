@@ -25,6 +25,7 @@ if TYPE_CHECKING:
 _logger = logging.getLogger(__name__)
 
 SNAPSHOT_DATASETS: tuple[str, str] = ("book_ticker", "premium_index")
+_EXEC_DEPTH_DIR = "exec_depth"
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,6 +131,30 @@ def _snapshot_day_dirs(capture_root: Path) -> list[tuple[str, str, Path]]:
             if day_dir.is_dir() and len(day_dir.name) == 8 and day_dir.name.isdigit()
         )
     return units
+
+
+def _prune_exec_depth(capture_root: Path, cutoff: pd.Timestamp, started_at_ns: int) -> int:
+    """Delete backed-up ``exec_depth/<day>/`` partitions (parts and manifests) older than ``cutoff``."""
+    base = Path(capture_root) / _EXEC_DEPTH_DIR
+    if not base.is_dir():
+        return 0
+    pruned = 0
+    for day_dir in sorted(base.iterdir()):
+        day = day_dir.name
+        if not (day_dir.is_dir() and len(day) == 8 and day.isdigit()):
+            continue
+        if pd.Timestamp(f"{day[:4]}-{day[4:6]}-{day[6:8]}T00:00:00Z") >= cutoff:
+            continue
+        files = sorted(path for path in day_dir.rglob("*") if path.is_file())
+        if not files or not _unit_backed_up(files, started_at_ns):
+            continue
+        for path in files:
+            try:
+                path.unlink()
+                pruned += 1
+            except OSError:
+                continue
+    return pruned
 
 
 def _liquidation_day_files(liquidations_dir: Path) -> dict[str, list[Path]]:
@@ -240,6 +265,9 @@ def prune_backed_up(
                 pruned += 1
             except OSError:
                 continue
+    pruned += _prune_exec_depth(
+        capture_root, today - pd.Timedelta(days=config.exec_depth_local_retention_days), started_ns
+    )
     for day, files in _liquidation_day_files(liquidations_dir).items():
         if pd.Timestamp(f"{day[:4]}-{day[4:6]}-{day[6:8]}T00:00:00Z") >= parquet_cutoff:
             continue
@@ -257,6 +285,7 @@ def prune_backed_up(
             Path(capture_root) / "raw" / "archive",
             Path(capture_root) / "book_ticker",
             Path(capture_root) / "premium_index",
+            Path(capture_root) / _EXEC_DEPTH_DIR,
         ]
     )
     return RetentionReport(
