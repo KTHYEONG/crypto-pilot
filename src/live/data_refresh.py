@@ -18,6 +18,7 @@ import pyarrow.parquet as pq
 
 from src.common.errors import DataIntegrityError
 from src.live.venue_listing import VenueListingSnapshot
+from src.market_data.binance.funding_info import FundingIntervalSnapshot
 from src.market_data.binance.futures import BinanceIpBlockedError
 from src.market_data.binance.venue_rules import EXCHANGE_INFO_URL
 from src.market_data.services.futures_collection import funding_gap_start_ms, funding_tail_is_fresh
@@ -265,7 +266,18 @@ def _staleness_p90(states: Iterable[tuple[pd.Timestamp | None, bool]], now: pd.T
     return float(pd.Series(gaps).quantile(0.90))
 
 
-def _funding_fresh_on_disk(futures_root: Path, symbol: str, now: pd.Timestamp, window_start: pd.Timestamp | None = None) -> bool:
+def _attested_interval_ms(snapshot: FundingIntervalSnapshot | None, symbol: str) -> int | None:
+    return None if snapshot is None else snapshot.interval_for(symbol)
+
+
+def _funding_fetch_kwargs(interval_ms: int | None) -> dict[str, int]:
+    return {} if interval_ms is None else {"interval_ms": interval_ms}
+
+
+def _funding_fresh_on_disk(
+    futures_root: Path, symbol: str, now: pd.Timestamp, window_start: pd.Timestamp | None = None,
+    *, interval_ms: int | None = None,
+) -> bool:
     path = Path(futures_root) / "funding" / f"{symbol}.parquet"
     if not path.exists():
         return False
@@ -275,7 +287,7 @@ def _funding_fresh_on_disk(futures_root: Path, symbol: str, now: pd.Timestamp, w
         _logger.debug("[DATA] funding tail unreadable symbol=%s error=%s", symbol, exc)
         return False
     stamps = pd.to_numeric(frame["timestamp"], errors="coerce").dropna().astype("int64").tolist()
-    if not funding_tail_is_fresh(stamps, now):
+    if not funding_tail_is_fresh(stamps, now, interval_ms=interval_ms):
         return False
     if window_start is None:
         return True
@@ -313,6 +325,7 @@ def refresh_live_market_data(
     klines_only_symbols: frozenset[str] = frozenset(),
     seed_lookback_days: int = 150,
     required_symbols: frozenset[str] = frozenset(),
+    funding_intervals: FundingIntervalSnapshot | None = None,
 ) -> RefreshReport:
     """Bring every universe symbol's 1h klines and settled funding current, then verify it on disk.
 
@@ -361,7 +374,10 @@ def refresh_live_market_data(
 
     def _observe(sym: str) -> None:
         kline_state[sym] = _kline_tail_state(futures_root, sym, now)
-        funding_fresh[sym] = sym in klines_only or _funding_fresh_on_disk(futures_root, sym, now, window_start=funding_window_start)
+        funding_fresh[sym] = sym in klines_only or _funding_fresh_on_disk(
+            futures_root, sym, now, window_start=funding_window_start,
+            interval_ms=_attested_interval_ms(funding_intervals, sym),
+        )
 
     def _symbol_current(sym: str) -> bool:
         tail = kline_state[sym][0]
@@ -431,7 +447,10 @@ def refresh_live_market_data(
         if funding_blocked.is_set():
             return "funding_skip"
         try:
-            collector.ensure_funding_data(sym, str(funding_window_start), str(now))
+            collector.ensure_funding_data(
+                sym, str(funding_window_start), str(now),
+                **_funding_fetch_kwargs(_attested_interval_ms(funding_intervals, sym)),
+            )
         except BinanceIpBlockedError as exc:
             funding_blocked.set()
             _logger.error("[DATA] stage=refresh_live_market_data funding_blocked=True symbol=%s http_code=%d", sym, exc.http_code)
@@ -503,8 +522,9 @@ def refresh_live_market_data(
     elapsed_s = time.perf_counter() - t0
 
     _logger.info(
-        "[DATA] stage=refresh_live_market_data total=%d fresh=%d refreshed=%d failed=%d deadline_skipped=%d incomplete=%d required_incomplete=%d deadline_hit=%s staleness_h=%.1f klines_elapsed_s=%.1f funding_elapsed_s=%.1f elapsed_s=%.1f ok=%s ip_blocked=%s funding_stale=%d absent=%d funding_blocked=%s",
+        "[DATA] stage=refresh_live_market_data total=%d fresh=%d refreshed=%d failed=%d deadline_skipped=%d incomplete=%d required_incomplete=%d deadline_hit=%s staleness_h=%.1f klines_elapsed_s=%.1f funding_elapsed_s=%.1f elapsed_s=%.1f ok=%s ip_blocked=%s funding_stale=%d absent=%d funding_blocked=%s funding_intervals=%s",
         total, fresh, refreshed, failed, deadline_skipped, incomplete, len(required_incomplete), deadline_hit, staleness, klines_elapsed_s, funding_elapsed_s, elapsed_s, ok, ip_blocked.is_set(), funding_stale, len(absent), funding_blocked.is_set(),
+        "none" if funding_intervals is None else len(funding_intervals.interval_ms),
     )
     if not_current_sample:
         _logger.warning("[DATA] stage=refresh_live_market_data not_current_sample=%s", ",".join(not_current_sample))
@@ -540,6 +560,7 @@ def refresh_funding_tails(
     deadline_s: float,
     max_workers: int,
     collector: Any | None = None,
+    funding_intervals: FundingIntervalSnapshot | None = None,
 ) -> FundingPrefetchReport:
     """Best-effort off-window funding fetch so the nightly critical path finds most tails already fresh.
 
@@ -559,14 +580,15 @@ def refresh_funding_tails(
     funding_blocked = threading.Event()
 
     def _fetch(sym: str) -> str:
-        if _funding_fresh_on_disk(futures_root, sym, now, window_start=funding_window_start):
+        interval_ms = _attested_interval_ms(funding_intervals, sym)
+        if _funding_fresh_on_disk(futures_root, sym, now, window_start=funding_window_start, interval_ms=interval_ms):
             return "fresh"
         if time.perf_counter() > deadline_ts:
             return "deadline"
         if funding_blocked.is_set():
             return "funding_skip"
         try:
-            collector.ensure_funding_data(sym, str(funding_window_start), str(now))
+            collector.ensure_funding_data(sym, str(funding_window_start), str(now), **_funding_fetch_kwargs(interval_ms))
         except BinanceIpBlockedError as exc:
             funding_blocked.set()
             _logger.error("[DATA] stage=funding_prefetch funding_blocked=True symbol=%s http_code=%d", sym, exc.http_code)

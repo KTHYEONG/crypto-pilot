@@ -27,6 +27,7 @@ from src.live.rest import IP_BAN_RELEASE_MARGIN_S, ip_ban_remaining_s
 if TYPE_CHECKING:
     from src.live.data_refresh import RefreshReport
     from src.live.strategy_signal import StrategyStepReport
+    from src.market_data.binance.funding_info import FundingIntervalSnapshot
 from src.live.alert_outbox import default_dedupe_key
 from src.live.alerting import dispatch_alert, drain_alerts
 from src.live.audit import AUDIT_LOG_ROOT, prune_old_audit_logs
@@ -207,6 +208,22 @@ def _required_symbols(settings: LiveSettings, weights_path: Path) -> set[str]:
     return required
 
 
+FUNDING_INTERVAL_SNAPSHOT_DIR: Path = DATA_DIR / "state" / "funding_interval"
+
+
+def _capture_funding_intervals() -> FundingIntervalSnapshot | None:
+    """Venue-attested funding cadence persisted for audit; None (inference fallback) on any failure."""
+    from src.market_data.binance.funding_info import fetch_funding_info, write_funding_interval_snapshot
+
+    try:
+        snapshot = fetch_funding_info()
+        write_funding_interval_snapshot(snapshot, FUNDING_INTERVAL_SNAPSHOT_DIR)
+    except (RuntimeError, DataIntegrityError, OSError) as exc:
+        logger.warning("[DATA] stage=funding_info status=UNAVAILABLE fallback=inference error=%r", exc)
+        return None
+    return snapshot
+
+
 def _default_data_refresh(
     settings: LiveSettings, weights_path: Path, decision_time: pd.Timestamp,
 ) -> RefreshReport:
@@ -247,6 +264,7 @@ def _default_data_refresh(
     if universe.unlisted_required:
         logger.error("[DATA] stage=refresh_universe unlisted_required=%s", ",".join(universe.unlisted_required))
     fetch_set = sorted({*universe.trading, *universe.tracked_pending, *universe.tracked_settled})
+    funding_intervals = _capture_funding_intervals()
     return refresh_live_market_data(
         FUTURES_DATA_DIR,
         now=_utc_now(),
@@ -259,6 +277,7 @@ def _default_data_refresh(
         klines_only_symbols=frozenset(universe.tracked_settled),
         seed_lookback_days=LIVE_SIGNAL_WARMUP_DAYS + 30,
         required_symbols=frozenset(required) & set(fetch_set),
+        funding_intervals=funding_intervals,
     )
 
 
@@ -284,6 +303,7 @@ def _default_funding_prefetch(
         previous, required_symbols=required, non_crypto=non_crypto, now=_utc_now(),
     )
     fetch_set = sorted({*universe.trading, *universe.tracked_pending})
+    funding_intervals = _capture_funding_intervals()
     report = refresh_funding_tails(
         FUTURES_DATA_DIR,
         now=_utc_now(),
@@ -291,6 +311,7 @@ def _default_funding_prefetch(
         symbols=fetch_set,
         deadline_s=settings.refresh_deadline_s,
         max_workers=settings.refresh_max_workers,
+        funding_intervals=funding_intervals,
     )
     logger.info(
         "[DATA] stage=funding_prefetch total=%d fetched=%d fresh=%d failed=%d elapsed_s=%.1f",
