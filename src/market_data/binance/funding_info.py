@@ -27,7 +27,7 @@ _logger = logging.getLogger(__name__)
 FUNDING_INFO_URL: str = "https://fapi.binance.com/fapi/v1/fundingInfo"
 FUNDING_INFO_TIMEOUT_S: float = 5.0
 FUNDING_INTERVAL_HOURS_ALLOWED: frozenset[int] = frozenset({1, 2, 4, 8})
-_MS_PER_HOUR: int = 3_600_000
+_FUNDING_HOUR_MS: int = 3_600_000
 _SNAPSHOT_STEM_FORMAT: str = "%Y%m%dT%H%M%SZ"
 _SNAPSHOT_STEM_LENGTH: int = 16
 
@@ -74,7 +74,7 @@ def parse_funding_info(payload: object, *, captured_at: pd.Timestamp) -> Funding
         if not isinstance(symbol, str) or not symbol or hours is None:
             skipped += 1
             continue
-        intervals[symbol] = hours * _MS_PER_HOUR
+        intervals[symbol] = hours * _FUNDING_HOUR_MS
     if not intervals:
         raise DataIntegrityError("fundingInfo payload has no valid rows")
     if skipped:
@@ -111,7 +111,7 @@ def write_funding_interval_snapshot(snapshot: FundingIntervalSnapshot, root: Pat
     body = json.dumps(
         {
             "captured_at": captured.isoformat(),
-            "interval_hours": {sym: ms // _MS_PER_HOUR for sym, ms in snapshot.interval_ms.items()},
+            "interval_hours": {sym: ms // _FUNDING_HOUR_MS for sym, ms in snapshot.interval_ms.items()},
         },
         sort_keys=True,
         separators=(",", ":"),
@@ -129,10 +129,10 @@ def _read_snapshot_file(path: Path) -> FundingIntervalSnapshot:
         raw = json.loads(path.read_text(encoding="utf-8"))
         hours = raw["interval_hours"]
         captured = pd.Timestamp(raw["captured_at"])
-        intervals = {str(sym): int(h) * _MS_PER_HOUR for sym, h in hours.items()}
+        intervals = {str(sym): int(h) * _FUNDING_HOUR_MS for sym, h in hours.items()}
     except (OSError, UnicodeDecodeError, ValueError, KeyError, TypeError, AttributeError) as exc:
         raise DataIntegrityError(f"funding interval snapshot unreadable: {path.name}") from exc
-    if not intervals or any(ms // _MS_PER_HOUR not in FUNDING_INTERVAL_HOURS_ALLOWED for ms in intervals.values()):
+    if not intervals or any(ms // _FUNDING_HOUR_MS not in FUNDING_INTERVAL_HOURS_ALLOWED for ms in intervals.values()):
         raise DataIntegrityError(f"funding interval snapshot malformed: {path.name}")
     return FundingIntervalSnapshot(captured_at=_utc(captured, "captured_at"), interval_ms=intervals)
 
