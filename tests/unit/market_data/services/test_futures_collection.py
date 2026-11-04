@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 
 import pandas as pd
+import pytest
 
 import src.market_data.services.futures_collection as collector_module
 from src.market_data.binance.futures import BinanceKlinePermanentError
@@ -1074,3 +1075,83 @@ def test_ohlcv_permanent_kline_error_is_logged_not_raised(tmp_path, monkeypatch,
     warnings = [r for r in caplog.records if r.name == "DataCollector" and r.levelno == logging.WARNING]
     assert any("Permanent OHLCV API failure" in r.getMessage() for r in warnings)
     assert pd.read_parquet(cache)["timestamp"].tolist() == [_wiring_ms(s) for s in july]
+
+
+def _funding_ms(ts: str) -> int:
+    import pandas as pd
+
+    return int((pd.Timestamp(ts) - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta("1ms"))
+
+
+def test_infer_is_conservative_when_interval_just_lengthened() -> None:
+    from src.market_data.services.futures_collection import infer_funding_interval_ms
+
+    h = 3600000
+    one_to_four = [i * h for i in range(6)] + [9 * h]
+    assert infer_funding_interval_ms(one_to_four) == h
+    four_to_one = [0, 4 * h, 8 * h, 12 * h, 16 * h, 17 * h]
+    assert infer_funding_interval_ms(four_to_one) == h
+
+
+def test_fresh_with_attested_interval_overrides_inference() -> None:
+    import pandas as pd
+    from src.market_data.services.futures_collection import funding_tail_is_fresh
+
+    h = 3600000
+    series = [_funding_ms(f"2026-11-03T{hour:02d}:00Z") for hour in range(10, 17)] + [_funding_ms("2026-11-03T20:00Z")]
+    now = pd.Timestamp("2026-11-03T23:00:30Z")
+    assert funding_tail_is_fresh(series, now) is False
+    assert funding_tail_is_fresh(series, now, interval_ms=4 * h) is True
+
+
+def test_attested_interval_still_detects_missed_settlement() -> None:
+    import pandas as pd
+    from src.market_data.services.futures_collection import funding_tail_is_fresh
+
+    h = 3600000
+    series = [_funding_ms("2026-11-03T04:00Z"), _funding_ms("2026-11-03T08:00Z"), _funding_ms("2026-11-03T12:00Z")]
+    assert funding_tail_is_fresh(series, pd.Timestamp("2026-11-03T23:00:30Z"), interval_ms=4 * h) is False
+    assert funding_tail_is_fresh([], pd.Timestamp("2026-11-03T23:00:30Z"), interval_ms=4 * h) is False
+
+
+@pytest.mark.parametrize("bad", [0, -3600000])
+def test_non_positive_interval_rejected(bad: int) -> None:
+    import pandas as pd
+    from src.market_data.services.futures_collection import funding_tail_is_fresh
+
+    with pytest.raises(ValueError, match="interval_ms must be positive"):
+        funding_tail_is_fresh([1], pd.Timestamp("2026-11-03T23:00:30Z"), interval_ms=bad)
+
+
+def test_ensure_funding_data_early_returns_with_attested_interval(tmp_path, monkeypatch) -> None:
+    import pandas as pd
+    import src.market_data.services.futures_collection as collector_module
+    from src.market_data.services.futures_collection import DataCollector
+
+    class _NoVision:
+        def fetch_funding_rate_monthly(self, *args, **kwargs):
+            raise AssertionError("vision must not be used for a recent tail")
+
+    target = tmp_path / "funding" / "QUSDT.parquet"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(collector_module, "funding_path", lambda symbol: target)
+    monkeypatch.setattr(collector_module, "BinanceVisionDownloader", _NoVision)
+    monkeypatch.setattr(collector_module, "_utc_now", lambda: pd.Timestamp("2026-11-03T23:00:30Z"))
+    collector = DataCollector()
+    cached = [_funding_ms(f"2026-11-03T{hour:02d}:00Z") for hour in range(10, 17)] + [_funding_ms("2026-11-03T20:00Z")]
+    pd.DataFrame({"timestamp": cached, "funding_rate": [0.0001] * len(cached)}).to_parquet(target, index=False)
+    before = target.read_bytes()
+    calls: list[object] = []
+
+    def _fetch(*args, **kwargs):
+        calls.append(args)
+        return pd.DataFrame(columns=["timestamp", "funding_rate"])
+
+    collector.client.fetch_funding_rate_history = _fetch
+
+    collector.ensure_funding_data("QUSDT", "2026-11-03T10:00:00Z", "2026-11-03T23:00:30Z", interval_ms=4 * 3600000)
+    assert calls == []
+    assert target.read_bytes() == before
+
+    collector.ensure_funding_data("QUSDT", "2026-11-03T10:00:00Z", "2026-11-03T23:00:30Z")
+    assert len(calls) == 1

@@ -142,3 +142,14 @@ def _neutralize_execution_depth_capture(monkeypatch: pytest.MonkeyPatch) -> None
             )
 
     monkeypatch.setattr(runner_mod, "ExecutionDepthRecorder", _NullDepthRecorder)
+
+
+@pytest.fixture(autouse=True)
+def _block_funding_info_fetch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """fundingInfo is an external boundary: unit tests degrade to inference unless they stub it."""
+    from src.market_data.binance import funding_info
+
+    def _unavailable(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("fundingInfo blocked in unit tests")
+
+    monkeypatch.setattr(funding_info, "fetch_funding_info", _unavailable)

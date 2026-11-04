@@ -1,7 +1,6 @@
 import concurrent.futures
 import itertools
 import logging
-import statistics
 from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
 
@@ -36,8 +35,8 @@ def infer_funding_interval_ms(timestamps_ms: Iterable[int]) -> int:
         return FUNDING_DEFAULT_INTERVAL_MS
     tail = ts[-(_FUNDING_INTERVAL_SAMPLE + 1):]
     diffs = [b - a for a, b in itertools.pairwise(tail)]
-    median = statistics.median_low(diffs)
-    return max(1, round(median / 3_600_000)) * 3_600_000
+    # A too-short estimate costs one extra fetch; a too-long one hides missed settlements.
+    return max(1, round(min(diffs) / 3_600_000)) * 3_600_000
 
 
 def last_settled_funding_epoch_ms(now: pd.Timestamp, interval_ms: int) -> int:
@@ -45,11 +44,15 @@ def last_settled_funding_epoch_ms(now: pd.Timestamp, interval_ms: int) -> int:
     return (as_of_ms // interval_ms) * interval_ms
 
 
-def funding_tail_is_fresh(timestamps_ms: Iterable[int], now: pd.Timestamp) -> bool:
+def funding_tail_is_fresh(timestamps_ms: Iterable[int], now: pd.Timestamp, *, interval_ms: int | None = None) -> bool:
+    """Whether the newest settlement reaches the last one due at ``now``; ``interval_ms`` (venue-attested) overrides inference."""
+    if interval_ms is not None and interval_ms <= 0:
+        raise ValueError(f"interval_ms must be positive: {interval_ms}")
     ts = [int(t) for t in timestamps_ms]
     if not ts:
         return False
-    return max(ts) >= last_settled_funding_epoch_ms(now, infer_funding_interval_ms(ts)) - FUNDING_TIME_TOLERANCE_MS
+    interval = interval_ms if interval_ms is not None else infer_funding_interval_ms(ts)
+    return max(ts) >= last_settled_funding_epoch_ms(now, interval) - FUNDING_TIME_TOLERANCE_MS
 
 
 def funding_gap_start_ms(timestamps_ms: Iterable[int], window_start_ms: int) -> int | None:
@@ -356,7 +359,7 @@ class DataCollector:
             )
             self._save_cache(symbol, timeframe, combined)
 
-    def ensure_funding_data(self, symbol: str, start_date: str, end_date: str) -> None:
+    def ensure_funding_data(self, symbol: str, start_date: str, end_date: str, *, interval_ms: int | None = None) -> None:
         path = funding_path(symbol)
         req_start = pd.to_datetime(start_date, utc=True)
         req_end = pd.to_datetime(end_date, utc=True)
@@ -376,7 +379,7 @@ class DataCollector:
         if (
             not cache_df.empty
             and cache_df["datetime"].min() <= req_start + pd.Timedelta(days=1)
-            and funding_tail_is_fresh(cache_df["timestamp"], as_of)
+            and funding_tail_is_fresh(cache_df["timestamp"], as_of, interval_ms=interval_ms)
             and funding_gap_start_ms(cache_df["timestamp"], req_start_ms) is None
         ):
             return
