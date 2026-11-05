@@ -384,7 +384,7 @@ def test_source_module_size_budget() -> None:
         # Cycle phases stay co-located to preserve runtime module-global test seams;
         # explicit phase contracts add lines while reducing orchestration complexity.
         # spec 17: venue snapshot passthrough, disabled-collection audit, genesis alert.
-        "src/live/runner.py": 2117,  # exec depth readiness gate wiring; paper tape feed lifecycle and execution latency audit.
+        "src/live/runner.py": 2118,  # exec depth readiness gate wiring; paper tape feed lifecycle and execution latency audit (warn threshold).
         # spec 17: mainnet refuse-to-start gate (fail loud before any venue call).
         "src/live/scheduler.py": 1129,  # IP-ban aware retry backoff; pre-release kline prefetch slots.
         # Shared post/unknown-submission primitives retain the executor lifecycle and contracts.

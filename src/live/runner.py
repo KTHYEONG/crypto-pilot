@@ -1437,8 +1437,9 @@ def _record_execution_latency(
     refresh_s: float | None,
     signal_s: float | None,
     depth_wait_s: float,
+    warn_after_s: float = 120.0,
 ) -> float | None:
-    """Audit one execution-latency row and warn when the first post missed the 60 s budget."""
+    """Audit one execution-latency row; warn past ``warn_after_s`` (structural floor ~70 s; observed 69-111 s)."""
     seconds = (first_post_at - release_at).total_seconds() if first_post_at is not None else None
     audit.record(
         "execution_latency",
@@ -1453,7 +1454,7 @@ def _record_execution_latency(
         "[EXEC] stage=execution_latency seconds_after_release=%s release_at=%s first_post_at=%s",
         seconds, release_at.isoformat(), first_post_at.isoformat() if first_post_at is not None else None,
     )
-    if first_post_at is not None and seconds is not None and seconds > 60:
+    if first_post_at is not None and seconds is not None and seconds > warn_after_s:
         logger.warning(
             "[EXEC] stage=execution_latency status=SLOW seconds_after_release=%.1f "
             "refresh_s=%s signal_s=%s depth_wait_s=%.1f release_at=%s first_post_at=%s",

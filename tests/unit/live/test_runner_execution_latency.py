@@ -107,6 +107,32 @@ def test_slow_cycle_warns_with_breakdown(tmp_path, monkeypatch, caplog) -> None:
 
     weights_path = _seed_weights(tmp_path)
     _install_stubs(tmp_path, monkeypatch, post=True)
+    monkeypatch.setattr(runner_mod, "_clock", lambda: (RELEASE_AT + pd.Timedelta(seconds=130)).timestamp())
+    settings = LiveSettings(
+        ledger_path=str(tmp_path / "ledger.json"),
+        order_journal_path=str(tmp_path / "journal.jsonl"),
+        exec_depth_capture_enabled=False,
+    )
+    with caplog.at_level(logging.INFO, logger="LiveRunner"):
+        report = runner_mod.run_shadow_cycle(
+            settings, DECISION_TIME, weights_path, now=RELEASE_AT + pd.Timedelta(seconds=130),
+        )
+    assert report.status == "COMPLETE"
+    events = _latency_events(tmp_path)
+    assert len(events) == 1
+    assert events[0]["seconds_after_release"] == 130
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING and "execution_latency" in r.getMessage()]
+    assert len(warnings) == 1
+    message = warnings[0].getMessage()
+    assert "130" in message and "refresh_s=" in message and "signal_s=" in message and "depth_wait_s=" in message
+
+
+def test_structural_floor_latency_does_not_warn(tmp_path, monkeypatch, caplog) -> None:
+    import src.live.runner as runner_mod
+    from src.live.settings import LiveSettings
+
+    weights_path = _seed_weights(tmp_path)
+    _install_stubs(tmp_path, monkeypatch, post=True)
     monkeypatch.setattr(runner_mod, "_clock", lambda: (RELEASE_AT + pd.Timedelta(seconds=75)).timestamp())
     settings = LiveSettings(
         ledger_path=str(tmp_path / "ledger.json"),
@@ -121,10 +147,7 @@ def test_slow_cycle_warns_with_breakdown(tmp_path, monkeypatch, caplog) -> None:
     events = _latency_events(tmp_path)
     assert len(events) == 1
     assert events[0]["seconds_after_release"] == 75
-    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING and "execution_latency" in r.getMessage()]
-    assert len(warnings) == 1
-    message = warnings[0].getMessage()
-    assert "75" in message and "refresh_s=" in message and "signal_s=" in message and "depth_wait_s=" in message
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING and "execution_latency" in r.getMessage()]
 
 
 def test_first_post_audit_proxy_delegates_and_fires_once(tmp_path) -> None:
