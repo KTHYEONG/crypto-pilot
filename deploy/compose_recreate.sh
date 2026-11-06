@@ -11,6 +11,8 @@
 #   CAPTURE_HANDOVER_POLL_S=5       Heartbeat poll period.
 #   CAPTURE_HEARTBEAT_STALE_S=30    A heartbeat older than this is not READY.
 #   CAPTURE_STOP_GRACE_S=20         Graceful stop of the old capture slot.
+#   OWNERSHIP_WORKER_WAIT_S=300     Max wait for root-run one-shot workers before the ownership pass.
+#   CRYPTO_OWNERSHIP_FIXUP          Ownership helper (default: crypto-ownership-fixup.sh beside this script).
 set -euo pipefail
 
 IMAGE="${1:?Usage: compose_recreate.sh <image>}"
@@ -19,6 +21,8 @@ CAPTURE_HANDOVER_TIMEOUT_S="${CAPTURE_HANDOVER_TIMEOUT_S:-900}"
 CAPTURE_HANDOVER_POLL_S="${CAPTURE_HANDOVER_POLL_S:-5}"
 CAPTURE_HEARTBEAT_STALE_S="${CAPTURE_HEARTBEAT_STALE_S:-30}"
 CAPTURE_STOP_GRACE_S="${CAPTURE_STOP_GRACE_S:-20}"
+OWNERSHIP_WORKER_WAIT_S="${OWNERSHIP_WORKER_WAIT_S:-300}"
+OWNERSHIP_POLL_S=5
 
 if docker compose version >/dev/null 2>&1; then
   C="docker compose"
@@ -87,6 +91,21 @@ observe_slot() {
   printf '%s:%s:%s:%s:%s' "$slot" "$running" "$fp" "$cfg" "$ready"
 }
 
+FIXUP="${CRYPTO_OWNERSHIP_FIXUP:-$SCRIPT_DIR/crypto-ownership-fixup.sh}"
+MIGRATING=0
+fixup_check_rc=0
+"$FIXUP" check || fixup_check_rc=$?
+case "$fixup_check_rc" in
+  0) ;;
+  10) MIGRATING=1 ;;
+  *) echo "[SYS] stage=deploy_recreate ownership=check_failed rc=${fixup_check_rc}"; exit 4 ;;
+esac
+
+# Pass1: every writer is still a root container, so re-owning cannot break capture.
+if [ "$MIGRATING" = "1" ]; then
+  "$FIXUP" fix || { echo "[SYS] stage=deploy_recreate ownership=failed reason=pass1"; exit 4; }
+fi
+
 blue_obs="$(observe_slot blue)"
 green_obs="$(observe_slot green)"
 
@@ -137,6 +156,49 @@ retire_container() {
   $C rm -f "$service" >/dev/null 2>&1 || docker rm "$container" >/dev/null 2>&1 || true
 }
 
+ownership_failed() {
+  echo "[SYS] stage=deploy_recreate ownership=failed reason=$1"
+  docker start market-normalizer mhs-live-daemon >/dev/null 2>&1 || true
+  exit 4
+}
+
+root_workers() {
+  local name image user
+  docker ps --format '{{.Names}}' 2>/dev/null | while IFS= read -r name; do
+    case "$name" in
+      market-normalizer|mhs-live-daemon|"market-capture-${new_slot}") continue ;;
+    esac
+    image="$(docker inspect -f '{{.Config.Image}}' "$name" 2>/dev/null || true)"
+    [ "$image" = "$IMAGE" ] || continue
+    user="$(docker inspect -f '{{.Config.User}}' "$name" 2>/dev/null || true)"
+    case "$user" in
+      ""|0|0:*|root|root:*) printf '%s\n' "$name" ;;
+    esac
+  done
+}
+
+wait_root_workers() {
+  local elapsed=0
+  while [ -n "$(root_workers)" ]; do
+    if [ "$elapsed" -ge "$OWNERSHIP_WORKER_WAIT_S" ]; then return 1; fi
+    sleep "$OWNERSHIP_POLL_S"
+    elapsed=$((elapsed + OWNERSHIP_POLL_S))
+  done
+}
+
+# Pass2: the normalizer and daemon are the only root writers left; stop them, re-own, recreate as 1001.
+migrate_pass2() {
+  trap 'systemctl --user start crypto-pilot-liveness.timer >/dev/null 2>&1 || true' EXIT
+  systemctl --user stop crypto-pilot-liveness.timer >/dev/null 2>&1 || true
+  wait_root_workers || ownership_failed workers_running
+  $C stop -t 30 market-normalizer || ownership_failed normalizer_stop
+  $C stop -t 120 mhs-live || ownership_failed daemon_stop
+  "$FIXUP" fix || ownership_failed reown
+  $C up -d --no-deps --force-recreate market-normalizer || ownership_failed normalizer_up
+  $C up -d --no-deps --force-recreate mhs-live || ownership_failed daemon_up
+  echo "[SYS] stage=deploy_recreate ownership=ok"
+}
+
 case "$action" in
   keep)
     ;;
@@ -167,6 +229,15 @@ case "$action" in
     retire_container "capture-${old_slot}" "market-capture-${old_slot}" "$CAPTURE_STOP_GRACE_S"
     ;;
 esac
+
+if [ "$MIGRATING" = "1" ]; then
+  if [ "$HANDOVER_FAILED" = "1" ]; then
+    echo "[SYS] stage=deploy_recreate ownership=deferred reason=handover_failed"
+    exit 3
+  fi
+  migrate_pass2
+  exit 0
+fi
 
 $C up -d --no-deps --force-recreate market-normalizer
 $C up -d --no-deps --force-recreate mhs-live

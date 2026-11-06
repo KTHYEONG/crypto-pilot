@@ -57,6 +57,7 @@ if [ -n "${STARTED_AT}" ] && [ "${STARTED_AT}" != "null" ]; then
 fi
 
 if docker run --pull never --rm --network host --memory 256m \
+  --user "$(id -u):$(id -g)" -e HOME=/tmp \
   --env-file "${ENV_FILE}" \
   -v "${ROOT}/data/state:/app/data/state" \
   "${IMAGE}" /app/.venv/bin/python -m src.cli.main "${ARGS[@]}"; then

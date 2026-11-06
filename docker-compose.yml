@@ -1,11 +1,15 @@
+# user 1001:1001 = host ubuntu, the owner of the data tree after the ownership migration.
 services:
   mhs-live:
     image: ghcr.io/kthyeong/crypto-pilot-live:latest
+    user: "1001:1001"
     container_name: mhs-live-daemon
     restart: unless-stopped
     stop_grace_period: 120s
     env_file: /home/ubuntu/quant-secrets/crypto-pilot.env
     environment:
+      - HOME=/tmp
+      - UV_CACHE_DIR=/tmp/uv-cache
       - LIVE_MODE=paper
       - LIVE_EXECUTION_POLICY=strict_passive_repeg
       - LIVE_PAPER_FILL_MODEL=tape_through
@@ -26,6 +30,9 @@ services:
         max-file: "5"
   capture-blue:
     image: ghcr.io/kthyeong/crypto-pilot-live:latest
+    user: "1001:1001"
+    environment:
+      - HOME=/tmp
     container_name: market-capture-blue
     profiles: ["capture-blue"]
     restart: unless-stopped
@@ -45,6 +52,9 @@ services:
         max-file: "5"
   capture-green:
     image: ghcr.io/kthyeong/crypto-pilot-live:latest
+    user: "1001:1001"
+    environment:
+      - HOME=/tmp
     container_name: market-capture-green
     profiles: ["capture-green"]
     restart: unless-stopped
@@ -64,6 +74,9 @@ services:
         max-file: "5"
   market-normalizer:
     image: ghcr.io/kthyeong/crypto-pilot-live:latest
+    user: "1001:1001"
+    environment:
+      - HOME=/tmp
     container_name: market-normalizer
     restart: unless-stopped
     stop_grace_period: 30s
@@ -81,12 +94,14 @@ services:
         max-file: "5"
   public-archive:
     image: ghcr.io/kthyeong/crypto-pilot-live:latest
+    user: "1001:1001"
     container_name: public-archive
     profiles: ["archive"]
     restart: "no"
     mem_limit: 3g
     cpus: 1.0
     environment:
+      - HOME=/tmp
       - ARCHIVE_INCREMENTAL=1
     volumes:
       - ./data/public_archive:/app/data/public_archive
