@@ -20,7 +20,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-tuning = ["optuna>=4.0.0"]
+tuning = ["optuna>=5.0.0"]
 
 [build-system]
 requires = ["setuptools>=61.0"]
