@@ -453,6 +453,28 @@ esac
 """
 
 
+_FAKE_SYSTEMCTL_SCRIPT = """#!/usr/bin/env bash
+echo "systemctl $*" >> "$FAKE_LOG"
+exit 0
+"""
+
+# Knobs: FAKE_FIXUP_CHECK=foreign returns 10; FAKE_FIXUP_FAIL_CALL=n makes the n-th fix call fail.
+_FAKE_FIXUP_SCRIPT = """#!/usr/bin/env bash
+echo "fixup $*" >> "$FAKE_LOG"
+case "${1:-}" in
+  check)
+    if [ "${FAKE_FIXUP_CHECK:-clean}" = foreign ]; then echo "foreign=1"; exit 10; fi
+    echo "foreign=0"; exit 0 ;;
+  fix)
+    n=$(( $(cat "$FAKE_STATE/fixcalls" 2>/dev/null || echo 0) + 1 ))
+    echo "$n" > "$FAKE_STATE/fixcalls"
+    if [ "$n" = "${FAKE_FIXUP_FAIL_CALL:-0}" ]; then exit 11; fi
+    echo "foreign=0"; exit 0 ;;
+esac
+exit 2
+"""
+
+
 def _write_ready_heartbeat(tmp_path, slot: str, started_at_iso: str) -> None:
     """Write a fully READY heartbeat for ``slot`` with a fresh ``ts``."""
     import json
@@ -491,6 +513,12 @@ def _run_compose_recreate(tmp_path, env: dict[str, str]):
     fake_docker = fake_bin / "docker"
     fake_docker.write_text(_FAKE_DOCKER_SCRIPT, encoding="utf-8")
     fake_docker.chmod(fake_docker.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    fake_systemctl = fake_bin / "systemctl"
+    fake_systemctl.write_text(_FAKE_SYSTEMCTL_SCRIPT, encoding="utf-8")
+    fake_systemctl.chmod(fake_systemctl.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    fixup_stub = tmp_path / "fixup_stub.sh"
+    fixup_stub.write_text(_FAKE_FIXUP_SCRIPT, encoding="utf-8")
+    fixup_stub.chmod(fixup_stub.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
     state_dir = tmp_path / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
     deploy_dir = tmp_path / "deploy"
@@ -499,6 +527,7 @@ def _run_compose_recreate(tmp_path, env: dict[str, str]):
     log = tmp_path / "argv.log"
     log.write_text("", encoding="utf-8")
     full_env = dict(os.environ)
+    full_env["CRYPTO_OWNERSHIP_FIXUP"] = str(fixup_stub)
     full_env.update(env)
     full_env["FAKE_LOG"] = str(log)
     full_env["FAKE_STATE"] = str(state_dir)
@@ -978,3 +1007,122 @@ def test_runtime_code_never_reads_tests_tree() -> None:
     )
 
     assert offenders == []
+
+
+def _index_after(lines: list[str], needle: str, start: int = 0) -> int:
+    return next(i for i in range(start, len(lines)) if needle in lines[i])
+
+
+def _migrating_env() -> dict[str, str]:
+    env = _base_recreate_env()
+    env["FAKE_BLUE_RUNNING"] = "true"
+    env["FAKE_IMAGE_FP"] = "sha256:changed"
+    env["FAKE_FIXUP_CHECK"] = "foreign"
+    return env
+
+
+def test_migration_runs_pass1_before_any_capture_action(tmp_path) -> None:
+    env = _migrating_env()
+    _write_ready_heartbeat(tmp_path, "blue", _shift_iso(env["FAKE_STARTED_AT"], 10))
+    _write_ready_heartbeat(tmp_path, "green", _shift_iso(env["FAKE_STARTED_AT"], 10))
+    result, argv_log = _run_compose_recreate(tmp_path, env)
+    assert result.returncode == 0, result.stdout
+    first_fix = next(i for i, line in enumerate(argv_log) if line == "fixup fix")
+    first_action = next(i for i, line in enumerate(argv_log) if " compose up " in line or " compose stop " in line)
+    assert first_fix < first_action
+
+
+def test_migration_handover_then_pass2_then_recreate(tmp_path) -> None:
+    env = _migrating_env()
+    _write_ready_heartbeat(tmp_path, "blue", _shift_iso(env["FAKE_STARTED_AT"], 10))
+    _write_ready_heartbeat(tmp_path, "green", _shift_iso(env["FAKE_STARTED_AT"], 10))
+    result, argv_log = _run_compose_recreate(tmp_path, env)
+    assert result.returncode == 0, result.stdout
+    assert "ownership=ok" in result.stdout
+    idx = _index_after(argv_log, "compose up -d --no-deps --force-recreate capture-green")
+    for needle in (
+        "compose stop -t 20 capture-blue",
+        "systemctl --user stop crypto-pilot-liveness.timer",
+        "compose stop -t 30 market-normalizer",
+        "compose stop -t 120 mhs-live",
+        "fixup fix",
+        "compose up -d --no-deps --force-recreate market-normalizer",
+        "compose up -d --no-deps --force-recreate mhs-live",
+        "systemctl --user start crypto-pilot-liveness.timer",
+    ):
+        idx = _index_after(argv_log, needle, idx + 1)
+
+
+def test_migration_handover_failure_keeps_root_services(tmp_path) -> None:
+    env = _migrating_env()
+    env["CAPTURE_HANDOVER_TIMEOUT_S"] = "1"
+    _write_ready_heartbeat(tmp_path, "blue", _shift_iso(env["FAKE_STARTED_AT"], 10))
+    result, argv_log = _run_compose_recreate(tmp_path, env)
+    assert result.returncode == 3
+    assert "ownership=deferred reason=handover_failed" in result.stdout
+    assert not any("compose stop -t 30 market-normalizer" in line for line in argv_log)
+    assert not any("compose stop -t 120 mhs-live" in line for line in argv_log)
+    assert not any("force-recreate market-normalizer" in line for line in argv_log)
+    assert not any("force-recreate mhs-live" in line for line in argv_log)
+    assert not any(line.startswith("systemctl") for line in argv_log)
+    assert argv_log.count("fixup fix") == 1
+
+
+def test_migration_pass2_failure_restarts_old_containers(tmp_path) -> None:
+    env = _base_recreate_env()
+    env["FAKE_BLUE_RUNNING"] = "true"
+    env["FAKE_FIXUP_CHECK"] = "foreign"
+    env["FAKE_FIXUP_FAIL_CALL"] = "2"
+    _write_ready_heartbeat(tmp_path, "blue", _shift_iso(env["FAKE_STARTED_AT"], 10))
+    result, argv_log = _run_compose_recreate(tmp_path, env)
+    assert result.returncode == 4
+    assert "ownership=failed reason=reown" in result.stdout
+    assert "docker start market-normalizer mhs-live-daemon" in argv_log
+    assert "systemctl --user start crypto-pilot-liveness.timer" in argv_log
+    assert not any("force-recreate market-normalizer" in line for line in argv_log)
+
+
+def test_not_migrating_is_byte_identical_flow(tmp_path) -> None:
+    env = _base_recreate_env()
+    env["FAKE_BLUE_RUNNING"] = "true"
+    _write_ready_heartbeat(tmp_path, "blue", _shift_iso(env["FAKE_STARTED_AT"], 10))
+    result, argv_log = _run_compose_recreate(tmp_path, env)
+    assert result.returncode == 0
+    assert not any(line.startswith("fixup fix") for line in argv_log)
+    assert not any(line.startswith("systemctl") for line in argv_log)
+    ups = _up_lines(argv_log)
+    assert "market-normalizer" in ups[-2]
+    assert "mhs-live" in ups[-1]
+
+
+def _compose_service_block(name: str) -> str:
+    lines = (ROOT / "docker-compose.yml").read_text(encoding="utf-8").splitlines()
+    start = lines.index(f"  {name}:")
+    block = []
+    for line in lines[start + 1 :]:
+        if line.startswith("  ") and not line.startswith("   "):
+            break
+        block.append(line)
+    return "\n".join(block)
+
+
+def test_compose_runs_all_services_as_host_user() -> None:
+    services = ("mhs-live", "capture-blue", "capture-green", "market-normalizer", "public-archive")
+    for name in services:
+        block = _compose_service_block(name)
+        assert 'user: "1001:1001"' in block, name
+        assert "HOME=/tmp" in block, name
+    assert "UV_CACHE_DIR=/tmp/uv-cache" in _compose_service_block("mhs-live")
+
+
+def test_liveness_run_is_non_root() -> None:
+    script = (ROOT / "deploy" / "liveness" / "crypto-pilot-liveness.sh").read_text(encoding="utf-8")
+    run_at = script.index("docker run")
+    assert script.index('--user "$(id -u):$(id -g)"', run_at) > run_at
+
+
+def test_workflow_ships_fixup_before_recreate() -> None:
+    workflow = (ROOT / ".github" / "workflows" / "deploy.yml").read_text(encoding="utf-8")
+    assert 'deploy/crypto-ownership-fixup.sh "$REMOTE_USER@$HOST:~/crypto-pilot/deploy/crypto-ownership-fixup.sh.new"' in workflow
+    promote = workflow.index("mv -f ~/crypto-pilot/deploy/crypto-ownership-fixup.sh.new ~/crypto-pilot/deploy/crypto-ownership-fixup.sh")
+    assert promote < workflow.index("compose_recreate.sh '$IMAGE:latest'")
