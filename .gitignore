@@ -254,13 +254,9 @@ docs/results/
 data/research/
 data/backtests/
 
-# Ignore all enc files everywhere in results/ (default)
+# Ignore all enc files everywhere in results/. Chosen parameters live in the private
+# strategy store (KTHYEONG/quant-strategy-store), never in this public repo, sealed or not.
 results/**/*.enc
-
-# Unignore specific production ENC files only
-!results/**/best_futures_*.enc
-!results/**/best_params_*.enc
-!results/**/best_spot_*.enc
 
 # Live delivery boundary: only sealed envelopes (.enc) may be tracked.
 # Plaintext parameters, bootstrap, and weights are secrets and stay ignored.
@@ -268,7 +264,6 @@ deploy/mhs/*.json
 deploy/mhs/*.parquet
 deploy/mhs/*.log
 deploy/mhs/*.enc
-!deploy/mhs/frozen_unit_returns_maker.parquet
 !deploy/mhs/venue_rules_20260921.json
 
 # Serena AI Assistant

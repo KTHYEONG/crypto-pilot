@@ -94,3 +94,16 @@ def test_dockerignore_ships_only_sealed_delivery() -> None:
     assert "docs/results" not in content
     assert "deploy/mhs/*" in content
     assert "!deploy/mhs/*.enc" in content
+
+
+def test_gitignore_never_unignores_strategy_values() -> None:
+    lines = [line.strip() for line in Path(".gitignore").read_text(encoding="utf-8").splitlines()]
+    unignored = [line for line in lines if line.startswith("!")]
+    assert unignored == ["!deploy/mhs/venue_rules_20260921.json"], unignored
+    probe = ("deploy/mhs/frozen_unit_returns_maker.parquet", "results/x/best_params_1.enc")
+    import subprocess
+
+    result = subprocess.run(  # noqa: S603 - fixed argv, repo-local paths
+        ["git", "check-ignore", "--no-index", *probe], capture_output=True, text=True, check=False  # noqa: S607
+    )
+    assert sorted(result.stdout.split()) == sorted(probe)
