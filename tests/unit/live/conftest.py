@@ -153,3 +153,12 @@ def _block_funding_info_fetch(monkeypatch: pytest.MonkeyPatch) -> None:
         raise RuntimeError("fundingInfo blocked in unit tests")
 
     monkeypatch.setattr(funding_info, "fetch_funding_info", _unavailable)
+
+
+@pytest.fixture
+def no_fsync(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Skip durable_io disk flushes in fake-clock loops that only check sizes or counts.
+
+    Durability itself is covered by the durable_io tests; thousands of fsyncs here only add I/O wait.
+    """
+    monkeypatch.setattr("src.common.durable_io.os.fsync", lambda fd: None)

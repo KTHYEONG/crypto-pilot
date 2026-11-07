@@ -364,15 +364,10 @@ def test_SCENARIO_RESIL_08_legacy_state_compat(tmp_path):  # noqa: D103
 
 
 # SCENARIO_RESIL_10-heartbeat-bounded
-def test_SCENARIO_RESIL_10_heartbeat_bounded(tmp_path, monkeypatch):  # noqa: D103
-    """SCENARIO_RESIL_10-heartbeat-bounded"""
+def test_SCENARIO_RESIL_10_heartbeat_bounded(tmp_path, monkeypatch, no_fsync):  # noqa: D103
     import pandas as pd
     import src.live.scheduler as sched
     monkeypatch.setattr(sched, "_strategy_params_present", lambda settings: True, raising=False)
-    # Size-bound scenario only: thousands of fake-clock polls each fsync the heartbeat; durability of
-    # durable_write_text is covered by its own tests, so skip the disk flush here.
-    import src.common.durable_io as durable_io
-    monkeypatch.setattr(durable_io.os, "fsync", lambda fd: None)
     from src.live.runner import CycleReport
     from src.live.scheduler import run_daemon
     from src.live.settings import LiveSettings
