@@ -91,7 +91,7 @@ class MhsDiagnosticRequest:
             flag="--execution-timeframe",
             help=(
                 "OHLCV execution replay resolution; signal construction remains 1h. "
-                [redacted]
+                "3m (2026-08 default) gives finer fill precision than 5m and is "
                 "collected natively from Binance"
             ),
             choices=("3m",),
@@ -369,7 +369,7 @@ class MhsDiagnosticRequest:
             help=(
                 "Gross budget allocated to the directional trend sleeve, in "
                 "[0.0, 1.0]; a risk-budget policy value, never a fitted parameter. "
-                [redacted]
+                "Measured negative when enabled (CAPITAL_INVARIANT_BREACH) -- see "
                 "--trend-sleeve's warning"
             ),
             arg_type=float,
@@ -514,16 +514,16 @@ class MhsDiagnosticRequest:
                 "Requires committee capital (on by default): rescales every "
                 "committee decision row to an explicit gross, restoring the "
                 "unit-gross invariant that the k=5 member average and the tranche "
-                [redacted]
+                "mean otherwise dilute, leaving idle cash. DEFAULT (flag "
                 "omitted): the registered COMMITTEE_TARGET_GROSS=0.92, the "
                 "largest replay-certified exposure inside the registered "
                 "COMMITTEE_GROWTH_MAX_DRAWDOWN=0.25 budget per ADR_20260823_MHS_LEVERAGE_FRONTIER_SCAN; "
                 "the I4 drawdown-budget gate blocks "
                 "Research-GO if a replay breaches the budget. Pass "
                 "--no-committee-target-gross to restore the diluted book "
-                [redacted]
-                [redacted]
-                [redacted]
+                "(None). The old CLI 'capital-invariant cliff' near the registered "
+                "gross was the ruin of a diagnostic reference instrument (OHLCV_STRICT_PROXY), "
+                "not of the capital book, and is no longer a reason to avoid it; "
                 "a risk-budget policy value, never a fitted parameter"
             ),
             negate_flag="--no-committee-target-gross",
@@ -564,8 +564,8 @@ class MhsDiagnosticRequest:
             flag="--funding-carry-weight",
             help=(
                 "Gross-budget share of the funding-carry sleeve in [0.0, 1.0); "
-                [redacted]
-                [redacted]
+                "a registered risk-budget policy value on a measured plateau, "
+                "never a fitted parameter. Requires --committee-capital "
                 "(on by default)"
             ),
             arg_type=float,

@@ -427,9 +427,8 @@ def test_mhs_diagnostic_committee_flag_threaded_to_request(monkeypatch) -> None:
 
 def test_mhs_diagnostic_committee_kelly_sizing_defaults_on_and_opt_out(monkeypatch) -> None:
     """SCENARIO_MHS_COMMITTEE_KELLY_SIZING_MAIN_LOGIC_DEFAULT: committee Kelly
-    [redacted]
-    [redacted]
-    ADR_20260823_MHS_KELLY_TWO_SIDED_SIZING) is on by default whenever
+    sizing (adopted on a real 3m replay for its better drawdown and Calmar than
+    the Kelly-off baseline, ADR_20260823_MHS_KELLY_TWO_SIDED_SIZING) is on by default whenever
     committee capital is active; ``--no-committee-kelly-sizing`` opts back out
     to the pure vol-target scale while leaving committee capital on."""
     from src.cli.dataclass_args import explicit_field_values

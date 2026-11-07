@@ -99,14 +99,11 @@ class TestFrozenLiterals:
         assert all(v > 0 for v in MEASURED_EXECUTION_COST_TIERS_BPS.values())
 
     def test_blend_weights_reflect_prescreen_admission(self) -> None:
-        [redacted]
-        [redacted]
-        [redacted]
-        [redacted]
-        [redacted]
-        [redacted]
-        [redacted]
-        [redacted]
+        # SCENARIO_MHS_BLEND_ADMISSION_01: fast_reversal's prescreen net t-stat
+        # stays below the admission floor at every cost tier with an unstable
+        # sign, so its Research-GO blend weight is zero; slow_momentum keeps the
+        # pre-registered momentum sign through every cost tier, so it takes the
+        # full allocation.
         # fast_reversal stays a computed book (signal/prescreen kept for
         # re-measurement), just zero-weighted.
         assert BOOK_BLEND_WEIGHTS == {"fast_reversal": 0.0, "slow_momentum": 1.0}
@@ -322,9 +319,9 @@ class TestFrozenLiteralsCommitteeTiming:
     def test_committee_regime_adaptive_window_frozen(self) -> None:
         # SCENARIO_MHS_COMMITTEE_REGIME_ADAPTIVE_WINDOW_FROZEN: the regime-
         # adaptive tranche gating window is a frozen constant confirmed via
-        [redacted]
-        [redacted]
-        [redacted]
+        # real 3m replay to sit inside a plateau of passing neighbors, not a
+        # single fitted point; windows far outside it trigger
+        # CAPITAL_INVARIANT_BREACH.
         from src.core.types import COMMITTEE_REGIME_ADAPTIVE_WINDOW
 
         assert isinstance(COMMITTEE_REGIME_ADAPTIVE_WINDOW, int)
@@ -391,9 +388,8 @@ class TestCompoundingAlphaAxesContract:
         assert set(strategy_values().committee_sets.keys()) == {"flow_momentum", "risk_premia"}
 
     def test_default_member_set_is_flow_momentum(self) -> None:
-        [redacted]
-        [redacted]
-        [redacted]
+        # risk_premia was measured non-adopted: a full 3m replay breached the
+        # registered drawdown budget and turned folds STRESS_SHARPE_NOT_POSITIVE. See
         # ADR_20260820_MHS_COMPOUNDING_ALPHA_AXES.
         from src.strategy.store import strategy_values
         assert strategy_values().committee_default == "flow_momentum"

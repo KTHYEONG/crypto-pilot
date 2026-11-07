@@ -94,7 +94,7 @@ def test_account_default_execution_stays_taker(tmp_path: Path, monkeypatch: pyte
 def test_account_fixed_moment_source_is_none(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Fixed policy discloses no moment source but still replays the unit reference."""
     seen = _install_strategy_account_fakes(monkeypatch, tmp_path)
-    [redacted]
+    report = run_account_replay(_account_request(tmp_path, policy="fixed", fixed_exposure=3.0))
     assert seen["replays"][0]["policy"].exposure_max == 1.0
     assert seen["replays"][1]["unit_equity"] is not None
     assert report.payload["moment_source"] == "none"
@@ -430,7 +430,7 @@ def test_account_same_book_skips_unreadable_rows(tmp_path: Path, monkeypatch: py
     (bad_json / "result.json").write_text("not json", encoding="utf-8")
     index.write_text(index.read_text(encoding="utf-8") + json.dumps({"kind": "mhs_frozen", "strategy_id": "frozen_mhs_top20_v2", "run_dir": "runs/broken", "evaluation_start": "2025-01-01T00:00:00+00:00", "evaluation_end": "2025-02-01T00:00:00+00:00"}) + "\n", encoding="utf-8")
     unit_cagr = (105000.0 / 100000.0) ** (365.0 / 3.0) - 1.0
-    [redacted]
+    _write_same_book_reference(tmp_path, index, run_dir="runs/levered", base_cagr=unit_cagr, base_mdd=0.05, exposure_multiplier=3.0)
     _write_same_book_reference(tmp_path, index, run_dir="runs/good", base_cagr=unit_cagr, base_mdd=0.05)
     report = run_account_replay(_account_request(tmp_path))
     assert report.payload["reconciliation"]["status"] == "ok"

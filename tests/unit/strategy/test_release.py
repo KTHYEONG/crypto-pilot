@@ -226,7 +226,7 @@ def test_signal_digest_ignores_sizing_and_params() -> None:
 
     assert strategy_signal_digest(FLOW_MOM_TOP20) == strategy_signal_digest(FLOW_MOM_TOP20_ACCOUNT_UNIT)
     assert strategy_signal_digest(FLOW_MOM_TOP20) == strategy_signal_digest(
-        [redacted]
+        dataclasses.replace(FLOW_MOM_TOP20, exposure_multiplier=3.0)
     )
     assert strategy_spec_digest(FLOW_MOM_TOP20, {"exposure_cap": 1.0}) != strategy_spec_digest(
         FLOW_MOM_TOP20, {"exposure_cap": 3.0})

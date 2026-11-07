@@ -139,13 +139,14 @@ def test_fold_blend_parity_matching_traces_passes() -> None:
 
 
 def test_fold_blend_parity_production_divergence_blocks_go() -> None:
-    [redacted]
-    [redacted]
-    [redacted]
-    [redacted]
+    # SCENARIO_MHS_EVAL_INTEGRITY_PARITY_GATE: a large fold-vs-blend holdings
+    # divergence emits the path-divergence code.
+    fold = _fold_report(0, _trace(60.0, 0.5))
+    payload, reasons = _fold_blend_parity({0: _trace(150.0, 0.5)}, (fold,))
+    expected_log_ratio = math.log(60.0 / 150.0)
     assert reasons == (GO_REASON_PATH_DIVERGENCE,)
-    [redacted]
-    [redacted]
+    assert payload["max_abs_log_holdings_ratio"] == pytest.approx(abs(expected_log_ratio), abs=1e-3)
+    assert payload["folds"][0]["holdings_log_ratio"] == pytest.approx(expected_log_ratio, abs=1e-3)
 
 
 def test_fold_blend_parity_unmeasured_fold_no_code() -> None:
@@ -170,7 +171,7 @@ def _minimal_report(fold_blend_parity_value=None) -> MhsHorizonDiagnosticReport:
     deployment = DeploymentReadinessResult(
         geometric_cagr=0.0,
         max_drawdown=0.0,
-        calmar=N,
+        calmar=0.0,
         expected_shortfall=0.0,
         worst_1d=0.0,
         worst_7d=0.0,
@@ -232,10 +233,10 @@ def test_run_history_record_includes_fold_blend_parity() -> None:
     # SCENARIO_MHS_EVAL_INTEGRITY_HISTORY_PAYLOAD: the parity payload reaches
     # the run-history record unchanged and round-trips through json.dumps.
     parity = {
-        [redacted]
+        "max_abs_log_holdings_ratio": 0.9,
         "max_abs_log_gross_ratio": 0.0,
         "tolerance": 0.25,
-        [redacted]
+        "folds": {"0": {"holdings_log_ratio": -0.9, "gross_log_ratio": 0.0}},
         "unmeasured": [],
     }
     report = _minimal_report(parity)
@@ -348,16 +349,16 @@ def test_fold_growth_concentration_invalid_fold_unmeasured() -> None:
 
 # SCENARIO_MHS_FOLD_CONCENTRATION_TAKES_EXPLICIT_THRESHOLD
 def test_fold_growth_concentration_threshold_is_explicit_argument() -> None:
-    [redacted]
-    [redacted]
+    # 로그성장 share가 한 fold에 절반가량 몰린 fold 집합.
+    cagrs = tuple(math.expm1(logret) for logret in (0.51, 0.16, 0.16, 0.16))
     folds = tuple(
         _concentration_fold(index, cagr) for index, cagr in enumerate(cagrs)
     )
-    [redacted]
+    passing_payload, passing_reasons = _fold_growth_concentration(folds, 0.60)
     assert passing_reasons == ()
-    [redacted]
-    [redacted]
-    [redacted]
+    assert passing_payload["max_fold_share"] == pytest.approx(0.51 / 0.99, abs=1e-3)
+    assert passing_payload["threshold"] == 0.60
+    assert passing_payload["max_share"] == 0.60
 
     failing_payload, failing_reasons = _fold_growth_concentration(folds, 0.50)
     assert failing_reasons == (GO_REASON_FOLD_GROWTH_CONCENTRATION,)
@@ -500,10 +501,10 @@ def _parity_fold(
 
 
 def test_fold_realized_risk_parity_observes_divergence() -> None:
-    [redacted]
-    [redacted]
+    # SCENARIO_MHS_FOLD_REALIZED_RISK_PARITY_OBSERVES_DIVERGENCE: fold vols that
+    # breach the tolerance never emit a reason code.
     folds = tuple(
-        [redacted]
+        _parity_fold(i, v) for i, v in enumerate([0.30, 0.31, 0.28, 0.60])
     )
     payload, reasons = _fold_realized_risk_parity(folds)
     assert reasons == ()

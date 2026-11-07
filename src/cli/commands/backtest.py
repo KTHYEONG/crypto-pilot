@@ -24,7 +24,7 @@ from src.core.params import (
     PROCESS_EVALUATION_CEILING,
 )
 from src.core.resources import MhsMemoryBudget
-from src.strategy.store import refuse_example_store
+from src.strategy.store import refuse_example_store, strategy_values
 
 if TYPE_CHECKING:
     from src.engine.backtest_evidence import StrategyExecutionBound
@@ -172,7 +172,7 @@ def _strategy_policy(breadth: int, variant: str = "primary") -> StrategySpec:
         raise SystemExit(f"unknown strategy variant {variant!r}")
     if breadth == 20:
         return FLOW_MOM_TOP20
-    [redacted]
+    if breadth == FLOW_MOM_TOP40_CONTROL.breadth:
         return FLOW_MOM_TOP40_CONTROL
     import dataclasses
 
@@ -359,12 +359,12 @@ def _record_trial_for_window(
     append_trial(record, path=releases_dir() / f"{_trial_family(str(strategy.strategy_id))}.trials.jsonl")
 
 
-def _holdout_gate(
-    [redacted]
-) -> None:
+def _holdout_gate(strategy_id: str, start: pd.Timestamp, end: pd.Timestamp, *, strategy: StrategySpec | None = None) -> None:
     """Journal any post-design part of the window as observed by this strategy's signal."""
-    [redacted]
-    [redacted]
+    if strategy is None:
+        control = strategy_id == "flow_mom_top40_control"
+        strategy = _strategy_policy(strategy_values().control_breadth if control else 20)
+    record_post_design_look(strategy_id, _trial_family(strategy_id), strategy, start, end, purpose="strategy_backtest")
 
 
 def _neighbor_specs(strategy: Any) -> list[Any]:
@@ -485,7 +485,7 @@ def run_strategy_backtest_command(args: argparse.Namespace) -> None:
     if selected_id is not None:
         selected_breadth, selected_variant = {
             "flow_mom_top20": (20, "primary"),
-            [redacted]
+            "flow_mom_top40_control": (strategy_values().control_breadth, "primary"),
             "flow_mom_top20_growth": (20, "growth"),
         }[selected_id]
         if (breadth != 20 and breadth != selected_breadth) or (variant != "primary" and variant != selected_variant):

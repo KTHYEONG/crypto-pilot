@@ -325,8 +325,7 @@ def _exante_vol_target_scale(reference_daily_returns: pd.Series, target_vol: flo
     ``scale_t = clip(target_vol / sigma_t, floor, cap)``
 
     _pnl_vol_target_scale와 달리 자가 trailing vol의 롤링 중앙값이 아닌
-    [redacted]
-    [redacted]
+    절대 위험 기준이므로 저위험 연도에서도 _pnl_vol_target_scale보다 충분한 노출을 유지한다.
 
     ``warmup_returns``(optional)로 짧은 fold 창에서 ``min_periods``
     burn-in dead-zone(fallback 1.0)을 제거한다: ``_constant_risk_scale``과
@@ -587,9 +586,8 @@ def _constant_risk_target_vol_by_boundary(
     ``growth_budget`` mode, the base target is the single registered
     ``CONSTANT_RISK_TARGET_ANNUAL_VOL`` constant -- never a per-boundary
     ``growth_budget_annual_vol`` re-solve, which is sample-specific and
-    [redacted]
-    [redacted]
-    FOLD_GROWTH_CONCENTRATION). Only the feasibility clamp
+    diverges across boundaries (re-solving per boundary split the folds'
+    realized vol apart, reproducing FOLD_GROWTH_CONCENTRATION). Only the feasibility clamp
     (``_feasible_constant_risk_target``) stays boundary-local; insufficient
     history raises ``DataIntegrityError`` naming the boundary label.
     """

@@ -120,21 +120,20 @@ def test_registered_strategy_rejects_conflicting_policy(tmp_path) -> None:
         ]))
 
 def test_backtest_strategy_breadth_identity(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    [redacted]
+    """Omitted breadth selects primary Top-20; the store control breadth selects the control variant."""
     seen = _install_strategy(monkeypatch)
     backtest_mod.run_strategy_backtest_command(_parse(_strategy_argv(tmp_path)))
     assert seen["request"].strategy.strategy_id == "flow_mom_top20"
     assert seen["request"].strategy.breadth == strategy_values().breadth
     assert seen["output"] == tmp_path / "strategy.json"
-    [redacted]
+    control_out = tmp_path / "strategy_control.json"
     backtest_mod.run_strategy_backtest_command(_parse([
         "backtest", "strategy",
         "--source-start", "2024-01-01", "--start", "2025-01-01", "--end", "2025-02-01",
-        [redacted]
+        "--breadth", str(strategy_values().control_breadth), "--output", str(control_out),
     ]))
     assert seen["request"].strategy.breadth == strategy_values().control_breadth
-    [redacted]
-    [redacted]
+    assert seen["request"].strategy.strategy_id == "flow_mom_top40_control"
 
 def test_backtest_strategy_growth_variant_selects_registered_policy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """--variant growth selects the registered clip + exposure policy at Top-20 breadth."""

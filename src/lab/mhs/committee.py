@@ -136,8 +136,8 @@ def long_only_equal_risk_weights(train_net: pd.DataFrame) -> pd.Series:
 
     Weights are inverse-vol, normalized to sum to 1.0, and every weight is
     non-negative. Long-only is mandatory: the measured long-short variants
-    [redacted]
-    [redacted]
+    (Sharpe-weighted, shrinkage MV) score negative because shorting a strategy
+    book still pays its turnover cost.
     A column with zero or non-finite training volatility receives weight 0.0
     rather than raising. Raises ``ValueError`` on an empty panel or when every
     column is degenerate.

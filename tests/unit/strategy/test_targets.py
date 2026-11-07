@@ -108,7 +108,7 @@ def test_invalid_member_definitions_fail() -> None:
     with pytest.raises(ValueError, match="strictly earlier"):
         StrategySpec(
             strategy_id="bad-clock", breadth=20, members=FLOW_MOM_TOP20.members,
-            [redacted]
+            min_rank_symbols=FLOW_MOM_TOP20.min_rank_symbols, snapshot_hour_utc=23, release_hour_utc=23, entry_hour_utc=0,
             design_data_cutoff=FLOW_MOM_TOP20.design_data_cutoff,
         )
     with pytest.raises(ValueError, match="min_rank_symbols"):
@@ -123,7 +123,7 @@ def test_design_data_cutoff_rejects_naive_and_nat() -> None:
     """The design cutoff is a required UTC instant: NaT, naive, and offset zones fail."""
     base = {
         "strategy_id": "bad-cutoff", "breadth": 20, "members": FLOW_MOM_TOP20.members,
-        [redacted]
+        "min_rank_symbols": FLOW_MOM_TOP20.min_rank_symbols, "snapshot_hour_utc": 22, "release_hour_utc": 23, "entry_hour_utc": 0,
     }
     with pytest.raises(ValueError, match="design_data_cutoff"):
         StrategySpec(**base, design_data_cutoff=pd.NaT)  # type: ignore[arg-type]
@@ -357,26 +357,26 @@ def test_strategy_member_validation_branches() -> None:
     with pytest.raises(ValueError, match="strategy_id"):
         StrategySpec(
             strategy_id="", breadth=20, members=FLOW_MOM_TOP20.members,
-            [redacted]
+            min_rank_symbols=FLOW_MOM_TOP20.min_rank_symbols, snapshot_hour_utc=22, release_hour_utc=23, entry_hour_utc=0,
             design_data_cutoff=FLOW_MOM_TOP20.design_data_cutoff,
         )
     for bad_breadth in (0, -3, True):
         with pytest.raises(ValueError, match="breadth"):
             StrategySpec(
                 strategy_id="bad", breadth=bad_breadth, members=FLOW_MOM_TOP20.members,  # type: ignore[arg-type]
-                [redacted]
+                min_rank_symbols=FLOW_MOM_TOP20.min_rank_symbols, snapshot_hour_utc=22, release_hour_utc=23, entry_hour_utc=0,
                 design_data_cutoff=FLOW_MOM_TOP20.design_data_cutoff,
             )
     with pytest.raises(ValueError, match="non-empty tuple"):
         StrategySpec(
             strategy_id="bad", breadth=20, members=(),  # type: ignore[arg-type]
-            [redacted]
+            min_rank_symbols=FLOW_MOM_TOP20.min_rank_symbols, snapshot_hour_utc=22, release_hour_utc=23, entry_hour_utc=0,
             design_data_cutoff=FLOW_MOM_TOP20.design_data_cutoff,
         )
     with pytest.raises(ValueError, match="integer hour"):
         StrategySpec(
             strategy_id="bad-sign", breadth=20, members=FLOW_MOM_TOP20.members,
-            [redacted]
+            min_rank_symbols=FLOW_MOM_TOP20.min_rank_symbols, snapshot_hour_utc=22, release_hour_utc=24, entry_hour_utc=0,
             design_data_cutoff=FLOW_MOM_TOP20.design_data_cutoff,
         )
     daily_close, daily_qv = _daily()
@@ -536,9 +536,9 @@ def test_default_policy_is_identity() -> None:
 def test_multiplier_scales_every_row() -> None:
     default = _build()
     levered = _build_with(
-        [redacted]
+        dataclasses.replace(FLOW_MOM_TOP20, exposure_multiplier=3.0, name_clip=None)
     )
-    [redacted]
+    pd.testing.assert_frame_equal(levered.target_weights, default.target_weights * 3.0)
 
 
 def test_growth_spec_applies_clip_before_scaling() -> None:

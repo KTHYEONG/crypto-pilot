@@ -147,7 +147,7 @@ def test_record_trial_for_window_falls_back_on_digest_failure(tmp_path, monkeypa
     stub = types.SimpleNamespace(
         strategy_id="flow_mom_top20",
         design_data_cutoff=pd.Timestamp("2026-07-01", tz="UTC"),
-        [redacted]
+        name_clip=0.11,
         exposure_multiplier=1.0,
     )
     backtest_mod._record_trial_for_window(

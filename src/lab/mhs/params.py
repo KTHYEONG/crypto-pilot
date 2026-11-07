@@ -46,7 +46,7 @@ FORWARD_MIN_FOLDS: int = 4
 
 DISCOVERY_GATE_TRANCHE_COUNT: int = 8
 
-[redacted]
+# 단일 종목 드리프트 상한: 균등 슬롯 몇 개(레버리지 상한 / 실행 유니버스)가 상한에 걸린 값.
 NAME_DRIFT_TRIM_MAX_WEIGHT: float = 0.20
 
 DISCOVERY_REVERSAL_CANDIDATES: tuple[int, ...] = (24, 48, 72, 96, 120, 144, 168)
@@ -80,9 +80,9 @@ FOLD_REALIZED_RISK_PARITY_TOLERANCE: float = 0.35
 
 # --- 증거 게이트 보정(I-CALIB) ---------------------------------------------------
 # 등록 상수는 원시 지표 임계값이 아니라 선언된 오차율 alpha이며, 임계값은 각 런에서
-[redacted]
-[redacted]
-[redacted]
+# 전략 자신의 pooled 수익률 null로부터 파생된다(오탈락·탐지력 실측으로 확인).
+# 고정 FOLD_GROWTH_CONCENTRATION_MAX_SHARE 는 유도 근거 부재로 삭제되었고,
+# alpha 파생 임계값이 이를 대체한다.
 EVIDENCE_GATE_ALPHA: float = 0.05
 
 NULL_BOOTSTRAP_TRIALS: int = 2000
@@ -119,13 +119,10 @@ COMMITTEE_KELLY_FRACTION: float = 0.5
 COMMITTEE_KELLY_LCB_Z: float = 0.0
 
 # constant_risk 모드 전용 상수(기존 모드의 PNL_VOL_TARGET_* 는 불변).
-[redacted]
-[redacted]
-[redacted]
-[redacted]
-[redacted]
-[redacted]
-[redacted]
+# 3m 원장 실측에서 halflife가 유일한 다이얼로는 fold_blend_parity와 risk_parity 두
+# 게이트를 동시에 통과시키지 못하는 단조 트레이드오프가 확인됨(halflife를 늘리면
+# blend parity는 개선되나 risk parity와 share가 악화). 등록값은 이 기능이 겨냥한
+# 1차 목표(FOLD_GROWTH_CONCENTRATION, share 최소화)에 가장 근접한 지점이다. FOLD_BLEND_PATH_DIVERGENCE는 미해결 -- ADR_20260823_MHS_CONSTANT_RISK_DEPLOYMENT
 # 후속 과제(fold가 자체 EWMA를 재적합하지 않고 blend의 연속 스케일 궤적을 날짜로
 # 슬라이스해 재사용하는 구조적 대안이 유력, 미구현).
 CONSTANT_RISK_EWMA_HALFLIFE_DAYS: int = 90
@@ -137,12 +134,12 @@ CONSTANT_RISK_MIN_PERIODS_DAYS: int = 45
 CONSTANT_RISK_CAP_BINDING_QUANTILE: float = 0.10
 
 # 고정 목표 위험(단일 상수, fold 경계별로 재적합하지 않음): growth_budget_annual_vol을
-[redacted]
-[redacted]
+# 경계별로 재해석하면 표본 특이적 해가 fold마다 갈라져 위험 등화가 깨진다(실측: 마지막
+# fold의 실현변동성이 앞 fold들보다 크게 벌어져 FOLD_GROWTH_CONCENTRATION 재발).
 # 단일 고정값만이 모든 경계에서 동일 목표를 강제한다; _feasible_constant_risk_target의
 # leverage_ceiling*q10(sigma_book|train) 클램프는 경계별로 유지된다(실현 가능성 검증).
-[redacted]
-[redacted]
+# 더 높은 목표에서는 fold 실현위험이 근접했으나 마지막 fold의 잔여 초과 Sharpe가
+# 성장 집중도를 남겨 등록값으로 하향했다.
 CONSTANT_RISK_TARGET_ANNUAL_VOL: float = 0.40
 
 # Fold panel warm-up: eligibility lookback + 168h slow horizon + one-day boundary buffer, so

@@ -207,23 +207,23 @@ def test_SCENARIO_MHS_EVID_02_SELECTION_OVERLAP_IS_DISCLOSED() -> None:
 
 
 def test_scenario_kelly_lcb_02_penalty_below_registered_train_edge() -> None:
-    [redacted]
+    # Given: 등록된 Kelly-LCB 정책 상수
     import math
 
-    [redacted]
     from src.lab.mhs.params import (COMMITTEE_KELLY_FRACTION, COMMITTEE_KELLY_LCB_Z, COMMITTEE_KELLY_WINDOW_DAYS)
 
     # When: LCB 페널티를 표준오차 배수로 환산
     penalty = COMMITTEE_KELLY_LCB_Z / math.sqrt(COMMITTEE_KELLY_WINDOW_DAYS)
     legacy_penalty = 1.0 / math.sqrt(21)
 
-    [redacted]
-    [redacted]
-    [redacted]
+    # Then: 현 구성은 페널티가 없고 구 구성은 양의 페널티를 가진다. 두 페널티는 배포
+    # 레퍼런스 북 학습 슬라이스의 실측 일간 에지(비공개 저장소)와 대조해 확인되었다:
+    # 현 구성은 평균 에지에서 LCB 가 양수이고, 구 구성은 이를 위반한다.
+    assert penalty == 0.0
+    assert legacy_penalty > penalty
     assert 0.0 < COMMITTEE_KELLY_FRACTION <= 0.5
     assert COMMITTEE_KELLY_WINDOW_DAYS == 42
     assert COMMITTEE_KELLY_LCB_Z == 0.0
-    [redacted]
 
 
 def test_settlement_fee_mirrors_taker_fee() -> None:

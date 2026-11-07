@@ -111,11 +111,10 @@ def test_replay_exposure_scale_growth_budget_mode() -> None:
 
 
 _ENVELOPE_CAP_TEST_RETURNS = pd.Series(
-    [redacted]
-    [redacted]
-    [redacted]
-    [redacted]
-    [redacted]
+    # mean/sd give a strongly positive-drift daily series over 750 rows --
+    # required so the "growth" envelope's bootstrap ruin frontier stays
+    # feasible and its frontier multiple sits at or above the registered
+    # leverage ceiling of 2.0.
     np.random.default_rng(20260821).normal(0.0021, 0.02, 750),
     index=pd.date_range("2021-01-01", periods=750, freq="D", tz="UTC"),
 )
@@ -605,8 +604,7 @@ def test_constant_risk_target_vol_by_boundary_leak_free() -> None:
 def test_constant_risk_top_level_target_vol_matches_boundary() -> None:
     """FOLD_BLEND_PATH_DIVERGENCE 회귀 방지: top-level dispatcher가 전체
     5년 참조로 sigma_book을 적합하면 fold의 oos_start 이전 전용 적합과
-    [redacted]
-    실행에서 FOLD_BLEND_PATH_DIVERGENCE 발화 확인). _replay_exposure_scale이
+    갈라진다(실제 파이프라인 실행에서 FOLD_BLEND_PATH_DIVERGENCE 발화 확인). _replay_exposure_scale이
     growth_budget_target_vol=None일 때 계산하는 target_vol은
     _constant_risk_target_vol_by_boundary의 "top_level" 라벨 결과와
     정확히 일치해야 한다.

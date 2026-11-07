@@ -71,7 +71,7 @@ def test_null_calibration_deterministic_and_global_state_untouched() -> None:
 
 # SCENARIO_MHS_NULL_CALIBRATION_THRESHOLD_RANGE
 def test_null_calibration_threshold_range_and_alpha_monotonicity() -> None:
-    [redacted]
+    # 일간 vol 2% 정규 + 강한 양의 드리프트:
     # 무드리프트 표본은 fold 로그성장이 음수가 빈번해 share null이 발산한다.
     pooled = np.random.default_rng(2026).normal(0.00227, 0.02, 1429)
     base = calibrate_max_share_null(pooled, 4, 357, 1.0 / 4, alpha=0.05, trials=800)

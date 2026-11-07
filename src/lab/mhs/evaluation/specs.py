@@ -63,6 +63,6 @@ def _peg_chase_maker_share(report: StrategyExecutionReplayResult) -> float | Non
 # UTC. exchangeInfo reports this symbol's current contract onboardDate as
 # 2023-02-22 (a delist/relist), so the pre-relist history is not just
 # uncollected but no longer served by the exchange at all -- no backfill path
-[redacted]
+# exists. The prior relative Calmar cost estimate was measured before
 # committee_kelly_sizing/growth_extreme/breadth-60 became the defaults; see
 # fold0's RELEVANT_EXECUTION_DATA_GAP measurement for the current cost.

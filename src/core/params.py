@@ -249,11 +249,6 @@ NULL_BOOTSTRAP_MEAN_BLOCK_DAYS: int = 20
 
 
 
-[redacted]
-[redacted]
-[redacted]
-
-
 # 인과적 자기자본 드로다운 브레이크: brake = clip(1 + k * underwater, floor, 1).
 # k=2.0 selected per ADR_20260823_MHS_CONSTANT_RISK_DEPLOYMENT.
 EXPOSURE_DRAWDOWN_BRAKE_K: float = 2.0
@@ -322,7 +317,7 @@ ACCOUNT_UNIT_REFERENCE_CAPITAL: float = 1e5
 # 사후 μ의 Kelly 비율이 `1 - haircut`이다(0.5 = 사후 half-Kelly). 추정오차가 있을 때
 # 과소베팅보다 과대베팅의 손실이 더 크다는 비대칭 때문이다.
 ACCOUNT_MEAN_HAIRCUT: float = 0.50
-[redacted]
+# 관측 최악 단위 일간손실의 약 2배인 adverse 충격.
 ACCOUNT_SHOCK_PER_UNIT: float = 0.08
 # adverse 후에도 자기자본의 10%는 마진 버퍼로 남긴다.
 ACCOUNT_MARGIN_RESERVE: float = 0.10
