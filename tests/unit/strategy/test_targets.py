@@ -98,7 +98,7 @@ def test_invalid_member_definitions_fail() -> None:
     with pytest.raises(ValueError, match="unique"):
         dataclasses.replace(
             FLOW_MOM_TOP20,
-            members=(FeatureMember(name="REDACTED", sign=1), FeatureMember(name="REDACTED", sign=1)),
+            members=(FeatureMember(name="mom_168h", sign=1), FeatureMember(name="mom_168h", sign=1)),
         )
     unknown = dataclasses.replace(
         FLOW_MOM_TOP20, members=(FeatureMember(name="no_such_feature", sign=1),)
@@ -353,7 +353,7 @@ def test_strategy_member_validation_branches() -> None:
     with pytest.raises(ValueError, match="non-empty string"):
         FeatureMember(name="", sign=1)
     with pytest.raises(ValueError, match="sign"):
-        FeatureMember(name="REDACTED", sign=2)  # type: ignore[arg-type]
+        FeatureMember(name="mom_168h", sign=2)  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="strategy_id"):
         StrategySpec(
             strategy_id="", breadth=20, members=FLOW_MOM_TOP20.members,
@@ -797,12 +797,12 @@ def test_cache_direct_fingerprint_branches() -> None:
     from src.strategy.targets import FeatureMember, MemberSnapshotCache
 
     cache = MemberSnapshotCache()
-    member = FeatureMember(name="REDACTED", sign=1)
+    member = FeatureMember(name="mom_168h", sign=1)
     frame = pd.DataFrame(1.0, index=pd.date_range("2021-01-01", periods=2, tz="UTC"), columns=["A"])
     stored = cache.snapshots(member, lambda: frame, snapshot_hour=22, release_hour=23, fingerprint=("a",))
     assert stored is frame
     assert cache.snapshots(member, lambda: frame, snapshot_hour=22, release_hour=23, fingerprint=("a",)) is frame
-    other = FeatureMember(name="REDACTED", sign=1)
+    other = FeatureMember(name="amihud", sign=1)
     with pytest.raises(DataIntegrityError, match="different source"):
         cache.snapshots(other, lambda: frame, snapshot_hour=22, release_hour=23, fingerprint=("b",))
     with pytest.raises(DataIntegrityError, match="different source"):
