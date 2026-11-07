@@ -9,8 +9,9 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from collections.abc import Mapping
-from dataclasses import dataclass
+import os
+from collections.abc import Mapping, Sequence
+from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -65,6 +66,37 @@ class EvaluationCriteria:
 
 
 @dataclass(frozen=True, slots=True)
+class ImplementationAmendment:
+    """Recorded equivalence of a running-code digest change; never a research identity change."""
+
+    from_spec_digest: str
+    to_spec_digest: str
+    baseline_commit: str
+    candidate_commit: str | None
+    evidence_sha256: str
+    window_start: str
+    window_end: str
+    decision_rows: int
+    max_abs_diff: float
+    recorded_at: str
+
+    def __post_init__(self) -> None:
+        for name in ("from_spec_digest", "to_spec_digest", "baseline_commit", "evidence_sha256",
+                     "window_start", "window_end", "recorded_at"):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not value:
+                raise DataIntegrityError(f"implementation amendment {name} must be a non-empty string")
+        if self.candidate_commit is not None and (not isinstance(self.candidate_commit, str) or not self.candidate_commit):
+            raise DataIntegrityError("implementation amendment candidate_commit must be a string or null")
+        if self.from_spec_digest == self.to_spec_digest:
+            raise DataIntegrityError("implementation amendment must change the spec digest")
+        if isinstance(self.decision_rows, bool) or not isinstance(self.decision_rows, int) or self.decision_rows < 0:
+            raise DataIntegrityError("implementation amendment decision_rows must be a non-negative integer")
+        if isinstance(self.max_abs_diff, bool) or not math.isfinite(self.max_abs_diff) or self.max_abs_diff < 0:
+            raise DataIntegrityError("implementation amendment max_abs_diff must be finite and non-negative")
+
+
+@dataclass(frozen=True, slots=True)
 class StrategyRelease:
     strategy_id: str
     legacy_ids: tuple[str, ...]
@@ -76,6 +108,7 @@ class StrategyRelease:
     criteria_digest: str
     evaluation_digest: str | None
     verdict: str | None
+    implementation_amendments: tuple[ImplementationAmendment, ...] = ()
 
 
 def _canonical_json(value: Any) -> str:
@@ -100,14 +133,14 @@ def criteria_digest(criteria: EvaluationCriteria) -> str:
     return hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()
 
 
-def strategy_spec_digest(spec: StrategySpec, sizing: Mapping[str, str | float | None]) -> str:
-    """Content digest of the strategy definition plus the sizing that trades it."""
+def strategy_spec_payload(spec: StrategySpec, sizing: Mapping[str, str | float | None]) -> dict[str, Any]:
+    """The exact payload whose canonical JSON ``strategy_spec_digest`` hashes."""
     from src.core.params import ACCOUNT_EXPOSURE_CAP
 
     members = [(str(m.name), int(m.sign)) for m in spec.members]
     sized = {str(k): v for k, v in dict(sizing).items()}
     sized.setdefault("exposure_cap", ACCOUNT_EXPOSURE_CAP)
-    payload = {
+    return {
         "strategy_id": spec.strategy_id,
         "breadth": spec.breadth,
         "members": members,
@@ -125,7 +158,11 @@ def strategy_spec_digest(spec: StrategySpec, sizing: Mapping[str, str | float | 
         },
         "shared_parameters": hashlib.sha256((Path(__file__).parent.parent / "core" / "params.py").read_bytes()).hexdigest(),
     }
-    return hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()
+
+
+def strategy_spec_digest(spec: StrategySpec, sizing: Mapping[str, str | float | None]) -> str:
+    """Content digest of the strategy definition plus the sizing that trades it."""
+    return hashlib.sha256(_canonical_json(strategy_spec_payload(spec, sizing)).encode("utf-8")).hexdigest()
 
 
 def strategy_signal_digest(spec: StrategySpec) -> str:
@@ -168,6 +205,34 @@ def release_path(strategy_id: str, *, root: Path | None = None) -> Path:
     if not isinstance(strategy_id, str) or not strategy_id:
         raise DataIntegrityError("strategy_id must be a non-empty string")
     return releases_dir(root) / f"{strategy_id}.json"
+
+
+_AMENDMENT_FIELDS = frozenset(field.name for field in fields(ImplementationAmendment))
+
+
+def _parse_amendment(raw: Any) -> ImplementationAmendment:
+    if not isinstance(raw, dict) or set(raw) != _AMENDMENT_FIELDS:
+        raise DataIntegrityError("implementation amendment malformed")
+    return ImplementationAmendment(**raw)
+
+
+def _chain_head(base: str, amendments: Sequence[ImplementationAmendment]) -> str:
+    """Walk the amendment chain from ``base``; every ``from`` must follow and every ``to`` must be new."""
+    current = base
+    seen = {base}
+    for amendment in amendments:
+        if amendment.from_spec_digest != current:
+            raise DataIntegrityError("implementation amendment chain broken: from digest does not follow")
+        if amendment.to_spec_digest in seen:
+            raise DataIntegrityError("implementation amendment chain repeats a digest")
+        seen.add(amendment.to_spec_digest)
+        current = amendment.to_spec_digest
+    return current
+
+
+def effective_spec_digest(release: StrategyRelease) -> str:
+    """The spec digest the running code must match: the last amendment ``to``, else the certified digest."""
+    return _chain_head(release.spec_digest, release.implementation_amendments)
 
 
 def _parse_criteria(raw: Any) -> EvaluationCriteria:
@@ -213,6 +278,10 @@ def load_release(strategy_id: str, *, root: Path | None = None) -> StrategyRelea
     if verdict is not None and verdict not in ("accept", "reject", "inconclusive", "invalid"):
         raise DataIntegrityError(f"release verdict invalid: {path}")
     sizing = dict(raw.get("sizing", {}))
+    raw_amendments = raw.get("implementation_amendments", [])
+    if not isinstance(raw_amendments, list):
+        raise DataIntegrityError(f"release record invalid: {path}: implementation_amendments must be a list")
+    amendments = tuple(_parse_amendment(item) for item in raw_amendments)
     return StrategyRelease(
         strategy_id=str(raw.get("strategy_id", canonical)),
         legacy_ids=tuple(raw.get("legacy_ids", ())),
@@ -224,6 +293,7 @@ def load_release(strategy_id: str, *, root: Path | None = None) -> StrategyRelea
         criteria_digest=stored_digest,
         evaluation_digest=None if evaluation_digest is None else str(evaluation_digest),
         verdict=None if verdict is None else str(verdict),
+        implementation_amendments=amendments,
     )
 
 
@@ -255,3 +325,25 @@ def record_acceptance(
     raw["verdict"] = "accept"
     path.write_text(json.dumps(raw, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return load_release(canonical, root=root)
+
+
+def append_implementation_amendment(
+    strategy_id: str, amendment: ImplementationAmendment, *, root: Path | None = None,
+) -> None:
+    """Append one amendment to the release record, leaving every other key byte-equal in parsed form."""
+    from src.strategy.targets import resolve_strategy_id  # noqa: PLC0415
+
+    canonical = resolve_strategy_id(strategy_id)
+    path = release_path(canonical, root=root)
+    release = load_release(canonical, root=root)
+    if amendment.from_spec_digest != effective_spec_digest(release):
+        raise DataIntegrityError("amendment must start at the effective spec digest")
+    _chain_head(release.spec_digest, (*release.implementation_amendments, amendment))
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError) as exc:
+        raise DataIntegrityError(f"release record unreadable: {path}") from exc
+    raw["implementation_amendments"] = [*raw.get("implementation_amendments", []), asdict(amendment)]
+    temporary = path.with_name(f"{path.name}.tmp")
+    temporary.write_text(json.dumps(raw, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    os.replace(temporary, path)

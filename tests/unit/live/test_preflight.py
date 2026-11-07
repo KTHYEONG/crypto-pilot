@@ -381,6 +381,7 @@ def _release_root_with_verdict(tmp_path, verdict: str, evaluation_digest=None, e
 
     raw["sizing"]["unit_bootstrap_sha256"] = hashlib.sha256(b"bootstrap fixture").hexdigest()
     raw["spec_digest"] = strategy_spec_digest(FLOW_MOM_TOP20, raw["sizing"])
+    raw.pop("implementation_amendments", None)  # spec_digest is re-derived from running code above
     (target / "flow_mom_top20.json").write_text(json.dumps(raw), encoding="utf-8")
     if verdict != "none":
         raw = json.loads((target / "flow_mom_top20.json").read_text(encoding="utf-8"))
@@ -482,3 +483,78 @@ def test_release_gate_fails_closed_without_record(tmp_path) -> None:
     check = release_gate_check(settings, root=tmp_path / "nope")
     assert check.passed is False
     assert check.detail.startswith("[RISK] release gate failed closed")
+
+
+def _amended_release_root(tmp_path, *, spec_digest: str, amendments: list[dict]):
+    import json
+
+    root = _release_root_with_verdict(tmp_path, "accept", evaluation_digest="eval-abc")
+    path = root / "src" / "strategy" / "releases" / "flow_mom_top20.json"
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    raw["spec_digest"] = spec_digest
+    raw["implementation_amendments"] = amendments
+    path.write_text(json.dumps(raw, indent=2, sort_keys=True), encoding="utf-8")
+    return root
+
+
+def _amendment_record(from_digest: str, to_digest: str) -> dict:
+    return {
+        "from_spec_digest": from_digest, "to_spec_digest": to_digest, "baseline_commit": "a1b2c3d",
+        "candidate_commit": None, "evidence_sha256": "e" * 64,
+        "window_start": "2026-01-01T00:00:00+00:00", "window_end": "2026-11-01T00:00:00+00:00",
+        "decision_rows": 100, "max_abs_diff": 1e-16, "recorded_at": "2026-11-07T12:00:00+00:00",
+    }
+
+
+def _mainnet_gate_settings(tmp_path):
+    settings = _live_settings_for_tax_gate(tmp_path, "live_mainnet", enabled=True)
+    settings.execution_policy = "strict_passive_repeg"
+    bootstrap = tmp_path / "unit.parquet"
+    bootstrap.write_bytes(b"bootstrap fixture")
+    settings.unit_bootstrap_path = str(bootstrap)
+    settings.notional_equity_usdt = 1000
+    return settings
+
+
+def test_gate_accepts_amended_digest(tmp_path) -> None:
+    """An ACCEPT whose certified digest is followed by an amendment to the running digest passes."""
+    import json
+
+    from src.live.preflight import release_gate_check
+    from src.strategy.release import strategy_spec_digest
+    from src.strategy.targets import FLOW_MOM_TOP20
+
+    current_root = _release_root_with_verdict(tmp_path / "current", "accept", evaluation_digest="eval-abc")
+    raw = json.loads((current_root / "src" / "strategy" / "releases" / "flow_mom_top20.json").read_text(encoding="utf-8"))
+    running = strategy_spec_digest(FLOW_MOM_TOP20, raw["sizing"])
+    root = _amended_release_root(
+        tmp_path / "amended", spec_digest="a" * 64,
+        amendments=[_amendment_record("a" * 64, running)],
+    )
+    check = release_gate_check(_mainnet_gate_settings(tmp_path / "amended"), root=root)
+    assert check.passed is True
+    assert "verdict=accept" in check.detail
+    assert running[:12] in check.detail
+
+
+def test_gate_rejects_unamended_impl_change(tmp_path) -> None:
+    """Running code that differs from the certified digest with no amendment on record fails the gate."""
+    from src.live.preflight import release_gate_check
+
+    root = _amended_release_root(tmp_path / "unamended", spec_digest="a" * 64, amendments=[])
+    check = release_gate_check(_mainnet_gate_settings(tmp_path / "unamended"), root=root)
+    assert check.passed is False
+    assert "digest" in check.detail
+
+
+def test_gate_fails_closed_on_broken_chain(tmp_path) -> None:
+    """A chain whose first link does not start at the certified digest fails closed."""
+    from src.live.preflight import release_gate_check
+
+    root = _amended_release_root(
+        tmp_path / "broken", spec_digest="a" * 64,
+        amendments=[_amendment_record("b" * 64, "c" * 64)],
+    )
+    check = release_gate_check(_mainnet_gate_settings(tmp_path / "broken"), root=root)
+    assert check.passed is False
+    assert "failed closed" in check.detail

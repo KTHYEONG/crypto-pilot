@@ -90,7 +90,7 @@ def release_gate_check(settings: Any, *, root: Path | None = None) -> PreflightC
     try:
         from src.core.params import ACCOUNT_EXPOSURE_CAP, STRATEGY_NAME_CLIP
         from src.live.runner import _unit_bootstrap_sha256
-        from src.strategy.release import load_release, strategy_spec_digest
+        from src.strategy.release import effective_spec_digest, load_release, strategy_spec_digest
         from src.strategy.targets import FLOW_MOM_TOP20
 
         release = load_release(FLOW_MOM_TOP20.strategy_id, root=root)
@@ -110,14 +110,15 @@ def release_gate_check(settings: Any, *, root: Path | None = None) -> PreflightC
         if str(release.sizing.get("execution_policy", "")) != str(getattr(settings, "execution_policy", "")):
             return PreflightCheck(name="release_gate", passed=False,
                                   detail="[RISK] daemon execution policy differs from the accepted release")
-        if release.spec_digest != expected:
+        effective = effective_spec_digest(release)
+        if effective != expected:
             return PreflightCheck(
                 name="release_gate", passed=False,
-                detail="[RISK] running book digest differs from the accepted release",
+                detail=f"[RISK] running book digest differs from the accepted release (effective={effective[:12]})",
             )
         return PreflightCheck(
             name="release_gate", passed=True,
-            detail=f"release {release.strategy_id} verdict=accept digest={release.spec_digest[:12]}",
+            detail=f"release {release.strategy_id} verdict=accept digest={effective[:12]}",
         )
     except Exception as exc:
         return PreflightCheck(name="release_gate", passed=False, detail=f"[RISK] release gate failed closed: {exc}")

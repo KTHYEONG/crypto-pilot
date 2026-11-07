@@ -197,6 +197,39 @@ class TestRankWeightBook:
             rank_weight_book(signal, eligible, 1, 2)
 
 
+class TestRankWeightBookTies:
+    """Exact half-integer centering: tied cells cancel bit-exactly, so an
+    all-tied row is flat for every breadth and partial ties share weight."""
+
+    @pytest.mark.parametrize("n_symbols", list(range(2, 201)))
+    def test_tied_row_is_flat_for_every_breadth(self, n_symbols: int) -> None:
+        signal = pd.DataFrame([[0.3] * n_symbols], columns=[f"S{i}" for i in range(n_symbols)])
+        eligible = pd.DataFrame(True, index=signal.index, columns=signal.columns)
+        weights = rank_weight_book(signal, eligible, 1, 2)
+        assert weights.abs().sum(axis=1).iloc[0] == 0.0
+
+    def test_partial_ties_share_equal_weight(self) -> None:
+        signal = pd.DataFrame({"A": [1.0], "B": [1.0], "C": [2.0], "D": [3.0]})
+        eligible = pd.DataFrame(True, index=signal.index, columns=signal.columns)
+        weights = rank_weight_book(signal, eligible, 1, 2)
+        assert weights.iloc[0]["A"] == weights.iloc[0]["B"]
+        assert float(weights.sum(axis=1).iloc[0]) == pytest.approx(0.0, abs=1e-12)
+        assert float(weights.abs().sum(axis=1).iloc[0]) == pytest.approx(1.0, abs=1e-12)
+
+    def test_matches_pct_rank_reference_on_dispersed_rows(self) -> None:
+        rng = np.random.default_rng(17)
+        signal = pd.DataFrame(rng.normal(size=(25, 9)), columns=list("ABCDEFGHI"))
+        eligible = pd.DataFrame(True, index=signal.index, columns=signal.columns)
+        eligible.iloc[::4, :3] = False
+        out = rank_weight_book(signal, eligible, -1, 3)
+        masked = signal.where(eligible)
+        pct = masked.rank(axis=1, pct=True)
+        centered = pct.sub(pct.mean(axis=1), axis=0).mul(-1)
+        gross = centered.abs().sum(axis=1)
+        reference = centered.div(gross, axis=0).where(eligible.sum(axis=1) >= 3, other=0.0).fillna(0.0)
+        np.testing.assert_allclose(out.to_numpy(), reference.to_numpy(), rtol=1e-12, atol=1e-15)
+
+
 class TestRenormalizeWithinMask:
     """Execution-roster renormalization: surviving roster cells are re-centered
     and re-normalized while masked-out cells stay exactly zero."""
@@ -256,6 +289,27 @@ class TestRenormalizeWithinMask:
         mask = pd.DataFrame({"A": [True], "B": [True]})
         with pytest.raises(ValueError, match="min_symbols must be >= 2"):
             renormalize_within_mask(weights, mask, 1)
+
+    @pytest.mark.parametrize("n_symbols", list(range(2, 61)))
+    def test_renormalize_equal_weights_is_flat(self, n_symbols: int) -> None:
+        cols = [f"S{i}" for i in range(n_symbols)]
+        weights = pd.DataFrame([[0.0137] * n_symbols], columns=cols)
+        mask = pd.DataFrame(True, index=weights.index, columns=cols)
+        out = renormalize_within_mask(weights, mask, 2)
+        assert out.abs().sum(axis=1).iloc[0] == 0.0
+
+    def test_renormalize_preserves_invariants(self) -> None:
+        rng = np.random.default_rng(29)
+        cols = list("ABCDEFGH")
+        weights = pd.DataFrame(rng.normal(size=(20, 8)), columns=cols)
+        weights = weights.div(weights.abs().sum(axis=1), axis=0)
+        mask = pd.DataFrame(rng.random((20, 8)) < 0.7, columns=cols)
+        mask.loc[:, "A"] = True
+        mask.loc[:, "B"] = True
+        out = renormalize_within_mask(weights, mask, 2)
+        assert out.where(~mask, other=0.0).abs().sum().sum() == 0.0
+        assert out.sum(axis=1).abs().max() < 1e-12
+        assert out.abs().sum(axis=1).sub(1.0).abs().max() < 1e-12
 
     def test_all_zero_surviving_gross_stays_zero_not_nan(self) -> None:
         # SCENARIO_MHS_RENORM_06_ALL_ZERO_GROSS_STAYS_ZERO
@@ -516,3 +570,27 @@ def test_clip_names_preserving_gross_invalid_clip_rejected() -> None:
     for bad in (0.0, -0.1, float("nan"), float("inf")):
         with pytest.raises(ValueError, match="clip"):
             clip_names_preserving_gross(weights, bad)
+
+
+def test_clip_names_preserving_gross_noise_cell_is_not_a_held_name() -> None:
+    # Reproduces 2022-02-26: a name whose member ranks cancel carries 1.7e-17 instead of 0.0.
+    weights = _dollar_neutral_book()
+    binding = int(np.flatnonzero(weights.abs().max(axis=1).to_numpy() > 0.05)[0])
+    exact = weights.iloc[[binding]].copy()
+    exact.iloc[0, 0] = 0.0
+    exact.iloc[0, 1:] -= exact.iloc[0, 1:].mean()
+    noisy = exact.copy()
+    noisy.iloc[0, 0] = 1.6653345369377347e-17
+    out_exact = clip_names_preserving_gross(exact, 0.05)
+    out_noisy = clip_names_preserving_gross(noisy, 0.05)
+    assert out_noisy.iloc[0, 0] == 0.0
+    pd.testing.assert_frame_equal(out_noisy, out_exact, check_exact=False, rtol=1e-12, atol=1e-15)
+
+
+@pytest.mark.parametrize("noise", [1e-18, -2.7755575615628915e-18, 1e-16])
+def test_clip_names_preserving_gross_flushes_noise_in_untouched_rows(noise: float) -> None:
+    weights = _dollar_neutral_book() * 0.1
+    weights.iloc[:, 0] = noise
+    out = clip_names_preserving_gross(weights, 0.05)
+    assert bool((out.iloc[:, 0].to_numpy() == 0.0).all())
+    assert (out.iloc[:, 1:] - weights.iloc[:, 1:]).abs().max().max() == 0.0

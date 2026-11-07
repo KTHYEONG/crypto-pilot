@@ -7,6 +7,7 @@ Constants used exclusively by the research lab are owned by
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Final
 
 import pandas as pd
 
@@ -69,6 +70,9 @@ MEASURED_EXECUTION_COST_TIERS_BPS: dict[str, float] = {
 }
 
 DISCOVERY_START: pd.Timestamp = pd.Timestamp("2021-01-01", tz="UTC")
+
+#: Relative gross below which a re-centered book row is float centering noise (~1e-16), not dispersion.
+BOOK_DEGENERATE_GROSS_RTOL: Final[float] = 1e-12
 
 BOOK_BLEND_WEIGHTS: dict[str, float] = {
     "fast_reversal": 0.0,
