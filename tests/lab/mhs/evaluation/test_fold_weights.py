@@ -842,23 +842,45 @@ def test_shared_train_reference_falls_back_on_missing_source(monkeypatch) -> Non
         folds_mod._build_shared_train_reference("root", ((0, fold),), request, funding, 1.0, None, None)
 
 
-def test_fold_executes_boundary_admission_verbatim() -> None:
+def _with_long_warmup_member(monkeypatch) -> str:
+    """Add the registry's longest-warmup feature to the default committee for this test only."""
+    import dataclasses
+    import types
+
+    import src.lab.mhs.evaluation.committee as committee_mod
+    import src.strategy.store as store_mod
+    from src.strategy.features import FEATURE_REGISTRY
+    from src.strategy.store import strategy_values
+
+    long_member = max(FEATURE_REGISTRY, key=lambda spec: spec.warmup_bars).name
+    base = strategy_values()
+    members = (*(name for name in base.committee_members if name != long_member), long_member)
+    sets = dict(base.committee_sets)
+    sets[base.committee_default] = members
+    patched = dataclasses.replace(base, committee_sets=types.MappingProxyType(sets))
+    for module in (committee_mod, store_mod):
+        monkeypatch.setattr(module, "strategy_values", lambda: patched)
+    return long_member
+
+
+def test_fold_executes_boundary_admission_verbatim(monkeypatch) -> None:
     import pytest
 
     from src.lab.mhs.evaluation.integrity import CommitteeAdmissionIntegrityError
     from src.strategy.features import FeatureAdmission
 
+    long_member = _with_long_warmup_member(monkeypatch)
     panel, fold, funding, request, _ = _pit_market()
     admission = _pit_admission(panel, fold, request)
-    # The fold panel (912h warmup) is shorter than the 1006-row warmup of
-    # xs_idio_mom_336h, so the old in-window audit always dropped it; the
-    # train-end-frozen boundary admission keeps it.
-    assert "xs_idio_mom_336h" in admission.admitted
+    # The fold panel (912h warmup) is shorter than the longest registry warmup, so
+    # the old in-window audit always dropped that member; the train-end-frozen
+    # boundary admission keeps it.
+    assert long_member in admission.admitted
     base_targets, *_ = _pit_targets(panel, fold, funding, request, admission)
 
     reduced = FeatureAdmission(
         admission.cutoff,
-        tuple(name for name in admission.admitted if name != "xs_idio_mom_336h"),
+        tuple(name for name in admission.admitted if name != long_member),
     )
     assert len(reduced.admitted) == len(admission.admitted) - 1
     reduced_targets, *_ = _pit_targets(panel, fold, funding, request, reduced)

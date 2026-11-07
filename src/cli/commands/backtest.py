@@ -24,6 +24,7 @@ from src.core.params import (
     PROCESS_EVALUATION_CEILING,
 )
 from src.core.resources import MhsMemoryBudget
+from src.strategy.store import refuse_example_store
 
 if TYPE_CHECKING:
     from src.engine.backtest_evidence import StrategyExecutionBound
@@ -458,6 +459,7 @@ def run_strategy_backtest_command(args: argparse.Namespace) -> None:
     Raises:
         SystemExit: Arguments are invalid or the research replay fails.
     """
+    refuse_example_store("strategy backtest")
     from src.common.errors import DataIntegrityError
     from src.engine.backtest_evidence import StrategyReportPeriod
     from src.engine.backtest_persist import persist_strategy_backtest
@@ -605,7 +607,7 @@ def run_exposure_scan_command(args: argparse.Namespace) -> None:
 def run_account_replay_command(args: argparse.Namespace) -> None:
     """Replay the strategy book as one real account and persist account-scale evidence.
 
-    Builds the unlevered (exposure 1.0) clip-0.05 candidate and first replays it as the
+    Builds the unlevered (exposure 1.0) store-clipped candidate and first replays it as the
     unit-exposure reference ledger (exposure 1, no order filters, no impact, reference
     capital). That ledger both supplies the causal posterior moments the growth policy
     sizes from and anchors the reconciliation against the canonical 3m ledger. The account
@@ -619,6 +621,7 @@ def run_account_replay_command(args: argparse.Namespace) -> None:
         SystemExit: Invalid arguments, missing venue snapshot, a data-integrity failure,
             or a failed unit reference replay.
     """
+    refuse_example_store("strategy backtest")
     if getattr(args, "source_start", None) is None:
         raise SystemExit("source-start is required")
     if getattr(args, "start", None) is None:

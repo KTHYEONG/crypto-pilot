@@ -721,7 +721,7 @@ def _run_cycle_at(
 
 def _run_startup_gates(settings: LiveSettings) -> None:
     """Fail loud before any venue call when a start gate refuses the daemon."""
-    from src.live.preflight import release_gate_check, tax_collection_check
+    from src.live.preflight import release_gate_check, strategy_store_check, tax_collection_check
     from src.live.tax_ledger import resolve_tax_ledger_dir
 
     tax_check = tax_collection_check(settings, resolve_tax_ledger_dir(settings))
@@ -730,6 +730,10 @@ def _run_startup_gates(settings: LiveSettings) -> None:
         raise LiveTradingError(f"daemon refused to start: {tax_check.detail}")
     if tax_check.detail.startswith("WARNING:"):
         logger.warning("[RISK] %s", tax_check.detail)
+    store_check = strategy_store_check()
+    if not store_check.passed:
+        logger.critical("[RISK] daemon_refused reason=strategy_store mode=%s detail=%s", settings.mode.value, store_check.detail)
+        raise LiveTradingError(f"daemon refused to start: {store_check.detail}")
     release_check = release_gate_check(settings)
     if not release_check.passed:
         logger.critical("[RISK] daemon_refused reason=release_gate mode=%s detail=%s", settings.mode.value, release_check.detail)
@@ -837,6 +841,10 @@ def run_daemon(
     funding_slot = _PrefetchSlot("funding", settings.funding_prefetch_enabled, prefetch_fn)
     startup = _read_heartbeat(heartbeat_path)
     logger.info("[SYS] daemon start mode=%s pid=%d weights=%s state=%s heartbeat_stage=%s heartbeat_status=%s", settings.mode.value, os.getpid(), weights_path, state_path, (startup or {}).get("stage"), (startup or {}).get("status"))
+    from src.strategy.store import strategy_values  # noqa: PLC0415
+
+    store = strategy_values()
+    logger.info("[SYS] strategy_store revision=%s example=%s", store.revision or "none", store.example)
     _handle_interrupted_stage(settings, heartbeat_path, now_fn())
 
     while max_iterations is None or iteration < max_iterations:

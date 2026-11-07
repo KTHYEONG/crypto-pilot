@@ -21,7 +21,6 @@ from src.core.params import (
     COMMITTEE_GROWTH_N_PATHS,
     COMMITTEE_GROWTH_RISK_GRID_MULTIPLIERS,
     COMMITTEE_GROWTH_RUIN_FRACTION,
-    COMMITTEE_MEMBERS,
     COMMITTEE_OOS_START,
     COMMITTEE_PURGE_HOURS,
     COMMITTEE_TARGET_VOL,
@@ -34,6 +33,7 @@ from src.lab.mhs.params import PERIODS_PER_YEAR_1H as _PERIODS_PER_YEAR_1H
 from src.lab.mhs.params import WALK_FORWARD_MIN_TRAIN_BARS
 from src.quant.risk.growth_sizing import GrowthSizingConfig, diagnose_growth_headroom, solve_growth_optimal_risk
 from src.strategy.features import FeatureSpec, source_coverage_audit
+from src.strategy.store import strategy_values
 
 _logger = logging.getLogger("MhsHorizonDiagnostic")
 
@@ -281,7 +281,7 @@ def _committee_source_admission(
 def _committee_exclusions(admitted: list[str], source_excluded: Mapping[str, Mapping[str, Any]]) -> list[dict[str, Any]]:
     excluded: list[dict[str, Any]] = [
         {"name": name, "reason": "feature_coverage"}
-        for name in COMMITTEE_MEMBERS
+        for name in strategy_values().committee_members
         if name not in admitted and name not in source_excluded
     ]
     excluded.extend(
@@ -410,7 +410,7 @@ def _committee_diagnostic_payload(
             "feature/combiner/size configurations on this same 2021-2025 panel; "
             "treat OOS Sharpe as an upper bound, not a deflated estimate"
         ),
-        "members": list(COMMITTEE_MEMBERS),
+        "members": list(strategy_values().committee_members),
         "admitted": admitted,
         "excluded": excluded,
         "source_coverage": {

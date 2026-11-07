@@ -74,6 +74,22 @@ def tax_collection_check(settings: LiveSettings, tax_dir: Path) -> PreflightChec
     )
 
 
+def strategy_store_check() -> PreflightCheck:
+    """Fail closed unless the private strategy store loads and is not the public example (no values in detail)."""
+    from src.strategy.store import strategy_values
+
+    try:
+        values = strategy_values()
+    except Exception as exc:
+        return PreflightCheck(name="strategy_store", passed=False, detail=f"[RISK] strategy store unusable: {exc}")
+    if values.example:
+        return PreflightCheck(
+            name="strategy_store", passed=False,
+            detail="[RISK] public example strategy store is active; set CRYPTO_STRATEGY_STORE",
+        )
+    return PreflightCheck(name="strategy_store", passed=True, detail=f"revision={values.revision or 'none'}")
+
+
 def release_gate_check(settings: Any, *, root: Path | None = None) -> PreflightCheck:
     """Real-money start gate: LIVE_MAINNET needs an ACCEPTed release matching the daemon book.
 
@@ -88,9 +104,10 @@ def release_gate_check(settings: Any, *, root: Path | None = None) -> PreflightC
             detail="suppressed mode: paper mode is an operational check and is never gated",
         )
     try:
-        from src.core.params import ACCOUNT_EXPOSURE_CAP, STRATEGY_NAME_CLIP
+        from src.core.params import ACCOUNT_EXPOSURE_CAP
         from src.live.runner import _unit_bootstrap_sha256
         from src.strategy.release import effective_spec_digest, load_release, strategy_spec_digest
+        from src.strategy.store import strategy_values
         from src.strategy.targets import FLOW_MOM_TOP20
 
         release = load_release(FLOW_MOM_TOP20.strategy_id, root=root)
@@ -102,7 +119,7 @@ def release_gate_check(settings: Any, *, root: Path | None = None) -> PreflightC
         bootstrap_digest = _unit_bootstrap_sha256(settings)
         if bootstrap_digest is None or release.evaluation_digest is None:
             raise DataIntegrityError("accepted release requires evaluation and unit-bootstrap digests")
-        sizing = {"name_clip": STRATEGY_NAME_CLIP, "execution_policy": settings.execution_policy,
+        sizing = {"name_clip": strategy_values().name_clip, "execution_policy": settings.execution_policy,
                   "unit_bootstrap_sha256": bootstrap_digest, "exposure_cap": ACCOUNT_EXPOSURE_CAP}
         expected = strategy_spec_digest(FLOW_MOM_TOP20, sizing)
         if settings.notional_equity_usdt != release.target_capital_usdt:
@@ -131,6 +148,13 @@ def _append_tax_collection_check(settings: Any, checks: list[PreflightCheck]) ->
     if tax_check.detail.startswith("WARNING:"):
         logger.warning("[RISK] preflight %s", tax_check.detail)
     checks.append(tax_check)
+
+
+def _append_strategy_store_check(checks: list[PreflightCheck]) -> None:
+    store = strategy_store_check()
+    if not store.passed:
+        logger.critical("[RISK] preflight %s", store.detail)
+    checks.append(store)
 
 
 def _append_release_gate_check(settings: Any, checks: list[PreflightCheck]) -> None:
@@ -328,5 +352,6 @@ def run_preflight(
         checks.append(PreflightCheck(name="venue_leverage_plan", passed=False, detail=str(exc)))
 
     _append_tax_collection_check(settings, checks)
+    _append_strategy_store_check(checks)
     _append_release_gate_check(settings, checks)
     return PreflightReport(checks=tuple(checks))

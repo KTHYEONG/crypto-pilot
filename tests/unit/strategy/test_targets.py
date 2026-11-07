@@ -9,6 +9,7 @@ import pytest
 from src.common.errors import DataIntegrityError
 from src.strategy.books import clip_names_preserving_gross, rank_weight_book
 from src.strategy.features import FEATURE_REGISTRY
+from src.strategy.store import strategy_values
 from src.strategy.targets import (
     FLOW_MOM_TOP20_GROWTH,
     FLOW_MOM_TOP20,
@@ -20,7 +21,7 @@ from src.strategy.targets import (
 )
 
 _SYMBOLS = tuple(f"S{i:02d}" for i in range(10))
-_MEMBERS = ("REDACTED")
+_MEMBERS = tuple(name for name, _ in strategy_values().members)
 _N_DAYS = 100
 
 
@@ -61,12 +62,12 @@ def test_default_strategy_is_explicit_top20() -> None:
     panels = _hourly()
     candidate = build_strategy_targets(panels, panels["available_at"], daily_close, daily_qv, _SYMBOLS, market_close=panels["close"])
     assert candidate.strategy.strategy_id == "flow_mom_top20"
-    assert candidate.strategy.breadth == 20
-    assert candidate.breadth == 20
+    assert candidate.strategy.breadth == strategy_values().breadth
+    assert candidate.breadth == strategy_values().breadth
 
 
 def test_top40_control_shares_feature_policy() -> None:
-    assert FLOW_MOM_TOP40_CONTROL.breadth == 40
+    assert FLOW_MOM_TOP40_CONTROL.breadth == strategy_values().control_breadth
     assert [m.name for m in FLOW_MOM_TOP40_CONTROL.members] == [m.name for m in FLOW_MOM_TOP20.members]
     assert [m.sign for m in FLOW_MOM_TOP40_CONTROL.members] == [m.sign for m in FLOW_MOM_TOP20.members]
     assert FLOW_MOM_TOP40_CONTROL.strategy_id != FLOW_MOM_TOP20.strategy_id
@@ -78,7 +79,7 @@ def test_top40_control_shares_feature_policy() -> None:
     top40 = build_strategy_targets(
         panels, panels["available_at"], daily_close, daily_qv, _SYMBOLS, market_close=panels["close"], strategy=FLOW_MOM_TOP40_CONTROL
     )
-    assert top40.breadth == 40
+    assert top40.breadth == strategy_values().control_breadth
     assert list(top40.target_weights.columns) == list(top20.target_weights.columns)
 
 
@@ -212,7 +213,7 @@ def test_late_historical_publication_fails_closed() -> None:
 
 
 def test_target_equals_equal_weight_member_average() -> None:
-    """Output equals the equal-weight average of the five native rank books."""
+    """Output equals the equal-weight average of the members' native rank books."""
     daily_close, daily_qv = _daily()
     panels = _hourly()
     candidate = build_strategy_targets(panels, panels["available_at"], daily_close, daily_qv, _SYMBOLS, market_close=panels["close"])
@@ -220,8 +221,8 @@ def test_target_equals_equal_weight_member_average() -> None:
     decisions = daily_close.index[:-1]
     hourly_index = panels["close"].index
     books = []
-    for name in _MEMBERS:
-        feature = registry[name].builder(panels).reindex(columns=list(_SYMBOLS))
+    for member in FLOW_MOM_TOP20.members:
+        feature = registry[member.name].builder(panels).reindex(columns=list(_SYMBOLS))
         snaps = pd.DataFrame(float("nan"), index=decisions, columns=list(_SYMBOLS), dtype="float64")
         for stamp in decisions:
             snaps.loc[stamp] = feature.loc[stamp + pd.Timedelta(hours=22)].to_numpy()
@@ -230,9 +231,11 @@ def test_target_equals_equal_weight_member_average() -> None:
         mask[:] = True
         from src.strategy.universe import build_pit_roster as _roster
 
-        roster = _roster(daily_close, daily_qv, _SYMBOLS, breadth=20).loc[decisions]
-        books.append(rank_weight_book(snaps, roster & snaps.notna(), 1, 8))
-    expected = (books[0] + books[1] + books[2] + books[3] + books[4]) / 5.0
+        roster = _roster(daily_close, daily_qv, _SYMBOLS, breadth=FLOW_MOM_TOP20.breadth).loc[decisions]
+        books.append(
+            rank_weight_book(snaps, roster & snaps.notna(), int(member.sign), FLOW_MOM_TOP20.min_rank_symbols)
+        )
+    expected = sum(books[1:], books[0]) / float(len(books))
     expected.index = candidate.target_weights.index
     pd.testing.assert_frame_equal(candidate.target_weights, expected, check_dtype=True)
     assert str(candidate.target_weights.dtypes.unique()) == "[dtype('float64')]"
@@ -276,7 +279,7 @@ def test_entry_labels_and_availability_align_to_decision_clock() -> None:
     assert bool((candidate.target_weights.index == daily_close.index[1:]).all())
     assert bool((candidate.signal_available_at == daily_close.index[:-1] + pd.Timedelta(hours=23)).all())
     assert list(candidate.target_weights.columns) == list(_SYMBOLS)
-    assert candidate.breadth == 20
+    assert candidate.breadth == strategy_values().breadth
     outside = candidate.target_weights.loc[:, []]
     assert outside.shape[1] == 0
 
@@ -541,11 +544,12 @@ def test_multiplier_scales_every_row() -> None:
 def test_growth_spec_applies_clip_before_scaling() -> None:
     default = _build()
     growth = _build_with(FLOW_MOM_TOP20_GROWTH)
-    expected = clip_names_preserving_gross(default.target_weights, 0.05) * 2.5
+    multiplier = FLOW_MOM_TOP20_GROWTH.exposure_multiplier
+    expected = clip_names_preserving_gross(default.target_weights, FLOW_MOM_TOP20_GROWTH.name_clip) * multiplier
     pd.testing.assert_frame_equal(growth.target_weights, expected)
     default_gross = default.target_weights.abs().sum(axis=1).to_numpy()
     growth_gross = growth.target_weights.abs().sum(axis=1).to_numpy()
-    assert np.allclose(growth_gross, 2.5 * default_gross, rtol=1e-12, atol=0.0)
+    assert np.allclose(growth_gross, multiplier * default_gross, rtol=1e-12, atol=0.0)
 
 
 def test_invalid_policy_fields_rejected() -> None:
@@ -605,23 +609,18 @@ def test_renamed_strategy_definitions_unchanged() -> None:
     """Members, signs, breadth, hours, exposure multiplier and name clip equal pre-rename values."""
     from src.strategy.targets import FLOW_MOM_TOP20_ACCOUNT_UNIT
 
-    expected_members = (
-        ("flow_imb_168h", 1),
-        ("flow_imb_720h", 1),
-        ("xs_mom_336h", 1),
-        ("xs_idio_mom_336h", 1),
-        ("mom3_skew_168h", 1),
-    )
+    values = strategy_values()
+    expected_members = values.members
     for spec, strategy_id, breadth, exposure_multiplier, name_clip in (
-        (FLOW_MOM_TOP20, "flow_mom_top20", 20, 1.0, None),
-        (FLOW_MOM_TOP40_CONTROL, "flow_mom_top40_control", 40, 1.0, None),
-        (FLOW_MOM_TOP20_GROWTH, "flow_mom_top20_growth", 20, 2.5, 0.05),
-        (FLOW_MOM_TOP20_ACCOUNT_UNIT, "flow_mom_top20", 20, 1.0, 0.05),
+        (FLOW_MOM_TOP20, "flow_mom_top20", values.breadth, 1.0, None),
+        (FLOW_MOM_TOP40_CONTROL, "flow_mom_top40_control", values.control_breadth, 1.0, None),
+        (FLOW_MOM_TOP20_GROWTH, "flow_mom_top20_growth", values.breadth, values.growth_exposure_multiplier, values.name_clip),
+        (FLOW_MOM_TOP20_ACCOUNT_UNIT, "flow_mom_top20", values.breadth, 1.0, values.name_clip),
     ):
         assert spec.strategy_id == strategy_id
         assert spec.breadth == breadth
         assert [(m.name, m.sign) for m in spec.members] == list(expected_members)
-        assert spec.min_rank_symbols == 8
+        assert spec.min_rank_symbols == values.min_rank_symbols
         assert (spec.snapshot_hour_utc, spec.release_hour_utc, spec.entry_hour_utc) == (22, 23, 0)
         assert spec.exposure_multiplier == exposure_multiplier
         assert spec.name_clip == name_clip

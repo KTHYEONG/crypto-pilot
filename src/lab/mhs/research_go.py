@@ -88,20 +88,21 @@ def _resolved_committee_tranche_count(request: MhsDiagnosticRequest) -> int:
 def _resolved_committee_members(request: MhsDiagnosticRequest) -> tuple[str, ...]:
     """Single resolution seam for committee member set (invariant I4).
 
-    Returns the member tuple from COMMITTEE_MEMBER_SETS keyed by
+    Returns the member tuple from the strategy store committee sets keyed by
     request.committee_member_set. An unregistered key raises ValueError
     naming the registered keys.
     """
-    from src.core.params import COMMITTEE_MEMBER_SETS
+    from src.strategy.store import strategy_values
 
+    committee_sets = strategy_values().committee_sets
     key = request.committee_member_set
-    if key not in COMMITTEE_MEMBER_SETS:
-        registered = sorted(COMMITTEE_MEMBER_SETS)
+    if key not in committee_sets:
+        registered = sorted(committee_sets)
         raise ValueError(
             f"unknown committee_member_set '{key}'; "
             f"registered keys: {registered}"
         )
-    return COMMITTEE_MEMBER_SETS[key]
+    return committee_sets[key]
 
 
 def _resolved_growth_envelope(request: MhsDiagnosticRequest) -> GrowthRiskEnvelope:

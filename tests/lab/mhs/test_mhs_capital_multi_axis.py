@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from src.strategy.store import strategy_values
+
 from tests.fixtures.mhs_requests import research_baseline
 import numpy as np
 import pandas as pd
@@ -11,7 +13,7 @@ import src.core.marks as marks
 from src.lab.mhs.evaluation import committee as committee_evaluation
 from src.lab.mhs.evaluation import fold_weights
 from src.lab.mhs.evaluation.committee import _committee_execution_book
-from src.core.types import BOOK_SPECS, COMMITTEE_MEMBERS
+from src.core.types import BOOK_SPECS
 from src.lab.mhs.evidence import AnchoredPurgedFold
 from src.strategy.features import FEATURE_REGISTRY, FeatureSpec, build_feature_books
 from src.quant.universe.pit_universe import symbol_partition
@@ -30,7 +32,7 @@ _FOLD = AnchoredPurgedFold(
 
 
 def _committee_member_specs() -> list[FeatureSpec]:
-    return [spec for spec in FEATURE_REGISTRY if spec.name in set(COMMITTEE_MEMBERS)]
+    return [spec for spec in FEATURE_REGISTRY if spec.name in set(strategy_values().committee_members)]
 
 
 @pytest.fixture

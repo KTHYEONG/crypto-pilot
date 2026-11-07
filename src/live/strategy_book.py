@@ -1,6 +1,6 @@
 """Live strategy Top-20 book on a short 1h window, bit-identical to the research builder.
 
-The live daemon recomputes the registered flow_mom_top20 book (name clip 0.05) from
+The live daemon recomputes the registered flow_mom_top20 book (store name clip) from
 the trailing 1h panel instead of loading sealed parameter artifacts, and derives the unit
 book's daily return proxy that extends the backtest unit-return bootstrap for Bayesian
 Kelly sizing.
@@ -17,7 +17,7 @@ import pandas as pd
 
 from src.common.errors import DataIntegrityError
 from src.core.panel import load_base_panel
-from src.core.params import LIVE_SIGNAL_WARMUP_DAYS, STRATEGY_NAME_CLIP
+from src.core.params import LIVE_SIGNAL_WARMUP_DAYS
 from src.core.settlement_evidence import SettlementEvidence
 from src.market_data.services.futures_collection import (
     FUNDING_DEFAULT_INTERVAL_MS,
@@ -26,6 +26,7 @@ from src.market_data.services.futures_collection import (
 )
 from src.strategy.books import clip_names_preserving_gross
 from src.strategy.liquidity import causal_adv_sigma
+from src.strategy.store import strategy_values
 from src.strategy.targets import FLOW_MOM_TOP20, build_strategy_targets
 
 _REQUIRED_COLUMNS = ("close", "quote_vol", "taker_buy_quote")
@@ -154,7 +155,7 @@ def build_live_strategy_book(
     """Rebuild the strategy book from ``data_root/ohlcv/1h`` over ``[panel_start, panel_end)``.
 
     Uses the research builder and roster unchanged (FLOW_MOM_TOP20, name clip
-    STRATEGY_NAME_CLIP, full-census market close for market-relative features). Each
+    the strategy store name clip, full-census market close for market-relative features). Each
     hourly bar is taken as published one hour after its open, the same availability rule
     the research source loader applies. Decision rows earlier than
     ``panel_start + LIVE_SIGNAL_WARMUP_DAYS`` are dropped because their roster and features
@@ -222,7 +223,7 @@ def build_live_strategy_book(
         tuple(census_list), market_close=close_c,
         strategy=strategy, blocked_decisions=blocked_frame,
     )
-    clipped = clip_names_preserving_gross(candidate.target_weights, STRATEGY_NAME_CLIP)
+    clipped = clip_names_preserving_gross(candidate.target_weights, strategy_values().name_clip)
     entries = pd.DatetimeIndex(clipped.index).tz_convert("UTC")
     decisions = entries - pd.Timedelta(days=1)
     unit_weights = pd.DataFrame(

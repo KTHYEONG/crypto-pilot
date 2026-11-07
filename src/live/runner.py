@@ -836,13 +836,13 @@ def _unit_bootstrap_sha256(settings: LiveSettings) -> str | None:
 
 
 def _current_run_manifest(settings: LiveSettings, now: pd.Timestamp) -> dict[str, Any]:
-    from src.core.params import STRATEGY_NAME_CLIP  # noqa: PLC0415
+    from src.strategy.store import strategy_values  # noqa: PLC0415
     from src.strategy.targets import FLOW_MOM_TOP20  # noqa: PLC0415
 
     return {
         "run_id": settings.record_run_id,
         "strategy_id": FLOW_MOM_TOP20.strategy_id,
-        "name_clip": STRATEGY_NAME_CLIP,
+        "name_clip": strategy_values().name_clip,
         "execution_policy": settings.execution_policy,
         "paper_fill_model": settings.paper_fill_model,
         "mode": settings.mode.value,

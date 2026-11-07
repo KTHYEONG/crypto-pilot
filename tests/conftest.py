@@ -16,6 +16,7 @@ for _key, _val in (
 
 
 import contextlib
+import json
 import logging
 import shutil
 import sys
@@ -46,6 +47,13 @@ _PREIMPORTED_SRC_MODULES = tuple(sorted(name for name in sys.modules if name == 
 # ``data/backtests/registry.sqlite3`` regardless of the host shell.
 os.environ["CRYPTO_PILOT_LOG_DIR"] = str(_PROC_TEMP_ROOT / "logs")
 os.environ["CRYPTO_PILOT_BACKTESTS_DIR"] = str(_PROC_TEMP_ROOT / "backtests")
+
+# Chosen strategy values are read from the private store at ``src`` import time: every test process
+# gets its own copy of the placeholder fixture store, selected before any ``src`` module is imported.
+_STRATEGY_STORE_ROOT = _PROC_TEMP_ROOT / "strategy_store"
+shutil.copytree(Path(__file__).resolve().parent / "fixtures" / "strategy_store", _STRATEGY_STORE_ROOT)
+(_STRATEGY_STORE_ROOT / "STORE_REVISION").write_text("fixture\n", encoding="utf-8")
+os.environ["CRYPTO_STRATEGY_STORE"] = str(_STRATEGY_STORE_ROOT)
 
 # Developer-tree paths that must be byte-identical before and after a test session. A test that
 # writes here pollutes real state, logs or the backtest registry, so the session fails loudly.
@@ -115,6 +123,18 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int | pytest.ExitC
     if _PROC_TEMP_ROOT.exists():
         with contextlib.suppress(OSError):
             shutil.rmtree(_PROC_TEMP_ROOT, ignore_errors=True)
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _fixture_strategy_release_digest() -> None:
+    """Bind the fixture release to the current implementation so code edits never stale it."""
+    from src.strategy.release import strategy_spec_digest
+    from src.strategy.targets import FLOW_MOM_TOP20
+
+    path = _STRATEGY_STORE_ROOT / "crypto-pilot" / "releases" / "flow_mom_top20.json"
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    raw["spec_digest"] = strategy_spec_digest(FLOW_MOM_TOP20, dict(raw["sizing"]))
+    path.write_text(json.dumps(raw, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
 @pytest.fixture(autouse=True, scope="session")

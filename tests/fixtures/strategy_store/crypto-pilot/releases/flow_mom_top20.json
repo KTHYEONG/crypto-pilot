@@ -1,0 +1,32 @@
+{
+  "criteria": {
+    "dsr_min": 0.95,
+    "growth_horizon_years": 3.0,
+    "growth_lcb_alpha": 0.05,
+    "holdout_growth_min_quantile": 0.05,
+    "max_participation_p95": 0.01,
+    "max_top5_funding_dependence": true,
+    "max_withdrawn_seat_fraction": 0.001,
+    "min_discovery_days": 730,
+    "min_holdout_days": 60,
+    "overbet_probe_scale": 0.75,
+    "participation_basis": "adv30_median_prior_day",
+    "plateau_min_fraction": 0.5
+  },
+  "criteria_digest": "8710bb6600649ff7aa706b6d0e56be0d9720493bf406fa682fdd5ba99e11c0db",
+  "design_data_cutoff": "2026-07-01T00:00:00+00:00",
+  "evaluation_digest": null,
+  "implementation_amendments": [],
+  "legacy_ids": [
+    "frozen_mhs_top20_v2"
+  ],
+  "sizing": {
+    "execution_policy": "strict_passive_repeg",
+    "exposure_cap": 10.0,
+    "name_clip": 0.07
+  },
+  "spec_digest": "8c34571fa43adda19f97e0b328fc354c2dd039267607255ce8f77f1af95a82ff",
+  "strategy_id": "flow_mom_top20",
+  "target_capital_usdt": 1000.0,
+  "verdict": null
+}

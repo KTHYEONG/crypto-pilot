@@ -14,9 +14,9 @@ import numpy as np
 import pandas as pd
 
 from src.common.errors import DataIntegrityError
-from src.core.params import GROWTH_EXPOSURE_MULTIPLIER, STRATEGY_NAME_CLIP
 from src.strategy.books import clip_names_preserving_gross, rank_weight_book
 from src.strategy.features import FEATURE_REGISTRY, MARKET_CLOSE_PANEL
+from src.strategy.store import strategy_values
 from src.strategy.universe import build_pit_roster
 
 _REQUIRED_PANELS = ("close", "quote_vol", "taker_buy_quote")
@@ -97,17 +97,14 @@ class StrategySpec:
             raise ValueError(f"name_clip must be None or a finite float in (0, 1], got {self.name_clip!r}")
 
 
+_VALUES = strategy_values()
+_MEMBERS = tuple(FeatureMember(name, sign) for name, sign in _VALUES.members)
+
 FLOW_MOM_TOP20 = StrategySpec(
     strategy_id="flow_mom_top20",
-    breadth=20,
-    members=(
-        FeatureMember(name="REDACTED", sign=1),
-        FeatureMember(name="REDACTED", sign=1),
-        FeatureMember(name="REDACTED", sign=1),
-        FeatureMember(name="REDACTED", sign=1),
-        FeatureMember(name="REDACTED", sign=1),
-    ),
-    min_rank_symbols=8,
+    breadth=_VALUES.breadth,
+    members=_MEMBERS,
+    min_rank_symbols=_VALUES.min_rank_symbols,
     snapshot_hour_utc=22,
     release_hour_utc=23,
     entry_hour_utc=0,
@@ -116,15 +113,9 @@ FLOW_MOM_TOP20 = StrategySpec(
 
 FLOW_MOM_TOP40_CONTROL = StrategySpec(
     strategy_id="flow_mom_top40_control",
-    breadth=40,
-    members=(
-        FeatureMember(name="REDACTED", sign=1),
-        FeatureMember(name="REDACTED", sign=1),
-        FeatureMember(name="REDACTED", sign=1),
-        FeatureMember(name="REDACTED", sign=1),
-        FeatureMember(name="REDACTED", sign=1),
-    ),
-    min_rank_symbols=8,
+    breadth=_VALUES.control_breadth,
+    members=_MEMBERS,
+    min_rank_symbols=_VALUES.min_rank_symbols,
     snapshot_hour_utc=22,
     release_hour_utc=23,
     entry_hour_utc=0,
@@ -133,41 +124,29 @@ FLOW_MOM_TOP40_CONTROL = StrategySpec(
 
 FLOW_MOM_TOP20_GROWTH = StrategySpec(
     strategy_id="flow_mom_top20_growth",
-    breadth=20,
-    members=(
-        FeatureMember(name="REDACTED", sign=1),
-        FeatureMember(name="REDACTED", sign=1),
-        FeatureMember(name="REDACTED", sign=1),
-        FeatureMember(name="REDACTED", sign=1),
-        FeatureMember(name="REDACTED", sign=1),
-    ),
-    min_rank_symbols=8,
+    breadth=_VALUES.breadth,
+    members=_MEMBERS,
+    min_rank_symbols=_VALUES.min_rank_symbols,
     snapshot_hour_utc=22,
     release_hour_utc=23,
     entry_hour_utc=0,
     design_data_cutoff=pd.Timestamp("2026-07-01T00:00:00Z"),
-    exposure_multiplier=GROWTH_EXPOSURE_MULTIPLIER,
-    name_clip=STRATEGY_NAME_CLIP,
+    exposure_multiplier=_VALUES.growth_exposure_multiplier,
+    name_clip=_VALUES.name_clip,
 )
 
 # Unleveraged clip book with exposure chosen by account policy; signals match FLOW_MOM_TOP20.
 FLOW_MOM_TOP20_ACCOUNT_UNIT = StrategySpec(
     strategy_id="flow_mom_top20",
-    breadth=20,
-    members=(
-        FeatureMember(name="REDACTED", sign=1),
-        FeatureMember(name="REDACTED", sign=1),
-        FeatureMember(name="REDACTED", sign=1),
-        FeatureMember(name="REDACTED", sign=1),
-        FeatureMember(name="REDACTED", sign=1),
-    ),
-    min_rank_symbols=8,
+    breadth=_VALUES.breadth,
+    members=_MEMBERS,
+    min_rank_symbols=_VALUES.min_rank_symbols,
     snapshot_hour_utc=22,
     release_hour_utc=23,
     entry_hour_utc=0,
     design_data_cutoff=pd.Timestamp("2026-07-01T00:00:00Z"),
     exposure_multiplier=1.0,
-    name_clip=STRATEGY_NAME_CLIP,
+    name_clip=_VALUES.name_clip,
 )
 
 

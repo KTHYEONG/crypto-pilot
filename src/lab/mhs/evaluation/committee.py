@@ -8,7 +8,6 @@ import numpy as np
 import pandas as pd
 
 from src.core.params import (
-    COMMITTEE_MEMBERS,
     COMMITTEE_OOS_START,
     COMMITTEE_PURGE_HOURS,
     MEASURED_EXECUTION_COST_TIERS_BPS,
@@ -35,6 +34,7 @@ from src.strategy.features import (
     feature_admission_by_boundary,
     feature_registry_panel_columns,
 )
+from src.strategy.store import strategy_values
 
 from . import diagnostics
 from .committee_reports import (
@@ -64,7 +64,7 @@ def _stream_committee_member_nets(
     rss_budget_bytes: int | None,
     rss_reserve_bytes: int | None,
 ) -> tuple[list[str], dict[str, pd.Series], dict[str, pd.Series]]:
-    """Stream one member at a time in ``COMMITTEE_MEMBERS`` order, keeping only the two cost-tier nets.
+    """Stream one member at a time in ``strategy_values().committee_members`` order, keeping only the two cost-tier nets.
 
     Order preserves the pre-streaming admitted/net-panel column order; each
     book is dropped immediately to bound memory residency.
@@ -73,7 +73,7 @@ def _stream_committee_member_nets(
     admitted: list[str] = []
     net_low_by_name: dict[str, pd.Series] = {}
     net_high_by_name: dict[str, pd.Series] = {}
-    for name in COMMITTEE_MEMBERS:
+    for name in strategy_values().committee_members:
         member_spec = specs_by_name.get(name)
         if member_spec is None:
             continue
@@ -138,11 +138,11 @@ def _committee_diagnostic(
             grid_1h,
             aligned_symbols,
             columns=feature_registry_panel_columns(
-                [spec for spec in FEATURE_REGISTRY if spec.name in set(COMMITTEE_MEMBERS)],
+                [spec for spec in FEATURE_REGISTRY if spec.name in set(strategy_values().committee_members)],
             ),
         )
     _assert_stage_rss_budget("committee_feature_panels", rss_budget_bytes, rss_reserve_bytes)
-    member_specs = [spec for spec in FEATURE_REGISTRY if spec.name in set(COMMITTEE_MEMBERS)]
+    member_specs = [spec for spec in FEATURE_REGISTRY if spec.name in set(strategy_values().committee_members)]
     source_coverage, source_excluded, member_specs = _committee_source_admission(
         member_specs, panels, execution_mask
     )
@@ -225,7 +225,7 @@ def _committee_boundary_admission_and_weights(
         keys equal ``admission_by_label[label].admitted`` when weighting, else
         ``{}`` overall.
     """
-    _resolved = members or COMMITTEE_MEMBERS
+    _resolved = members or strategy_values().committee_members
     _member_specs = [spec for spec in FEATURE_REGISTRY if spec.name in set(_resolved)]
     _panels = {"close": close, "quote_vol": quote_vol, "taker_buy_quote": taker_buy_quote}
     if not evidence_weighting:
@@ -456,7 +456,7 @@ def _committee_execution_book(
     """Build the k=5 committee capital book on the decision grid.
 
     Shared by the fold path and the top-level blend: filter the registry to
-    ``members`` (or ``COMMITTEE_MEMBERS`` when None), build equal-notional
+    ``members`` (or ``strategy_values().committee_members`` when None), build equal-notional
     rank books, average them.  No leg-risk tilt -- tilting the curated committee
     set to equal risk removed the concentration that carries its edge per ADR_20260823_MHS_CONSTANT_RISK_DEPLOYMENT. Fails closed when no member is
     admitted. ``tranche_count`` smooths the decision rows with a staggered tranche
@@ -485,7 +485,7 @@ def _committee_execution_book(
         raise ValueError(f"tranche_count must be >= 1, got {tranche_count}")
     if regime_adaptive_window is not None and regime_adaptive_window < 3:
         raise ValueError(f"regime_adaptive_window must be >= 3, got {regime_adaptive_window}")
-    _resolved = members or COMMITTEE_MEMBERS
+    _resolved = members or strategy_values().committee_members
     if admission is not None and coverage_cutoff is not None:
         raise ValueError("admission and coverage_cutoff are mutually exclusive")
     _committee_books = _committee_member_book_set(

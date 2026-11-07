@@ -60,6 +60,8 @@ if docker run --pull never --rm --network host --memory 256m \
   --user "$(id -u):$(id -g)" -e HOME=/tmp \
   --env-file "${ENV_FILE}" \
   -v "${ROOT}/data/state:/app/data/state" \
+  -v /home/ubuntu/quant-strategy-store:/run/strategy-store:ro \
+  -e CRYPTO_STRATEGY_STORE=/run/strategy-store/current \
   "${IMAGE}" /app/.venv/bin/python -m src.cli.main "${ARGS[@]}"; then
   log "status=OK running=${RUNNING} restarting=${RESTARTING} oom=${OOM} restarts=${RESTART_COUNT}"
   exit 0

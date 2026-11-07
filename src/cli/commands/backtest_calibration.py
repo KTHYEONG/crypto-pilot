@@ -159,6 +159,10 @@ def run_fill_calibration_command(args: argparse.Namespace) -> None:
     """Score OHLCV/paper fill rules against the tape model and persist the report."""
     import sys
 
+    from src.strategy.store import refuse_example_store
+
+    refuse_example_store("fill calibration")
+
     from src.application.fill_calibration import FillCalibrationRequest
     from src.application.strategy_account import AccountReplayError
     from src.cli.commands.backtest import _resolve_budget, _utc_timestamp

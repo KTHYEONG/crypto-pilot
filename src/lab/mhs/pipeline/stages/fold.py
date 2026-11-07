@@ -25,7 +25,7 @@ import src.lab.mhs.evaluation.guards as guards
 import src.lab.mhs.evaluation.regime as regime
 from src.common.errors import DataIntegrityError
 from src.core.marks import clear_mhs_market_data_caches
-from src.core.params import COMMITTEE_MEMBERS, COMMITTEE_OOS_START
+from src.core.params import COMMITTEE_OOS_START
 from src.core.resources import _assert_stage_rss_budget
 from src.lab.mhs import research_go as _research_go
 from src.lab.mhs import statistics as _statistics
@@ -44,6 +44,7 @@ from src.lab.mhs.run_history import (
 from src.lab.mhs.telemetry import StageTelemetry
 from src.lab.mhs.trial_pool_disclosure import trial_pool_disclosure
 from src.strategy.features import FEATURE_REGISTRY, feature_registry_panel_columns
+from src.strategy.store import strategy_values
 
 
 def _committee_weight_leak_fraction(validation_start: str, validation_end: str) -> float:
@@ -118,7 +119,7 @@ def run_folds(ctx: PipelineContext, telemetry: StageTelemetry) -> None:
             _diag_panel_columns = feature_registry_panel_columns(
                 [
                     spec for spec in FEATURE_REGISTRY
-                    if spec.name in set(COMMITTEE_MEMBERS)
+                    if spec.name in set(strategy_values().committee_members)
                 ],
             )
         _diag_panels = diagnostics._load_feature_panels(

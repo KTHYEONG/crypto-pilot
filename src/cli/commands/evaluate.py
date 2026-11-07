@@ -479,7 +479,9 @@ def run_evaluate_strategy_command(args: argparse.Namespace) -> None:
     """Print the verdict table, persist the evaluation envelope, and map verdicts to exits."""
     from src.evaluation.standard import evaluate_strategy
     from src.strategy.release import criteria_digest, load_release, record_acceptance
+    from src.strategy.store import refuse_example_store
 
+    refuse_example_store("strategy evaluation")
     strategy_id = str(args.strategy)
     release = load_release(strategy_id)
     inputs = build_evaluation_inputs(

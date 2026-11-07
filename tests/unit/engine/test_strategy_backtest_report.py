@@ -112,9 +112,12 @@ def test_payload_preserves_strategy_provenance() -> None:
     run = _run()
     payload = strategy_backtest_payload(run)
     assert payload["strategy_id"] == "flow_mom_top20"
-    assert payload["breadth"] == 20
+    from src.strategy.store import strategy_values
+
+    values = strategy_values()
+    assert payload["breadth"] == values.breadth
     assert [member["name"] for member in payload["members"]] == [  # type: ignore[index]
-        "REDACTED"
+        name for name, _ in values.members
     ]
     assert payload["canonical_symbols"] == 2
     assert payload["base_one_way_taker_bps"] == 6.0
@@ -280,11 +283,11 @@ def _growth_run() -> StrategyBacktestRun:
 
 def test_payload_states_policy() -> None:
     """Growth and primary payloads state their registered exposure policy explicitly."""
-    from src.core.params import GROWTH_EXPOSURE_MULTIPLIER, STRATEGY_NAME_CLIP
+    from src.strategy.store import strategy_values
 
     growth = strategy_backtest_payload(_growth_run())
-    assert growth["exposure_multiplier"] == GROWTH_EXPOSURE_MULTIPLIER
-    assert growth["name_clip"] == STRATEGY_NAME_CLIP
+    assert growth["exposure_multiplier"] == strategy_values().growth_exposure_multiplier
+    assert growth["name_clip"] == strategy_values().name_clip
     assert growth["daily_artifact"] == "daily.parquet"
     primary = strategy_backtest_payload(_run())
     assert primary["exposure_multiplier"] == 1.0

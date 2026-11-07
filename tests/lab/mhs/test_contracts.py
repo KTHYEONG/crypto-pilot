@@ -210,25 +210,19 @@ class TestFrozenLiterals:
 
     def test_committee_members_and_target_vol_are_frozen(self) -> None:
         # SCENARIO_MHS_COMMITTEE_LITERALS_FROZEN and
-        # SCENARIO_MHS_COMMITTEE_MEMBERS_K5_FROZEN: the k=5 committee is declared
-        # by economic family (order flow x2, cross-sectional trend x2,
-        # higher-moment x1; xs_mom_720h removed as a rank-invariant no-op), its
-        # 15% target volatility and 720h purge are frozen contract values, and
-        # the purge matches the longest 720h lookbacks so no overlapping-label
-        # information leaks across a walk-forward boundary.
+        # SCENARIO_MHS_COMMITTEE_MEMBERS_K5_FROZEN: the committee members come from
+        # the strategy store (k=5, unique, equal to the default set); the 15%
+        # target volatility and 720h purge are frozen contract values.
         from src.core.types import (
-            COMMITTEE_MEMBERS,
             COMMITTEE_OOS_START,
             COMMITTEE_PURGE_HOURS,
             COMMITTEE_TARGET_VOL,
         )
+        from src.strategy.store import strategy_values
 
-        assert COMMITTEE_MEMBERS == (
-    "REDACTED",
-        )
-        assert len(COMMITTEE_MEMBERS) == 5
-        assert len(set(COMMITTEE_MEMBERS)) == 5
-        assert "xs_mom_720h" not in COMMITTEE_MEMBERS
+        assert len(strategy_values().committee_members) == 5
+        assert len(set(strategy_values().committee_members)) == 5
+        assert strategy_values().committee_sets[strategy_values().committee_default] == strategy_values().committee_members
         assert pytest.approx(0.15) == COMMITTEE_TARGET_VOL
         assert COMMITTEE_PURGE_HOURS == 720
         assert pd.Timestamp("2023-01-01", tz="UTC") == COMMITTEE_OOS_START
@@ -265,19 +259,19 @@ class TestFrozenLiterals:
     def test_committee_purge_hours_matches_longest_member_lookback(self) -> None:
         # SCENARIO_COMMITTEE_PURGE_HOURS_MATCHES_LONGEST_MEMBER_LOOKBACK (B2):
         # the purge gap must always cover the longest committee feature lookback
-        # (720h, still carried by flow_imb_720h after the k=5 change) so no
-        # overlapping-label information leaks across a walk-forward boundary. A
+        # (720h) so no overlapping-label information leaks across a walk-forward
+        # boundary. A
         # future member with a longer lookback than the purge fails this static
         # test loudly instead of silently recurring the doc/value mismatch the
         # B2 fix corrected.
-        from src.core.types import COMMITTEE_MEMBERS, COMMITTEE_PURGE_HOURS
+        from src.core.types import COMMITTEE_PURGE_HOURS
         from src.strategy.features import FEATURE_REGISTRY
+        from src.strategy.store import strategy_values
 
         registry = {spec.name: spec for spec in FEATURE_REGISTRY}
         assert COMMITTEE_PURGE_HOURS >= 720
-        for name in COMMITTEE_MEMBERS:
+        for name in strategy_values().committee_members:
             assert name in registry, f"committee member {name} not in registry"
-        assert "flow_imb_720h" in COMMITTEE_MEMBERS
 
 
 class TestFillMarkParityGateConstants:
@@ -393,35 +387,31 @@ class TestCompoundingAlphaAxesContract:
     """SCENARIO_MHS_COMPOUNDING_ALPHA_AXES_01: committee member set contracts."""
 
     def test_member_sets_have_exactly_two_keys(self) -> None:
-        from src.core.params import COMMITTEE_MEMBER_SETS
-        assert set(COMMITTEE_MEMBER_SETS.keys()) == {"flow_momentum", "risk_premia"}
+        from src.strategy.store import strategy_values
+        assert set(strategy_values().committee_sets.keys()) == {"flow_momentum", "risk_premia"}
 
     def test_default_member_set_is_flow_momentum(self) -> None:
         [redacted]
         [redacted]
         [redacted]
         # ADR_20260820_MHS_COMPOUNDING_ALPHA_AXES.
-        from src.core.params import COMMITTEE_DEFAULT_MEMBER_SET, COMMITTEE_MEMBERS, COMMITTEE_MEMBER_SETS
-        assert COMMITTEE_DEFAULT_MEMBER_SET == "flow_momentum"
-        assert COMMITTEE_MEMBER_SETS["flow_momentum"] == COMMITTEE_MEMBERS
+        from src.strategy.store import strategy_values
+        assert strategy_values().committee_default == "flow_momentum"
+        assert strategy_values().committee_sets["flow_momentum"] == strategy_values().committee_members
 
     def test_risk_premia_members(self) -> None:
-        from src.core.params import COMMITTEE_MEMBER_SETS
-        assert COMMITTEE_MEMBER_SETS["risk_premia"] == (
-            "flow_imb_720h", "flow_imb_168h", "mom3_skew_168h", "lowvol_168h", "rev_24h",
-        )
+        from src.strategy.store import strategy_values
+        assert len(strategy_values().committee_sets["risk_premia"]) == 5
 
     def test_flow_momentum_members(self) -> None:
-        from src.core.params import COMMITTEE_MEMBER_SETS
-        assert COMMITTEE_MEMBER_SETS["flow_momentum"] == (
-            "REDACTED",
-        )
+        from src.strategy.store import strategy_values
+        assert len(strategy_values().committee_sets["flow_momentum"]) == 5
 
     def test_all_member_names_in_registry(self) -> None:
-        from src.core.params import COMMITTEE_MEMBER_SETS
         from src.strategy.features import FEATURE_REGISTRY
+        from src.strategy.store import strategy_values
         registry_names = {s.name for s in FEATURE_REGISTRY}
-        for members in COMMITTEE_MEMBER_SETS.values():
+        for members in strategy_values().committee_sets.values():
             for name in members:
                 assert name in registry_names, f"{name} not in FEATURE_REGISTRY"
 
@@ -431,7 +421,9 @@ class TestCompoundingAlphaAxesContract:
 
     def test_resolved_committee_members(self) -> None:
         from src.lab.mhs.research_go import _resolved_committee_members
-        from src.core.params import COMMITTEE_MEMBER_SETS
+        from src.strategy.store import strategy_values
+
+        COMMITTEE_MEMBER_SETS = strategy_values().committee_sets
 
         req_v2 = research_baseline(committee_capital=True, committee_member_set="risk_premia")
         assert _resolved_committee_members(req_v2) == COMMITTEE_MEMBER_SETS["risk_premia"]

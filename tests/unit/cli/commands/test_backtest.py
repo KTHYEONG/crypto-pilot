@@ -14,6 +14,7 @@ import pandas as pd
 import pytest
 
 import src.cli.commands.backtest as backtest_mod
+from src.strategy.store import strategy_values
 from src.cli.main import build_root_parser
 from tests.unit.cli.commands._backtest_helpers import (
     _install_strategy,
@@ -96,13 +97,16 @@ def test_backtest_old_frozen_names_rejected() -> None:
     with pytest.raises(SystemExit):
         _parse(["backtest", "mhs-frozen-exposure", "--help"])
 
-@pytest.mark.parametrize(("strategy_id", "breadth", "multiplier"), [
-    ("flow_mom_top20", 20, 1.0),
-    ("flow_mom_top40_control", 40, 1.0),
-    ("flow_mom_top20_growth", 20, 2.5),
+@pytest.mark.parametrize(("strategy_id", "breadth_key", "multiplier_key"), [
+    ("flow_mom_top20", "breadth", None),
+    ("flow_mom_top40_control", "control_breadth", None),
+    ("flow_mom_top20_growth", "breadth", "growth_exposure_multiplier"),
 ])
-def test_registered_strategy_choice_wires_request(tmp_path, monkeypatch, strategy_id, breadth, multiplier) -> None:
+def test_registered_strategy_choice_wires_request(tmp_path, monkeypatch, strategy_id, breadth_key, multiplier_key) -> None:
     """The canonical CLI choice reaches the replay request and its exact target policy."""
+    values = strategy_values()
+    breadth = getattr(values, breadth_key)
+    multiplier = 1.0 if multiplier_key is None else getattr(values, multiplier_key)
     seen = _install_strategy(monkeypatch)
     backtest_mod.run_strategy_backtest_command(_parse([*_strategy_argv(tmp_path), "--strategy", strategy_id]))
     strategy = seen["request"].strategy
@@ -120,7 +124,7 @@ def test_backtest_strategy_breadth_identity(tmp_path: Path, monkeypatch: pytest.
     seen = _install_strategy(monkeypatch)
     backtest_mod.run_strategy_backtest_command(_parse(_strategy_argv(tmp_path)))
     assert seen["request"].strategy.strategy_id == "flow_mom_top20"
-    assert seen["request"].strategy.breadth == 20
+    assert seen["request"].strategy.breadth == strategy_values().breadth
     assert seen["output"] == tmp_path / "strategy.json"
     [redacted]
     backtest_mod.run_strategy_backtest_command(_parse([
@@ -128,19 +132,19 @@ def test_backtest_strategy_breadth_identity(tmp_path: Path, monkeypatch: pytest.
         "--source-start", "2024-01-01", "--start", "2025-01-01", "--end", "2025-02-01",
         [redacted]
     ]))
-    assert seen["request"].strategy.breadth == 40
+    assert seen["request"].strategy.breadth == strategy_values().control_breadth
     [redacted]
     [redacted]
 
 def test_backtest_strategy_growth_variant_selects_registered_policy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """--variant growth selects the registered clip + exposure policy at Top-20 breadth."""
-    from src.core.params import GROWTH_EXPOSURE_MULTIPLIER, STRATEGY_NAME_CLIP
+    from src.strategy.store import strategy_values
 
     seen = _install_strategy(monkeypatch)
     backtest_mod.run_strategy_backtest_command(_parse([*_strategy_argv(tmp_path)[:8], "--variant", "growth", "--output", str(tmp_path / "growth.json")]))
     assert seen["request"].strategy.strategy_id == "flow_mom_top20_growth"
-    assert seen["request"].strategy.exposure_multiplier == GROWTH_EXPOSURE_MULTIPLIER
-    assert seen["request"].strategy.name_clip == STRATEGY_NAME_CLIP
+    assert seen["request"].strategy.exposure_multiplier == strategy_values().growth_exposure_multiplier
+    assert seen["request"].strategy.name_clip == strategy_values().name_clip
     with pytest.raises(SystemExit):
         backtest_mod._strategy_policy(20, "turbo")
 
@@ -459,9 +463,13 @@ def test_neighbor_specs_cover_drops_and_breadths() -> None:
     from src.strategy.targets import FLOW_MOM_TOP20
 
     neighbors = backtest_mod._neighbor_specs(FLOW_MOM_TOP20)
-    assert len(neighbors) == 7
-    assert sorted(n.breadth for n in neighbors if len(n.members) == 5) == [15, 25]
-    assert sorted(len(n.members) for n in neighbors) == [4, 4, 4, 4, 4, 5, 5]
+    n_members = len(FLOW_MOM_TOP20.members)
+    breadth = FLOW_MOM_TOP20.breadth
+    assert len(neighbors) == n_members + 2
+    assert sorted(n.breadth for n in neighbors if len(n.members) == n_members) == [
+        round(breadth * 0.75), round(breadth * 1.25),
+    ]
+    assert sorted(len(n.members) for n in neighbors) == [n_members - 1] * n_members + [n_members] * 2
 
 
 def test_holdout_control_look_is_journaled_beside_primary(tmp_path, monkeypatch) -> None:
@@ -530,11 +538,13 @@ def test_strategy_command_records_trial_and_neighbors(tmp_path, monkeypatch) -> 
     ]
     backtest_mod.run_strategy_backtest_command(_parse(argv))
     rows = (root / "flow_mom.trials.jsonl").read_text(encoding="utf-8").strip().splitlines()
-    assert len(rows) == 1 + 7
+    from src.strategy.targets import FLOW_MOM_TOP20
+
+    assert len(rows) == 1 + len(backtest_mod._neighbor_specs(FLOW_MOM_TOP20))
     run_output = tmp_path / "strategy.json"
     expected = {
         run_output.parent.parent / f"{run_output.parent.name}_neighbor{i}" / "result.json"
-        for i in range(7)
+        for i in range(len(backtest_mod._neighbor_specs(FLOW_MOM_TOP20)))
     }
     assert all(path.exists() for path in expected)
     import json as _json
@@ -610,7 +620,9 @@ def test_neighbor_set_shares_one_source(tmp_path, monkeypatch) -> None:
         "--output", str(tmp_path / "strategy.json"), "--neighbors",
     ]))
     assert len(loads) == 1
-    assert len(seen_sources) == 1 + 7
+    from src.strategy.targets import FLOW_MOM_TOP20
+
+    assert len(seen_sources) == 1 + len(backtest_mod._neighbor_specs(FLOW_MOM_TOP20))
     assert all(source is seen_sources[0] for source in seen_sources)
     assert all(cache is seen_caches[0] for cache in seen_caches)
     assert seen_caches[0] is not None

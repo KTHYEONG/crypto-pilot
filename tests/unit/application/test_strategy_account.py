@@ -57,13 +57,13 @@ def test_account_unit_reference_replays_before_account(tmp_path: Path, monkeypat
 def test_account_candidate_is_unlevered(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The account book is the registered unlevered clip unit book; both replays use its anchors."""
     from src.strategy.targets import FLOW_MOM_TOP20_ACCOUNT_UNIT
-    from src.core.params import STRATEGY_NAME_CLIP
+    from src.strategy.store import strategy_values
 
     seen = _install_strategy_account_fakes(monkeypatch, tmp_path)
     run_account_replay(_account_request(tmp_path))
     assert seen["request"].strategy is FLOW_MOM_TOP20_ACCOUNT_UNIT
     assert seen["request"].strategy.exposure_multiplier == 1.0
-    assert seen["request"].strategy.name_clip == STRATEGY_NAME_CLIP
+    assert seen["request"].strategy.name_clip == strategy_values().name_clip
     assert seen["request"].execution_bound == "OHLCV_IMMEDIATE_TAKER"
     for replay in seen["replays"]:
         pd.testing.assert_index_equal(replay["anchor_times"], seen["anchors"])
@@ -222,7 +222,7 @@ def test_reconcile_boundary_inclusive() -> None:
     """Gaps exactly at tolerance are ok; twice the CAGR tolerance is mismatch."""
     from src.core.params import ACCOUNT_RECON_CAGR_TOLERANCE
 
-    ref = {"strategy_id": "s", "run_dir": "r", "evaluation_start": "a", "evaluation_end": "b", "base_cagr": 0.0, "base_max_drawdown": 0.0, "name_clip": 0.05, "exposure_multiplier": 1.0}
+    ref = {"strategy_id": "s", "run_dir": "r", "evaluation_start": "a", "evaluation_end": "b", "base_cagr": 0.0, "base_max_drawdown": 0.0, "name_clip": 0.06, "exposure_multiplier": 1.0}
     ok = reconcile_unit_reference(ref, unit_cagr=ACCOUNT_RECON_CAGR_TOLERANCE, unit_mdd=0.0)
     assert ok["status"] == "ok"
     bad = reconcile_unit_reference(ref, unit_cagr=2 * ACCOUNT_RECON_CAGR_TOLERANCE, unit_mdd=0.0)
@@ -231,21 +231,21 @@ def test_reconcile_boundary_inclusive() -> None:
 
 def test_reconcile_missing_base_metric_is_mismatch() -> None:
     """A None base CAGR yields mismatch with a null gap."""
-    ref = {"strategy_id": "s", "run_dir": "r", "evaluation_start": "a", "evaluation_end": "b", "base_cagr": None, "base_max_drawdown": 0.05, "name_clip": 0.05, "exposure_multiplier": 1.0}
+    ref = {"strategy_id": "s", "run_dir": "r", "evaluation_start": "a", "evaluation_end": "b", "base_cagr": None, "base_max_drawdown": 0.05, "name_clip": 0.06, "exposure_multiplier": 1.0}
     rec = reconcile_unit_reference(ref, unit_cagr=0.1, unit_mdd=0.05)
     assert rec["status"] == "mismatch"
     assert rec["cagr_gap"] is None
 
 def test_reconcile_drawdown_sign_agnostic() -> None:
     """Negative and positive base drawdowns give identical gaps."""
-    base = {"strategy_id": "s", "run_dir": "r", "evaluation_start": "a", "evaluation_end": "b", "name_clip": 0.05, "exposure_multiplier": 1.0}
+    base = {"strategy_id": "s", "run_dir": "r", "evaluation_start": "a", "evaluation_end": "b", "name_clip": 0.06, "exposure_multiplier": 1.0}
     pos = reconcile_unit_reference({**base, "base_cagr": 0.1, "base_max_drawdown": 0.05}, unit_cagr=0.1, unit_mdd=0.05)
     neg = reconcile_unit_reference({**base, "base_cagr": 0.1, "base_max_drawdown": -0.05}, unit_cagr=0.1, unit_mdd=0.05)
     assert pos["mdd_gap"] == neg["mdd_gap"] == pytest.approx(0.0)
 
 def test_reconcile_pure_and_non_mutating() -> None:
     """Repeated calls agree and the input mapping is unchanged."""
-    ref = {"strategy_id": "s", "run_dir": "r", "evaluation_start": "a", "evaluation_end": "b", "base_cagr": 0.1, "base_max_drawdown": 0.05, "name_clip": 0.05, "exposure_multiplier": 1.0}
+    ref = {"strategy_id": "s", "run_dir": "r", "evaluation_start": "a", "evaluation_end": "b", "base_cagr": 0.1, "base_max_drawdown": 0.05, "name_clip": 0.06, "exposure_multiplier": 1.0}
     before = dict(ref)
     first = reconcile_unit_reference(ref, unit_cagr=0.1, unit_mdd=0.05)
     second = reconcile_unit_reference(ref, unit_cagr=0.1, unit_mdd=0.05)
@@ -254,7 +254,7 @@ def test_reconcile_pure_and_non_mutating() -> None:
 
 def test_reconcile_non_numeric_base_metric_raises() -> None:
     """Unconvertible base metrics raise typed errors."""
-    base = {"strategy_id": "s", "run_dir": "r", "evaluation_start": "a", "evaluation_end": "b", "base_max_drawdown": 0.05, "name_clip": 0.05, "exposure_multiplier": 1.0}
+    base = {"strategy_id": "s", "run_dir": "r", "evaluation_start": "a", "evaluation_end": "b", "base_max_drawdown": 0.05, "name_clip": 0.06, "exposure_multiplier": 1.0}
     with pytest.raises(ValueError, match=r".*"):
         reconcile_unit_reference({**base, "base_cagr": "abc"}, unit_cagr=0.1, unit_mdd=0.05)
     with pytest.raises(TypeError):

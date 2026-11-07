@@ -137,7 +137,7 @@ def test_SCENARIO_LIVE_39_PREFLIGHT_AGGREGATES_ALL_CHECKS_WITHOUT_RAISING(tmp_pa
     )
 
     assert report.passed is False
-    assert len(report.checks) == 9
+    assert len(report.checks) == 10
     assert tuple(c.name for c in report.checks) == (
         "artifact_readable",
         "artifact_covers_decision_time",
@@ -147,9 +147,14 @@ def test_SCENARIO_LIVE_39_PREFLIGHT_AGGREGATES_ALL_CHECKS_WITHOUT_RAISING(tmp_pa
         "position_reconciliation",
         "venue_leverage_plan",
         "tax_collection_ready",
+        "strategy_store",
         "release_gate",
     )
-    assert all(c.passed is False for c in report.checks if c.name not in ("tax_collection_ready", "release_gate"))
+    assert all(
+        c.passed is False
+        for c in report.checks
+        if c.name not in ("tax_collection_ready", "strategy_store", "release_gate")
+    )
     assert {c.name: c for c in report.checks}["tax_collection_ready"].detail == (
         "suppressed mode: simulated tax records"
     )
@@ -371,7 +376,7 @@ def _release_root_with_verdict(tmp_path, verdict: str, evaluation_digest=None, e
     from src.strategy.release import release_path
 
     root = tmp_path / "root"
-    target = root / "src" / "strategy" / "releases"
+    target = root / "crypto-pilot" / "releases"
     target.mkdir(parents=True)
     shutil.copy(release_path("flow_mom_top20"), target / "flow_mom_top20.json")
     raw = json.loads((target / "flow_mom_top20.json").read_text(encoding="utf-8"))
@@ -431,9 +436,9 @@ def test_release_gate_rejects_digest_and_policy_mismatch(tmp_path) -> None:
     from src.live.preflight import release_gate_check
 
     root = _release_root_with_verdict(tmp_path, "accept", evaluation_digest="eval-abc")
-    raw = json.loads((root / "src" / "strategy" / "releases" / "flow_mom_top20.json").read_text(encoding="utf-8"))
+    raw = json.loads((root / "crypto-pilot" / "releases" / "flow_mom_top20.json").read_text(encoding="utf-8"))
     raw["spec_digest"] = "0" * 64
-    (root / "src" / "strategy" / "releases" / "flow_mom_top20.json").write_text(
+    (root / "crypto-pilot" / "releases" / "flow_mom_top20.json").write_text(
         json.dumps(raw, indent=2, sort_keys=True), encoding="utf-8"
     )
     settings = _live_settings_for_tax_gate(tmp_path, "live_mainnet", enabled=True)
@@ -441,7 +446,7 @@ def test_release_gate_rejects_digest_and_policy_mismatch(tmp_path) -> None:
     assert release_gate_check(settings, root=root).passed is False
 
     root2 = _release_root_with_verdict(tmp_path / "other", "accept", evaluation_digest="eval-abc")
-    accepted = root2 / "src" / "strategy" / "releases" / "flow_mom_top20.json"
+    accepted = root2 / "crypto-pilot" / "releases" / "flow_mom_top20.json"
     raw = json.loads(accepted.read_text(encoding="utf-8"))
     raw["sizing"]["execution_policy"] = "taker_parity"
     accepted.write_text(json.dumps(raw, indent=2, sort_keys=True), encoding="utf-8")
@@ -489,7 +494,7 @@ def _amended_release_root(tmp_path, *, spec_digest: str, amendments: list[dict])
     import json
 
     root = _release_root_with_verdict(tmp_path, "accept", evaluation_digest="eval-abc")
-    path = root / "src" / "strategy" / "releases" / "flow_mom_top20.json"
+    path = root / "crypto-pilot" / "releases" / "flow_mom_top20.json"
     raw = json.loads(path.read_text(encoding="utf-8"))
     raw["spec_digest"] = spec_digest
     raw["implementation_amendments"] = amendments
@@ -525,7 +530,7 @@ def test_gate_accepts_amended_digest(tmp_path) -> None:
     from src.strategy.targets import FLOW_MOM_TOP20
 
     current_root = _release_root_with_verdict(tmp_path / "current", "accept", evaluation_digest="eval-abc")
-    raw = json.loads((current_root / "src" / "strategy" / "releases" / "flow_mom_top20.json").read_text(encoding="utf-8"))
+    raw = json.loads((current_root / "crypto-pilot" / "releases" / "flow_mom_top20.json").read_text(encoding="utf-8"))
     running = strategy_spec_digest(FLOW_MOM_TOP20, raw["sizing"])
     root = _amended_release_root(
         tmp_path / "amended", spec_digest="a" * 64,

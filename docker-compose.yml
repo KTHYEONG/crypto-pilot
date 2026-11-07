@@ -8,6 +8,7 @@ services:
     stop_grace_period: 120s
     env_file: /home/ubuntu/quant-secrets/crypto-pilot.env
     environment:
+      - CRYPTO_STRATEGY_STORE=/run/strategy-store/current
       - HOME=/tmp
       - UV_CACHE_DIR=/tmp/uv-cache
       - LIVE_MODE=paper
@@ -17,6 +18,7 @@ services:
       - LIVE_RECORD_RUN_ID=frozen_top20_v2_repeg_fillcap_20261002
       - LIVE_TAX_COLLECTION_ENABLED=false
     volumes:
+      - /home/ubuntu/quant-strategy-store:/run/strategy-store:ro
       - ./data:/app/data
       - ./data/state:/app/data/state
       - ./logs:/app/logs

@@ -100,13 +100,7 @@ FEATURE_MIN_COVERAGE: float = 0.90
 
 
 
-COMMITTEE_MEMBER_SETS: dict[str, tuple[str, ...]] = {}  # chosen sets live in the private strategy store
-
-COMMITTEE_DEFAULT_MEMBER_SET: str = "flow_momentum"
-
-COMMITTEE_MEMBERS: tuple[str, ...] = COMMITTEE_MEMBER_SETS[
-    COMMITTEE_DEFAULT_MEMBER_SET
-]
+# Committee member sets, chosen strategy values and the strategy multipliers live in the strategy store (src/strategy/store.py).
 
 COMMITTEE_TARGET_VOL: float = 0.15
 COMMITTEE_TARGET_GROSS: float = 0.92
@@ -301,12 +295,6 @@ PANEL_MIN_HISTORY_BARS: int = UNIVERSE_ELIGIBILITY_MIN_HISTORY_BARS
 DEFAULT_DETAIL_RETENTION_MAX_BYTES: int | None = None
 DEFAULT_DETAIL_RETENTION_MAX_RUNS: int | None = 1
 
-# --- strategy growth policy ------------------------------------------------------
-# (research note moved to the private strategy store)
-STRATEGY_NAME_CLIP: float = None  # private strategy store
-# (research note moved to the private strategy store)
-# 전략 북이나 데이터가 바뀌면 동일 부트스트랩으로 반드시 재도출해야 한다.
-GROWTH_EXPOSURE_MULTIPLIER: float = None  # private strategy store
 # 이웃 설정 Sharpe 정점 대비 선택 편향으로 깎이는 평균 비율.
 EXPOSURE_SCAN_MEAN_HAIRCUT: float = 0.25
 # 하루 만에 이름값의 절반 이상이 움직이면 헷지로 막을 수 없는 갭으로 본다.

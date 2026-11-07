@@ -215,14 +215,14 @@ def test_choices_come_from_registries() -> None:
     from src.core.panel import DATA_POLICIES
     from src.core.params import (
         CLI_GROWTH_ENVELOPE_DEFAULT,
-        COMMITTEE_MEMBER_SETS,
         GROWTH_RISK_ENVELOPES,
     )
+    from src.strategy.store import strategy_values
 
     by_name = {f.name: f for f in dataclasses.fields(MhsDiagnosticRequest)}
     assert by_name["growth_envelope"].metadata["choices"] == tuple(sorted(GROWTH_RISK_ENVELOPES))
     assert CLI_GROWTH_ENVELOPE_DEFAULT in by_name["growth_envelope"].metadata["choices"]
-    assert by_name["committee_member_set"].metadata["choices"] == tuple(sorted(COMMITTEE_MEMBER_SETS))
+    assert by_name["committee_member_set"].metadata["choices"] == tuple(sorted(strategy_values().committee_sets))
     assert set(by_name["data_policy"].metadata["choices"]) == set(DATA_POLICIES)
     assert len(by_name["pnl_vol_target_mode"].metadata["choices"]) == 4
     assert "constant_risk" in by_name["pnl_vol_target_mode"].metadata["choices"]

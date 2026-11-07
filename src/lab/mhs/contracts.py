@@ -11,13 +11,11 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal
 
 from src.core.data_policy import MHS_DATA_POLICY_DEFAULT
 from src.core.params import (
     CLI_GROWTH_ENVELOPE_DEFAULT,
-    COMMITTEE_DEFAULT_MEMBER_SET,
-    COMMITTEE_MEMBER_SETS,
     COMMITTEE_TARGET_GROSS,
     COMMITTEE_TRANCHE_COUNT,
     FUNDING_CARRY_SLEEVE_WEIGHT,
@@ -25,6 +23,7 @@ from src.core.params import (
 )
 from src.core.resources import MhsResourceMeasurement as MhsResourceMeasurement
 from src.lab.mhs.params import CLI_EXECUTION_UNIVERSE_SIZE_DEFAULT
+from src.strategy.store import strategy_values
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -451,8 +450,8 @@ class MhsDiagnosticRequest:
             ),
         ),
     )
-    committee_member_set: Literal["risk_premia", "flow_momentum"] = field(
-        default=cast(Literal["risk_premia", "flow_momentum"], COMMITTEE_DEFAULT_MEMBER_SET),
+    committee_member_set: str = field(
+        default=strategy_values().committee_default,
         metadata=cli_param(
             flag="--committee-member-set",
             help=(
@@ -462,7 +461,7 @@ class MhsDiagnosticRequest:
                 "STRESS_SHARPE_NOT_POSITIVE folds, see ADR_20260820_MHS_COMPOUNDING_ALPHA_AXES). "
                 "Requires --committee-capital (on by default)"
             ),
-            choices=tuple(sorted(COMMITTEE_MEMBER_SETS)),
+            choices=tuple(sorted(strategy_values().committee_sets)),
         ),
     )
     committee_tranche_smoothing: bool = field(

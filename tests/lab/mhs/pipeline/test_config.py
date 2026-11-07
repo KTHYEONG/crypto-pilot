@@ -52,9 +52,9 @@ def test_config_defaults_match_cli_derived():
 
 def test_member_set_values():
     """Registered committee member sets have no _v<N> suffix (I_NOVERSION)."""
-    from src.core.params import COMMITTEE_MEMBER_SETS
+    from src.strategy.store import strategy_values
 
-    assert set(COMMITTEE_MEMBER_SETS) == {"risk_premia", "flow_momentum"}
+    assert set(strategy_values().committee_sets) == {"risk_premia", "flow_momentum"}
 
 
 def test_from_namespace_no_arg_cli_matches_bare_config():

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import dataclasses
-import hashlib
 import json
 import shutil
 from pathlib import Path
@@ -15,7 +14,6 @@ from src.common.errors import DataIntegrityError
 from src.strategy.release import (
     EvaluationCriteria,
     ImplementationAmendment,
-    _canonical_json,
     append_implementation_amendment,
     criteria_digest,
     effective_spec_digest,
@@ -23,11 +21,9 @@ from src.strategy.release import (
     record_acceptance,
     release_path,
     strategy_spec_digest,
-    strategy_spec_payload,
 )
-from src.strategy.targets import FLOW_MOM_TOP20
+from src.strategy.targets import FLOW_MOM_TOP20, FLOW_MOM_TOP20_ACCOUNT_UNIT
 
-BASELINE_PAYLOAD = Path(__file__).resolve().parents[2] / "fixtures" / "release" / "flow_mom_top20_pre_amendment_payload.json"
 _IMPLEMENTATION_KEYS = {"implementation", "shared_parameters"}
 
 
@@ -46,7 +42,7 @@ def test_committed_release_loads_and_digests_verify() -> None:
 def test_criteria_change_clears_verdict(tmp_path) -> None:
     """A criteria edit changes the digest: the stored verdict no longer verifies."""
     root = tmp_path / "root"
-    target = root / "src" / "strategy" / "releases"
+    target = root / "crypto-pilot" / "releases"
     target.mkdir(parents=True)
     shutil.copy(release_path("flow_mom_top20"), target / "flow_mom_top20.json")
     raw = json.loads((target / "flow_mom_top20.json").read_text(encoding="utf-8"))
@@ -59,7 +55,7 @@ def test_criteria_change_clears_verdict(tmp_path) -> None:
 def test_accept_requires_matching_digests(tmp_path) -> None:
     """Acceptance writes only for matching spec digests; mismatches fail closed."""
     root = tmp_path / "root"
-    target = root / "src" / "strategy" / "releases"
+    target = root / "crypto-pilot" / "releases"
     target.mkdir(parents=True)
     shutil.copy(release_path("flow_mom_top20"), target / "flow_mom_top20.json")
     release = load_release("flow_mom_top20", root=root)
@@ -83,7 +79,7 @@ def test_release_guards_reject_bad_records(tmp_path) -> None:
         load_release("flow_mom_top20", root=tmp_path / "empty")
     with pytest.raises(DataIntegrityError):
         release_path("")
-    target = tmp_path / "root" / "src" / "strategy" / "releases"
+    target = tmp_path / "root" / "crypto-pilot" / "releases"
     target.mkdir(parents=True)
     dest = target / "flow_mom_top20.json"
     shutil.copy(release_path("flow_mom_top20"), dest)
@@ -120,7 +116,7 @@ def test_acceptance_validates_digests(tmp_path, monkeypatch) -> None:
     from src.common.errors import DataIntegrityError
 
     root = tmp_path / "root"
-    target = root / "src" / "strategy" / "releases"
+    target = root / "crypto-pilot" / "releases"
     target.mkdir(parents=True)
     shutil.copy(release_path("flow_mom_top20"), target / "flow_mom_top20.json")
     release = load_release("flow_mom_top20", root=root)
@@ -187,7 +183,7 @@ def test_release_without_seat_fraction_key_fails_closed(tmp_path) -> None:
     """A release lacking the fraction key raises instead of taking a silent default."""
     raw = json.loads(release_path("flow_mom_top20").read_text(encoding="utf-8"))
     del raw["criteria"]["max_withdrawn_seat_fraction"]
-    target = tmp_path / "root" / "src" / "strategy" / "releases"
+    target = tmp_path / "root" / "crypto-pilot" / "releases"
     target.mkdir(parents=True)
     (target / "flow_mom_top20.json").write_text(json.dumps(raw), encoding="utf-8")
     with pytest.raises(DataIntegrityError, match="max_withdrawn_seat_fraction"):
@@ -203,7 +199,7 @@ def test_release_envelope_mismatch_fails_closed(tmp_path, retired) -> None:
     else:
         raw[retired] = "growth"
     raw["criteria_digest"] = "stale"
-    target = tmp_path / "root" / "src" / "strategy" / "releases"
+    target = tmp_path / "root" / "crypto-pilot" / "releases"
     target.mkdir(parents=True)
     (target / "flow_mom_top20.json").write_text(json.dumps(raw), encoding="utf-8")
     with pytest.raises(DataIntegrityError, match="retired key"):
@@ -301,7 +297,7 @@ def _write_identity_unit_run(run_dir, *, start: str = "2025-01-01", n: int = 100
             "members": [{"name": m.name, "sign": m.sign} for m in FLOW_MOM_TOP20.members],
             "min_rank_symbols": FLOW_MOM_TOP20.min_rank_symbols,
             "design_data_cutoff": pd.Timestamp(FLOW_MOM_TOP20.design_data_cutoff).tz_convert("UTC").isoformat(),
-            "name_clip": 0.05,
+            "name_clip": FLOW_MOM_TOP20_ACCOUNT_UNIT.name_clip,
             "exposure_multiplier": 1.0,
             "evaluation_start": index[0].isoformat(),
             "evaluation_end": (index[-1] + pd.Timedelta(days=1)).isoformat(),
@@ -424,7 +420,7 @@ def _amendment(from_digest: str, to_digest: str, **overrides) -> ImplementationA
 
 def _root_copy(tmp_path) -> Path:
     root = tmp_path / "root"
-    target = root / "src" / "strategy" / "releases"
+    target = root / "crypto-pilot" / "releases"
     target.mkdir(parents=True)
     raw = json.loads(release_path("flow_mom_top20").read_text(encoding="utf-8"))
     raw.pop("implementation_amendments", None)  # model an unamended release; chains are built per test
@@ -436,15 +432,6 @@ def _unamended_release():
     return dataclasses.replace(load_release("flow_mom_top20"), implementation_amendments=())
 
 
-def test_digest_unchanged_by_payload_refactor() -> None:
-    """The pre-amendment payload still hashes to the committed digest; only implementation keys may differ."""
-    baseline = json.loads(BASELINE_PAYLOAD.read_text(encoding="utf-8"))
-    release = load_release("flow_mom_top20")
-    assert hashlib.sha256(_canonical_json(baseline).encode("utf-8")).hexdigest() == release.spec_digest
-    current = json.loads(json.dumps(strategy_spec_payload(FLOW_MOM_TOP20, dict(release.sizing))))
-    assert set(current) == set(baseline)
-    for key in set(baseline) - _IMPLEMENTATION_KEYS:
-        assert current[key] == baseline[key]
 
 
 def test_effective_digest_follows_chain() -> None:

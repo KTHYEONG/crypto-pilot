@@ -66,7 +66,7 @@ unit = book.unit_weights
 unit.to_parquet(out)
 pre = pre_clip[0].reindex(unit.index + pd.Timedelta(days=1))
 pd.DataFrame(pre.to_numpy(dtype="float64"), index=unit.index, columns=pre.columns).to_parquet(out + ".preclip.parquet")
-release = load_release(FLOW_MOM_TOP20.strategy_id, root=Path(tree))
+release = load_release(FLOW_MOM_TOP20.strategy_id)
 sizing = dict(release.sizing)
 payload = release_mod.strategy_spec_payload(FLOW_MOM_TOP20, sizing) if hasattr(release_mod, "strategy_spec_payload") else None
 print(json.dumps({"digest": strategy_spec_digest(FLOW_MOM_TOP20, sizing), "payload": payload, "pandas": pd.__version__}, sort_keys=True, default=str))
@@ -235,7 +235,7 @@ def _git(*args: str) -> str:
 
 
 def run(args: argparse.Namespace) -> int:
-    from src.core.params import BOOK_DEGENERATE_GROSS_RTOL, LIVE_SIGNAL_WARMUP_DAYS, STRATEGY_NAME_CLIP
+    from src.core.params import BOOK_DEGENERATE_GROSS_RTOL, LIVE_SIGNAL_WARMUP_DAYS
     from src.strategy.books import clip_names_preserving_gross
     from src.strategy.release import (
         ImplementationAmendment,
@@ -243,6 +243,7 @@ def run(args: argparse.Namespace) -> int:
         effective_spec_digest,
         load_release,
     )
+    from src.strategy.store import refuse_example_store, strategy_values
 
     data_root = Path(args.data_root).resolve()
     baseline_commit = _git("rev-parse", "--verify", f"{args.baseline_commit}^{{commit}}")
@@ -255,7 +256,7 @@ def run(args: argparse.Namespace) -> int:
         start, end = pd.Timestamp(args.start, tz="UTC"), pd.Timestamp(args.end, tz="UTC")
     else:
         start, end = default_window(data_root, int(LIVE_SIGNAL_WARMUP_DAYS))
-    release = load_release(_STRATEGY_ID, root=ROOT)
+    release = load_release(_STRATEGY_ID)
     accepted = effective_spec_digest(release)
 
     warmup = pd.Timedelta(days=int(LIVE_SIGNAL_WARMUP_DAYS))
@@ -303,7 +304,7 @@ def run(args: argparse.Namespace) -> int:
         pre_part = compare_unit_weights(b_pre, c_pre)
         rows, _ = divergent_rows(b_frame, c_frame)
         attributed += attribute_rows_to_noise(
-            b_pre, c_frame, rows, clip_fn=clip_names_preserving_gross, clip=float(STRATEGY_NAME_CLIP),
+            b_pre, c_frame, rows, clip_fn=clip_names_preserving_gross, clip=float(strategy_values().name_clip),
             noise_rtol=float(BOOK_DEGENERATE_GROSS_RTOL),
         )
         kept = np.setdiff1d(np.arange(len(b_frame)), rows)
@@ -344,6 +345,7 @@ def run(args: argparse.Namespace) -> int:
     print(f"evidence={evidence_path} sha256={evidence_sha256}")
 
     if args.record:
+        refuse_example_store("release equivalence record")
         amendment = ImplementationAmendment(
             from_spec_digest=base["digest"],
             to_spec_digest=cand["digest"],
@@ -356,7 +358,7 @@ def run(args: argparse.Namespace) -> int:
             max_abs_diff=float(stats["max_abs_diff"]),
             recorded_at=dt.datetime.now(dt.UTC).isoformat(),
         )
-        append_implementation_amendment(_STRATEGY_ID, amendment, root=ROOT)
+        append_implementation_amendment(_STRATEGY_ID, amendment)
         print(f"recorded amendment {base['digest'][:12]} -> {cand['digest'][:12]}")
     return 0
 

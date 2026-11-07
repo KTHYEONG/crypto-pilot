@@ -20,7 +20,10 @@ from src.lab.mhs.research_go import (
     _resolved_committee_members,
     _resolved_growth_envelope,
 )
-from src.core.params import COMMITTEE_MEMBER_SETS, GROWTH_RISK_ENVELOPES
+from src.core.params import GROWTH_RISK_ENVELOPES
+from src.strategy.store import strategy_values
+
+COMMITTEE_MEMBER_SETS = strategy_values().committee_sets
 from src.core.types import REGISTERED_POLICY_THRESHOLDS
 
 

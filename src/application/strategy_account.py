@@ -405,7 +405,7 @@ def _reconcile_account_unit(request: AccountReplayRequest, strategy: Any, unit: 
 def run_account_replay(request: AccountReplayRequest) -> AccountReplayReport:
     """Replay the strategy account-unit book as one real account and persist account-scale evidence.
 
-    Builds the unlevered clip-0.05 `FLOW_MOM_TOP20_ACCOUNT_UNIT` candidate and first
+    Builds the unlevered store-clipped `FLOW_MOM_TOP20_ACCOUNT_UNIT` candidate and first
     replays it as the unit-exposure reference ledger. That ledger supplies the causal posterior
     moments the growth policy sizes from and anchors reconciliation against the canonical 3m
     ledger, so its failure or liquidation invalidates the account run. The account is then

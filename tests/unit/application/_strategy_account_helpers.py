@@ -107,11 +107,15 @@ def _write_catalog_index(tmp_path: Path, rows: list[dict]) -> Path:
 
 def _write_same_book_reference(
     tmp_path: Path, index: Path, *, run_dir: str = "runs/ref", execution: str | None = None,
-    name_clip: float | None = 0.05, exposure_multiplier: float | None = 1.0,
+    name_clip: float | None | object = ..., exposure_multiplier: float | None = 1.0,
     base_cagr: float | None = None, base_mdd: float | None = None,
     evaluation_start: str = "2025-01-01T00:00:00+00:00",
     evaluation_end: str = "2025-02-01T00:00:00+00:00",
 ) -> dict:
+    if name_clip is ...:
+        from src.strategy.targets import FLOW_MOM_TOP20_ACCOUNT_UNIT
+
+        name_clip = FLOW_MOM_TOP20_ACCOUNT_UNIT.name_clip
     row: dict = {
         "kind": "mhs_frozen", "strategy_id": "frozen_mhs_top20_v2", "run_dir": run_dir,
         "evaluation_start": evaluation_start, "evaluation_end": evaluation_end,

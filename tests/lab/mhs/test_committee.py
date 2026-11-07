@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from src.strategy.store import strategy_values
+
 import itertools
 import math
 
@@ -21,7 +23,7 @@ from src.lab.mhs.committee import (
     volatility_target_scale,
     wealth_metrics,
 )
-from src.core.types import COMMITTEE_MEMBERS, COMMITTEE_OOS_START
+from src.core.types import COMMITTEE_OOS_START
 from src.strategy.features import FEATURE_REGISTRY
 
 _PPY = 365.0 * 24.0
@@ -138,7 +140,7 @@ def test_wealth_metrics_compound_correctly() -> None:
     n = 365 * 24
     r = pd.Series(np.full(n, 0.0001), index=_hourly_index(n))
     m = wealth_metrics(r, _PPY)
-    expected_cagr = (1.0001 ** n) ** (_PPY / n) - 1.0
+    expected_cagr = (1.0001**n) ** (_PPY / n) - 1.0
     assert m["cagr"] == pytest.approx(expected_cagr, rel=1e-9)
     assert m["mdd"] == pytest.approx(0.0)
     assert m["logret"] == pytest.approx(n * math.log1p(0.0001), rel=1e-9)
@@ -150,9 +152,7 @@ def test_wealth_metrics_compound_correctly() -> None:
     r3 = pd.Series([-1.0, 0.0, 0.5])
     m3 = wealth_metrics(r3, _PPY)
     assert np.isfinite(m3["logret"])
-    assert m3["logret"] == pytest.approx(
-        math.log1p(-0.99) + math.log1p(0.0) + math.log1p(0.5), rel=1e-9
-    )
+    assert m3["logret"] == pytest.approx(math.log1p(-0.99) + math.log1p(0.0) + math.log1p(0.5), rel=1e-9)
     # cagr uses the unfloored -1.0, so equity reaches zero
     assert m3["cagr"] == pytest.approx(-1.0)
 
@@ -283,7 +283,12 @@ def test_purged_walk_forward_excludes_purge_window(monkeypatch) -> None:
     monkeypatch.setattr(committee, "long_only_equal_risk_weights", spy)
 
     result = purged_walk_forward(
-        gross, tc, 4.18, edges, purge, min_train_bars=min_train_bars,
+        gross,
+        tc,
+        4.18,
+        edges,
+        purge,
+        min_train_bars=min_train_bars,
     )
     # The 2022-02-01 block has ~17 days of train (< 500 bars) and is skipped.
     assert len(captured) == 2
@@ -296,7 +301,12 @@ def test_purged_walk_forward_excludes_purge_window(monkeypatch) -> None:
     # A block whose test window is empty is skipped rather than raising.
     beyond = pd.Timestamp("2023-02-01", tz="UTC")
     res2 = purged_walk_forward(
-        gross, tc, 4.18, [edges[1], beyond], purge, min_train_bars=min_train_bars,
+        gross,
+        tc,
+        4.18,
+        [edges[1], beyond],
+        purge,
+        min_train_bars=min_train_bars,
     )
     assert bool((res2.index < beyond).all())
 
@@ -304,7 +314,12 @@ def test_purged_walk_forward_excludes_purge_window(monkeypatch) -> None:
         purged_walk_forward(gross, tc, 4.18, [], purge, min_train_bars=min_train_bars)
     with pytest.raises(ValueError, match="strictly ascending"):
         purged_walk_forward(
-            gross, tc, 4.18, [edges[1], edges[0]], purge, min_train_bars=min_train_bars,
+            gross,
+            tc,
+            4.18,
+            [edges[1], edges[0]],
+            purge,
+            min_train_bars=min_train_bars,
         )
     with pytest.raises(ValueError, match="purge"):
         purged_walk_forward(gross, tc, 4.18, edges, pd.Timedelta(0), min_train_bars=min_train_bars)
@@ -326,7 +341,12 @@ def test_purged_walk_forward_scales_by_train_vol_only() -> None:
     edges = [pd.Timestamp("2022-10-01", tz="UTC")]
     min_train_bars = 100
     result = purged_walk_forward(
-        gross, tc, 4.18, edges, purge, min_train_bars=min_train_bars,
+        gross,
+        tc,
+        4.18,
+        edges,
+        purge,
+        min_train_bars=min_train_bars,
     )
 
     c = 2.5
@@ -336,7 +356,12 @@ def test_purged_walk_forward_scales_by_train_vol_only() -> None:
     gross_scaled.loc[test_rows, ["A", "B"]] *= c
     tc_scaled.loc[test_rows, ["A", "B"]] *= c
     result_scaled = purged_walk_forward(
-        gross_scaled, tc_scaled, 4.18, edges, purge, min_train_bars=min_train_bars,
+        gross_scaled,
+        tc_scaled,
+        4.18,
+        edges,
+        purge,
+        min_train_bars=min_train_bars,
     )
     pd.testing.assert_series_equal(result_scaled, result * c, check_dtype=False)
 
@@ -350,7 +375,12 @@ def test_purged_walk_forward_scales_by_train_vol_only() -> None:
     gross_zero = pd.DataFrame({"A": x, "B": -x}, index=idx)
     tc_zero = pd.DataFrame({"A": 0.0, "B": 0.0}, index=idx)
     res_zero = purged_walk_forward(
-        gross_zero, tc_zero, 4.18, edges, purge, min_train_bars=min_train_bars,
+        gross_zero,
+        tc_zero,
+        4.18,
+        edges,
+        purge,
+        min_train_bars=min_train_bars,
     )
     assert len(res_zero) == len(result)
     assert (res_zero == 0.0).all()
@@ -366,7 +396,13 @@ def test_purged_walk_forward_default_sizing_mode_byte_identical() -> None:
     edges = [pd.Timestamp("2022-10-01", tz="UTC")]
     default = purged_walk_forward(gross, tc, 4.18, edges, purge, min_train_bars=100)
     explicit = purged_walk_forward(
-        gross, tc, 4.18, edges, purge, min_train_bars=100, sizing_mode="vol_target",
+        gross,
+        tc,
+        4.18,
+        edges,
+        purge,
+        min_train_bars=100,
+        sizing_mode="vol_target",
     )
     pd.testing.assert_series_equal(default, explicit)
 
@@ -381,7 +417,13 @@ def test_purged_walk_forward_kelly_blend_changes_output() -> None:
     edges = [pd.Timestamp("2022-10-01", tz="UTC")]
     vol = purged_walk_forward(gross, tc, 4.18, edges, purge, min_train_bars=100)
     kelly = purged_walk_forward(
-        gross, tc, 4.18, edges, purge, min_train_bars=100, sizing_mode="kelly_blend",
+        gross,
+        tc,
+        4.18,
+        edges,
+        purge,
+        min_train_bars=100,
+        sizing_mode="kelly_blend",
     )
     assert kelly.index.equals(vol.index)
     assert not kelly.equals(vol)
@@ -395,28 +437,34 @@ def test_purged_walk_forward_invalid_sizing_mode_raises() -> None:
     edges = [pd.Timestamp("2022-10-01", tz="UTC")]
     with pytest.raises(ValueError, match="sizing_mode"):
         purged_walk_forward(
-            gross, tc, 4.18, edges, purge, min_train_bars=100, sizing_mode="bogus",
+            gross,
+            tc,
+            4.18,
+            edges,
+            purge,
+            min_train_bars=100,
+            sizing_mode="bogus",
         )
 
 
 def test_committee_members_resolve_in_feature_registry() -> None:
     # SCENARIO_COMMITTEE_MEMBERS_RESOLVE_IN_FEATURE_REGISTRY and
     # SCENARIO_MHS_COMMITTEE_MEMBERS_SPAN_THREE_FAMILIES_AFTER_K5: every name in
-    # COMMITTEE_MEMBERS resolves to exactly one FeatureSpec in
+    # strategy_values().committee_members resolves to exactly one FeatureSpec in
     # FEATURE_REGISTRY, the k=5 tuple has 5 unique entries (xs_mom_720h
     # removed as rank-invariant no-op), and it spans at least 3 distinct economic
     # families -- the composition invariant that stops the committee from
     # silently collapsing into one family.
-    assert len(COMMITTEE_MEMBERS) == 5
-    assert len(set(COMMITTEE_MEMBERS)) == 5
+    assert len(strategy_values().committee_members) == 5
+    assert len(set(strategy_values().committee_members)) == 5
     registry_names = {spec.name for spec in FEATURE_REGISTRY}
-    assert set(COMMITTEE_MEMBERS) <= registry_names
-    for member in COMMITTEE_MEMBERS:
+    assert set(strategy_values().committee_members) <= registry_names
+    for member in strategy_values().committee_members:
         matches = [spec for spec in FEATURE_REGISTRY if spec.name == member]
         assert len(matches) == 1
 
     families = set()
-    for member in COMMITTEE_MEMBERS:
+    for member in strategy_values().committee_members:
         if member.startswith("flow_"):
             families.add("order_flow")
         elif member.startswith(("xs_mom", "xs_idio_mom")):
@@ -430,6 +478,7 @@ def test_committee_members_resolve_in_feature_registry() -> None:
         else:
             families.add(member)
     assert len(families) >= 3
+
 
 def test_committee_block_edges_from_anchored_at_oos_start() -> None:
     # SCENARIO_COMMITTEE_BLOCK_EDGES_ANCHORED_AT_OOS_START (B1): the walk-forward
@@ -481,7 +530,8 @@ def test_evidence_weights_favor_stronger_member() -> None:
     noise = pd.Series(rng.normal(0.0, 0.01, n), index=idx)
 
     weights = train_evidence_weights(
-        {"strong": strong, "weak": weak, "noise": noise}, train_mask,
+        {"strong": strong, "weak": weak, "noise": noise},
+        train_mask,
     )
     assert weights["strong"] > weights["weak"] > weights["noise"]
     assert all(w >= 0.0 for w in weights.values())
@@ -545,7 +595,9 @@ def test_evidence_weights_reject_invalid_input() -> None:
     flat_series = pd.Series(1.0, index=idx)
     neg_series = pd.Series(-0.01, index=idx)
     w = train_evidence_weights(
-        {"nan_col": nan_series, "flat": flat_series, "neg": neg_series}, mask, min_train_rows=30,
+        {"nan_col": nan_series, "flat": flat_series, "neg": neg_series},
+        mask,
+        min_train_rows=30,
     )
     assert w["nan_col"] == pytest.approx(1 / 3, abs=1e-12)
     assert w["flat"] == pytest.approx(1 / 3, abs=1e-12)

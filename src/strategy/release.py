@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any
 import pandas as pd
 
 from src.common.errors import DataIntegrityError
+from src.strategy.store import releases_dir_of, releases_root
 
 if TYPE_CHECKING:
     from src.strategy.targets import StrategySpec
@@ -195,10 +196,10 @@ def strategy_signal_digest(spec: StrategySpec) -> str:
 
 
 def releases_dir(root: Path | None = None) -> Path:
-    base = Path(root) if root is not None else Path(__file__).resolve().parents[1]
-    if root is not None:
-        return Path(root) / "src" / "strategy" / RELEASES_DIRNAME
-    return base / "strategy" / RELEASES_DIRNAME
+    """Release ledger directory of the store ``root``, or of the active strategy store when None."""
+    if root is None:
+        return releases_root()
+    return releases_dir_of(Path(root))
 
 
 def release_path(strategy_id: str, *, root: Path | None = None) -> Path:

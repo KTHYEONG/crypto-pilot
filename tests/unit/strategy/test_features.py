@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from src.strategy.store import strategy_values
+
 import itertools
 
 import numpy as np
@@ -27,14 +29,17 @@ _SYMBOLS = ("A", "B", "C", "D", "E", "F", "G", "H", "I", "J")
 
 
 def _signal_panel(
-    n: int = 2000, seed: int = 0, start: str = "2021-01-01",
+    n: int = 2000,
+    seed: int = 0,
+    start: str = "2021-01-01",
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Deterministic hourly log-close panel + all-True mask on 10 symbols."""
     idx = pd.date_range(start, periods=n, freq="1h", tz="UTC")
     rng = np.random.default_rng(seed)
     log_close = pd.DataFrame(
         np.cumsum(rng.normal(0.0, 0.005, (n, len(_SYMBOLS))), axis=0),
-        index=idx, columns=_SYMBOLS,
+        index=idx,
+        columns=_SYMBOLS,
     )
     mask = pd.DataFrame(True, index=idx, columns=_SYMBOLS)
     return log_close, mask
@@ -51,10 +56,12 @@ def _momentum_spec(min_coverage: float = 0.90) -> FeatureSpec:
 
 def _gap_spec() -> FeatureSpec:
     """Builder whose feature is NaN in every calendar year after 2021."""
+
     def _build(panels: dict[str, pd.DataFrame]) -> pd.DataFrame:
         close = panels["close"]
         keep = pd.Series(close.index.year == 2021, index=close.index)
         return close.where(keep, axis=0)
+
     return FeatureSpec(
         name="gap_feature",
         required_columns=("close",),
@@ -125,14 +132,22 @@ def test_build_feature_books_excludes_low_coverage_fail_closed() -> None:
     covered = _momentum_spec()
     gap = _gap_spec()
     books = build_feature_books(
-        [gap, covered], {"close": close}, mask, decision_grid, min_symbols=8,
+        [gap, covered],
+        {"close": close},
+        mask,
+        decision_grid,
+        min_symbols=8,
     )
     assert set(books) == {"mom_168h"}
     assert "gap_feature" not in books
 
     with pytest.raises(ValueError, match="required_columns"):
         build_feature_books(
-            [_momentum_spec()], {"open": close}, mask, decision_grid, min_symbols=8,
+            [_momentum_spec()],
+            {"open": close},
+            mask,
+            decision_grid,
+            min_symbols=8,
         )
 
 
@@ -147,11 +162,19 @@ def test_build_feature_books_coverage_cutoff_ignores_post_cutoff_gap() -> None:
     decision_grid = pd.date_range(close.index[0], close.index[-1], freq="24h", tz="UTC")
     gap = _gap_spec()
     books_no_cutoff = build_feature_books(
-        [gap], {"close": close}, mask, decision_grid, min_symbols=8,
+        [gap],
+        {"close": close},
+        mask,
+        decision_grid,
+        min_symbols=8,
     )
     assert "gap_feature" not in books_no_cutoff
     books_with_cutoff = build_feature_books(
-        [gap], {"close": close}, mask, decision_grid, min_symbols=8,
+        [gap],
+        {"close": close},
+        mask,
+        decision_grid,
+        min_symbols=8,
         coverage_cutoff=pd.Timestamp("2022-01-01", tz="UTC"),
     )
     assert "gap_feature" in books_with_cutoff
@@ -167,7 +190,11 @@ def test_build_feature_books_are_dollar_neutral_on_decision_grid() -> None:
     close = np.exp(log_close)
     decision_grid = pd.date_range(close.index[0], close.index[-1], freq="24h", tz="UTC")
     books = build_feature_books(
-        [_momentum_spec()], {"close": close}, mask, decision_grid, min_symbols=8,
+        [_momentum_spec()],
+        {"close": close},
+        mask,
+        decision_grid,
+        min_symbols=8,
     )
     book = books["mom_168h"]
     assert book.index.equals(close.index)
@@ -188,7 +215,8 @@ def test_build_feature_books_are_dollar_neutral_on_decision_grid() -> None:
         stamp_row = book.loc[a]
         expected = pd.DataFrame(
             np.tile(stamp_row.to_numpy(), (len(between), 1)),
-            index=between.index, columns=between.columns,
+            index=between.index,
+            columns=between.columns,
         )
         pd.testing.assert_frame_equal(between, expected, check_dtype=False)
 
@@ -238,7 +266,8 @@ def test_equal_risk_combination_preserves_dollar_neutrality() -> None:
     mismatched_columns.columns = ["X", "B", "C", "D"]
     with pytest.raises(ValueError, match="identical index and column"):
         equal_risk_combination(
-            {"a": book_a, "b": mismatched_columns}, {"a": scale_a, "b": scale_b},
+            {"a": book_a, "b": mismatched_columns},
+            {"a": scale_a, "b": scale_b},
         )
 
 
@@ -258,7 +287,8 @@ def test_equal_risk_scale_uses_only_supplied_returns() -> None:
     scale_b_train = scale_b[scale_b.index < train_end]
 
     truncated = equal_risk_combination(
-        {"a": book_a, "b": book_b}, {"a": scale_a_train, "b": scale_b_train},
+        {"a": book_a, "b": book_b},
+        {"a": scale_a_train, "b": scale_b_train},
     )
     expected = (book_a / scale_a_train.std(ddof=1)) + (book_b / scale_b_train.std(ddof=1))
     expected = expected / 2.0
@@ -267,7 +297,8 @@ def test_equal_risk_scale_uses_only_supplied_returns() -> None:
     # The scale standard deviation is computed ONLY from the supplied returns:
     # extending the books (but not the scale returns) changes nothing.
     from_full = equal_risk_combination(
-        {"a": book_a, "b": book_b}, {"a": scale_a_train, "b": scale_b_train},
+        {"a": book_a, "b": book_b},
+        {"a": scale_a_train, "b": scale_b_train},
     )
     pd.testing.assert_frame_equal(truncated, from_full, check_dtype=False)
 
@@ -291,15 +322,20 @@ def test_new_registry_builders_are_causal_and_finite() -> None:
     rng = np.random.default_rng(7)
     log_close = pd.DataFrame(
         np.cumsum(rng.normal(0.0, 0.005, (n, len(_SYMBOLS))), axis=0),
-        index=idx, columns=_SYMBOLS,
+        index=idx,
+        columns=_SYMBOLS,
     )
     panels = {
         "close": np.exp(log_close),
         "taker_buy_quote": pd.DataFrame(
-            rng.uniform(0.4, 0.6, (n, len(_SYMBOLS))), index=idx, columns=_SYMBOLS,
+            rng.uniform(0.4, 0.6, (n, len(_SYMBOLS))),
+            index=idx,
+            columns=_SYMBOLS,
         ),
         "quote_vol": pd.DataFrame(
-            rng.uniform(100.0, 200.0, (n, len(_SYMBOLS))), index=idx, columns=_SYMBOLS,
+            rng.uniform(100.0, 200.0, (n, len(_SYMBOLS))),
+            index=idx,
+            columns=_SYMBOLS,
         ),
     }
     for spec in FEATURE_REGISTRY:
@@ -315,7 +351,9 @@ def test_new_registry_builders_are_causal_and_finite() -> None:
             truncated = {col: frame.loc[frame.index <= idx[t]] for col, frame in panels.items()}
             rebuilt = spec.builder(truncated)
             pd.testing.assert_series_equal(
-                rebuilt.iloc[-1], feature.loc[idx[t]], check_dtype=False,
+                rebuilt.iloc[-1],
+                feature.loc[idx[t]],
+                check_dtype=False,
             )
 
 
@@ -349,30 +387,33 @@ def test_source_coverage_audit_catches_pre_fillna_gaps() -> None:
     with pytest.raises(ValueError, match="identically indexed"):
         source_coverage_audit(source.iloc[1:], mask)
 
+
 def test_feature_registry_panel_columns_prunes_to_required_union() -> None:
     # SCENARIOFEATURE_NAME_PANEL_COLUMN_PRUNING: feature_registry_panel_columns
     # returns the deterministic first-seen union of required_columns -- for the
     # full registry 6 columns with NO 'open' (no builder uses it), and for the
     # 6 committee members 3 columns -- so _load_feature_panels can prune its
     # parquet reads and resident panels accordingly.
-    from src.core.types import COMMITTEE_MEMBERS
     from src.strategy.features import feature_registry_panel_columns
 
     registry_cols = feature_registry_panel_columns(FEATURE_REGISTRY)
     assert registry_cols == (
-        "close", "taker_buy_quote", "quote_vol", "high", "low", "no_trades",
+        "close",
+        "taker_buy_quote",
+        "quote_vol",
+        "high",
+        "low",
+        "no_trades",
     )
     assert "open" not in registry_cols
 
-    member_specs = [
-        spec for spec in FEATURE_REGISTRY if spec.name in set(COMMITTEE_MEMBERS)
-    ]
+    member_specs = [spec for spec in FEATURE_REGISTRY if spec.name in set(strategy_values().committee_members)]
     committee_cols = feature_registry_panel_columns(member_specs)
-    # Default flow_momentum: registry order puts flow_imb_168h/flow_imb_720h
-    # (taker_buy_quote, quote_vol) before xs_mom_336h/xs_idio_mom_336h/
-    # mom3_skew_168h (close,) -> first-seen union is (taker_buy_quote,
-    # quote_vol, close).
-    assert committee_cols == ("taker_buy_quote", "quote_vol", "close")
+    # First-seen union of the members' required columns, in registry order.
+    expected: list[str] = []
+    for spec in member_specs:
+        expected.extend(c for c in spec.required_columns if c not in expected)
+    assert committee_cols == tuple(expected)
     assert all(c in registry_cols for c in committee_cols)
 
 
@@ -388,7 +429,8 @@ def test_xs_mom_builder_rank_invariance() -> None:
     rng = np.random.default_rng(99)
     log_close = pd.DataFrame(
         np.cumsum(rng.normal(0.0, 0.005, (n, ncols)), axis=0),
-        index=idx, columns=list("ABCDEFGHIJKL"),
+        index=idx,
+        columns=list("ABCDEFGHIJKL"),
     )
     panels = {"close": np.exp(log_close)}
     mask = pd.DataFrame(True, index=idx, columns=list("ABCDEFGHIJKL"))
@@ -408,40 +450,44 @@ def test_xs_mom_builder_rank_invariance() -> None:
 def test_boundary_feature_admission_ignores_later_coverage() -> None:
     import pandas as pd
     from src.strategy.features import FeatureSpec, build_feature_books_by_boundary
-    idx = pd.date_range('2024-01-01', periods=12, freq='1h', tz='UTC')
-    mask = pd.DataFrame({'A': True, 'B': True}, index=idx)
-    base = pd.DataFrame({'A': range(12), 'B': range(12)}, index=idx, dtype=float)
+
+    idx = pd.date_range("2024-01-01", periods=12, freq="1h", tz="UTC")
+    mask = pd.DataFrame({"A": True, "B": True}, index=idx)
+    base = pd.DataFrame({"A": range(12), "B": range(12)}, index=idx, dtype=float)
     calls = []
+
     def build(panels):
         calls.append(1)
-        return panels['close']
-    spec = FeatureSpec('x', ('close',), 1.0, build)
-    ends = {'early': idx[6], 'late': idx[-1]+pd.Timedelta(hours=1)}
-    first = build_feature_books_by_boundary((spec,), {'close': base}, mask, idx, ends, min_symbols=2)
+        return panels["close"]
+
+    spec = FeatureSpec("x", ("close",), 1.0, build)
+    ends = {"early": idx[6], "late": idx[-1] + pd.Timedelta(hours=1)}
+    first = build_feature_books_by_boundary((spec,), {"close": base}, mask, idx, ends, min_symbols=2)
     assert len(calls) == 1
     changed = base.copy()
-    changed.loc[idx[7]:, 'A'] = float('nan')
-    second = build_feature_books_by_boundary((spec,), {'close': changed}, mask, idx, ends, min_symbols=2)
+    changed.loc[idx[7] :, "A"] = float("nan")
+    second = build_feature_books_by_boundary((spec,), {"close": changed}, mask, idx, ends, min_symbols=2)
     assert len(calls) == 2
-    pd.testing.assert_frame_equal(first['early']['x'], second['early']['x'])
+    pd.testing.assert_frame_equal(first["early"]["x"], second["early"]["x"])
 
 
 def test_boundary_books_reject_bad_inputs() -> None:
     import pandas as pd
     import pytest
     from src.strategy.features import FeatureSpec, build_feature_books_by_boundary
-    idx = pd.date_range('2024-01-01', periods=4, freq='1h', tz='UTC')
-    mask = pd.DataFrame({'A': True}, index=idx)
-    base = pd.DataFrame({'A': [1.0, 2.0, 3.0, 4.0]}, index=idx)
-    spec = FeatureSpec('x', ('close',), 1.0, lambda panels: panels['close'])
-    with pytest.raises(ValueError, match='min_symbols'):
-        build_feature_books_by_boundary((spec,), {'close': base}, mask, idx, {'b': idx[0]}, min_symbols=1)
-    with pytest.raises(ValueError, match='required_columns'):
-        build_feature_books_by_boundary((spec,), {}, mask, idx, {'b': idx[0]})
+
+    idx = pd.date_range("2024-01-01", periods=4, freq="1h", tz="UTC")
+    mask = pd.DataFrame({"A": True}, index=idx)
+    base = pd.DataFrame({"A": [1.0, 2.0, 3.0, 4.0]}, index=idx)
+    spec = FeatureSpec("x", ("close",), 1.0, lambda panels: panels["close"])
+    with pytest.raises(ValueError, match="min_symbols"):
+        build_feature_books_by_boundary((spec,), {"close": base}, mask, idx, {"b": idx[0]}, min_symbols=1)
+    with pytest.raises(ValueError, match="required_columns"):
+        build_feature_books_by_boundary((spec,), {}, mask, idx, {"b": idx[0]})
     shifted = base.copy()
     shifted.index = shifted.index + pd.Timedelta(hours=1)
-    with pytest.raises(ValueError, match='identically indexed'):
-        build_feature_books_by_boundary((spec,), {'close': shifted}, mask, idx, {'b': idx[0]})
+    with pytest.raises(ValueError, match="identically indexed"):
+        build_feature_books_by_boundary((spec,), {"close": shifted}, mask, idx, {"b": idx[0]})
 
 
 def test_boundary_books_rank_each_admitted_feature_once(monkeypatch) -> None:
@@ -449,30 +495,31 @@ def test_boundary_books_rank_each_admitted_feature_once(monkeypatch) -> None:
     import src.strategy.features as features_module
     from src.strategy.books import rank_weight_book
     from src.strategy.features import FeatureSpec, build_feature_books_by_boundary
-    idx = pd.date_range('2024-01-01', periods=12, freq='1h', tz='UTC')
-    mask = pd.DataFrame({'A': True, 'B': True, 'C': True}, index=idx)
-    base = pd.DataFrame({'A': range(12), 'B': range(12, 0, -1), 'C': [1.0, 3.0] * 6}, index=idx, dtype=float)
+
+    idx = pd.date_range("2024-01-01", periods=12, freq="1h", tz="UTC")
+    mask = pd.DataFrame({"A": True, "B": True, "C": True}, index=idx)
+    base = pd.DataFrame({"A": range(12), "B": range(12, 0, -1), "C": [1.0, 3.0] * 6}, index=idx, dtype=float)
     calls = []
 
     def counting(signal, eligible, sign, min_symbols):
         calls.append(sign)
         return rank_weight_book(signal, eligible, sign, min_symbols)
 
-    monkeypatch.setattr(features_module, 'rank_weight_book', counting)
+    monkeypatch.setattr(features_module, "rank_weight_book", counting)
     specs = (
-        FeatureSpec('x', ('close',), 0.5, lambda p: p['close']),
-        FeatureSpec('y', ('close',), 0.5, lambda p: -p['close']),
+        FeatureSpec("x", ("close",), 0.5, lambda p: p["close"]),
+        FeatureSpec("y", ("close",), 0.5, lambda p: -p["close"]),
     )
-    ends = {f'b{i}': idx[3 + i] for i in range(5)}
+    ends = {f"b{i}": idx[3 + i] for i in range(5)}
     # When
-    books = build_feature_books_by_boundary(specs, {'close': base}, mask, idx, ends, min_symbols=2)
+    books = build_feature_books_by_boundary(specs, {"close": base}, mask, idx, ends, min_symbols=2)
     # Then: one rank pass per feature, not per boundary x feature
     assert len(calls) == 2
-    monkeypatch.setattr(features_module, 'rank_weight_book', rank_weight_book)
+    monkeypatch.setattr(features_module, "rank_weight_book", rank_weight_book)
     for label in ends:
         for spec in specs:
-            step = rank_weight_book(spec.builder({'close': base}), mask, 1, 2)
-            expected = step.reindex(idx).reindex(step.index, method='ffill').fillna(0.0)
+            step = rank_weight_book(spec.builder({"close": base}), mask, 1, 2)
+            expected = step.reindex(idx).reindex(step.index, method="ffill").fillna(0.0)
             pd.testing.assert_frame_equal(books[label][spec.name], expected)
 
 
@@ -484,7 +531,9 @@ def _idio_close_panel(n: int = 200, seed: int = 11) -> pd.DataFrame:
     rng = np.random.default_rng(seed)
     walks = np.cumsum(rng.normal(0.0, 0.005, (n, 6)), axis=0)
     return pd.DataFrame(
-        np.exp(walks) * 100.0, index=idx, columns=["A", "B", "C", "D", "E", "F"],
+        np.exp(walks) * 100.0,
+        index=idx,
+        columns=["A", "B", "C", "D", "E", "F"],
     )
 
 
@@ -551,8 +600,11 @@ def test_idio_mom_misaligned_market_plane_rejected() -> None:
 
 # --- Spec 28 (I-FOLD-ADMISSION-PIT) invariant scenarios below. ---
 
+
 def _dense_registry_panels(
-    n: int = 3000, n_symbols: int = 8, seed: int = 0,
+    n: int = 3000,
+    n_symbols: int = 8,
+    seed: int = 0,
 ) -> dict[str, pd.DataFrame]:
     """Dense synthetic panels covering every registry required column."""
     idx = pd.date_range("2021-01-01", periods=n, freq="1h", tz="UTC")
@@ -560,22 +612,28 @@ def _dense_registry_panels(
     rng = np.random.default_rng(seed)
     log_close = pd.DataFrame(
         np.cumsum(rng.normal(0.0, 0.005, (n, n_symbols)), axis=0),
-        index=idx, columns=cols,
+        index=idx,
+        columns=cols,
     )
     close = np.exp(log_close) * 100.0
     return {
         "close": close,
         "taker_buy_quote": pd.DataFrame(
-            rng.uniform(100.0, 200.0, (n, n_symbols)), index=idx, columns=cols,
+            rng.uniform(100.0, 200.0, (n, n_symbols)),
+            index=idx,
+            columns=cols,
         ),
         "quote_vol": pd.DataFrame(
-            rng.uniform(1000.0, 2000.0, (n, n_symbols)), index=idx, columns=cols,
+            rng.uniform(1000.0, 2000.0, (n, n_symbols)),
+            index=idx,
+            columns=cols,
         ),
         "high": close * 1.001,
         "low": close * 0.999,
         "no_trades": pd.DataFrame(
             rng.integers(10, 100, (n, n_symbols)).astype(float),
-            index=idx, columns=cols,
+            index=idx,
+            columns=cols,
         ),
     }
 
@@ -611,13 +669,21 @@ def test_feature_spec_rejects_invalid_warmup() -> None:
     for bad in (-1, True, 1.5):
         with pytest.raises(ValueError, match="warmup_bars"):
             FeatureSpec(
-                name="x", required_columns=("close",), min_coverage=0.9,
-                builder=builder, warmup_bars=bad,
+                name="x",
+                required_columns=("close",),
+                min_coverage=0.9,
+                builder=builder,
+                warmup_bars=bad,
             )
-    assert FeatureSpec(
-        name="x", required_columns=("close",), min_coverage=0.9,
-        builder=builder,
-    ).warmup_bars == 0
+    assert (
+        FeatureSpec(
+            name="x",
+            required_columns=("close",),
+            min_coverage=0.9,
+            builder=builder,
+        ).warmup_bars
+        == 0
+    )
 
 
 def test_feature_admission_rejects_invalid_fields() -> None:
@@ -632,7 +698,8 @@ def test_feature_admission_rejects_invalid_fields() -> None:
         FeatureAdmission(pd.Timestamp("2023-01-01"), ("a",))
     with pytest.raises(ValueError, match="cutoff"):
         FeatureAdmission(
-            pd.Timestamp("2023-01-01", tz=timezone(timedelta(hours=9))), ("a",),
+            pd.Timestamp("2023-01-01", tz=timezone(timedelta(hours=9))),
+            ("a",),
         )
     with pytest.raises(ValueError, match="admitted"):
         FeatureAdmission(utc, ["a"])  # type: ignore[arg-type]
@@ -655,7 +722,8 @@ def test_warmup_cells_excluded_from_admission_coverage() -> None:
     rng = np.random.default_rng(21)
     close = pd.DataFrame(
         np.exp(np.cumsum(rng.normal(0.0, 0.005, (n, len(cols))), axis=0)) * 100.0,
-        index=idx, columns=cols,
+        index=idx,
+        columns=cols,
     )
     mask = pd.DataFrame(True, index=idx, columns=cols)
 
@@ -665,18 +733,30 @@ def test_warmup_cells_excluded_from_admission_coverage() -> None:
     feature = _build({"close": close})
     year = 2021
     with_warmup = FeatureSpec(
-        name="rm", required_columns=("close",), min_coverage=0.9,
-        builder=_build, warmup_bars=warmup,
+        name="rm",
+        required_columns=("close",),
+        min_coverage=0.9,
+        builder=_build,
+        warmup_bars=warmup,
     )
     without_warmup = FeatureSpec(
-        name="rm", required_columns=("close",), min_coverage=0.9,
-        builder=_build, warmup_bars=0,
+        name="rm",
+        required_columns=("close",),
+        min_coverage=0.9,
+        builder=_build,
+        warmup_bars=0,
     )
     assert feature_admission_coverage(
-        with_warmup, feature, {"close": close}, mask,
+        with_warmup,
+        feature,
+        {"close": close},
+        mask,
     ) == {year: 1.0}
     uncovered = feature_admission_coverage(
-        without_warmup, feature, {"close": close}, mask,
+        without_warmup,
+        feature,
+        {"close": close},
+        mask,
     )
     assert uncovered[year] == pytest.approx((n - warmup) / n)
     assert uncovered[year] < 1.0
@@ -692,17 +772,24 @@ def test_listing_anchor_excludes_only_post_listing_warmup() -> None:
     rng = np.random.default_rng(22)
     close = pd.DataFrame(
         np.exp(np.cumsum(rng.normal(0.0, 0.005, (n, len(cols))), axis=0)) * 100.0,
-        index=idx, columns=cols,
+        index=idx,
+        columns=cols,
     )
     close.iloc[:anchor, 1] = np.nan
     close.iloc[20:22, 1] = np.nan
     mask = pd.DataFrame(True, index=idx, columns=cols)
     spec = FeatureSpec(
-        name="x", required_columns=("close",), min_coverage=0.9,
-        builder=lambda panels: panels["close"], warmup_bars=warmup,
+        name="x",
+        required_columns=("close",),
+        min_coverage=0.9,
+        builder=lambda panels: panels["close"],
+        warmup_bars=warmup,
     )
     coverage = feature_admission_coverage(
-        spec, spec.builder({"close": close}), {"close": close}, mask,
+        spec,
+        spec.builder({"close": close}),
+        {"close": close},
+        mask,
     )
     assert coverage == pytest.approx({2021: (25 + 15 - 2) / (25 + 25)})
 
@@ -717,17 +804,24 @@ def test_late_source_feed_not_hidden_by_anchor() -> None:
     rng = np.random.default_rng(23)
     a = pd.DataFrame(
         np.exp(np.cumsum(rng.normal(0.0, 0.005, (n, len(cols))), axis=0)) * 100.0,
-        index=idx, columns=cols,
+        index=idx,
+        columns=cols,
     )
     b = a.copy()
     b.iloc[:late] = np.nan
     mask = pd.DataFrame(True, index=idx, columns=cols)
     spec = FeatureSpec(
-        name="x", required_columns=("a", "b"), min_coverage=0.9,
-        builder=lambda panels: panels["b"], warmup_bars=warmup,
+        name="x",
+        required_columns=("a", "b"),
+        min_coverage=0.9,
+        builder=lambda panels: panels["b"],
+        warmup_bars=warmup,
     )
     coverage = feature_admission_coverage(
-        spec, spec.builder({"a": a, "b": b}), {"a": a, "b": b}, mask,
+        spec,
+        spec.builder({"a": a, "b": b}),
+        {"a": a, "b": b},
+        mask,
     )
     assert coverage == pytest.approx({2021: (n - late) / (n - warmup)})
 
@@ -742,16 +836,23 @@ def test_dead_source_symbol_counts_as_missing() -> None:
     rng = np.random.default_rng(24)
     close = pd.DataFrame(
         np.exp(np.cumsum(rng.normal(0.0, 0.005, (n, len(cols))), axis=0)) * 100.0,
-        index=idx, columns=cols,
+        index=idx,
+        columns=cols,
     )
     close.iloc[:, 1] = np.nan
     mask = pd.DataFrame(True, index=idx, columns=cols)
     spec = FeatureSpec(
-        name="x", required_columns=("close",), min_coverage=0.9,
-        builder=lambda panels: panels["close"], warmup_bars=warmup,
+        name="x",
+        required_columns=("close",),
+        min_coverage=0.9,
+        builder=lambda panels: panels["close"],
+        warmup_bars=warmup,
     )
     coverage = feature_admission_coverage(
-        spec, spec.builder({"close": close}), {"close": close}, mask,
+        spec,
+        spec.builder({"close": close}),
+        {"close": close},
+        mask,
     )
     assert coverage == pytest.approx({2021: 25 / (25 + 30)})
 
@@ -767,16 +868,23 @@ def test_pure_warmup_year_omitted_and_empty_universe_year_stays_zero() -> None:
     rng = np.random.default_rng(25)
     close = pd.DataFrame(
         np.exp(np.cumsum(rng.normal(0.0, 0.005, (n, len(cols))), axis=0)) * 100.0,
-        index=idx, columns=cols,
+        index=idx,
+        columns=cols,
     )
     mask = pd.DataFrame(True, index=idx, columns=cols)
     mask.loc[idx[idx.year == 2022]] = False
     spec = FeatureSpec(
-        name="x", required_columns=("close",), min_coverage=0.9,
-        builder=lambda panels: panels["close"], warmup_bars=warmup,
+        name="x",
+        required_columns=("close",),
+        min_coverage=0.9,
+        builder=lambda panels: panels["close"],
+        warmup_bars=warmup,
     )
     coverage = feature_admission_coverage(
-        spec, spec.builder({"close": close}), {"close": close}, mask,
+        spec,
+        spec.builder({"close": close}),
+        {"close": close},
+        mask,
     )
     assert 2021 not in coverage
     assert coverage == {2022: 0.0}
@@ -792,21 +900,33 @@ def test_empty_audit_never_admits() -> None:
     rng = np.random.default_rng(26)
     close = pd.DataFrame(
         np.exp(np.cumsum(rng.normal(0.0, 0.005, (n, len(cols))), axis=0)) * 100.0,
-        index=idx, columns=cols,
+        index=idx,
+        columns=cols,
     )
     mask = pd.DataFrame(True, index=idx, columns=cols)
     spec = FeatureSpec(
-        name="x", required_columns=("close",), min_coverage=0.0,
+        name="x",
+        required_columns=("close",),
+        min_coverage=0.0,
         builder=lambda panels: panels["close"],
     )
     grid = pd.date_range(idx[0], idx[-1], freq="24h", tz="UTC")
     for cutoff in (idx[0], idx[0] - pd.Timedelta(hours=1)):
-        assert build_feature_books(
-            [spec], {"close": close}, mask, grid, min_symbols=2,
-            coverage_cutoff=cutoff,
-        ) == {}
+        assert (
+            build_feature_books(
+                [spec],
+                {"close": close},
+                mask,
+                grid,
+                min_symbols=2,
+                coverage_cutoff=cutoff,
+            )
+            == {}
+        )
     admission = feature_admission_by_boundary(
-        [spec], {"close": close}, mask,
+        [spec],
+        {"close": close},
+        mask,
         {"at_first": idx[0], "before_first": idx[0] - pd.Timedelta(hours=1)},
     )
     assert admission["at_first"].admitted == ()
@@ -814,7 +934,10 @@ def test_empty_audit_never_admits() -> None:
 
 
 def _rolling_gap_spec(
-    name: str, window: int, warmup: int, min_coverage: float = 0.9,
+    name: str,
+    window: int,
+    warmup: int,
+    min_coverage: float = 0.9,
 ) -> FeatureSpec:
     """Rolling-mean spec whose warmup cells are NaN by construction."""
 
@@ -822,8 +945,11 @@ def _rolling_gap_spec(
         return panels["close"].rolling(_window, min_periods=_window).mean()
 
     return FeatureSpec(
-        name=name, required_columns=("close",), min_coverage=min_coverage,
-        builder=_build, warmup_bars=warmup,
+        name=name,
+        required_columns=("close",),
+        min_coverage=min_coverage,
+        builder=_build,
+        warmup_bars=warmup,
     )
 
 
@@ -838,11 +964,13 @@ def test_warmup_exclusion_only_widens_admission() -> None:
     rng_base = np.random.default_rng(27)
     base = pd.DataFrame(
         np.exp(np.cumsum(rng_base.normal(0.0, 0.005, (n, len(cols))), axis=0)) * 100.0,
-        index=idx, columns=cols,
+        index=idx,
+        columns=cols,
     )
     specs = (_rolling_gap_spec("r20", 21, 20), _rolling_gap_spec("r50", 51, 50))
     zero_specs = (
-        _rolling_gap_spec("r20", 21, 0), _rolling_gap_spec("r50", 51, 0),
+        _rolling_gap_spec("r20", 21, 0),
+        _rolling_gap_spec("r50", 51, 0),
     )
     cutoff = idx[-1] + pd.Timedelta(hours=1)
     assert int((idx < cutoff).sum()) >= 1
@@ -850,20 +978,34 @@ def test_warmup_exclusion_only_widens_admission() -> None:
         rng = np.random.default_rng(100 + seed)
         close = base.where(
             pd.DataFrame(
-                rng.random((n, len(cols))) > 0.08, index=idx, columns=cols,
+                rng.random((n, len(cols))) > 0.08,
+                index=idx,
+                columns=cols,
             )
         )
         close.iloc[0] = base.iloc[0]
         mask = pd.DataFrame(True, index=idx, columns=cols)
-        assert feature_admission_coverage(
-            specs[0], specs[0].builder({"close": close}),
-            {"close": close}, mask, cutoff,
-        ) != {}
+        assert (
+            feature_admission_coverage(
+                specs[0],
+                specs[0].builder({"close": close}),
+                {"close": close},
+                mask,
+                cutoff,
+            )
+            != {}
+        )
         new = feature_admission_by_boundary(
-            specs, {"close": close}, mask, {"b": cutoff},
+            specs,
+            {"close": close},
+            mask,
+            {"b": cutoff},
         )
         old = feature_admission_by_boundary(
-            zero_specs, {"close": close}, mask, {"b": cutoff},
+            zero_specs,
+            {"close": close},
+            mask,
+            {"b": cutoff},
         )
         assert set(old["b"].admitted) <= set(new["b"].admitted), seed
 
@@ -877,25 +1019,38 @@ def test_admission_by_boundary_equals_book_keys() -> None:
     rng = np.random.default_rng(28)
     close = pd.DataFrame(
         np.exp(np.cumsum(rng.normal(0.0, 0.005, (n, len(cols))), axis=0)) * 100.0,
-        index=idx, columns=cols,
+        index=idx,
+        columns=cols,
     )
     mask = pd.DataFrame(True, index=idx, columns=cols)
     good = FeatureSpec(
-        name="good", required_columns=("close",), min_coverage=0.9,
+        name="good",
+        required_columns=("close",),
+        min_coverage=0.9,
         builder=lambda panels: panels["close"],
     )
     bad = FeatureSpec(
-        name="bad", required_columns=("close",), min_coverage=0.9,
+        name="bad",
+        required_columns=("close",),
+        min_coverage=0.9,
         builder=lambda panels: panels["close"] * np.nan,
     )
     specs = (bad, good)
     grid = pd.date_range(idx[0], idx[-1], freq="24h", tz="UTC")
     ends = {"e1": idx[30], "e2": idx[-1] + pd.Timedelta(hours=1)}
     admission = feature_admission_by_boundary(
-        specs, {"close": close}, mask, ends,
+        specs,
+        {"close": close},
+        mask,
+        ends,
     )
     books = build_feature_books_by_boundary(
-        specs, {"close": close}, mask, grid, ends, min_symbols=2,
+        specs,
+        {"close": close},
+        mask,
+        grid,
+        ends,
+        min_symbols=2,
     )
     for label in ends:
         assert admission[label].admitted == tuple(books[label])
@@ -911,7 +1066,8 @@ def test_admission_by_boundary_builds_each_feature_once() -> None:
     rng = np.random.default_rng(29)
     close = pd.DataFrame(
         np.exp(np.cumsum(rng.normal(0.0, 0.005, (n, len(cols))), axis=0)) * 100.0,
-        index=idx, columns=cols,
+        index=idx,
+        columns=cols,
     )
     mask = pd.DataFrame(True, index=idx, columns=cols)
     calls = {"a": 0, "b": 0}
@@ -920,13 +1076,12 @@ def test_admission_by_boundary_builds_each_feature_once() -> None:
         def _build(panels: dict[str, pd.DataFrame]) -> pd.DataFrame:
             calls[name] += 1
             return panels["close"]
+
         return _build
 
     specs = (
-        FeatureSpec(name="a", required_columns=("close",),
-                    min_coverage=0.9, builder=_make("a")),
-        FeatureSpec(name="b", required_columns=("close",),
-                    min_coverage=0.9, builder=_make("b")),
+        FeatureSpec(name="a", required_columns=("close",), min_coverage=0.9, builder=_make("a")),
+        FeatureSpec(name="b", required_columns=("close",), min_coverage=0.9, builder=_make("b")),
     )
     ends = {f"b{i}": idx[5 + i] for i in range(5)}
     feature_admission_by_boundary(specs, {"close": close}, mask, ends)
@@ -942,12 +1097,15 @@ def test_admission_by_boundary_ignores_data_at_and_after_boundary() -> None:
     rng = np.random.default_rng(30)
     close = pd.DataFrame(
         np.exp(np.cumsum(rng.normal(0.0, 0.005, (n, len(cols))), axis=0)) * 100.0,
-        index=idx, columns=cols,
+        index=idx,
+        columns=cols,
     )
     mask = pd.DataFrame(True, index=idx, columns=cols)
     specs = (
         FeatureSpec(
-            name="plain", required_columns=("close",), min_coverage=0.9,
+            name="plain",
+            required_columns=("close",),
+            min_coverage=0.9,
             builder=lambda panels: panels["close"],
         ),
         _rolling_gap_spec("rolled", 11, 10),
@@ -955,12 +1113,18 @@ def test_admission_by_boundary_ignores_data_at_and_after_boundary() -> None:
     boundary = idx[30]
     ends = {"b": boundary, "late": idx[-1] + pd.Timedelta(hours=1)}
     clean = feature_admission_by_boundary(
-        specs, {"close": close}, mask, ends,
+        specs,
+        {"close": close},
+        mask,
+        ends,
     )
     perturbed = close.copy()
     perturbed.loc[perturbed.index >= boundary] = np.nan
     rebuilt = feature_admission_by_boundary(
-        specs, {"close": perturbed}, mask, ends,
+        specs,
+        {"close": perturbed},
+        mask,
+        ends,
     )
     assert rebuilt["b"] == clean["b"]
 
@@ -976,43 +1140,67 @@ def test_admitted_books_match_audited_books_without_auditing() -> None:
     rng = np.random.default_rng(31)
     close = pd.DataFrame(
         np.exp(np.cumsum(rng.normal(0.0, 0.005, (n, len(cols))), axis=0)) * 100.0,
-        index=idx, columns=cols,
+        index=idx,
+        columns=cols,
     )
     mask = pd.DataFrame(True, index=idx, columns=cols)
     specs = (
         FeatureSpec(
-            name="f1", required_columns=("close",), min_coverage=0.9,
+            name="f1",
+            required_columns=("close",),
+            min_coverage=0.9,
             builder=lambda panels: panels["close"],
         ),
         FeatureSpec(
-            name="f2", required_columns=("close",), min_coverage=0.9,
+            name="f2",
+            required_columns=("close",),
+            min_coverage=0.9,
             builder=lambda panels: -panels["close"],
         ),
     )
     grid = pd.date_range(idx[0], idx[-1], freq="24h", tz="UTC")
     audited = build_feature_books(
-        specs, {"close": close}, mask, grid, min_symbols=2,
+        specs,
+        {"close": close},
+        mask,
+        grid,
+        min_symbols=2,
     )
     admitted = build_admitted_feature_books(
-        specs, {"close": close}, mask, grid, min_symbols=2,
+        specs,
+        {"close": close},
+        mask,
+        grid,
+        min_symbols=2,
     )
     assert list(admitted) == list(audited)
     for name in audited:
         pd.testing.assert_frame_equal(admitted[name], audited[name], check_exact=True)
     failing = FeatureSpec(
-        name="bad", required_columns=("close",), min_coverage=0.9,
+        name="bad",
+        required_columns=("close",),
+        min_coverage=0.9,
         builder=lambda panels: panels["close"] * np.nan,
     )
-    assert build_feature_books(
-        (failing,), {"close": close}, mask, grid, min_symbols=2,
-    ) == {}
+    assert (
+        build_feature_books(
+            (failing,),
+            {"close": close},
+            mask,
+            grid,
+            min_symbols=2,
+        )
+        == {}
+    )
     assert list(
         build_admitted_feature_books(
-            (failing,), {"close": close}, mask, grid, min_symbols=2,
+            (failing,),
+            {"close": close},
+            mask,
+            grid,
+            min_symbols=2,
         )
     ) == ["bad"]
-
-
 
 
 def test_admission_validation_branches_raise() -> None:
@@ -1032,8 +1220,7 @@ def test_admission_validation_branches_raise() -> None:
     idx = pd.date_range("2021-01-01", periods=48, freq="1h", tz="UTC")
     mask = pd.DataFrame(True, index=idx, columns=["A", "B"])
     close = pd.DataFrame(1.0, index=idx, columns=["A", "B"])
-    spec = FeatureSpec(name="x", required_columns=("close",), min_coverage=0.9,
-                       builder=lambda panels: panels["close"])
+    spec = FeatureSpec(name="x", required_columns=("close",), min_coverage=0.9, builder=lambda panels: panels["close"])
     feature = spec.builder({"close": close})
     grid = pd.date_range(idx[0], idx[-1], freq="24h", tz="UTC")
 
@@ -1053,22 +1240,34 @@ def test_admission_validation_branches_raise() -> None:
         build_feature_books((spec,), {"close": shifted}, mask, grid)
     with pytest.raises(ValueError, match="identically indexed"):
         build_feature_books(
-            (spec,), {"close": close},
-            pd.DataFrame(True, index=shifted.index, columns=["A", "B"]), grid,
+            (spec,),
+            {"close": close},
+            pd.DataFrame(True, index=shifted.index, columns=["A", "B"]),
+            grid,
         )
     with pytest.raises(ValueError, match="required_columns"):
         feature_admission_by_boundary(
-            (spec,), {}, mask, {"b": idx[0]},
+            (spec,),
+            {},
+            mask,
+            {"b": idx[0]},
         )
     with pytest.raises(ValueError, match="identically indexed"):
         feature_admission_by_boundary(
-            (spec,), {"close": shifted}, mask, {"b": idx[0]},
+            (spec,),
+            {"close": shifted},
+            mask,
+            {"b": idx[0]},
         )
-    bad_builder = FeatureSpec(name="y", required_columns=("close",), min_coverage=0.9,
-                              builder=lambda panels: panels["close"].iloc[1:])
+    bad_builder = FeatureSpec(
+        name="y", required_columns=("close",), min_coverage=0.9, builder=lambda panels: panels["close"].iloc[1:]
+    )
     with pytest.raises(ValueError, match="identically indexed"):
         feature_admission_by_boundary(
-            (bad_builder,), {"close": close}, mask, {"b": idx[0]},
+            (bad_builder,),
+            {"close": close},
+            mask,
+            {"b": idx[0]},
         )
     with pytest.raises(ValueError, match="min_symbols"):
         build_admitted_feature_books((spec,), {"close": close}, mask, grid, min_symbols=1)
@@ -1091,26 +1290,42 @@ def test_admission_vector_branches_dead_source_and_empty_year() -> None:
     mask = pd.DataFrame(True, index=idx, columns=["A", "B"])
     close = pd.DataFrame(1.0, index=idx, columns=["A", "B"])
     close["B"] = float("nan")  # dead source symbol
-    dead = FeatureSpec(name="d", required_columns=("close",), min_coverage=0.0,
-                       builder=lambda panels: panels["close"].fillna(0.0),
-                       warmup_bars=5)
+    dead = FeatureSpec(
+        name="d",
+        required_columns=("close",),
+        min_coverage=0.0,
+        builder=lambda panels: panels["close"].fillna(0.0),
+        warmup_bars=5,
+    )
     out = feature_admission_by_boundary(
-        (dead,), {"close": close}, mask, {"b": idx[-1] + pd.Timedelta(hours=1)},
+        (dead,),
+        {"close": close},
+        mask,
+        {"b": idx[-1] + pd.Timedelta(hours=1)},
     )
     assert out["b"].admitted == ("d",)
 
     mask_empty_year = mask.copy()
     mask_empty_year.loc[mask_empty_year.index.year == 2021, :] = False
-    warm = FeatureSpec(name="w", required_columns=("close",), min_coverage=0.9,
-                       builder=lambda panels: panels["close"], warmup_bars=1000)
+    warm = FeatureSpec(
+        name="w",
+        required_columns=("close",),
+        min_coverage=0.9,
+        builder=lambda panels: panels["close"],
+        warmup_bars=1000,
+    )
     out2 = feature_admission_by_boundary(
-        (warm,), {"close": pd.DataFrame(1.0, index=idx, columns=["A", "B"])},
-        mask, {"b": idx[-1] + pd.Timedelta(hours=1)},
+        (warm,),
+        {"close": pd.DataFrame(1.0, index=idx, columns=["A", "B"])},
+        mask,
+        {"b": idx[-1] + pd.Timedelta(hours=1)},
     )
     assert out2["b"].admitted == ()
     out3 = feature_admission_by_boundary(
-        (warm,), {"close": pd.DataFrame(1.0, index=idx, columns=["A", "B"])},
-        mask_empty_year, {"b": idx[-1] + pd.Timedelta(hours=1)},
+        (warm,),
+        {"close": pd.DataFrame(1.0, index=idx, columns=["A", "B"])},
+        mask_empty_year,
+        {"b": idx[-1] + pd.Timedelta(hours=1)},
     )
     assert out3["b"].admitted == ()
 
@@ -1125,8 +1340,7 @@ def test_coverage_symbol_without_year_mask_skipped() -> None:
     mask = pd.DataFrame(True, index=idx, columns=["A", "B"])
     mask["B"] = False
     close = pd.DataFrame(1.0, index=idx, columns=["A", "B"])
-    spec = FeatureSpec(name="x", required_columns=("close",), min_coverage=0.0,
-                       builder=lambda panels: panels["close"])
+    spec = FeatureSpec(name="x", required_columns=("close",), min_coverage=0.0, builder=lambda panels: panels["close"])
     cov = feature_admission_coverage(spec, close, {"close": close}, mask)
     assert cov[2021] == 1.0
 
@@ -1143,22 +1357,30 @@ def test_book_entry_points_reject_misaligned_panels() -> None:
     close = pd.DataFrame(1.0, index=idx, columns=["A", "B"])
     shifted = close.copy()
     shifted.index = shifted.index + pd.Timedelta(hours=1)
-    spec = FeatureSpec(name="x", required_columns=("close",), min_coverage=0.9,
-                       builder=lambda panels: panels["close"])
+    spec = FeatureSpec(name="x", required_columns=("close",), min_coverage=0.9, builder=lambda panels: panels["close"])
     grid = pd.date_range(idx[0], idx[-1], freq="24h", tz="UTC")
     with pytest.raises(ValueError, match="identically indexed"):
         build_feature_books((spec,), {"close": shifted}, mask, grid)
-    two_col = FeatureSpec(name="z", required_columns=("close", "quote_vol"),
-                          min_coverage=0.9, builder=lambda panels: panels["close"])
+    two_col = FeatureSpec(
+        name="z", required_columns=("close", "quote_vol"), min_coverage=0.9, builder=lambda panels: panels["close"]
+    )
     with pytest.raises(ValueError, match="identically indexed"):
         build_feature_books(
-            (two_col,), {"close": close, "quote_vol": shifted}, mask, grid,
+            (two_col,),
+            {"close": close, "quote_vol": shifted},
+            mask,
+            grid,
         )
-    bad = FeatureSpec(name="y", required_columns=("close",), min_coverage=0.9,
-                      builder=lambda panels: panels["close"].iloc[1:])
+    bad = FeatureSpec(
+        name="y", required_columns=("close",), min_coverage=0.9, builder=lambda panels: panels["close"].iloc[1:]
+    )
     with pytest.raises(ValueError, match="identically indexed"):
         build_feature_books_by_boundary(
-            (bad,), {"close": close}, mask, grid, {"b": idx[0]},
+            (bad,),
+            {"close": close},
+            mask,
+            grid,
+            {"b": idx[0]},
         )
 
 

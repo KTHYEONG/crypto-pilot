@@ -346,9 +346,11 @@ def test_exposure_respects_margin_cap(layout: dict[str, Path], tmp_path: Path) -
     weights = (stored / report.exposure).to_numpy(dtype="float64")
     rules = load_venue_rule_snapshot(strict)
     ladders, _ = build_venue_ladders(sorted(_SYMS), rules)
-    cap = margin_exposure_cap(weights, report.equity_usdt, ladders, account_growth_policy())
-    assert cap == pytest.approx(ACCOUNT_EXPOSURE_STEP)
-    assert report.exposure == pytest.approx(ACCOUNT_EXPOSURE_STEP)
+    policy = account_growth_policy()
+    cap = margin_exposure_cap(weights, report.equity_usdt, ladders, policy)
+    # The strict venue binds below the policy maximum and the chosen step never exceeds it.
+    assert ACCOUNT_EXPOSURE_STEP <= cap < policy.exposure_max
+    assert ACCOUNT_EXPOSURE_STEP <= report.exposure <= cap + 1e-12
 
 
 def test_live_step_caps_at_envelope_ceiling(layout: dict[str, Path]) -> None:

@@ -4,15 +4,14 @@ from __future__ import annotations
 
 import pytest
 
+from src.strategy.store import strategy_values
+
 from src.core.params import (
-    COMMITTEE_DEFAULT_MEMBER_SET,
     COMMITTEE_GROWTH_MAX_DRAWDOWN,
     COMMITTEE_GROWTH_MAX_DRAWDOWN_PROB,
     COMMITTEE_GROWTH_MAX_RUIN_PROB,
     COMMITTEE_GROWTH_HORIZON_YEARS,
     COMMITTEE_GROWTH_RUIN_FRACTION,
-    COMMITTEE_MEMBER_SETS,
-    COMMITTEE_MEMBERS,
     GROWTH_ENVELOPE_DEFAULT,
     GROWTH_RISK_ENVELOPES,
     GrowthRiskEnvelope,
@@ -20,22 +19,22 @@ from src.core.params import (
 
 
 def test_committee_member_sets_keys() -> None:
-    assert set(COMMITTEE_MEMBER_SETS.keys()) == {"flow_momentum", "risk_premia"}
+    assert set(strategy_values().committee_sets.keys()) == {"flow_momentum", "risk_premia"}
 
 
 def test_default_member_set_is_flow_momentum() -> None:
     # risk_premia was measured non-adopted (full 3m replay breached the
     # registered drawdown budget); see ADR_20260820_MHS_COMPOUNDING_ALPHA_AXES.
-    assert COMMITTEE_DEFAULT_MEMBER_SET == "flow_momentum"
-    assert COMMITTEE_MEMBER_SETS["flow_momentum"] == COMMITTEE_MEMBERS
+    assert strategy_values().committee_default == "flow_momentum"
+    assert strategy_values().committee_sets["flow_momentum"] == strategy_values().committee_members
 
 
 def test_risk_premia_has_five_members() -> None:
-    assert len(COMMITTEE_MEMBER_SETS["risk_premia"]) == 5
+    assert len(strategy_values().committee_sets["risk_premia"]) == 5
 
 
 def test_flow_momentum_has_five_members() -> None:
-    assert len(COMMITTEE_MEMBER_SETS["flow_momentum"]) == 5
+    assert len(strategy_values().committee_sets["flow_momentum"]) == 5
 
 
 # SCENARIO_GROWTH_ENVELOPE_CONSERVATIVE_IS_BYTE_IDENTICAL

@@ -43,8 +43,9 @@ def test_run_neighbor_set_persists_siblings(tmp_path, monkeypatch):
               "base_spec": None, "stress_spec": None, "report_periods": (), "data_root": None,
               "budget": None, "execution_bound": "OHLCV_IMMEDIATE_TAKER", "output": output}
     backtest_mod._run_neighbor_set(FLOW_MOM_TOP20, **kwargs)
-    assert len(calls) == 7
-    assert sorted(path.parent.name for path in calls) == sorted(f"unit_neighbor{i}" for i in range(7))
+    expected = len(backtest_mod._neighbor_specs(FLOW_MOM_TOP20))
+    assert len(calls) == expected
+    assert sorted(path.parent.name for path in calls) == sorted(f"unit_neighbor{i}" for i in range(expected))
 
     def fail(request):
         raise DataIntegrityError("boom")

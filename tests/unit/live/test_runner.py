@@ -225,9 +225,9 @@ def test_run_manifest_written_once_on_first_cycle(tmp_path, monkeypatch) -> None
     first = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert first["run_id"] == record_run_id
     assert first["strategy_id"] == FLOW_MOM_TOP20.strategy_id
-    from src.core.params import STRATEGY_NAME_CLIP
+    from src.strategy.store import strategy_values
 
-    assert first["name_clip"] == STRATEGY_NAME_CLIP
+    assert first["name_clip"] == strategy_values().name_clip
     assert first["execution_policy"] == settings.execution_policy
     assert first["paper_fill_model"] == settings.paper_fill_model
     assert first["mode"] == settings.mode.value
@@ -347,12 +347,12 @@ def test_manifest_records_applied_clip(tmp_path) -> None:
     import pandas as pd
     import src.live.runner as runner_mod
     from src.live.settings import LiveSettings
-    from src.core.params import STRATEGY_NAME_CLIP
+    from src.strategy.store import strategy_values
 
     now = pd.Timestamp("2026-09-22 00:00Z")
     settings = LiveSettings(unit_bootstrap_path=str(tmp_path / "nope.parquet"))
     payload = runner_mod._current_run_manifest(settings, now)
-    assert payload["name_clip"] == STRATEGY_NAME_CLIP
+    assert payload["name_clip"] == strategy_values().name_clip
 
 
 def test_legacy_ciphertext_digest_migrates_once(tmp_path, monkeypatch) -> None:
@@ -419,7 +419,9 @@ def test_legacy_null_clip_manifest_migrates_once(tmp_path, monkeypatch) -> None:
     manifest_path.write_text(json.dumps(legacy), encoding="utf-8")
     runner_mod._assert_run_manifest_compatible(settings)
     migrated = json.loads(manifest_path.read_text(encoding="utf-8"))
-    assert migrated["name_clip"] == 0.05
+    from src.strategy.store import strategy_values
+
+    assert migrated["name_clip"] == strategy_values().name_clip
     bad = dict(current)
     bad["name_clip"] = 0.1
     manifest_path.write_text(json.dumps(bad), encoding="utf-8")

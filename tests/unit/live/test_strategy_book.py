@@ -19,7 +19,8 @@ from src.live.strategy_book import (
 from src.strategy.books import clip_names_preserving_gross
 from src.strategy.targets import FLOW_MOM_TOP20, build_strategy_targets
 from src.core.panel import load_base_panel
-from src.core.params import STRATEGY_NAME_CLIP, LIVE_SIGNAL_WARMUP_DAYS
+from src.core.params import LIVE_SIGNAL_WARMUP_DAYS
+from src.strategy.store import strategy_values
 
 _START = pd.Timestamp("2021-01-01", tz="UTC")
 _SYMBOLS = tuple(f"SYM{i:02d}USDT" for i in range(10))
@@ -80,7 +81,7 @@ def _research_comparison(tmp_path: Path, symbols: tuple[str, ...]) -> None:
         avail, daily_close, daily_qv, tuple(census),
         market_close=close_c, strategy=FLOW_MOM_TOP20, blocked_decisions=None,
     )
-    clipped = clip_names_preserving_gross(candidate.target_weights, STRATEGY_NAME_CLIP)
+    clipped = clip_names_preserving_gross(candidate.target_weights, strategy_values().name_clip)
     for day in book.unit_weights.index:
         entry = day + pd.Timedelta(days=1)
         pd.testing.assert_series_equal(
@@ -732,13 +733,20 @@ def test_proxy_matches_replay_anchor_to_anchor() -> None:
     assert proxy.loc[entries[1]] == pytest.approx(replay_ret, rel=1e-9)
 
 
+def _block_census() -> tuple[str, ...]:
+    """Two more symbols than the book breadth, so a withdrawn seat can be refilled."""
+    from src.strategy.targets import FLOW_MOM_TOP20
+
+    return tuple(f"BK{i:02d}USDT" for i in range(FLOW_MOM_TOP20.breadth + 2))
+
+
 def _write_block_panel(root: Path) -> tuple[pd.Timestamp, pd.Timestamp]:
-    return _write_panel(root, tuple(f"BK{i:02d}USDT" for i in range(22)), days=126, seed=21)
+    return _write_panel(root, _block_census(), days=126, seed=21)
 
 
 def test_blocked_build_withdraws_seat_and_reranks(tmp_path: Path) -> None:
     start, end = _write_block_panel(tmp_path)
-    census = tuple(f"BK{i:02d}USDT" for i in range(22))
+    census = _block_census()
     plain = build_live_strategy_book(tmp_path, census, panel_start=start, panel_end=end)
     day = plain.unit_weights.index[2]
     weights_d = plain.unit_weights.loc[day]
@@ -768,7 +776,7 @@ def test_blocked_build_withdraws_seat_and_reranks(tmp_path: Path) -> None:
 
 def test_all_false_blocked_build_matches_unblocked(tmp_path: Path) -> None:
     start, end = _write_block_panel(tmp_path)
-    census = tuple(f"BK{i:02d}USDT" for i in range(22))
+    census = _block_census()
     plain = build_live_strategy_book(tmp_path, census, panel_start=start, panel_end=end)
 
     def _none_blocked(index: pd.DatetimeIndex, order: tuple[str, ...]) -> pd.DataFrame:

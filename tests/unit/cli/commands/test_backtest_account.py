@@ -150,7 +150,9 @@ def test_account_artifacts_and_disclosures(tmp_path: Path, monkeypatch: pytest.M
     recon = payload["reconciliation"]
     assert recon["status"] == "ok"
     assert recon["reference_canonical"]["base_cagr"] == pytest.approx(unit_cagr)
-    assert recon["reference_canonical"]["name_clip"] == pytest.approx(0.05)
+    from src.strategy.targets import FLOW_MOM_TOP20_ACCOUNT_UNIT
+
+    assert recon["reference_canonical"]["name_clip"] == pytest.approx(FLOW_MOM_TOP20_ACCOUNT_UNIT.name_clip)
     assert recon["reference_canonical"]["exposure_multiplier"] == pytest.approx(1.0)
     assert recon["cagr_gap"] == pytest.approx(0.0)
     assert recon["mdd"] == pytest.approx(0.05)

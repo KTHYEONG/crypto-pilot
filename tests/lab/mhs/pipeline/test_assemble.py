@@ -209,7 +209,7 @@ def test_SCENARIO_MHS_TRIAL_POOL_DISCLOSURE_IN_REPORT_AND_HISTORY(
         }
 
     for record in (
-        _record("clean1", {"u": 1}, sharpe=N),
+        _record("clean1", {"u": 1}, sharpe=1.5),
         _record("gap", {"u": 2}, reason_codes=(gap_code,)),
         _record("halted", {"u": 3}, status="RUNNING"),
         _record("nonfinite", {"u": 4}, sharpe=None),
@@ -257,11 +257,14 @@ def test_assemble_report_carries_top_level_committee_member_weights() -> None:
     recorder = _StageRecorder(log_run=False)
     ctx = _bare_context(recorder)
     top_level = {
-    "REDACTED",
+        "member_a": 0.25,
+        "member_b": 0.4,
+        "member_c": 0.0,
+        "member_d": 0.35,
     }
     ctx._committee_weights_by_boundary = {
         "top_level": top_level,
-        "fold_0": {"flow_imb_168h": 1.0},
+        "fold_0": {"member_b": 1.0},
     }
 
     report = assemble_report(ctx, ctx.telemetry)

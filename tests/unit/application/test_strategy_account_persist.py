@@ -134,6 +134,9 @@ def test_account_payload_matches_pre_refactor_capture(case: str, tmp_path: Path,
     from src.strategy.targets import FLOW_MOM_TOP20_ACCOUNT_UNIT
 
     assert data.pop("signal_digest") == strategy_signal_digest(FLOW_MOM_TOP20_ACCOUNT_UNIT)
+    canonical = (data.get("reconciliation") or {}).get("reference_canonical")
+    if canonical is not None:
+        assert canonical.pop("name_clip") == pytest.approx(FLOW_MOM_TOP20_ACCOUNT_UNIT.name_clip)
     assert json.dumps(data, indent=2, sort_keys=True) == _PRE_REFACTOR["account"][case]
     assert "error_type" not in text
 

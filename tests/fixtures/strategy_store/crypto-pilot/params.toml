@@ -1,0 +1,33 @@
+[meta]
+schema = "crypto.strategy_values.v1"
+version = "fixture"
+created_at = "1970-01-01T00:00:00Z"
+source = "test fixture (placeholder values)"
+validated_by = "none"
+example = false
+
+[flow_mom]
+breadth = 24
+control_breadth = 30
+min_rank_symbols = 6
+name_clip = 0.07
+growth_exposure_multiplier = 1.5
+
+[[flow_mom.members]]
+name = "mom_168h"
+sign = 1
+
+[[flow_mom.members]]
+name = "taker_imb_24h"
+sign = 1
+
+[[flow_mom.members]]
+name = "amihud"
+sign = -1
+
+[committee]
+default = "flow_momentum"
+
+[committee.sets]
+flow_momentum = ["mom_168h", "taker_imb_24h", "amihud", "turnover_chg", "xs_mom_720h"]
+risk_premia = ["amihud", "mom_168h", "taker_imb_24h", "turnover_chg", "xs_mom_720h"]

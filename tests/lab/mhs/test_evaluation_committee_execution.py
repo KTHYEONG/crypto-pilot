@@ -1,3 +1,4 @@
+from src.strategy.store import strategy_values
 """MHS evaluation contract tests (split by behavioral domain; shared builders live in the original module)."""
 
 """Contract coverage for the MHS application evaluation resource telemetry."""
@@ -15,7 +16,6 @@ from src.strategy.features import FEATURE_REGISTRY, FeatureAdmission, build_feat
 from src.lab.mhs import research_go as _research_go
 from src.core.marks import _load_funding_series
 from src.core.params import (
-    COMMITTEE_MEMBERS,
     COMMITTEE_REGIME_ADAPTIVE_WINDOW,
     COMMITTEE_TRANCHE_COUNT,
     MEASURED_EXECUTION_COST_TIERS_BPS,
@@ -43,7 +43,7 @@ def test_committee_execution_book_tranche_1_is_identity() -> None:
     }
     default = _committee_execution_book(**kwargs)
     explicit = _committee_execution_book(**kwargs, tranche_count=1)
-    member_specs = [s for s in FEATURE_REGISTRY if s.name in set(COMMITTEE_MEMBERS)]
+    member_specs = [s for s in FEATURE_REGISTRY if s.name in set(strategy_values().committee_members)]
     books = build_feature_books(member_specs, panels, mask, decision_grid, min_symbols=8)
     assert len(books) >= 1
     reference = sum(books.values()) / float(len(books))
@@ -788,7 +788,7 @@ def test_committee_execution_book_coverage_cutoff_admits_pre_cutoff_member() -> 
         close, quote_vol, taker_gap, mask, decision_grid,
         min_symbols=8, tranche_count=1, coverage_cutoff=cutoff,
     )
-    member_specs = [s for s in FEATURE_REGISTRY if s.name in set(COMMITTEE_MEMBERS)]
+    member_specs = [s for s in FEATURE_REGISTRY if s.name in set(strategy_values().committee_members)]
     flow_members = [
         s.name for s in member_specs if "taker_buy_quote" in s.required_columns
     ]
@@ -811,7 +811,7 @@ def test_committee_execution_book_applies_member_weights() -> None:
         min_symbols=8, tranche_count=1,
     )
     # Build a weight dict that puts 0.8 on the first admitted member
-    member_specs = [s for s in FEATURE_REGISTRY if s.name in set(COMMITTEE_MEMBERS)]
+    member_specs = [s for s in FEATURE_REGISTRY if s.name in set(strategy_values().committee_members)]
     books = build_feature_books(
         member_specs,
         {"close": close, "quote_vol": quote_vol, "taker_buy_quote": taker_buy_quote},
@@ -843,7 +843,7 @@ def test_committee_execution_book_member_weights_fail_closed() -> None:
     )
     pd.testing.assert_frame_equal(book_equal, book_mismatch)
     # All-zero weights also falls back to equal
-    member_specs = [s for s in FEATURE_REGISTRY if s.name in set(COMMITTEE_MEMBERS)]
+    member_specs = [s for s in FEATURE_REGISTRY if s.name in set(strategy_values().committee_members)]
     books = build_feature_books(
         member_specs,
         {"close": close, "quote_vol": quote_vol, "taker_buy_quote": taker_buy_quote},
