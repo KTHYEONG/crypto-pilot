@@ -21,9 +21,59 @@ jobs:
       - id: check
         run: echo "paused=$LIVE_DEPLOY_PAUSED" >> "$GITHUB_OUTPUT"
 
+  # Decides whether this push reaches the running system. Tests/docs/markdown/AI-config-only pushes
+  # still run the test job but skip build and deploy (no approval prompt).
+  changes:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: write
+    outputs:
+      runtime: ${{ steps.classify.outputs.runtime }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+
+      - name: Classify runtime impact
+        id: classify
+        env:
+          EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          runtime=true
+          if [ "$EVENT" = "push" ]; then
+            set +e
+            bash .github/scripts/runtime_changed.sh "$BEFORE" "$GITHUB_SHA"
+            rc=$?
+            set -e
+            if [ "$rc" -eq 1 ]; then runtime=false; fi
+          fi
+          echo "runtime=$runtime" >> "$GITHUB_OUTPUT"
+          echo "runtime=$runtime"
+
+      # An older run parked at the production approval gate would hold the deploy concurrency slot and
+      # block this run. This push already contains those commits, so cancel only older runs still waiting.
+      - name: Cancel older runs waiting for approval
+        if: steps.classify.outputs.runtime == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          gh run list -R "$GITHUB_REPOSITORY" -w deploy.yml -s waiting -L 20 --json databaseId -q '.[].databaseId' |
+          while read -r id; do
+            if [ -n "$id" ] && [ "$id" -lt "$GITHUB_RUN_ID" ]; then
+              echo "cancel stale waiting run $id"
+              gh run cancel "$id" -R "$GITHUB_REPOSITORY" || echo "::warning::could not cancel run $id"
+            fi
+          done
+
   build-and-push:
-    needs: gate
-    if: ${{ needs.gate.outputs.paused != 'true' }}
+    needs: [gate, changes]
+    if: ${{ needs.gate.outputs.paused != 'true' && needs.changes.outputs.runtime == 'true' }}
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 20
     permissions:
@@ -82,14 +132,14 @@ jobs:
   deploy:
     # The deploy SSH key lives only in the production environment: no owner approval, no key.
     environment: production
-    needs: [gate, test, build-and-push]
+    needs: [gate, changes, test, build-and-push]
     # 결정 창 게이트에서 대기하던 배포들이 창 종료 시 동시에 풀려 서버에서 컨테이너 교체가
     # 겹치지 않도록 한 번에 하나만 실행한다. 대기 중인 이전 배포는 최신 배포로 대체된다
     # (모두 main의 :latest 이미지를 배포하므로 최신 하나만 적용하면 충분하다).
     concurrency:
       group: oracle-deploy
       cancel-in-progress: false
-    if: ${{ needs.gate.outputs.paused != 'true' }}
+    if: ${{ needs.gate.outputs.paused != 'true' && needs.changes.outputs.runtime == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 240
     steps:
