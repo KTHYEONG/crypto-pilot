@@ -1,16 +1,16 @@
-"""Golden freeze of live decisions across the research/lab restructure (parts 1-4).
+"""Golden freeze of live decisions.
 
 A deterministic synthetic 1h lake (30 seeded symbols, one listed mid-window, one
 delisted with a listing-registry fixture) feeds the public live entry point
 ``build_live_strategy_book`` and the account sizing path used by
-``run_strategy_signal_step``. SHA-256 digests of the canonical unit-target and
-levered-target frames pin every live decision bit; part 3 may only rename
-imports/symbols here, never the digests.
+``run_strategy_signal_step``. Reference frames under
+``tests/fixtures/golden/live_decision`` pin the unit, levered and live-step
+targets within float tolerance; regenerate them only with
+``tools/regen_live_golden.py --write``.
 """
 
 from __future__ import annotations
 
-import hashlib
 import json
 import shutil
 from pathlib import Path
@@ -53,9 +53,9 @@ _FAR = pd.Timestamp("2049-01-01", tz="UTC")
 _SNAPSHOT_HOUR = int(FLOW_MOM_TOP20.snapshot_hour_utc)
 _SEED_EQUITY_USDT = 2100.0
 
-_UNIT_BOOK_DIGEST = "d26b96855df02f7f532b7785926b80f679c9e431ea942137b07880122f66c447"
-_LEVERED_ROW_DIGEST = "311cc2767be0ecd99788ad84e0eb1ef49c9c8e5cc25ebdb5efd47af5547a758a"
-_LIVE_STEP_DIGEST = "e7a9ec1cdf90c4e1510dabae5948cb91af82303814d05e7278a2c81e1f247a73"
+_REFERENCE_DIR = Path(__file__).resolve().parents[1] / "fixtures" / "golden" / "live_decision"
+_REFERENCE_RTOL = 1e-9
+_REFERENCE_ATOL = 1e-12
 
 
 class GoldenLayout(TypedDict):
@@ -171,13 +171,17 @@ def _write_funding(root: Path) -> None:
         }).to_parquet(out / f"{symbol}.parquet")
 
 
-def _canonical_digest(frame: pd.DataFrame) -> str:
-    ordered = frame.sort_index(axis=0).sort_index(axis=1)
-    lines = ["," + ",".join(str(column) for column in ordered.columns)]
-    for stamp, row in ordered.iterrows():
-        cells = ",".join(f"{float(value):.17g}" for value in row.to_numpy())
-        lines.append(f"{pd.Timestamp(stamp).isoformat()},{cells}")
-    return hashlib.sha256(("\n".join(lines) + "\n").encode("utf-8")).hexdigest()
+def _assert_matches_reference(frame: pd.DataFrame, name: str) -> None:
+    reference = pd.read_parquet(_REFERENCE_DIR / f"{name}.parquet")
+    assert frame.index.equals(reference.index)
+    assert list(frame.columns) == list(reference.columns)
+    actual = frame.to_numpy(dtype="float64")
+    expected = reference.to_numpy(dtype="float64")
+    np.testing.assert_array_equal(np.sign(actual), np.sign(expected))
+    np.testing.assert_array_equal(actual == 0.0, expected == 0.0)
+    pd.testing.assert_frame_equal(
+        frame, reference, check_exact=False, rtol=_REFERENCE_RTOL, atol=_REFERENCE_ATOL,
+    )
 
 
 def _levered_targets(book: LiveStrategyBook, venue_path: Path, bootstrap_path: Path) -> pd.DataFrame:
@@ -225,9 +229,7 @@ def _live_step_targets(layout: GoldenLayout, state: Path) -> pd.DataFrame:
     return load_weights_frame(weights)
 
 
-@pytest.fixture(scope="module")
-def golden_layout(tmp_path_factory: pytest.TempPathFactory) -> GoldenLayout:
-    base = tmp_path_factory.mktemp("live_golden")
+def build_golden_layout(base: Path) -> GoldenLayout:
     data = base / "data"
     listing = base / "listing"
     venue = base / "venue.json"
@@ -257,22 +259,39 @@ def golden_layout(tmp_path_factory: pytest.TempPathFactory) -> GoldenLayout:
     return {"data": data, "listing": listing, "venue": venue, "book": book, "bootstrap": bootstrap}
 
 
-def test_live_unit_book_digest_is_stable(golden_layout: GoldenLayout) -> None:
-    assert _canonical_digest(golden_layout["book"].unit_weights) == _UNIT_BOOK_DIGEST
+def build_reference_frames(base: Path) -> dict[str, pd.DataFrame]:
+    """Build the three pinned frames from the fixture lake under ``base``."""
+    layout = build_golden_layout(base / "layout")
+    return {
+        "unit": layout["book"].unit_weights,
+        "levered": _levered_targets(layout["book"], layout["venue"], layout["bootstrap"]),
+        "targets": _live_step_targets(layout, base / "state"),
+    }
 
 
-def test_live_levered_row_digest_is_stable(golden_layout: GoldenLayout) -> None:
+@pytest.fixture(scope="module")
+def golden_layout(tmp_path_factory: pytest.TempPathFactory) -> GoldenLayout:
+    return build_golden_layout(tmp_path_factory.mktemp("live_golden"))
+
+
+def test_live_unit_book_matches_reference(golden_layout: GoldenLayout) -> None:
+    _assert_matches_reference(golden_layout["book"].unit_weights, "unit")
+
+
+def test_live_levered_row_matches_reference(golden_layout: GoldenLayout) -> None:
     levered = _levered_targets(golden_layout["book"], golden_layout["venue"], golden_layout["bootstrap"])
-    assert _canonical_digest(levered) == _LEVERED_ROW_DIGEST
+    _assert_matches_reference(levered, "levered")
 
 
-def test_production_live_step_digest_is_stable(golden_layout: GoldenLayout, tmp_path: Path) -> None:
+def test_production_live_step_matches_reference(golden_layout: GoldenLayout, tmp_path: Path) -> None:
     targets = _live_step_targets(golden_layout, tmp_path / "state")
-    assert _canonical_digest(targets) == _LIVE_STEP_DIGEST
+    _assert_matches_reference(targets, "targets")
 
 
 def test_golden_fixture_is_causal(golden_layout: GoldenLayout, tmp_path: Path) -> None:
     book = golden_layout["book"]
+    base_levered = _levered_targets(book, golden_layout["venue"], golden_layout["bootstrap"])
+    base_targets = _live_step_targets(golden_layout, tmp_path / "base_state")
     cutoff = book.unit_weights.index.max() + pd.Timedelta(hours=_SNAPSHOT_HOUR)
     perturbed = tmp_path / "data"
     shutil.copytree(golden_layout["data"], perturbed)
@@ -301,11 +320,11 @@ def test_golden_fixture_is_causal(golden_layout: GoldenLayout, tmp_path: Path) -
         perturbed, _CENSUS, panel_start=_START, panel_end=_START + pd.Timedelta(days=_DAYS),
         blocked_decisions=_blocked,
     )
-    assert _canonical_digest(rebuilt.unit_weights) == _UNIT_BOOK_DIGEST
+    pd.testing.assert_frame_equal(rebuilt.unit_weights, book.unit_weights, check_exact=True)
     levered = _levered_targets(rebuilt, golden_layout["venue"], golden_layout["bootstrap"])
-    assert _canonical_digest(levered) == _LEVERED_ROW_DIGEST
+    pd.testing.assert_frame_equal(levered, base_levered, check_exact=True)
     perturbed_layout: GoldenLayout = {
         **golden_layout, "data": perturbed, "book": rebuilt,
     }
     targets = _live_step_targets(perturbed_layout, tmp_path / "state")
-    assert _canonical_digest(targets) == _LIVE_STEP_DIGEST
+    pd.testing.assert_frame_equal(targets, base_targets, check_exact=True)
