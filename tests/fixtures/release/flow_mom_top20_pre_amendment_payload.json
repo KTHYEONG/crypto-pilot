@@ -1,0 +1,47 @@
+{
+  "breadth": 20,
+  "design_data_cutoff": "2026-07-01T00:00:00+00:00",
+  "entry_hour_utc": 0,
+  "exposure_multiplier": 1.0,
+  "implementation": {
+    "books.py": "d6cf8aa8d85be36c87cf8cae1bd5556fdd25c11911f418a1b3f0e7370be6fb0b",
+    "features.py": "b17a19f986cf317ac966fc369be6c6612dc790bf97f2d01e7538ad4f6123544d",
+    "sizing.py": "4ac510ebb7d61c7cb7e8c2eb8739ab94aa7e7cdabec5a3e20cb3809f4149e729",
+    "targets.py": "1ac8070ccf2792b2305b8ed025a1fcd25f443ccde89c085c456e9a84a3d0b12e",
+    "universe.py": "7e26be01535d265f8b77ad3287096c4348e222cedca61c7ec22cae0acc8f8bcb"
+  },
+  "members": [
+    [
+      "flow_imb_168h",
+      1
+    ],
+    [
+      "flow_imb_720h",
+      1
+    ],
+    [
+      "xs_mom_336h",
+      1
+    ],
+    [
+      "xs_idio_mom_336h",
+      1
+    ],
+    [
+      "mom3_skew_168h",
+      1
+    ]
+  ],
+  "min_rank_symbols": 8,
+  "name_clip": null,
+  "release_hour_utc": 23,
+  "shared_parameters": "444c948f5cbed2b6072bb1b65b12601d57acc1267fbbc1bf4844fa1b80f7639a",
+  "sizing": {
+    "execution_policy": "strict_passive_repeg",
+    "exposure_cap": 10.0,
+    "name_clip": 0.05,
+    "unit_bootstrap_sha256": "2cc6a4e9c11dd8fc6c509c3233645d38d226702b73f650e1f1f6ac4d0d9e956b"
+  },
+  "snapshot_hour_utc": 22,
+  "strategy_id": "flow_mom_top20"
+}

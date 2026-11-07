@@ -16,6 +16,20 @@
   "criteria_digest": "8710bb6600649ff7aa706b6d0e56be0d9720493bf406fa682fdd5ba99e11c0db",
   "design_data_cutoff": "2026-07-01T00:00:00+00:00",
   "evaluation_digest": "47bef61c6e68e9556a0799728abc3bbeae07f3983483ea635fcb2e6000e78b7a",
+  "implementation_amendments": [
+    {
+      "baseline_commit": "53ece0e7b4597a3782feeaabba91acc91d5c73bd",
+      "candidate_commit": null,
+      "decision_rows": 2001,
+      "evidence_sha256": "9dfb6f536f93a388ec395c5501ca8ab766ff04bf09414074cc26a9e772912863",
+      "from_spec_digest": "853722ab064a12d30c22cf27f399fbfcf27420c485a8413895aa3f90508cbf75",
+      "max_abs_diff": 4.85722573273506e-17,
+      "recorded_at": "2026-11-07T06:23:44.843252+00:00",
+      "to_spec_digest": "e6890dffcd8594eb308f7f466e7fefe6b76a93a821ce1aa739be14c4f2abc32a",
+      "window_end": "2026-10-28T22:00:00+00:00",
+      "window_start": "2021-05-01T00:00:00+00:00"
+    }
+  ],
   "legacy_ids": [
     "frozen_mhs_top20_v2"
   ],

@@ -14,6 +14,8 @@ from collections.abc import Mapping
 import numpy as np
 import pandas as pd
 
+from src.core.params import BOOK_DEGENERATE_GROSS_RTOL
+
 
 def portfolio_rebalance_trigger(
     target: pd.DataFrame,
@@ -95,12 +97,11 @@ def rank_weight_book(
 ) -> pd.DataFrame:
     """Dollar-neutral, unit-gross rank weights across eligible symbols.
 
-    Percentile-ranks each row, subtracts the row mean of the percentile ranks
-    (exact dollar neutrality; rank(pct) has mean ``(n+1)/(2n)``, so subtracting
-    the constant 0.5 would import a net long/short tilt), multiplies by
-    ``sign``, then divides by the row gross so ``abs`` weights sum to 1.0.
-    Rows with fewer than ``min_symbols`` eligible symbols (or zero gross)
-    return all zeros.
+    Ranks each row (average ties) and centers it on the exact half-integer
+    ``(n+1)/2``, so ties cancel bit-exactly and a fully tied row is flat.
+    Multiplies by ``sign``, then divides by the row gross so ``abs`` weights
+    sum to 1.0. Rows with fewer than ``min_symbols`` eligible symbols (or zero
+    gross) return all zeros.
     """
     if sign not in (-1, 1):
         raise ValueError(f"sign must be -1 or +1, got {sign}")
@@ -110,8 +111,9 @@ def rank_weight_book(
         raise ValueError("signal and eligible must be identically indexed and columned")
 
     masked = signal.where(eligible)
-    ranks = masked.rank(axis=1, pct=True)
-    centered = ranks.sub(ranks.mean(axis=1), axis=0).mul(sign)
+    ranks = masked.rank(axis=1)
+    count = masked.count(axis=1)
+    centered = ranks.sub((count + 1) / 2, axis=0).mul(sign)
     gross = centered.abs().sum(axis=1)
     out = centered.div(gross.where(gross > 0), axis=0)
     enough = eligible.sum(axis=1) >= min_symbols
@@ -137,7 +139,8 @@ def renormalize_within_mask(
     masked = weights.where(mask)
     centered = masked.sub(masked.mean(axis=1), axis=0)
     gross = centered.abs().sum(axis=1)
-    out = centered.div(gross.where(gross > 0), axis=0)
+    degenerate = gross <= BOOK_DEGENERATE_GROSS_RTOL * masked.abs().sum(axis=1)
+    out = centered.div(gross.where(~degenerate), axis=0)
     enough = mask.sum(axis=1) >= min_symbols
     return out.where(enough, other=0.0).fillna(0.0)
 
@@ -187,7 +190,9 @@ def clip_names_preserving_gross(weights: pd.DataFrame, clip: float) -> pd.DataFr
     is several times the book median, and those names dominate intraday drawdown. Clipping
     flattens that tail while restoring the pre-clip row gross keeps the ensemble's consensus
     scaling -- the book's own risk control -- intact. Re-centering over the names held before
-    clipping keeps the row dollar-neutral. The transform is single-pass: after gross
+    clipping keeps the row dollar-neutral. Cells within ``BOOK_DEGENERATE_GROSS_RTOL`` of the
+    row gross are float-cancellation noise and are treated as (and returned as) exact zeros, so
+    held names never depend on summation order. The transform is single-pass: after gross
     restoration a weight may exceed ``clip`` by the restoration factor, so ``clip`` is a
     shaping parameter, not a hard position limit.
 
@@ -205,7 +210,12 @@ def clip_names_preserving_gross(weights: pd.DataFrame, clip: float) -> pd.DataFr
     if not valid:
         raise ValueError(f"clip must be positive and finite, got {clip!r}")
     bound = float(clip)
-    values = np.where(np.isfinite(weights.to_numpy(dtype="float64")), weights.to_numpy(dtype="float64"), 0.0)
+    raw = weights.to_numpy(dtype="float64")
+    values = np.where(np.isfinite(raw), raw, 0.0)
+    # A cell at float-cancellation noise relative to its row gross is a zero weight, not a held
+    # name; counting it as held would shift the re-centering mean and move every other name.
+    noise = np.abs(values) <= BOOK_DEGENERATE_GROSS_RTOL * np.abs(values).sum(axis=1)[:, None]
+    values = np.where(noise, 0.0, values)
     held = values != 0.0
     gross_in = np.abs(values).sum(axis=1)
     clipped = np.sign(values) * np.minimum(np.abs(values), bound)

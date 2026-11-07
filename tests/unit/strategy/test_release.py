@@ -2,21 +2,33 @@
 
 from __future__ import annotations
 
+import dataclasses
+import hashlib
 import json
 import shutil
+from pathlib import Path
 
 import pytest
 
+import src.strategy.release as release_mod
 from src.common.errors import DataIntegrityError
 from src.strategy.release import (
     EvaluationCriteria,
+    ImplementationAmendment,
+    _canonical_json,
+    append_implementation_amendment,
     criteria_digest,
+    effective_spec_digest,
     load_release,
     record_acceptance,
     release_path,
     strategy_spec_digest,
+    strategy_spec_payload,
 )
 from src.strategy.targets import FLOW_MOM_TOP20
+
+BASELINE_PAYLOAD = Path(__file__).resolve().parents[2] / "fixtures" / "release" / "flow_mom_top20_pre_amendment_payload.json"
+_IMPLEMENTATION_KEYS = {"implementation", "shared_parameters"}
 
 
 def test_committed_release_loads_and_digests_verify() -> None:
@@ -26,7 +38,7 @@ def test_committed_release_loads_and_digests_verify() -> None:
     assert release.legacy_ids == ("frozen_mhs_top20_v2",)
     assert release.criteria_digest == criteria_digest(release.criteria)
     assert release.criteria_digest == criteria_digest(EvaluationCriteria())
-    assert release.spec_digest == strategy_spec_digest(FLOW_MOM_TOP20, dict(release.sizing))
+    assert effective_spec_digest(release) == strategy_spec_digest(FLOW_MOM_TOP20, dict(release.sizing))
     assert release.verdict in (None, "accept")
     assert (release.verdict is None) == (release.evaluation_digest is None)
 
@@ -391,3 +403,164 @@ def test_account_run_at_other_capital_is_rejected(tmp_path) -> None:
         neighbor_runs=neighbors,
     )
     assert mismatched.book_identity_ok is False
+
+
+def _amendment(from_digest: str, to_digest: str, **overrides) -> ImplementationAmendment:
+    fields = {
+        "from_spec_digest": from_digest,
+        "to_spec_digest": to_digest,
+        "baseline_commit": "a1b2c3d",
+        "candidate_commit": None,
+        "evidence_sha256": "e" * 64,
+        "window_start": "2026-01-01T00:00:00+00:00",
+        "window_end": "2026-11-01T00:00:00+00:00",
+        "decision_rows": 100,
+        "max_abs_diff": 1e-16,
+        "recorded_at": "2026-11-07T12:00:00+00:00",
+    }
+    fields.update(overrides)
+    return ImplementationAmendment(**fields)
+
+
+def _root_copy(tmp_path) -> Path:
+    root = tmp_path / "root"
+    target = root / "src" / "strategy" / "releases"
+    target.mkdir(parents=True)
+    raw = json.loads(release_path("flow_mom_top20").read_text(encoding="utf-8"))
+    raw.pop("implementation_amendments", None)  # model an unamended release; chains are built per test
+    (target / "flow_mom_top20.json").write_text(json.dumps(raw, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return root
+
+
+def _unamended_release():
+    return dataclasses.replace(load_release("flow_mom_top20"), implementation_amendments=())
+
+
+def test_digest_unchanged_by_payload_refactor() -> None:
+    """The pre-amendment payload still hashes to the committed digest; only implementation keys may differ."""
+    baseline = json.loads(BASELINE_PAYLOAD.read_text(encoding="utf-8"))
+    release = load_release("flow_mom_top20")
+    assert hashlib.sha256(_canonical_json(baseline).encode("utf-8")).hexdigest() == release.spec_digest
+    current = json.loads(json.dumps(strategy_spec_payload(FLOW_MOM_TOP20, dict(release.sizing))))
+    assert set(current) == set(baseline)
+    for key in set(baseline) - _IMPLEMENTATION_KEYS:
+        assert current[key] == baseline[key]
+
+
+def test_effective_digest_follows_chain() -> None:
+    """Chained amendments resolve to the last ``to``; a release without amendments keeps its digest."""
+    release = _unamended_release()
+    chained = dataclasses.replace(
+        release,
+        implementation_amendments=(_amendment(release.spec_digest, "1" * 64), _amendment("1" * 64, "2" * 64)),
+    )
+    assert effective_spec_digest(chained) == "2" * 64
+    assert effective_spec_digest(release) == release.spec_digest
+
+
+@pytest.mark.parametrize(
+    "chain",
+    [
+        (_amendment("9" * 64, "1" * 64),),
+        (_amendment("SPEC", "1" * 64), _amendment("9" * 64, "2" * 64)),
+        (_amendment("SPEC", "1" * 64), _amendment("1" * 64, "SPEC")),
+    ],
+    ids=["wrong_first_from", "gap", "repeated_to"],
+)
+def test_broken_chain_raises(chain) -> None:
+    release = _unamended_release()
+    chain = tuple(
+        dataclasses.replace(a, from_spec_digest=release.spec_digest if a.from_spec_digest == "SPEC" else a.from_spec_digest,
+                            to_spec_digest=release.spec_digest if a.to_spec_digest == "SPEC" else a.to_spec_digest)
+        for a in chain
+    )
+    broken = dataclasses.replace(release, implementation_amendments=chain)
+    with pytest.raises(DataIntegrityError, match="chain"):
+        effective_spec_digest(broken)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"from_spec_digest": ""}, {"to_spec_digest": ""}, {"baseline_commit": ""},
+        {"candidate_commit": ""}, {"candidate_commit": 7}, {"evidence_sha256": ""},
+        {"window_start": ""}, {"window_end": ""}, {"recorded_at": ""},
+        {"decision_rows": -1}, {"decision_rows": True}, {"max_abs_diff": float("nan")},
+        {"max_abs_diff": -1.0}, {"max_abs_diff": True},
+    ],
+)
+def test_amendment_rejects_malformed_fields(overrides) -> None:
+    with pytest.raises(DataIntegrityError):
+        _amendment("1" * 64, "2" * 64, **overrides)
+    with pytest.raises(DataIntegrityError, match="must change"):
+        _amendment("1" * 64, "1" * 64)
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda raw: raw.__setitem__("implementation_amendments", "not-a-list"),
+        lambda raw: raw.__setitem__("implementation_amendments", [{"from_spec_digest": "1"}]),
+        lambda raw: raw.__setitem__("implementation_amendments", [dict(
+            dataclasses.asdict(_amendment("SPEC", "1" * 64)), extra=1)]),
+    ],
+    ids=["not_list", "missing_keys", "extra_key"],
+)
+def test_release_rejects_malformed_amendment_records(tmp_path, mutate) -> None:
+    root = _root_copy(tmp_path)
+    path = release_path("flow_mom_top20", root=root)
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    mutate(raw)
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    with pytest.raises(DataIntegrityError, match="amendment"):
+        load_release("flow_mom_top20", root=root)
+
+
+def test_append_refuses_stale_from(tmp_path) -> None:
+    """An amendment that does not start at the effective digest is refused and the file is untouched."""
+    root = _root_copy(tmp_path)
+    path = release_path("flow_mom_top20", root=root)
+    before = path.read_bytes()
+    with pytest.raises(DataIntegrityError, match="effective spec digest"):
+        append_implementation_amendment("flow_mom_top20", _amendment("9" * 64, "1" * 64), root=root)
+    assert path.read_bytes() == before
+
+
+def test_append_refuses_repeated_to(tmp_path) -> None:
+    """A second amendment that returns to an earlier digest is refused as a repeated chain link."""
+    root = _root_copy(tmp_path)
+    release = load_release("flow_mom_top20", root=root)
+    append_implementation_amendment(
+        "flow_mom_top20", _amendment(release.spec_digest, "1" * 64), root=root,
+    )
+    with pytest.raises(DataIntegrityError, match="repeats"):
+        append_implementation_amendment("flow_mom_top20", _amendment("1" * 64, release.spec_digest), root=root)
+
+
+def test_append_preserves_other_keys(tmp_path) -> None:
+    """Appending writes one list entry; criteria, verdict and evaluation digest stay byte-equal when parsed."""
+    root = _root_copy(tmp_path)
+    path = release_path("flow_mom_top20", root=root)
+    before = json.loads(path.read_text(encoding="utf-8"))
+    release = load_release("flow_mom_top20", root=root)
+    append_implementation_amendment(
+        "flow_mom_top20", _amendment(release.spec_digest, "1" * 64), root=root,
+    )
+    after = json.loads(path.read_text(encoding="utf-8"))
+    recorded = after.pop("implementation_amendments")
+    assert recorded[0]["to_spec_digest"] == "1" * 64
+    assert after == before
+    assert not path.with_name(f"{path.name}.tmp").exists()
+    assert effective_spec_digest(load_release("flow_mom_top20", root=root)) == "1" * 64
+
+
+def test_append_fails_closed_when_record_vanishes(tmp_path, monkeypatch) -> None:
+    """A record removed after the chain check is reported as unreadable, never silently recreated."""
+    root = _root_copy(tmp_path)
+    path = release_path("flow_mom_top20", root=root)
+    release = load_release("flow_mom_top20", root=root)
+    path.unlink()
+    monkeypatch.setattr(release_mod, "load_release", lambda *args, **kwargs: release)
+    with pytest.raises(DataIntegrityError, match="unreadable"):
+        append_implementation_amendment("flow_mom_top20", _amendment(release.spec_digest, "1" * 64), root=root)
+    assert not path.exists()
