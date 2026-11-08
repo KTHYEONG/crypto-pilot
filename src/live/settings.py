@@ -97,8 +97,8 @@ class LiveSettings(BaseSettings):
     order_api_key: SecretStr | None = None
     order_api_secret: SecretStr | None = None
     mainnet_trading_ack: str | None = None
-    # 사이징 에쿼티의 절대 상한 캡(I-EQUITY-MTM): E = min(계좌 MTM, 이 값).
-    # '목표 노셔널'이 아니다. 값과 검증은 불변이다.
+    # PAPER/SHADOW 가상 원장의 시작 현금 시드. LIVE 모드 사이징은 계좌 MTM(지갑+미실현)을 상한 없이 쓰며,
+    # 이 값은 릴리스 게이트가 승인된 평가 자본과 대조하는 데만 쓰인다.
     notional_equity_usdt: float = 2_000.0
     recv_window_ms: int = 5_000
     order_identity_tolerance_ms: int = Field(
