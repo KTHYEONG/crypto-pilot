@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import math
@@ -44,6 +45,17 @@ def add_evaluate_commands(evaluate_parser: argparse.ArgumentParser) -> None:
     strategy.add_argument("--holdout-account-run", default=None, help="Finished continuous `backtest account` run from discovery start to holdout end (informational leveraged reporting).")
     strategy.add_argument("--accept", action="store_true", default=False)
     strategy.set_defaults(handler=run_evaluate_strategy_command)
+    accept = sub.add_parser(
+        "ml-tilt-accept",
+        help="Record the ML tilt acceptance block for mainnet (dry-run unless --write).",
+        description="Bind a C1 ML tilt account replay and its preregistered verdict to the accepted release.",
+    )
+    accept.add_argument("--account-run", required=True, help="Finished C1 `backtest account` run directory.")
+    accept.add_argument("--models", required=True, help="ML tilt model directory the account run replayed.")
+    accept.add_argument("--bootstrap", required=True, help="Plain (non-sealed) unit bootstrap parquet path.")
+    accept.add_argument("--execution-policy", required=True, help="Daemon execution policy, compared verbatim by the release gate.")
+    accept.add_argument("--write", action="store_true", default=False, help="Write the block into the active store working tree.")
+    accept.set_defaults(handler=run_ml_tilt_accept_command)
 
 
 def _family_of(strategy_id: str) -> str:
@@ -550,3 +562,108 @@ def run_evaluate_strategy_command(args: argparse.Namespace) -> None:
         record_acceptance(strategy_id, spec_digest=evaluation.spec_digest, evaluation_digest=evaluation.digest,
                           expected_criteria_digest=evaluation.criteria_digest)
     raise SystemExit(_EXIT_BY_VERDICT[str(evaluation.verdict)])
+
+
+def _sha256_file(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _bootstrap_provenance_ok(bootstrap: Path, account: dict[str, Any], manifest: dict[str, Any]) -> bool:
+    """The bootstrap parquet must carry the replayed run's identity in its key-value metadata."""
+    import pyarrow.parquet as pq  # noqa: PLC0415
+
+    try:
+        raw = pq.read_metadata(bootstrap).metadata or {}
+    except (OSError, ValueError):
+        return False
+    meta = {key.decode(): value.decode() for key, value in raw.items()}
+    return (
+        meta.get("ml_tilt_digest") == manifest["ml_tilt_digest"]
+        and meta.get("execution") == "maker"
+        and meta.get("strategy_id") == FLOW_MOM_TOP20.strategy_id
+        and meta.get("evaluation_start") == account.get("evaluation_start")
+        and meta.get("evaluation_end") == account.get("evaluation_end")
+    )
+
+
+def _ml_tilt_checks(args: argparse.Namespace, account: dict[str, Any], manifest: dict[str, Any],
+                    accepted_policy: str) -> dict[str, bool]:
+    capital = account.get("capital")
+    return {
+        "strategy_id": account.get("strategy_id") == FLOW_MOM_TOP20.strategy_id,
+        "ml_tilt_digest": account.get("ml_tilt_digest") == manifest["ml_tilt_digest"],
+        "execution mode": account.get("execution", {}).get("mode") == "maker",
+        "policy kind": account.get("policy", {}).get("kind") == "growth",
+        "not liquidated": account.get("liquidated_at") is None,
+        "stress not liquidated": account.get("stress_execution", {}).get("liquidated_at") is None,
+        "no initial margin breaches": account.get("initial_margin_breaches") == 0,
+        "execution policy": str(args.execution_policy) == accepted_policy,
+        "capital": isinstance(capital, (int, float)) and not isinstance(capital, bool)
+        and math.isfinite(capital) and capital > 0,
+        "bootstrap provenance": _bootstrap_provenance_ok(Path(args.bootstrap), account, manifest),
+    }
+
+
+def _ml_tilt_evidence(args: argparse.Namespace) -> dict[str, Any]:
+    """Validate the C1 evidence triple and return the acceptance block fields; raises SystemExit on any refusal."""
+    from src.strategy.release import ML_TILT_PREREG_VERDICT_RELPATH, load_release, ml_tilt_manifest  # noqa: PLC0415
+    from src.strategy.store import strategy_store_root  # noqa: PLC0415
+
+    bootstrap = Path(args.bootstrap)
+    if bootstrap.suffix == ".enc":
+        raise SystemExit("ml-tilt-accept refused: sealed bootstrap is not accepted, pass the plain parquet")
+    release = load_release(FLOW_MOM_TOP20.strategy_id)
+    if release.verdict != "accept":
+        raise SystemExit("ml-tilt-accept refused: base release is not accepted")
+    account_run = Path(args.account_run)
+    account_path = account_run / "account.json"
+    account = json.loads(account_path.read_text(encoding="utf-8"))
+    manifest = ml_tilt_manifest(Path(args.models))
+    accepted_policy = str(release.sizing.get("execution_policy", ""))
+    failed = [name for name, ok in _ml_tilt_checks(args, account, manifest, accepted_policy).items() if not ok]
+    if failed:
+        raise SystemExit(f"ml-tilt-accept refused: {', '.join(failed)} check failed")
+    verdict_path = strategy_store_root() / ML_TILT_PREREG_VERDICT_RELPATH
+    verdict = json.loads(verdict_path.read_text(encoding="utf-8"))
+    if verdict["C1"]["PASS"] is not True:
+        raise SystemExit("ml-tilt-accept refused: preregistered C1 verdict is not PASS")
+    return {
+        "definition_digest": manifest["ml_tilt_definition"],
+        "models": [(boundary, sha) for boundary, sha in manifest["ml_tilt_models"]],
+        "unit_bootstrap_sha256": _sha256_file(Path(args.bootstrap)),
+        "target_capital_usdt": float(account["capital"]),
+        "execution_policy": accepted_policy,
+        "account_run": account_run.name,
+        "account_sha256": _sha256_file(account_path),
+        "account_ml_tilt_digest": manifest["ml_tilt_digest"],
+        "prereg_verdict_sha256": _sha256_file(verdict_path),
+        "accepted_at": pd.Timestamp.now(tz="UTC").isoformat(),
+    }
+
+
+def run_ml_tilt_accept_command(args: argparse.Namespace) -> None:
+    """Print the ML tilt acceptance block; with --write, record it into the active store release."""
+    from src.common.errors import DataIntegrityError  # noqa: PLC0415
+    from src.strategy.release import MlTiltAcceptance, record_ml_tilt_acceptance  # noqa: PLC0415
+    from src.strategy.store import refuse_example_store  # noqa: PLC0415
+
+    try:
+        refuse_example_store("ml tilt acceptance")
+        fields = _ml_tilt_evidence(args)
+        block = {**fields, "models": [list(pair) for pair in fields["models"]]}
+        acceptance = MlTiltAcceptance(**{**fields, "models": tuple(fields["models"])})
+    except (DataIntegrityError, OSError, ValueError, KeyError, TypeError) as exc:
+        raise SystemExit(f"ml-tilt-accept refused: {exc}") from exc
+    print(json.dumps(block, indent=2, sort_keys=True))  # noqa: T201
+    if not args.write:
+        return
+    try:
+        record_ml_tilt_acceptance(FLOW_MOM_TOP20.strategy_id, acceptance)
+    except DataIntegrityError as exc:
+        raise SystemExit(f"ml-tilt-accept refused: {exc}") from exc
+    logger.info(
+        "[EVAL] ml-tilt-accept written definition=%s models=%d account=%s",
+        acceptance.definition_digest[:12],
+        len(acceptance.models),
+        acceptance.account_sha256[:12],
+    )

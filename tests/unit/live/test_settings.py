@@ -794,15 +794,15 @@ def test_liveness_execute_budget_covers_flip_day_worst_case() -> None:
     assert settings.liveness_execute_budget_s >= worst_case_s
 
 
-def test_ml_tilt_model_dir_rejected_on_mainnet_and_accepted_in_paper() -> None:
-    with pytest.raises(ValueError, match="ml tilt has no accepted release"):
-        LiveSettings(
-            mode=ExecutionMode.LIVE_MAINNET,
-            mainnet_trading_ack=MAINNET_TRADING_ACK,
-            api_key=SecretStr("k"),
-            api_secret=SecretStr("s"),
-            ml_tilt_model_dir="/models/ml_tilt",
-        )
-    settings = LiveSettings(mode=ExecutionMode.PAPER, ml_tilt_model_dir="/models/ml_tilt")
-    assert settings.ml_tilt_model_dir == "/models/ml_tilt"
+def test_ml_tilt_model_dir_allowed_in_mainnet_settings() -> None:
+    mainnet = LiveSettings(
+        mode=ExecutionMode.LIVE_MAINNET,
+        mainnet_trading_ack=MAINNET_TRADING_ACK,
+        api_key=SecretStr("k"),
+        api_secret=SecretStr("s"),
+        ml_tilt_model_dir="/models/ml_tilt",
+    )
+    assert mainnet.ml_tilt_model_dir == "/models/ml_tilt"
+    paper = LiveSettings(mode=ExecutionMode.PAPER, ml_tilt_model_dir="/models/ml_tilt")
+    assert paper.ml_tilt_model_dir == "/models/ml_tilt"
     assert LiveSettings().ml_tilt_model_dir is None

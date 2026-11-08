@@ -568,8 +568,154 @@ def test_gate_fails_closed_on_broken_chain(tmp_path) -> None:
 def test_release_gate_blocks_mainnet_ml_tilt(tmp_path) -> None:
     from src.live.preflight import release_gate_check
 
+    root = _release_root_with_verdict(tmp_path, "accept", evaluation_digest="eval-abc")
     settings = _mainnet_gate_settings(tmp_path)
     settings.ml_tilt_model_dir = str(tmp_path / "ml_tilt")
-    check = release_gate_check(settings, root=tmp_path)
+    check = release_gate_check(settings, root=root)
     assert check.passed is False
     assert check.detail.startswith("[RISK] ml tilt")
+
+
+_ML_MODELS = (("2026-10-01T00:00:00+00:00", "1" * 64), ("2026-11-01T00:00:00+00:00", "4" * 64))
+
+
+def _ml_manifest(models=_ML_MODELS, definition: str = "d" * 64) -> dict:
+    return {
+        "ml_tilt_digest": "f" * 64,
+        "ml_tilt_definition": definition,
+        "ml_tilt_models": [[boundary, sha] for boundary, sha in models],
+    }
+
+
+def _ml_root(tmp_path, *, block: bool = True):
+    """Accepted C0 release with an ML tilt acceptance recorded for the default fixture daemon settings."""
+    import hashlib
+
+    from src.strategy.release import MlTiltAcceptance, record_ml_tilt_acceptance
+
+    root = _release_root_with_verdict(tmp_path / "ml", "accept", evaluation_digest="eval-abc")
+    settings = _mainnet_gate_settings(tmp_path / "ml")
+    settings.ml_tilt_model_dir = str(tmp_path / "ml" / "ml_tilt")
+    if block:
+        record_ml_tilt_acceptance(
+            "flow_mom_top20",
+            MlTiltAcceptance(
+                definition_digest="d" * 64,
+                models=_ML_MODELS[:1],
+                unit_bootstrap_sha256=hashlib.sha256(b"bootstrap fixture").hexdigest(),
+                target_capital_usdt=1000.0,
+                execution_policy="strict_passive_repeg",
+                account_run="run-c1",
+                account_sha256="2" * 64,
+                account_ml_tilt_digest="f" * 64,
+                prereg_verdict_sha256="3" * 64,
+                accepted_at="2026-11-08T00:00:00+00:00",
+            ),
+            root=root,
+        )
+    return root, settings
+
+
+def _patch_manifest(monkeypatch, manifest: dict) -> None:
+    import src.live.strategy_book as strategy_book
+
+    monkeypatch.setattr(strategy_book, "live_ml_tilt_manifest", lambda _model_dir: manifest)
+
+
+def test_ml_gate_refuses_without_block(tmp_path, monkeypatch) -> None:
+    from src.live.preflight import release_gate_check
+
+    root, settings = _ml_root(tmp_path, block=False)
+    _patch_manifest(monkeypatch, _ml_manifest())
+    check = release_gate_check(settings, root=root)
+    assert check.passed is False
+    assert check.detail.startswith("[RISK] ml tilt has no accepted release")
+
+
+def test_ml_gate_passes_on_full_match(tmp_path, monkeypatch) -> None:
+    from src.live.preflight import release_gate_check
+
+    root, settings = _ml_root(tmp_path)
+    _patch_manifest(monkeypatch, _ml_manifest(models=_ML_MODELS[:1]))
+    check = release_gate_check(settings, root=root)
+    assert check.passed is True
+    assert "ml_tilt accepted" in check.detail
+
+
+def test_ml_gate_passes_on_appended_model(tmp_path, monkeypatch) -> None:
+    from src.live.preflight import release_gate_check
+
+    root, settings = _ml_root(tmp_path)
+    _patch_manifest(monkeypatch, _ml_manifest(models=_ML_MODELS))
+    check = release_gate_check(settings, root=root)
+    assert check.passed is True
+
+
+def _mutate_release(root, mutate) -> None:
+    import json
+
+    path = root / "crypto-pilot" / "releases" / "flow_mom_top20.json"
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    mutate(raw)
+    path.write_text(json.dumps(raw, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def test_ml_gate_refuses_each_mismatch(tmp_path, monkeypatch) -> None:
+    from src.live.preflight import release_gate_check
+
+    cases = {
+        "definition": (lambda s, m: None, _ml_manifest(definition="e" * 64), "[RISK] ml tilt definition differs"),
+        "model_sha": (lambda s, m: None, _ml_manifest(models=(("2026-10-01T00:00:00+00:00", "5" * 64), _ML_MODELS[1])),
+                      "[RISK] ml tilt models differ"),
+        "model_removed": (lambda s, m: None, _ml_manifest(models=()), "[RISK] ml tilt models differ"),
+        "capital": (lambda s, m: setattr(s, "notional_equity_usdt", 2000), _ml_manifest(),
+                    "[RISK] daemon capital differs"),
+        "policy": (lambda s, m: setattr(s, "execution_policy", "taker_parity"), _ml_manifest(),
+                   "[RISK] daemon execution policy differs"),
+    }
+    for name, (tweak, manifest, expected) in cases.items():
+        root, settings = _ml_root(tmp_path / name)
+        tweak(settings, manifest)
+        _patch_manifest(monkeypatch, manifest)
+        check = release_gate_check(settings, root=root)
+        assert check.passed is False, name
+        assert check.detail.startswith(expected), name
+
+    root, settings = _ml_root(tmp_path / "bootstrap")
+    settings.unit_bootstrap_path = str(tmp_path / "bootstrap" / "unit.parquet")
+    (tmp_path / "bootstrap" / "unit.parquet").write_bytes(b"changed")
+    _patch_manifest(monkeypatch, _ml_manifest())
+    check = release_gate_check(settings, root=root)
+    assert check.passed is False
+    assert "unit bootstrap differs" in check.detail
+
+    root, settings = _ml_root(tmp_path / "verdict")
+    _mutate_release(root, lambda raw: raw.update(verdict=None))
+    _patch_manifest(monkeypatch, _ml_manifest())
+    check = release_gate_check(settings, root=root)
+    assert check.passed is False
+    assert check.detail.startswith("[RISK] strategy")
+
+    root, settings = _ml_root(tmp_path / "book")
+    _mutate_release(root, lambda raw: raw.update(spec_digest="0" * 64))
+    _patch_manifest(monkeypatch, _ml_manifest())
+    check = release_gate_check(settings, root=root)
+    assert check.passed is False
+    assert "running book digest differs" in check.detail
+
+
+def test_ml_gate_fails_closed_on_manifest_error(tmp_path, monkeypatch) -> None:
+    from src.common.errors import DataIntegrityError
+    from src.live.preflight import release_gate_check
+
+    root, settings = _ml_root(tmp_path)
+
+    def broken(_model_dir):
+        raise DataIntegrityError("ml tilt model set is empty")
+
+    import src.live.strategy_book as strategy_book
+
+    monkeypatch.setattr(strategy_book, "live_ml_tilt_manifest", broken)
+    check = release_gate_check(settings, root=root)
+    assert check.passed is False
+    assert "failed closed" in check.detail

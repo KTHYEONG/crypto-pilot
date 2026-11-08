@@ -551,3 +551,147 @@ def test_append_fails_closed_when_record_vanishes(tmp_path, monkeypatch) -> None
     with pytest.raises(DataIntegrityError, match="unreadable"):
         append_implementation_amendment("flow_mom_top20", _amendment(release.spec_digest, "1" * 64), root=root)
     assert not path.exists()
+
+
+def _ml_block(**overrides) -> release_mod.MlTiltAcceptance:
+    fields = {
+        "definition_digest": "d" * 64,
+        "models": (("2026-10-01T00:00:00+00:00", "1" * 64), ("2026-11-01T00:00:00+00:00", "2" * 64)),
+        "unit_bootstrap_sha256": "b" * 64,
+        "target_capital_usdt": 300.0,
+        "execution_policy": "strict_passive_repeg",
+        "account_run": "run-c1",
+        "account_sha256": "a" * 64,
+        "account_ml_tilt_digest": "c" * 64,
+        "prereg_verdict_sha256": "e" * 64,
+        "accepted_at": "2026-11-08T00:00:00+00:00",
+    }
+    fields.update(overrides)
+    return release_mod.MlTiltAcceptance(**fields)
+
+
+def _accepted_root(tmp_path) -> Path:
+    root = _root_copy(tmp_path)
+    release = load_release("flow_mom_top20", root=root)
+    record_acceptance("flow_mom_top20", spec_digest=release.spec_digest, evaluation_digest="eval-1", root=root)
+    return root
+
+
+def _release_bytes(root: Path) -> bytes:
+    return release_path("flow_mom_top20", root=root).read_bytes()
+
+
+def test_ml_acceptance_absent_is_none(tmp_path) -> None:
+    """A release record without the ML block loads with no acceptance and unchanged digests."""
+    release = load_release("flow_mom_top20", root=_root_copy(tmp_path))
+    assert release.ml_tilt_acceptance is None
+    assert release.spec_digest == json.loads(release_path("flow_mom_top20").read_text(encoding="utf-8"))["spec_digest"]
+
+
+def test_ml_acceptance_round_trip_preserves_other_keys(tmp_path) -> None:
+    root = _accepted_root(tmp_path)
+    before = json.loads(_release_bytes(root))
+    acceptance = _ml_block()
+    reloaded = release_mod.record_ml_tilt_acceptance("flow_mom_top20", acceptance, root=root)
+    assert reloaded.ml_tilt_acceptance == acceptance
+    after = json.loads(_release_bytes(root))
+    assert after.pop("ml_tilt_acceptance") is not None
+    assert after == before
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"definition_digest": "XYZ"},
+        {"unit_bootstrap_sha256": "B" * 64},
+        {"models": ()},
+        {"models": (("2026-11-01T00:00:00+00:00", "1" * 64), ("2026-10-01T00:00:00+00:00", "2" * 64))},
+        {"models": (("2026-10-01T00:00:00+00:00", "1" * 64), ("2026-11-01T00:00:00+00:00", "1" * 64))},
+        {"models": (("2026-10-01T00:00:00", "1" * 64),)},
+        {"target_capital_usdt": 0.0},
+        {"target_capital_usdt": float("inf")},
+        {"execution_policy": ""},
+        {"accepted_at": "not-a-time"},
+        {"accepted_at": ""},
+        {"accepted_at": "2026-11-08T00:00:00"},
+        {"models": (("2026-10-01T00:00:00+00:00", "1" * 64), ("2026-11-01T00:00:00+00:00", "2" * 64), ("2026-12-01T00:00:00+00:00", "A" * 64))},
+    ],
+)
+def test_ml_acceptance_malformed_fails_closed(overrides) -> None:
+    with pytest.raises(DataIntegrityError, match="ml tilt acceptance malformed"):
+        _ml_block(**overrides)
+
+
+def test_ml_acceptance_extra_key_fails_closed(tmp_path) -> None:
+    root = _accepted_root(tmp_path)
+    path = release_path("flow_mom_top20", root=root)
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    block = dataclasses.asdict(_ml_block())
+    block["models"] = [list(pair) for pair in block["models"]]
+    raw["ml_tilt_acceptance"] = {**block, "extra": 1}
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    with pytest.raises(DataIntegrityError, match="ml tilt acceptance malformed"):
+        load_release("flow_mom_top20", root=root)
+
+
+def test_ml_acceptance_requires_accept_and_single_write(tmp_path) -> None:
+    unaccepted = _root_copy(tmp_path / "open")
+    before = _release_bytes(unaccepted)
+    with pytest.raises(DataIntegrityError, match="accept verdict"):
+        release_mod.record_ml_tilt_acceptance("flow_mom_top20", _ml_block(), root=unaccepted)
+    assert _release_bytes(unaccepted) == before
+
+    root = _accepted_root(tmp_path / "accepted")
+    release_mod.record_ml_tilt_acceptance("flow_mom_top20", _ml_block(), root=root)
+    recorded = _release_bytes(root)
+    with pytest.raises(DataIntegrityError, match="already recorded"):
+        release_mod.record_ml_tilt_acceptance("flow_mom_top20", _ml_block(definition_digest="f" * 64), root=root)
+    assert _release_bytes(root) == recorded
+
+
+_A = ("2026-10-01T00:00:00+00:00", "1" * 64)
+_B = ("2026-11-01T00:00:00+00:00", "2" * 64)
+_C = ("2026-12-01T00:00:00+00:00", "3" * 64)
+
+
+@pytest.mark.parametrize(
+    ("running", "expected"),
+    [
+        ([_A, _B], True),
+        ([_A, _B, _C], True),
+        ([_A, ("2026-11-01T00:00:00+00:00", "9" * 64)], False),
+        ([_A], False),
+        ([_B, _A], False),
+    ],
+)
+def test_ml_models_cover_append_only(running, expected) -> None:
+    assert release_mod.ml_tilt_models_cover((_A, _B), running) is expected
+
+
+def test_ml_acceptance_non_list_models_fails_closed(tmp_path) -> None:
+    root = _accepted_root(tmp_path)
+    path = release_path("flow_mom_top20", root=root)
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    block = dataclasses.asdict(_ml_block())
+    block["models"] = "2026-10-01"
+    raw["ml_tilt_acceptance"] = block
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    with pytest.raises(DataIntegrityError, match="ml tilt acceptance malformed: models"):
+        load_release("flow_mom_top20", root=root)
+
+
+def test_ml_acceptance_fails_closed_when_record_vanishes(tmp_path, monkeypatch) -> None:
+    root = _accepted_root(tmp_path)
+    path = release_path("flow_mom_top20", root=root)
+    release = load_release("flow_mom_top20", root=root)
+    path.unlink()
+    monkeypatch.setattr(release_mod, "load_release", lambda *args, **kwargs: release)
+    with pytest.raises(DataIntegrityError, match="unreadable"):
+        release_mod.record_ml_tilt_acceptance("flow_mom_top20", _ml_block(), root=root)
+    assert not path.exists()
+
+
+def test_ml_tilt_manifest_requires_store_section(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(release_mod, "ml_tilt_values", lambda: None)
+    with pytest.raises(DataIntegrityError, match=r"\[ml_tilt\] section"):
+        release_mod.ml_tilt_manifest(tmp_path)

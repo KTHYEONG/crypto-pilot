@@ -320,3 +320,65 @@ def test_run_paper_funding_backfill_dry_run_logs_cash_delta(monkeypatch, caplog)
     with caplog.at_level(logging.INFO):
         live_mod._run_paper_funding_backfill(argparse.Namespace(apply=False, artifact=None, mode=None, accrual_start=None))
     assert "cash_delta=0" in caplog.text
+
+
+def _shadow_args(**overrides):
+    import argparse
+
+    fields = {"decision_time": pd.Timestamp("2026-08-24 00:00Z"), "artifact": "weights.parquet", "mode": None}
+    fields.update(overrides)
+    return argparse.Namespace(**fields)
+
+
+def _stub_shadow(monkeypatch, mode, gate_detail: str | None):
+    from types import SimpleNamespace
+
+    import src.cli.commands.live as live_mod
+    import src.live.preflight as preflight_mod
+    import src.live.runner as runner_mod
+    from src.live.settings import ExecutionMode
+
+    calls = {"gate": 0, "cycle": 0}
+    settings = SimpleNamespace(mode=ExecutionMode(mode))
+
+    def gate(_settings, **_kwargs):
+        calls["gate"] += 1
+        passed = gate_detail is None
+        return preflight_mod.PreflightCheck(name="release_gate", passed=passed, detail=gate_detail or "ok")
+
+    def cycle(*_args, **_kwargs):
+        calls["cycle"] += 1
+        return SimpleNamespace(status="ok", reason="none", intent_count=0)
+
+    monkeypatch.setattr(live_mod, "_settings_with_mode", lambda _args: settings)
+    monkeypatch.setattr(preflight_mod, "release_gate_check", gate)
+    monkeypatch.setattr(runner_mod, "run_shadow_cycle", cycle)
+    return calls
+
+
+def test_shadow_cycle_mainnet_refused_by_release_gate(monkeypatch) -> None:
+    import pytest
+
+    from src.cli.commands.live import _run_shadow_cycle
+    from src.live.errors import LiveTradingError
+
+    calls = _stub_shadow(monkeypatch, "live_mainnet", "[RISK] ml tilt has no accepted release")
+    with pytest.raises(LiveTradingError, match="shadow-cycle refused"):
+        _run_shadow_cycle(_shadow_args())
+    assert calls == {"gate": 1, "cycle": 0}
+
+
+def test_shadow_cycle_mainnet_passing_gate_runs_cycle(monkeypatch) -> None:
+    from src.cli.commands.live import _run_shadow_cycle
+
+    calls = _stub_shadow(monkeypatch, "live_mainnet", None)
+    _run_shadow_cycle(_shadow_args())
+    assert calls == {"gate": 1, "cycle": 1}
+
+
+def test_shadow_cycle_paper_skips_release_gate(monkeypatch) -> None:
+    from src.cli.commands.live import _run_shadow_cycle
+
+    calls = _stub_shadow(monkeypatch, "paper", "[RISK] would refuse")
+    _run_shadow_cycle(_shadow_args())
+    assert calls == {"gate": 0, "cycle": 1}

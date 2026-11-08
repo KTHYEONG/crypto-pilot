@@ -7,23 +7,27 @@ Data only: live loads releases through this module without importing
 from __future__ import annotations
 
 import hashlib
+import itertools
 import json
 import math
 import os
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
 
 import pandas as pd
 
 from src.common.errors import DataIntegrityError
-from src.strategy.store import releases_dir_of, releases_root
+from src.strategy.store import ml_tilt_values, releases_dir_of, releases_root
 
 if TYPE_CHECKING:
+    from src.strategy.store import MlTiltValues
     from src.strategy.targets import StrategySpec
 
 RELEASES_DIRNAME = "releases"
+ML_TILT_PREREG_VERDICT_RELPATH: Final = Path("crypto-pilot/research/ml_tilt/verdict.json")
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,6 +102,62 @@ class ImplementationAmendment:
 
 
 @dataclass(frozen=True, slots=True)
+class MlTiltAcceptance:
+    """Human-merged evidence that the ML tilt variant may trade mainnet; append-only models at runtime."""
+
+    definition_digest: str
+    models: tuple[tuple[str, str], ...]
+    unit_bootstrap_sha256: str
+    target_capital_usdt: float
+    execution_policy: str
+    account_run: str
+    account_sha256: str
+    account_ml_tilt_digest: str
+    prereg_verdict_sha256: str
+    accepted_at: str
+
+    def __post_init__(self) -> None:
+        for name in ("definition_digest", "unit_bootstrap_sha256", "account_sha256",
+                     "account_ml_tilt_digest", "prereg_verdict_sha256"):
+            _require_hex64(getattr(self, name), name)
+        if not isinstance(self.models, tuple) or not self.models:
+            raise DataIntegrityError("ml tilt acceptance malformed: models")
+        boundaries: list[pd.Timestamp] = []
+        for boundary, sha in self.models:
+            _require_hex64(sha, "models")
+            boundaries.append(_utc_timestamp(boundary, "models"))
+        if any(later <= earlier for earlier, later in itertools.pairwise(boundaries)):
+            raise DataIntegrityError("ml tilt acceptance malformed: models")
+        if len({sha for _, sha in self.models}) != len(self.models):
+            raise DataIntegrityError("ml tilt acceptance malformed: models")
+        capital = self.target_capital_usdt
+        if isinstance(capital, bool) or not isinstance(capital, (int, float)) or not math.isfinite(capital) or capital <= 0:
+            raise DataIntegrityError("ml tilt acceptance malformed: target_capital_usdt")
+        for name in ("execution_policy", "account_run"):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not value:
+                raise DataIntegrityError(f"ml tilt acceptance malformed: {name}")
+        _utc_timestamp(self.accepted_at, "accepted_at")
+
+
+def _require_hex64(value: Any, field: str) -> None:
+    if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+        raise DataIntegrityError(f"ml tilt acceptance malformed: {field}")
+
+
+def _utc_timestamp(value: Any, field: str) -> pd.Timestamp:
+    if not isinstance(value, str) or not value:
+        raise DataIntegrityError(f"ml tilt acceptance malformed: {field}")
+    try:
+        stamp = pd.Timestamp(value)
+    except (ValueError, TypeError) as exc:
+        raise DataIntegrityError(f"ml tilt acceptance malformed: {field}") from exc
+    if stamp.tzinfo is None or stamp.utcoffset() != pd.Timedelta(0):
+        raise DataIntegrityError(f"ml tilt acceptance malformed: {field}")
+    return stamp
+
+
+@dataclass(frozen=True, slots=True)
 class StrategyRelease:
     strategy_id: str
     legacy_ids: tuple[str, ...]
@@ -110,6 +170,7 @@ class StrategyRelease:
     evaluation_digest: str | None
     verdict: str | None
     implementation_amendments: tuple[ImplementationAmendment, ...] = ()
+    ml_tilt_acceptance: MlTiltAcceptance | None = None
 
 
 def _canonical_json(value: Any) -> str:
@@ -236,6 +297,23 @@ def effective_spec_digest(release: StrategyRelease) -> str:
     return _chain_head(release.spec_digest, release.implementation_amendments)
 
 
+_ML_ACCEPTANCE_FIELDS = frozenset(field.name for field in fields(MlTiltAcceptance))
+
+
+def _parse_ml_tilt_acceptance(raw: Any) -> MlTiltAcceptance | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict) or set(raw) != _ML_ACCEPTANCE_FIELDS:
+        raise DataIntegrityError("ml tilt acceptance malformed: keys")
+    models = raw["models"]
+    if not isinstance(models, list) or not all(
+        isinstance(pair, list) and len(pair) == 2 and all(isinstance(item, str) for item in pair)
+        for pair in models
+    ):
+        raise DataIntegrityError("ml tilt acceptance malformed: models")
+    return MlTiltAcceptance(**{**raw, "models": tuple((pair[0], pair[1]) for pair in models)})
+
+
 def _parse_criteria(raw: Any) -> EvaluationCriteria:
     if not isinstance(raw, dict):
         raise DataIntegrityError("release criteria must be a mapping")
@@ -283,6 +361,7 @@ def load_release(strategy_id: str, *, root: Path | None = None) -> StrategyRelea
     if not isinstance(raw_amendments, list):
         raise DataIntegrityError(f"release record invalid: {path}: implementation_amendments must be a list")
     amendments = tuple(_parse_amendment(item) for item in raw_amendments)
+    acceptance = _parse_ml_tilt_acceptance(raw.get("ml_tilt_acceptance"))
     return StrategyRelease(
         strategy_id=str(raw.get("strategy_id", canonical)),
         legacy_ids=tuple(raw.get("legacy_ids", ())),
@@ -295,6 +374,7 @@ def load_release(strategy_id: str, *, root: Path | None = None) -> StrategyRelea
         evaluation_digest=None if evaluation_digest is None else str(evaluation_digest),
         verdict=None if verdict is None else str(verdict),
         implementation_amendments=amendments,
+        ml_tilt_acceptance=acceptance,
     )
 
 
@@ -348,3 +428,65 @@ def append_implementation_amendment(
     temporary = path.with_name(f"{path.name}.tmp")
     temporary.write_text(json.dumps(raw, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     os.replace(temporary, path)
+
+
+def ml_tilt_models_cover(accepted: Sequence[tuple[str, str]], running: Sequence[Sequence[str]]) -> bool:
+    """True when the running model list extends the accepted one; replaced, removed or reordered models fail."""
+    if len(running) < len(accepted):
+        return False
+    return all(tuple(pair) == tuple(expected) for expected, pair in zip(accepted, running, strict=False))
+
+
+def record_ml_tilt_acceptance(
+    strategy_id: str, acceptance: MlTiltAcceptance, *, root: Path | None = None,
+) -> StrategyRelease:
+    """Write the ML tilt acceptance block once, into an accepted release record; other keys stay unchanged."""
+    from src.strategy.targets import resolve_strategy_id  # noqa: PLC0415
+
+    canonical = resolve_strategy_id(strategy_id)
+    path = release_path(canonical, root=root)
+    release = load_release(canonical, root=root)
+    if release.verdict != "accept":
+        raise DataIntegrityError("ml tilt acceptance requires an accept verdict")
+    if release.ml_tilt_acceptance is not None:
+        raise DataIntegrityError("ml tilt acceptance already recorded")
+    block = asdict(acceptance)
+    block["models"] = [list(pair) for pair in acceptance.models]
+    _parse_ml_tilt_acceptance(block)
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError) as exc:
+        raise DataIntegrityError(f"release record unreadable: {path}") from exc
+    raw["ml_tilt_acceptance"] = block
+    temporary = path.with_name(f"{path.name}.tmp")
+    temporary.write_text(json.dumps(raw, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    os.replace(temporary, path)
+    return load_release(canonical, root=root)
+
+
+def ml_tilt_manifest(model_dir: Path, values: MlTiltValues | None = None) -> dict[str, Any]:
+    """Run-manifest identity of the ML variant: full digest, model-free definition digest, ordered model shas.
+
+    The definition digest fixes what the book is; the ordered ``[boundary, sha256]`` list lets a resumed run
+    accept boundary models appended after it started while still refusing any replaced, removed or reordered model.
+
+    Raises:
+        DataIntegrityError: The store has no ``[ml_tilt]`` section, or the model set is empty or invalid.
+    """
+    from src.strategy.ml_tilt import load_model_set, ml_tilt_signal_digest, values_digest  # noqa: PLC0415
+    from src.strategy.targets import FLOW_MOM_TOP20  # noqa: PLC0415
+
+    if values is None:
+        values = ml_tilt_values()
+    if values is None:
+        raise DataIntegrityError("ml tilt requires the [ml_tilt] section in the strategy store")
+    models = load_model_set(Path(model_dir), values=values)
+    if not models:
+        raise DataIntegrityError(f"ml tilt model set is empty: {model_dir}")
+    base = strategy_signal_digest(FLOW_MOM_TOP20)
+    digest = values_digest(values)
+    return {
+        "ml_tilt_digest": ml_tilt_signal_digest(base, models, digest),
+        "ml_tilt_definition": ml_tilt_signal_digest(base, (), digest),
+        "ml_tilt_models": [[model.boundary.isoformat(), model.sha256] for model in models],
+    }

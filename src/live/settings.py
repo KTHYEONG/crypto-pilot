@@ -251,7 +251,7 @@ class LiveSettings(BaseSettings):
     # Strategy live 입력: 봉인된 단위수익률 부트스트랩과 베뉴 규칙 폴백 스냅샷.
     unit_bootstrap_path: str = str(APP_ROOT / "deploy" / "mhs" / "frozen_unit_returns_maker.parquet.enc")
     venue_fallback_path: str = str(APP_ROOT / "deploy" / "mhs" / "venue_rules_20260921.json")
-    # flow_mom ML tilt 모델 디렉터리. 설정하면 페이퍼 전용이며 LIVE_MAINNET은 거부된다.
+    # flow_mom ML tilt 모델 디렉터리. LIVE_MAINNET은 승인된 ML tilt 릴리스가 있어야 기동된다(release gate).
     ml_tilt_model_dir: str | None = None
     # 다음 재학습 경계 모델이 이 일수 안으로 다가왔는데 없으면 경보(경계 당일에는 신호가 HALT된다).
     ml_tilt_retrain_warn_days: int = Field(default=14, ge=1)
@@ -592,13 +592,6 @@ class LiveSettings(BaseSettings):
         """The stale-ladder warning must fire strictly before the sizing halt."""
         if not self.venue_rules_warn_age_days < self.venue_rules_max_age_days:
             raise ValueError("venue_rules_warn_age_days must be < venue_rules_max_age_days")
-        return self
-
-    @model_validator(mode="after")
-    def _gate_ml_tilt_mainnet(self) -> LiveSettings:
-        """ML tilt has no accepted release, so it never runs against mainnet."""
-        if self.ml_tilt_model_dir is not None and self.mode is ExecutionMode.LIVE_MAINNET:
-            raise ValueError("ml tilt has no accepted release")
         return self
 
     @model_validator(mode="after")

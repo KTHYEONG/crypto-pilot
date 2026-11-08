@@ -11,6 +11,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -37,7 +38,7 @@ from src.strategy.ml_tilt import (
     next_boundary,
     values_digest,
 )
-from src.strategy.release import strategy_signal_digest
+from src.strategy.release import ml_tilt_manifest, strategy_signal_digest
 from src.strategy.store import MlTiltValues, ml_tilt_values, strategy_values
 from src.strategy.targets import FLOW_MOM_TOP20, build_strategy_targets
 from src.strategy.universe import build_pit_roster
@@ -192,27 +193,13 @@ def live_ml_tilt_digest(model_dir: Path) -> str:
     return ml_tilt_signal_digest(strategy_signal_digest(FLOW_MOM_TOP20), models, values_digest(values))
 
 
-def live_ml_tilt_manifest(model_dir: Path) -> dict[str, object]:
-    """Run-manifest identity of the ML variant: full digest, model-free definition digest, ordered model shas.
-
-    The definition digest (base signal, values, ``ml_tilt.py`` source) fixes what the book is; the ordered
-    ``[boundary, sha256]`` list lets a resumed run accept boundary models appended after it started while
-    still refusing any replaced, removed or reordered model.
+def live_ml_tilt_manifest(model_dir: Path) -> dict[str, Any]:
+    """Run-manifest identity of the ML variant; see ``src.strategy.release.ml_tilt_manifest``.
 
     Raises:
-        DataIntegrityError: The store has no ``[ml_tilt]`` section, or the model set is empty or invalid.
+        DataIntegrityError: The store has no ``[ml_tilt]`` values, or the model set is empty or invalid.
     """
-    values = _required_ml_tilt_values()
-    models = load_model_set(Path(model_dir), values=values)
-    if not models:
-        raise DataIntegrityError(f"ml tilt model set is empty: {model_dir}")
-    base = strategy_signal_digest(FLOW_MOM_TOP20)
-    digest = values_digest(values)
-    return {
-        "ml_tilt_digest": ml_tilt_signal_digest(base, models, digest),
-        "ml_tilt_definition": ml_tilt_signal_digest(base, (), digest),
-        "ml_tilt_models": [[model.boundary.isoformat(), model.sha256] for model in models],
-    }
+    return ml_tilt_manifest(model_dir, values=_required_ml_tilt_values())
 
 
 def ml_tilt_next_boundary_status(model_dir: Path, after: pd.Timestamp) -> tuple[pd.Timestamp, bool]:

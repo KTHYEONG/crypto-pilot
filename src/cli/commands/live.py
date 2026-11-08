@@ -64,9 +64,18 @@ def _resolve_weights_path(explicit: str | None, settings: Any) -> Path:
 
 
 def _run_shadow_cycle(args: argparse.Namespace) -> None:
+    from src.live.errors import LiveTradingError
     from src.live.runner import run_shadow_cycle
+    from src.live.settings import ExecutionMode
 
     settings = _settings_with_mode(args)
+    if settings.mode is ExecutionMode.LIVE_MAINNET:
+        from src.live.preflight import release_gate_check
+
+        gate = release_gate_check(settings)
+        if gate.passed is False:
+            logger.critical("[RISK] shadow_cycle_refused reason=release_gate")
+            raise LiveTradingError(f"shadow-cycle refused: {gate.detail}")
     report = run_shadow_cycle(
         settings,
         args.decision_time,

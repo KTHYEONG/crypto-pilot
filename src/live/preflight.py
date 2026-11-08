@@ -104,9 +104,7 @@ def release_gate_check(settings: Any, *, root: Path | None = None) -> PreflightC
             detail="suppressed mode: paper mode is an operational check and is never gated",
         )
     if getattr(settings, "ml_tilt_model_dir", None) is not None:
-        return PreflightCheck(
-            name="release_gate", passed=False, detail="[RISK] ml tilt has no accepted release",
-        )
+        return _ml_tilt_release_gate(settings, root)
     try:
         from src.core.params import ACCOUNT_EXPOSURE_CAP
         from src.live.runner import _unit_bootstrap_sha256
@@ -143,6 +141,58 @@ def release_gate_check(settings: Any, *, root: Path | None = None) -> PreflightC
         )
     except Exception as exc:
         return PreflightCheck(name="release_gate", passed=False, detail=f"[RISK] release gate failed closed: {exc}")
+
+
+def _ml_tilt_mismatch(settings: Any, acceptance: Any, manifest: dict[str, Any]) -> str | None:
+    from src.live.runner import _unit_bootstrap_sha256
+    from src.strategy.release import ml_tilt_models_cover
+
+    if manifest["ml_tilt_definition"] != acceptance.definition_digest:
+        return "[RISK] ml tilt definition differs from the accepted release"
+    if not ml_tilt_models_cover(acceptance.models, manifest["ml_tilt_models"]):
+        return "[RISK] ml tilt models differ from the accepted set"
+    if _unit_bootstrap_sha256(settings) != acceptance.unit_bootstrap_sha256:
+        return "[RISK] unit bootstrap differs from the accepted release"
+    if float(settings.notional_equity_usdt) != acceptance.target_capital_usdt:
+        return "[RISK] daemon capital differs from the accepted capital"
+    if str(settings.execution_policy) != acceptance.execution_policy:
+        return "[RISK] daemon execution policy differs from the accepted release"
+    return None
+
+
+def _ml_tilt_release_gate(settings: Any, root: Path | None) -> PreflightCheck:
+    """Mainnet ML tilt gate: the base book is accepted and a human-merged ML acceptance matches the daemon."""
+    from src.core.params import ACCOUNT_EXPOSURE_CAP
+    from src.live.strategy_book import live_ml_tilt_manifest
+    from src.strategy.release import effective_spec_digest, load_release, strategy_spec_digest
+    from src.strategy.store import strategy_values
+    from src.strategy.targets import FLOW_MOM_TOP20
+
+    def fail(detail: str) -> PreflightCheck:
+        return PreflightCheck(name="release_gate", passed=False, detail=detail)
+
+    try:
+        release = load_release(FLOW_MOM_TOP20.strategy_id, root=root)
+        if release.verdict != "accept":
+            return fail(f"[RISK] strategy {release.strategy_id} has no ACCEPT verdict (verdict={release.verdict})")
+        sizing = {"name_clip": strategy_values().name_clip, "execution_policy": release.sizing["execution_policy"],
+                  "unit_bootstrap_sha256": release.sizing["unit_bootstrap_sha256"], "exposure_cap": ACCOUNT_EXPOSURE_CAP}
+        if effective_spec_digest(release) != strategy_spec_digest(FLOW_MOM_TOP20, sizing):
+            return fail("[RISK] running book digest differs from the accepted release")
+        acceptance = release.ml_tilt_acceptance
+        if acceptance is None:
+            return fail("[RISK] ml tilt has no accepted release")
+        manifest = live_ml_tilt_manifest(Path(settings.ml_tilt_model_dir))
+        mismatch = _ml_tilt_mismatch(settings, acceptance, manifest)
+        if mismatch is not None:
+            return fail(mismatch)
+        return PreflightCheck(
+            name="release_gate", passed=True,
+            detail=(f"release {release.strategy_id} ml_tilt accepted definition={acceptance.definition_digest[:12]} "
+                    f"models={len(acceptance.models)}/{len(manifest['ml_tilt_models'])}"),
+        )
+    except Exception as exc:
+        return fail(f"[RISK] release gate failed closed: {exc}")
 
 
 def _append_tax_collection_check(settings: Any, checks: list[PreflightCheck]) -> None:
