@@ -8,7 +8,7 @@ import pytest
 
 from src.common.errors import DataIntegrityError
 from src.strategy import store
-from src.strategy.store import EXAMPLE_STORE_ROOT, load_strategy_values, strategy_store_root
+from src.strategy.store import EXAMPLE_STORE_ROOT, load_strategy_values, ml_tilt_values, strategy_store_root
 
 FIXTURE_ROOT = Path(__file__).resolve().parents[2] / "fixtures" / "strategy_store"
 _PARAMS = Path("crypto-pilot") / "params.toml"
@@ -169,3 +169,86 @@ def test_non_table_sections_fail_closed(tmp_path: Path) -> None:
     (root / _PARAMS).write_text('meta = 1\nflow_mom = 2\ncommittee = 3\n', encoding="utf-8")
     with pytest.raises(DataIntegrityError, match="malformed"):
         load_strategy_values(root)
+
+
+_ML_TILT_SECTION = """
+[ml_tilt]
+tilt = 0.10
+horizon_days = 1
+label_clip = 1.0
+vol_floor_quantile = 0.01
+smooth_halflife_days = 1.0
+retrain_days = 30
+purge_days = 2
+schedule_anchor = "2000-01-01T00:00:00Z"
+feature_breadth = 48
+num_leaves = 3
+min_child_samples = 10
+learning_rate = 0.1
+n_trees = 10
+subsample = 0.5
+colsample_bytree = 0.5
+reg_lambda = 1.0
+seed = 1
+min_train_rows = 100
+"""
+
+
+def test_ml_values_absent_returns_none(tmp_path: Path) -> None:
+    root = _copy_fixture(tmp_path)
+    assert ml_tilt_values(root) is None
+
+
+def test_ml_values_reject_short_purge(tmp_path: Path) -> None:
+    root = _copy_fixture(tmp_path)
+    (root / _PARAMS).write_text(
+        (root / _PARAMS).read_text(encoding="utf-8") + _ML_TILT_SECTION.replace("purge_days = 2", "purge_days = 1"),
+        encoding="utf-8",
+    )
+    with pytest.raises(DataIntegrityError, match=r"ml_tilt\.purge_days"):
+        ml_tilt_values(root)
+
+
+def test_example_store_has_ml_tilt() -> None:
+    values = ml_tilt_values(EXAMPLE_STORE_ROOT)
+    assert values is not None
+    assert values.schedule_anchor.tzinfo is not None
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "key"),
+    [
+        ("tilt = 0.10", "tilt = 1.0", "tilt"),
+        ("tilt = 0.10", "tilt = nan", "tilt"),
+        ("vol_floor_quantile = 0.01", "vol_floor_quantile = 0.5", "vol_floor_quantile"),
+        ("subsample = 0.5", "subsample = 1.5", "subsample"),
+        ("colsample_bytree = 0.5", "colsample_bytree = 0.0", "colsample_bytree"),
+        ("colsample_bytree = 0.5", "colsample_bytree = 1.5", "colsample_bytree"),
+        ("feature_breadth = 48", "feature_breadth = 1", "feature_breadth"),
+        ('schedule_anchor = "2000-01-01T00:00:00Z"', 'schedule_anchor = "not-a-date"', "schedule_anchor"),
+        ('schedule_anchor = "2000-01-01T00:00:00Z"', 'schedule_anchor = "2000-01-01T00:00:00"', "schedule_anchor"),
+        ('schedule_anchor = "2000-01-01T00:00:00Z"', 'schedule_anchor = "2000-01-01T00:00:00+02:00"', "schedule_anchor"),
+    ],
+)
+def test_ml_values_out_of_range_fail_closed(tmp_path: Path, old: str, new: str, key: str) -> None:
+    root = _copy_fixture(tmp_path)
+    (root / _PARAMS).write_text(
+        (root / _PARAMS).read_text(encoding="utf-8") + _ML_TILT_SECTION.replace(old, new),
+        encoding="utf-8",
+    )
+    with pytest.raises(DataIntegrityError, match=rf"ml_tilt\.{key}"):
+        ml_tilt_values(root)
+
+
+def test_ml_values_unparseable_params_fail_closed(tmp_path: Path) -> None:
+    root = _copy_fixture(tmp_path)
+    (root / _PARAMS).write_text("[ml_tilt\n", encoding="utf-8")
+    with pytest.raises(DataIntegrityError, match="unreadable"):
+        ml_tilt_values(root)
+
+
+def test_ml_section_must_be_a_table(tmp_path: Path) -> None:
+    root = _copy_fixture(tmp_path)
+    (root / _PARAMS).write_text("ml_tilt = 5\n" + (root / _PARAMS).read_text(encoding="utf-8"), encoding="utf-8")
+    with pytest.raises(DataIntegrityError, match="malformed"):
+        ml_tilt_values(root)

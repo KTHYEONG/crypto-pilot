@@ -13,9 +13,12 @@ import os
 import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from datetime import timedelta
 from pathlib import Path
 from types import MappingProxyType
 from typing import Final, Literal, cast
+
+import pandas as pd
 
 from src.common.errors import DataIntegrityError
 
@@ -23,6 +26,7 @@ _STORE_ENV: Final = "CRYPTO_STRATEGY_STORE"
 _STRATEGY_VALUES_SCHEMA: Final = "crypto.strategy_values.v1"
 _PROJECT_DIRNAME: Final = "crypto-pilot"
 _RELEASES_DIRNAME: Final = "releases"
+_ML_TILT_SECTION: Final = "ml_tilt"
 EXAMPLE_STORE_ROOT: Final[Path] = Path(__file__).resolve().parents[2] / "config" / "strategy_store.example"
 
 Sign = Literal[-1, 1]
@@ -45,6 +49,28 @@ class StrategyValues:
     @property
     def committee_members(self) -> tuple[str, ...]:
         return self.committee_sets[self.committee_default]
+
+
+@dataclass(frozen=True, slots=True)
+class MlTiltValues:
+    tilt: float
+    horizon_days: int
+    label_clip: float
+    vol_floor_quantile: float
+    smooth_halflife_days: float
+    retrain_days: int
+    purge_days: int
+    schedule_anchor: pd.Timestamp
+    feature_breadth: int
+    num_leaves: int
+    min_child_samples: int
+    learning_rate: float
+    n_trees: int
+    subsample: float
+    colsample_bytree: float
+    reg_lambda: float
+    seed: int
+    min_train_rows: int
 
 
 def strategy_store_root() -> Path:
@@ -165,6 +191,76 @@ def load_strategy_values(root: Path | None = None) -> StrategyValues:
         revision=store_revision(store_root),
     )
 
+
+def _ml_number(table: Mapping[str, object], key: str) -> float:
+    value = _required(table, key, _ML_TILT_SECTION)
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+        raise DataIntegrityError(f"strategy store key must be a finite number: {_ML_TILT_SECTION}.{key}")
+    return float(value)
+
+
+def _ml_range_error(key: str) -> DataIntegrityError:
+    return DataIntegrityError(f"strategy store key is out of range: {_ML_TILT_SECTION}.{key}")
+
+
+def _ml_schedule_anchor(table: Mapping[str, object]) -> pd.Timestamp:
+    where = f"{_ML_TILT_SECTION}.schedule_anchor"
+    text = _text(table, "schedule_anchor", _ML_TILT_SECTION)
+    try:
+        anchor = pd.Timestamp(text)
+    except (ValueError, TypeError) as exc:
+        raise DataIntegrityError(f"strategy store key must be a UTC timestamp: {where}") from exc
+    if anchor.tzinfo is None or anchor.utcoffset() != timedelta(0):
+        raise DataIntegrityError(f"strategy store key must be a UTC timestamp: {where}")
+    return anchor
+
+
+def ml_tilt_values(root: Path | None = None) -> MlTiltValues | None:
+    """Parse the ``[ml_tilt]`` section of the store params; None when the section is absent."""
+    store_root = strategy_store_root() if root is None else root
+    path = store_root / _PROJECT_DIRNAME / "params.toml"
+    try:
+        raw = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        raise DataIntegrityError(f"strategy store params unreadable: {path}") from exc
+    if _ML_TILT_SECTION not in raw:
+        return None
+    section = raw[_ML_TILT_SECTION]
+    if not isinstance(section, dict):
+        raise DataIntegrityError(f"strategy store params malformed: {path}")
+    values = MlTiltValues(
+        tilt=_ml_number(section, "tilt"),
+        horizon_days=_integer(section, "horizon_days", _ML_TILT_SECTION, minimum=1),
+        label_clip=_real(section, "label_clip", _ML_TILT_SECTION),
+        vol_floor_quantile=_ml_number(section, "vol_floor_quantile"),
+        smooth_halflife_days=_real(section, "smooth_halflife_days", _ML_TILT_SECTION),
+        retrain_days=_integer(section, "retrain_days", _ML_TILT_SECTION, minimum=1),
+        purge_days=_integer(section, "purge_days", _ML_TILT_SECTION, minimum=1),
+        schedule_anchor=_ml_schedule_anchor(section),
+        feature_breadth=_integer(section, "feature_breadth", _ML_TILT_SECTION, minimum=1),
+        num_leaves=_integer(section, "num_leaves", _ML_TILT_SECTION, minimum=2),
+        min_child_samples=_integer(section, "min_child_samples", _ML_TILT_SECTION, minimum=1),
+        learning_rate=_real(section, "learning_rate", _ML_TILT_SECTION),
+        n_trees=_integer(section, "n_trees", _ML_TILT_SECTION, minimum=1),
+        subsample=_real(section, "subsample", _ML_TILT_SECTION),
+        colsample_bytree=_real(section, "colsample_bytree", _ML_TILT_SECTION),
+        reg_lambda=_real(section, "reg_lambda", _ML_TILT_SECTION),
+        seed=_integer(section, "seed", _ML_TILT_SECTION, minimum=0),
+        min_train_rows=_integer(section, "min_train_rows", _ML_TILT_SECTION, minimum=1),
+    )
+    if not 0.0 < values.tilt < 1.0:
+        raise _ml_range_error("tilt")
+    if values.purge_days < values.horizon_days + 1:
+        raise _ml_range_error("purge_days")
+    if not 0.0 <= values.vol_floor_quantile < 0.5:
+        raise _ml_range_error("vol_floor_quantile")
+    if values.feature_breadth < load_strategy_values(store_root).breadth:
+        raise _ml_range_error("feature_breadth")
+    if not 0.0 < values.subsample <= 1.0:
+        raise _ml_range_error("subsample")
+    if not 0.0 < values.colsample_bytree <= 1.0:
+        raise _ml_range_error("colsample_bytree")
+    return values
 
 @functools.cache
 def strategy_values() -> StrategyValues:

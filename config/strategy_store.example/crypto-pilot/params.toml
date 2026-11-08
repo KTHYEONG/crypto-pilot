@@ -31,3 +31,23 @@ default = "flow_momentum"
 [committee.sets]
 flow_momentum = ["mom_168h", "taker_imb_24h", "amihud", "turnover_chg", "xs_mom_720h"]
 risk_premia = ["amihud", "mom_168h", "taker_imb_24h", "turnover_chg", "xs_mom_720h"]
+
+[ml_tilt]
+tilt = 0.10
+horizon_days = 1
+label_clip = 1.0
+vol_floor_quantile = 0.01
+smooth_halflife_days = 1.0
+retrain_days = 30
+purge_days = 2
+schedule_anchor = "2000-01-01T00:00:00Z"
+feature_breadth = 48
+num_leaves = 3
+min_child_samples = 10
+learning_rate = 0.1
+n_trees = 10
+subsample = 0.5
+colsample_bytree = 0.5
+reg_lambda = 1.0
+seed = 1
+min_train_rows = 100
