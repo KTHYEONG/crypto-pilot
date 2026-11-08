@@ -24,7 +24,7 @@ from src.core.params import (
     PROCESS_EVALUATION_CEILING,
 )
 from src.core.resources import MhsMemoryBudget
-from src.strategy.store import refuse_example_store, strategy_values
+from src.strategy.store import ml_tilt_values, refuse_example_store, strategy_values
 
 if TYPE_CHECKING:
     from src.engine.backtest_evidence import StrategyExecutionBound
@@ -103,7 +103,21 @@ def add_backtest_commands(backtest_parser: argparse.ArgumentParser) -> None:
         "--evaluate-holdout", action="store_true", default=False,
         help="Mark the run as a holdout evaluation (earlier run dirs are kept from retention pruning).",
     )
+    strategy.add_argument(
+        "--ml-tilt-models", type=Path, default=None,
+        help="Directory of boundary LightGBM models (from backtest ml-train); forces variant account_unit and blends the ML tilt into C0.",
+    )
     strategy.set_defaults(handler=run_strategy_backtest_command)
+    ml_train = sub.add_parser(
+        "ml-train",
+        help="Train the scheduled ML tilt boundary models that are missing from a directory.",
+        description="Train the scheduled ML tilt boundary models that are missing from a directory; existing valid models are kept.",
+    )
+    ml_train.add_argument("--until", required=True, help="UTC inclusive upper bound of scheduled boundaries; date-only values are UTC.")
+    ml_train.add_argument("--out", type=Path, required=True, help="Model directory; created when absent.")
+    ml_train.add_argument("--source-start", default=None, help="UTC source history start; date-only values are UTC.")
+    ml_train.add_argument("--data-root", default=None, help="Existing OHLCV root override.")
+    ml_train.set_defaults(handler=run_ml_train_command)
     exposure = sub.add_parser(
         "exposure",
         help="Re-derive the growth exposure rung from a finished strategy run.",
@@ -332,7 +346,8 @@ def _trial_family(strategy_id: str) -> str:
 
 
 def _record_trial_for_window(
-    strategy: Any, start: pd.Timestamp, end: pd.Timestamp, daily_sharpe: float | None, n_obs: int
+    strategy: Any, start: pd.Timestamp, end: pd.Timestamp, daily_sharpe: float | None, n_obs: int,
+    *, spec_digest_override: str | None = None,
 ) -> None:
     """Append one trial record when the window overlaps the discovery window (before cutoff)."""
     from src.evaluation.trials import TrialRecord, append_trial
@@ -346,6 +361,8 @@ def _record_trial_for_window(
         digest = strategy_spec_digest(strategy, sizing)
     except Exception:
         digest = str(strategy.strategy_id)
+    if spec_digest_override is not None:
+        digest = spec_digest_override
     record = TrialRecord(
         family=_trial_family(str(strategy.strategy_id)),
         spec_digest=digest,
@@ -359,12 +376,18 @@ def _record_trial_for_window(
     append_trial(record, path=releases_dir() / f"{_trial_family(str(strategy.strategy_id))}.trials.jsonl")
 
 
-def _holdout_gate(strategy_id: str, start: pd.Timestamp, end: pd.Timestamp, *, strategy: StrategySpec | None = None) -> None:
+def _holdout_gate(
+    strategy_id: str, start: pd.Timestamp, end: pd.Timestamp, *,
+    strategy: StrategySpec | None = None, signal_digest_override: str | None = None,
+) -> None:
     """Journal any post-design part of the window as observed by this strategy's signal."""
     if strategy is None:
         control = strategy_id == "flow_mom_top40_control"
         strategy = _strategy_policy(strategy_values().control_breadth if control else 20)
-    record_post_design_look(strategy_id, _trial_family(strategy_id), strategy, start, end, purpose="strategy_backtest")
+    record_post_design_look(
+        strategy_id, _trial_family(strategy_id), strategy, start, end, purpose="strategy_backtest",
+        signal_digest_override=signal_digest_override,
+    )
 
 
 def _neighbor_specs(strategy: Any) -> list[Any]:
@@ -439,7 +462,10 @@ def _append_trial_from_run(strategy: Any, run: Any, start: pd.Timestamp, end: pd
         base_values = run.evidence.base_daily.returns.to_numpy(dtype="float64")
         std = float(np.std(base_values, ddof=1)) if base_values.size >= 2 else 0.0
         sharpe = float(base_values.mean() / std) if std > 1e-12 else None
-        _record_trial_for_window(strategy, start, end, sharpe, int(base_values.size))
+        _record_trial_for_window(
+            strategy, start, end, sharpe, int(base_values.size),
+            spec_digest_override=getattr(run, "ml_tilt_digest", None),
+        )
     except Exception:
         _logger.exception("[EVAL] trial ledger append failed")
 
@@ -491,12 +517,27 @@ def run_strategy_backtest_command(args: argparse.Namespace) -> None:
         if (breadth != 20 and breadth != selected_breadth) or (variant != "primary" and variant != selected_variant):
             raise SystemExit("strategy conflicts with breadth or variant")
         breadth, variant = selected_breadth, selected_variant
+    ml_dir: Path | None = getattr(args, "ml_tilt_models", None)
+    if ml_dir is not None:
+        if bool(getattr(args, "neighbors", False)):
+            raise SystemExit("ml tilt cannot run discovery neighbors")
+        if breadth != 20 or variant == "growth":
+            raise SystemExit("ml tilt runs only on the Top-20 unit clip book")
+        variant = "account_unit"
     strategy = _strategy_policy(breadth, variant)
+    ml_digest: str | None = None
+    if ml_dir is not None:
+        from src.engine.strategy_backtest import ml_tilt_model_digest
+
+        try:
+            ml_digest = ml_tilt_model_digest(strategy, ml_dir)
+        except DataIntegrityError as exc:
+            raise SystemExit(f"invalid ml tilt models: {exc}") from exc
     evaluate_holdout = bool(getattr(args, "evaluate_holdout", False))
     if bool(getattr(args, "neighbors", False)) and (evaluate_holdout or end > strategy.design_data_cutoff):
         # Neighbors are a selection set: scoring them on post-design data would pick a variant on the holdout.
         raise SystemExit("holdout evaluation cannot run discovery neighbors")
-    _holdout_gate(strategy.strategy_id, start, end, strategy=strategy)
+    _holdout_gate(strategy.strategy_id, start, end, strategy=strategy, signal_digest_override=ml_digest)
     execution = getattr(args, "execution", "taker")
     if execution not in ("taker", "maker"):
         raise SystemExit(f"execution must be 'taker' or 'maker', got {execution!r}")
@@ -520,6 +561,7 @@ def run_strategy_backtest_command(args: argparse.Namespace) -> None:
             data_root=Path(args.data_root) if getattr(args, "data_root", None) else None,
             memory_budget=budget,
             execution_bound=execution_bound,
+            ml_tilt_model_dir=ml_dir,
         )
     except (DataIntegrityError, ValueError) as exc:
         raise SystemExit(f"invalid strategy backtest request: {exc}") from exc
@@ -532,6 +574,8 @@ def run_strategy_backtest_command(args: argparse.Namespace) -> None:
             run = run_strategy_backtest(request, source=shared_source, snapshot_cache=shared_cache)
         else:
             run = run_strategy_backtest(request)
+        if getattr(run, "ml_tilt_digest", None) != ml_digest:
+            raise DataIntegrityError("ml tilt models changed between the holdout journal and the run")
         statistics = _strategy_run_statistics(run)
         persist_strategy_backtest(run, output, statistics=statistics)
         _write_strategy_manifest(output, request=request, breadth=breadth)
@@ -542,7 +586,7 @@ def run_strategy_backtest_command(args: argparse.Namespace) -> None:
         )
     except (DataIntegrityError, ValueError, OSError) as exc:
         with contextlib.suppress(Exception):
-            _record_trial_for_window(strategy, start, end, None, 2)
+            _record_trial_for_window(strategy, start, end, None, 2, spec_digest_override=ml_digest)
         raise SystemExit(f"strategy backtest failed: {exc}") from exc
     if bool(getattr(args, "neighbors", False)):
         _run_neighbor_set(
@@ -560,6 +604,56 @@ def run_strategy_backtest_command(args: argparse.Namespace) -> None:
         strategy.strategy_id, status, variant, strategy.exposure_multiplier, strategy.name_clip,
     )
     print(str(output))  # noqa: T201 -- strategy command prints only the finalized result path
+
+
+def run_ml_train_command(args: argparse.Namespace) -> None:
+    """Train the scheduled ML tilt boundary models missing from ``--out`` and print one line per boundary.
+
+    Raises:
+        SystemExit: The public example store is active, the store lacks ``[ml_tilt]``, an existing model
+            file is invalid (left unchanged), or training data is insufficient.
+    """
+    refuse_example_store("backtest ml-train")
+    from src.common.errors import DataIntegrityError
+    from src.engine.backtest_evidence import StrategyReportPeriod
+    from src.engine.strategy_backtest import (
+        StrategyBacktestRequest,
+        build_ml_tilt_features,
+        load_strategy_source,
+    )
+    from src.strategy.ml_tilt import train_missing_boundaries
+
+    values = ml_tilt_values()
+    if values is None:
+        raise SystemExit("ml-train requires the [ml_tilt] section in the strategy store")
+    until = _utc_timestamp(args.until, "until", pd.Timestamp.now(tz="UTC"))
+    source_start = _utc_timestamp(args.source_start, "source-start", DISCOVERY_START)
+    strategy = _strategy_policy(20, "account_unit")
+    base_spec, stress_spec = strategy_execution_specs()
+    day = pd.Timedelta(days=1)
+    try:
+        request = StrategyBacktestRequest(
+            source_start=source_start, evaluation_start=until - day, evaluation_end=until,
+            strategy=strategy, initial_equity=100000.0, base_spec=base_spec, stress_spec=stress_spec,
+            report_periods=(StrategyReportPeriod(label="ml_train", start=(until - day).normalize(), end=until.normalize()),),
+            data_root=Path(args.data_root) if getattr(args, "data_root", None) else None,
+        )
+        source = load_strategy_source(request)
+        features = build_ml_tilt_features(source, strategy, base_spec, values)
+        rows = train_missing_boundaries(
+            features,
+            entry_marks=source.hourly_panels["close"].shift(freq=pd.Timedelta(hours=1)),
+            funding_by_symbol=source.funding_by_symbol,
+            hourly_close=source.hourly_panels["close"],
+            until=until,
+            out_dir=args.out,
+            values=values,
+            strategy=strategy,
+        )
+    except (DataIntegrityError, ValueError, OSError) as exc:
+        raise SystemExit(f"ml-train failed: {exc}") from exc
+    for row in rows:
+        print(f"{row.boundary.isoformat()} {row.sha256} {row.n_rows} {row.status}")  # noqa: T201 -- one line per boundary
 
 
 def run_exposure_scan_command(args: argparse.Namespace) -> None:

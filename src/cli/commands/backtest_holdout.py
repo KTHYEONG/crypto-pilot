@@ -12,6 +12,7 @@ _logger = logging.getLogger("MhsBacktestCli")
 
 def record_post_design_look(
     strategy_id: str, family: str, strategy: Any, start: pd.Timestamp, end: pd.Timestamp, *, purpose: str,
+    signal_digest_override: str | None = None,
 ) -> None:
     """Journal the post-design part of [start, end) as observed by this signal; design-only windows pass."""
     from src.common.errors import DataIntegrityError
@@ -27,7 +28,8 @@ def record_post_design_look(
         added = record_holdout_look(
             strategy_id, release.spec_digest, window,
             path=releases_dir() / f"{family}.holdout.jsonl",
-            signal_digest=strategy_signal_digest(strategy), purpose=purpose,
+            signal_digest=signal_digest_override if signal_digest_override is not None else strategy_signal_digest(strategy),
+            purpose=purpose,
         )
     except DataIntegrityError as exc:
         raise SystemExit(str(exc)) from exc

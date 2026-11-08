@@ -165,7 +165,8 @@ def strategy_backtest_payload(
             [dict(entry) for entry in getattr(run, "data_availability_withdrawals", ())],
         ),
         "design_data_cutoff": candidate.strategy.design_data_cutoff.isoformat(),
-        "signal_digest": strategy_signal_digest(candidate.strategy),
+        "signal_digest": run.ml_tilt_digest if run.ml_tilt_digest is not None else strategy_signal_digest(candidate.strategy),
+        "ml_tilt_digest": run.ml_tilt_digest,
         "report_periods": cast(JsonValue, periods),
         "research_only": True,
     }

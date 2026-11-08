@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -42,6 +42,17 @@ from src.engine.execution import ExecutionReplayWindow, live_required_symbols
 from src.engine.execution.batch import _LiveAccumulatorSets
 from src.engine.execution.window_stream import _iter_mhs_execution_windows
 from src.strategy.liquidity import causal_adv_sigma
+from src.strategy.ml_tilt import (
+    MlTiltModel,
+    apply_ml_tilt,
+    load_model_set,
+    member_rank_features,
+    ml_scores,
+    ml_tilt_signal_digest,
+    values_digest,
+)
+from src.strategy.release import strategy_signal_digest
+from src.strategy.store import MlTiltValues, ml_tilt_values
 from src.strategy.targets import (
     MemberSnapshotCache,
     StrategySpec,
@@ -79,6 +90,7 @@ class StrategyBacktestRequest:
     data_root: Path | None = None
     memory_budget: MhsMemoryBudget | None = None
     execution_bound: StrategyExecutionBound = "OHLCV_IMMEDIATE_TAKER"
+    ml_tilt_model_dir: Path | None = None
 
     def __post_init__(self) -> None:
         for name in ("source_start", "evaluation_start", "evaluation_end"):
@@ -115,6 +127,11 @@ class StrategyBacktestRequest:
             raise DataIntegrityError("data_root must be a Path or None")
         if self.memory_budget is not None and not isinstance(self.memory_budget, MhsMemoryBudget):
             raise DataIntegrityError("memory_budget must be a MhsMemoryBudget or None")
+        if self.ml_tilt_model_dir is not None:
+            if not isinstance(self.ml_tilt_model_dir, Path):
+                raise DataIntegrityError("ml_tilt_model_dir must be a Path or None")
+            if self.strategy.name_clip is None or self.strategy.exposure_multiplier != 1.0:
+                raise DataIntegrityError("ml tilt requires the unit clip book (name_clip set, exposure_multiplier 1.0)")
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,6 +145,7 @@ class StrategySourceContext:
     budget: MhsMemoryBudget
     daily_close: pd.DataFrame
     daily_quote_volume: pd.DataFrame
+    ml_tilt_digest: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -202,6 +220,7 @@ class StrategyBacktestRun:
     roster_seat_days: int = 0
     settlement_registry: InstrumentSettlementRegistry = EMPTY_SETTLEMENT_REGISTRY
     daily_adv: pd.DataFrame | None = None
+    ml_tilt_digest: str | None = None
 
 
 class LakeCoverageError(DataIntegrityError):
@@ -528,6 +547,82 @@ def _strategy_window_stream(
     )
 
 
+def _required_ml_tilt_values() -> MlTiltValues:
+    values = ml_tilt_values()
+    if values is None:
+        raise DataIntegrityError("ml tilt requires the [ml_tilt] section in the strategy store")
+    return values
+
+
+def _ml_tilt_digest(strategy: StrategySpec, models: Sequence[MlTiltModel], values: MlTiltValues) -> str:
+    return ml_tilt_signal_digest(strategy_signal_digest(strategy), models, values_digest(values))
+
+
+def ml_tilt_model_digest(strategy: StrategySpec, model_dir: Path) -> str:
+    """Digest of the ML variant that ``model_dir`` would score for ``strategy``; fails closed on bad models."""
+    values = _required_ml_tilt_values()
+    return _ml_tilt_digest(strategy, load_model_set(model_dir, values=values), values)
+
+
+def build_ml_tilt_features(
+    source: LoadedStrategySource,
+    strategy: StrategySpec,
+    base_spec: ExecutionSpec,
+    values: MlTiltValues,
+) -> pd.DataFrame:
+    """Member-rank features over the full census for training and scoring under one strategy policy."""
+    decision_index = pd.DatetimeIndex(source.daily_close.index)
+    blocked = strategy_blocked_decisions(
+        decision_index, source.census, strategy=strategy, base_spec=base_spec,
+        settlement_registry=settlement_registry_for_root(source.root),
+    )
+    return member_rank_features(
+        source.hourly_panels, source.hourly_available_at, source.daily_close, source.daily_quote_volume,
+        source.census, market_close=source.hourly_panels["close"], strategy=strategy, values=values,
+        blocked_decisions=blocked,
+    )
+
+
+def _ml_tilt_candidate(
+    request: StrategyBacktestRequest,
+    candidate: StrategyTargets,
+    source: LoadedStrategySource,
+    roster: pd.DataFrame,
+    blocked_decisions: pd.DataFrame,
+) -> tuple[StrategyTargets, str]:
+    """Replace the scored C0 entries with the ML-tilted book; decisions before the anchor fail closed."""
+    if request.ml_tilt_model_dir is None:
+        raise DataIntegrityError("ml tilt candidate requires ml_tilt_model_dir")
+    values = _required_ml_tilt_values()
+    entry_offset = pd.Timedelta(days=1, hours=int(request.strategy.entry_hour_utc))
+    if request.evaluation_start - entry_offset < values.schedule_anchor:
+        raise DataIntegrityError(
+            f"evaluation_start precedes the ml tilt schedule anchor {values.schedule_anchor.isoformat()}"
+        )
+    models = load_model_set(request.ml_tilt_model_dir, values=values)
+    features = member_rank_features(
+        source.hourly_panels, source.hourly_available_at, source.daily_close, source.daily_quote_volume,
+        source.census, market_close=source.hourly_panels["close"], strategy=request.strategy, values=values,
+        blocked_decisions=blocked_decisions,
+    )
+    scored_decisions = pd.DatetimeIndex(candidate.target_weights.index - entry_offset)
+    feature_decisions = pd.DatetimeIndex(features.index.get_level_values("decision"))
+    features = features.loc[feature_decisions.isin(scored_decisions)]
+    name_clip = request.strategy.name_clip
+    if name_clip is None:
+        raise DataIntegrityError("ml tilt requires a per-name clip")
+    scores = ml_scores(features, models, values=values)
+    tilted = apply_ml_tilt(
+        candidate.target_weights, scores, roster, values=values,
+        name_clip=float(name_clip), min_rank_symbols=request.strategy.min_rank_symbols,
+    )
+    digest = _ml_tilt_digest(request.strategy, models, values)
+    return (
+        StrategyTargets(target_weights=tilted, signal_available_at=candidate.signal_available_at, strategy=request.strategy),
+        digest,
+    )
+
+
 def build_request_targets(
     request: StrategyBacktestRequest,
     *,
@@ -615,9 +710,13 @@ def build_request_targets(
         signal_available_at=full_candidate.signal_available_at[scored],
         strategy=request.strategy,
     )
+    ml_digest: str | None = None
+    if request.ml_tilt_model_dir is not None:
+        candidate, ml_digest = _ml_tilt_candidate(request, candidate, source, roster, blocked_decisions)
     context = StrategySourceContext(
         census=census, funding_by_symbol=funding_by_symbol, funding_failures=funding_failures,
         root=root, budget=budget, daily_close=daily_close, daily_quote_volume=daily_quote_volume,
+        ml_tilt_digest=ml_digest,
     )
     return candidate, context
 
@@ -697,4 +796,5 @@ def run_strategy_backtest(
         roster_seat_days=seats,
         settlement_registry=settlement_registry,
         daily_adv=causal_adv_sigma(context.daily_quote_volume, context.daily_close)[0],
+        ml_tilt_digest=context.ml_tilt_digest,
     )

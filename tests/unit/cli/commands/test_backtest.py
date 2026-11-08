@@ -471,6 +471,17 @@ def test_neighbor_specs_cover_drops_and_breadths() -> None:
     assert sorted(len(n.members) for n in neighbors) == [n_members - 1] * n_members + [n_members] * 2
 
 
+def test_holdout_gate_journals_ml_tilt_digest_separately(tmp_path, monkeypatch) -> None:
+    root = _patch_releases_root(monkeypatch, tmp_path)
+    window = (pd.Timestamp("2026-07-01", tz="UTC"), pd.Timestamp("2026-10-01", tz="UTC"))
+    backtest_mod._holdout_gate("flow_mom_top20", *window)
+    backtest_mod._holdout_gate("flow_mom_top20", *window, signal_digest_override="ml" + "0" * 62)
+    rows = [json.loads(line) for line in (root / "flow_mom.holdout.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert len(rows) == 2
+    assert rows[1]["signal_digest"] == "ml" + "0" * 62
+    assert rows[0]["signal_digest"] != rows[1]["signal_digest"]
+
+
 def test_holdout_control_look_is_journaled_beside_primary(tmp_path, monkeypatch) -> None:
     root = _patch_releases_root(monkeypatch, tmp_path)
     window = (pd.Timestamp("2026-07-01", tz="UTC"), pd.Timestamp("2026-10-01", tz="UTC"))

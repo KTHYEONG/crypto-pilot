@@ -216,7 +216,7 @@ def train_boundary_model(
     )
     feature_names = tuple(str(c) for c in features.columns)
     model_text = booster.model_to_string()
-    digest = _values_digest(values)
+    digest = values_digest(values)
     return MlTiltModel(
         boundary=boundary,
         train_end=cutoff,
@@ -245,6 +245,80 @@ def save_model(model: MlTiltModel, directory: Path) -> Path:
     }
     durable_write_text(path, json.dumps(payload, sort_keys=True) + "\n")
     return path
+
+
+@dataclass(frozen=True, slots=True)
+class BoundaryTraining:
+    """Outcome of one scheduled boundary: ``trained`` (written), ``exists`` (kept), or ``awaiting_data``.
+
+    ``awaiting_data`` means the observed source ends before the boundary; nothing is written, so a later
+    run with complete data trains it instead of freezing a model fitted on a truncated history.
+    """
+
+    boundary: pd.Timestamp
+    sha256: str
+    n_rows: int
+    status: str
+
+
+def train_missing_boundaries(
+    features: pd.DataFrame,
+    *,
+    entry_marks: pd.DataFrame,
+    funding_by_symbol: Mapping[str, pd.Series],
+    hourly_close: pd.DataFrame,
+    until: pd.Timestamp,
+    out_dir: Path,
+    values: MlTiltValues,
+    strategy: StrategySpec,
+) -> tuple[BoundaryTraining, ...]:
+    """Train and save each scheduled boundary up to ``until`` that has no valid model in ``out_dir``.
+
+    Labels are rebuilt per boundary from decisions before ``boundary - purge_days`` only, so the
+    volatility floor never sees rows the boundary model could not have observed.
+
+    Raises:
+        DataIntegrityError: An existing model file is invalid (left untouched) or a boundary has too few rows.
+    """
+    existing = {m.boundary: m for m in load_model_set(out_dir, values=values)}
+    decisions = pd.DatetimeIndex(features.index.get_level_values("decision"))
+    observed = hourly_close.dropna(how="all").index
+    data_end = observed.max() + pd.Timedelta(hours=1) if len(observed) else None
+    rows: list[BoundaryTraining] = []
+    for boundary in boundary_schedule(values, until):
+        if boundary in existing:
+            kept = existing[boundary]
+            rows.append(BoundaryTraining(boundary, kept.sha256, kept.n_rows, "exists"))
+            continue
+        if data_end is None or data_end < boundary:
+            rows.append(BoundaryTraining(boundary, "", 0, "awaiting_data"))
+            continue
+        cutoff = boundary - pd.Timedelta(days=values.purge_days)
+        past = features.loc[decisions < cutoff]
+        labels = forward_labels(
+            entry_marks,
+            funding_by_symbol,
+            hourly_close,
+            past,
+            values=values,
+            entry_hour_utc=strategy.entry_hour_utc,
+            snapshot_hour_utc=strategy.snapshot_hour_utc,
+        )
+        model = train_boundary_model(past, labels, boundary, values=values)
+        save_model(model, out_dir)
+        rows.append(BoundaryTraining(boundary, model.sha256, model.n_rows, "trained"))
+    return tuple(rows)
+
+
+def ml_tilt_signal_digest(base_signal_digest: str, models: Sequence[MlTiltModel], values_digest: str) -> str:
+    """Digest identifying the ML variant: base signal, this module's source, values, and model sha256s."""
+    payload = {
+        "base_signal_digest": base_signal_digest,
+        "implementation": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        "values_digest": values_digest,
+        "model_sha256": [m.sha256 for m in sorted(models, key=lambda m: m.boundary)],
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
 
 
 def load_model_set(directory: Path, *, values: MlTiltValues) -> tuple[MlTiltModel, ...]:
@@ -384,7 +458,7 @@ def _window_sums(
     return out
 
 
-def _values_digest(values: MlTiltValues) -> str:
+def values_digest(values: MlTiltValues) -> str:
     payload = {
         key: value.isoformat() if isinstance(value, pd.Timestamp) else value for key, value in asdict(values).items()
     }
@@ -416,7 +490,7 @@ def _load_model(path: Path, values: MlTiltValues) -> MlTiltModel:
         )
     except (OSError, UnicodeDecodeError, ValueError, TypeError, KeyError) as exc:
         raise DataIntegrityError(f"ml tilt model unreadable: {path.name}") from exc
-    if model.values_digest != _values_digest(values):
+    if model.values_digest != values_digest(values):
         raise DataIntegrityError(f"ml tilt model was trained under different values: {path.name}")
     expected = _model_sha(model.model_text, model.boundary, model.feature_names, model.values_digest)
     if model.sha256 != expected:
