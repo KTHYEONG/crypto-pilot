@@ -31,10 +31,10 @@ from src.strategy.targets import StrategySpec, compute_source_readiness
 from src.strategy.universe import build_pit_roster
 
 MEMBER_RANK_PREFIX: Final = "r_"
-_REQUIRED_PANELS: Final = ("close", "quote_vol", "taker_buy_quote")
+_ML_REQUIRED_PANELS: Final = ("close", "quote_vol", "taker_buy_quote")
 _VOL_WINDOW_BARS: Final = 168
 _VOL_MIN_PERIODS: Final = 84
-_HOURS_PER_DAY: Final = 24
+_ML_HOURS_PER_DAY: Final = 24
 _DAY: Final = pd.Timedelta(days=1)
 EMA_WARMUP_HALFLIVES: Final = 10
 
@@ -74,12 +74,12 @@ def member_rank_features(
     registry = {spec.name: spec for spec in FEATURE_REGISTRY}
     if any(m.name not in registry for m in strategy.members):
         raise ValueError("strategy references an unregistered feature")
-    if any(p not in hourly_panels for p in _REQUIRED_PANELS):
+    if any(p not in hourly_panels for p in _ML_REQUIRED_PANELS):
         raise DataIntegrityError("hourly_panels must contain close, quote_vol, and taker_buy_quote")
     first = hourly_panels["close"]
     if any(
         not hourly_panels[p].index.equals(first.index) or list(hourly_panels[p].columns) != list(first.columns)
-        for p in _REQUIRED_PANELS
+        for p in _ML_REQUIRED_PANELS
     ):
         raise DataIntegrityError("hourly panels must share an identical index and column order")
     if not hourly_available_at.index.equals(first.index) or list(hourly_available_at.columns) != list(first.columns):
@@ -96,7 +96,7 @@ def member_rank_features(
     )
     decisions = roster.index[:-1]
     roster_dec = roster.loc[decisions].to_numpy(dtype=bool)
-    panels = {**{p: hourly_panels[p] for p in _REQUIRED_PANELS}, MARKET_CLOSE_PANEL: market_close}
+    panels = {**{p: hourly_panels[p] for p in _ML_REQUIRED_PANELS}, MARKET_CLOSE_PANEL: market_close}
 
     readiness = compute_source_readiness(hourly_available_at, decisions, strategy)
     bar_positions = np.asarray(readiness.bar_positions, dtype=np.int64)
@@ -158,7 +158,7 @@ def forward_labels(
     if observed.size == 0:
         return pd.Series(np.nan, index=features.index, name="label", dtype="float64")
     floor = float(np.quantile(observed, values.vol_floor_quantile))
-    denom = np.maximum(vol168, floor) * np.sqrt(_HOURS_PER_DAY * values.horizon_days)
+    denom = np.maximum(vol168, floor) * np.sqrt(_ML_HOURS_PER_DAY * values.horizon_days)
     scaled = np.where(denom > 0.0, centered.to_numpy(dtype="float64") / denom, np.nan)
     clipped = np.clip(scaled, -values.label_clip, values.label_clip)
     return pd.Series(clipped, index=features.index, name="label", dtype="float64")

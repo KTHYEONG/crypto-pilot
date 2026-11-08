@@ -124,6 +124,15 @@ EVENT_INFO: dict[str, dict[str, str]] = {
         "impact": "최신 시세 수집에 일시적 지연/오류가 발생했으나 허용 범위 내이므로 캐시된 패널로 매매를 정상 속행합니다.",
         "action": "상태 모니터링 유지 (데몬 자동 재시도 루틴 진행 중)",
     },
+    "ml_tilt_retrain_due": {
+        "title": "ML 틸트 다음 경계 모델 미배치",
+        "severity_badge": "⚠️ 주의",
+        "severity_label": "WARNING",
+        "header_color": "#d97706",
+        "bg_color": "#fffbeb",
+        "impact": "다음 재학습 경계의 ML 틸트 모델 파일이 아직 없습니다. 경계일까지 배치하지 않으면 그날 신호 단계가 HALT합니다.",
+        "action": "로컬(전체 1h 레이크)에서 backtest ml-train 실행 후 새 <boundary>.json만 data/state/models/flow_mom_ml_tilt/에 복사",
+    },
     "awaiting_params": {
         "title": "전략 파라미터 파일 대기 중",
         "severity_badge": "⚠️ 주의",

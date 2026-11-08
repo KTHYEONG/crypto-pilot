@@ -95,7 +95,7 @@ def test_file_size_budget() -> None:
     budget_bytes = 60 * 1024
     # frozen at measured size; growth fails, shrink requires deleting/lowering the entry.
     frozen_oversized = {
-        "tests/unit/live/test_scheduler.py": 171074,  # spec 17 gate tests; IP-ban aware backoff cases; release-latency buffer default.
+        "tests/unit/live/test_scheduler.py": 174396,  # spec 17 gate tests; ML tilt manifest/retrain-due cases; IP-ban aware backoff cases; release-latency buffer default.
         "tests/unit/live/test_runner_shadow_cycle.py": 99784,  # exec depth readiness stub signature and result.
         "tests/unit/live/test_runner_ledger.py": 63891,
         # venue-findings hardening: 2xx ack, ban horizon, unknown-outcome body and server-time cases.
@@ -103,6 +103,7 @@ def test_file_size_budget() -> None:
         "tests/unit/live/test_executor.py": 195208,
         "tests/unit/live/test_data_refresh.py": 71709,
         "tests/lab/mhs/test_process_backtest.py": 140056,
+        "tests/unit/live/test_strategy_book.py": 61527,  # ML tilt live book: warm-up, digest and boundary cases.
     }
     measured = {
         str(path): path.stat().st_size
@@ -384,7 +385,7 @@ def test_source_module_size_budget() -> None:
         # Cycle phases stay co-located to preserve runtime module-global test seams;
         # explicit phase contracts add lines while reducing orchestration complexity.
         # spec 17: venue snapshot passthrough, disabled-collection audit, genesis alert.
-        "src/live/runner.py": 2118,  # exec depth readiness gate wiring; paper tape feed lifecycle and execution latency audit (warn threshold).
+        "src/live/runner.py": 2139,  # ML tilt run-manifest keys and append-only model check; exec depth readiness gate wiring; paper tape feed lifecycle and execution latency audit (warn threshold).
         # spec 17: mainnet refuse-to-start gate (fail loud before any venue call).
         "src/live/scheduler.py": 1129,  # IP-ban aware retry backoff; pre-release kline prefetch slots.
         # Shared post/unknown-submission primitives retain the executor lifecycle and contracts.
@@ -420,9 +421,13 @@ def test_source_module_size_budget() -> None:
         # LiveSettings resolved path accessors (spec 20) stay on the settings model
         # so call-site default seams keep resolving lazily at call time.
         # spec 17: live modes skip run-scoped tax ledger derivation (account-scoped venue ledger).
-        "src/live/settings.py": 781,  # exec depth readiness gate timeout; paper tape (incl. its own aggTrade stream URL) and release-latency settings.
+        "src/live/settings.py": 784,  # ML tilt model dir with mainnet refusal; exec depth readiness gate timeout; paper tape (incl. its own aggTrade stream URL) and release-latency settings.
         # Drill transport-fault scenarios share one wire-record helper set; splitting would duplicate it.
         "src/live/testnet_drill/scenarios/transport_faults.py": 710,
+        # ML tilt (C1) research path: model-dir request field, scoring-range bound and digest guards.
+        "src/engine/strategy_backtest.py": 812,
+        # ML tilt (C1): strategy/account --ml-tilt-models and the ml-train command.
+        "src/cli/commands/backtest.py": 812,
     }
     measured = {
         str(path): len(path.read_text(encoding="utf-8").splitlines())
@@ -494,8 +499,8 @@ def test_no_function_exceeds_length_budget() -> None:
     frozen = {
         "src/live/runner.py::run_shadow_cycle": 434,  # exec depth readiness gate wiring; paper tape feed and latency audit.
         # spec 17: mainnet refuse-to-start gate (fail loud before any venue call).
-        "src/live/scheduler.py::run_daemon": 363,  # pre-release prefetch slot loop.
-        "src/live/strategy_signal.py::run_strategy_signal_step": 312,
+        "src/live/scheduler.py::run_daemon": 366,  # pre-release prefetch slot loop; ML tilt retrain-due alert.
+        "src/live/strategy_signal.py::run_strategy_signal_step": 321,  # ML tilt warm-up panel and boundary report.
         "src/engine/account_ledger.py::replay_account": 282,
         "src/lab/mhs/evaluation/windows.py::_book_outcome": 368,
         "src/engine/execution/window_stream.py::_iter_mhs_execution_windows": 382,
