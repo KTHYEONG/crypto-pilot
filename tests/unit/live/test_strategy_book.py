@@ -1219,3 +1219,48 @@ def test_ml_tilt_next_boundary_status_reports_stored_model(tmp_path: Path, monke
     assert (boundary, ready) == (expected, False)
     monkeypatch.setattr(strategy_book, "load_model_set", lambda directory, *, values: (types.SimpleNamespace(boundary=expected),))
     assert strategy_book.ml_tilt_next_boundary_status(tmp_path, day) == (expected, True)
+
+
+def test_live_ml_tilt_manifest_definition_survives_appended_models(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import shutil
+
+    import src.live.strategy_book as strategy_book
+
+    import dataclasses
+
+    from src.strategy.ml_tilt import member_rank_features, train_missing_boundaries
+    from src.strategy.targets import FLOW_MOM_TOP20
+
+    _, end = _write_panel(tmp_path, _ML_SYMBOLS, days=_ML_DAYS)
+    base_values = _tiny_ml_values(_ML_ANCHOR)
+    span_days = int((end - base_values.schedule_anchor).days)
+    values = dataclasses.replace(base_values, retrain_days=max(1, (span_days - 3) // 2))
+    monkeypatch.setattr(strategy_book, "ml_tilt_values", lambda: values)
+    full = tmp_path / "ml_tilt"
+    panels, available, close, daily_close, daily_qv = _research_inputs(tmp_path, end)
+    features = member_rank_features(
+        panels, available, daily_close, daily_qv, tuple(_ML_CENSUS),
+        market_close=close, strategy=FLOW_MOM_TOP20, values=values, blocked_decisions=None,
+    )
+    funding_idx = pd.date_range(_START, end + pd.Timedelta(days=30), freq="8h", tz="UTC")
+    funding = {sym: pd.Series(0.0, index=funding_idx, dtype="float64") for sym in _ML_CENSUS}
+    train_missing_boundaries(
+        features, entry_marks=close.shift(freq=pd.Timedelta(hours=1)), funding_by_symbol=funding,
+        hourly_close=close, until=end, out_dir=full, values=values, strategy=FLOW_MOM_TOP20,
+    )
+    files = sorted(full.glob("*.json"))
+    assert len(files) >= 2
+    partial = tmp_path / "ml_tilt_partial"
+    partial.mkdir()
+    for path in files[:-1]:
+        shutil.copy(path, partial / path.name)
+    grown = strategy_book.live_ml_tilt_manifest(full)
+    before = strategy_book.live_ml_tilt_manifest(partial)
+    assert grown["ml_tilt_digest"] == strategy_book.live_ml_tilt_digest(full)
+    assert grown["ml_tilt_definition"] == before["ml_tilt_definition"]
+    assert grown["ml_tilt_digest"] != before["ml_tilt_digest"]
+    assert grown["ml_tilt_models"][: len(before["ml_tilt_models"])] == before["ml_tilt_models"]
+    empty = tmp_path / "ml_tilt_empty"
+    empty.mkdir()
+    with pytest.raises(DataIntegrityError, match="model set is empty"):
+        strategy_book.live_ml_tilt_manifest(empty)

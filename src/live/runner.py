@@ -836,11 +836,14 @@ def _unit_bootstrap_sha256(settings: LiveSettings) -> str | None:
 
 
 def _current_run_manifest(settings: LiveSettings, now: pd.Timestamp) -> dict[str, Any]:
-    from src.live.strategy_book import live_ml_tilt_digest  # noqa: PLC0415
+    from src.live.strategy_book import live_ml_tilt_manifest  # noqa: PLC0415
     from src.strategy.store import strategy_values  # noqa: PLC0415
     from src.strategy.targets import FLOW_MOM_TOP20  # noqa: PLC0415
 
-    ml_tilt_digest = None if settings.ml_tilt_model_dir is None else live_ml_tilt_digest(Path(settings.ml_tilt_model_dir))
+    ml: dict[str, Any] = (
+        {"ml_tilt_digest": None} if settings.ml_tilt_model_dir is None
+        else live_ml_tilt_manifest(Path(settings.ml_tilt_model_dir))
+    )
     return {
         "run_id": settings.record_run_id,
         "strategy_id": FLOW_MOM_TOP20.strategy_id,
@@ -850,10 +853,21 @@ def _current_run_manifest(settings: LiveSettings, now: pd.Timestamp) -> dict[str
         "mode": settings.mode.value,
         "seed_equity_usdt": settings.notional_equity_usdt,
         "unit_bootstrap_sha256": _unit_bootstrap_sha256(settings),
-        "ml_tilt_digest": ml_tilt_digest,
+        **ml,
         "git_sha": os.environ.get("GIT_SHA"),
         "started_at": now.isoformat(),
     }
+
+
+def _ml_tilt_models_appended(raw: dict[str, Any], current: dict[str, Any]) -> bool:
+    """True when the ML definition is unchanged and the recorded models are a strict prefix of the current ones."""
+    definition = raw.get("ml_tilt_definition")
+    if definition is None or definition != current.get("ml_tilt_definition"):
+        return False
+    before, after = raw.get("ml_tilt_models"), current.get("ml_tilt_models")
+    if not isinstance(before, list) or not isinstance(after, list) or len(after) <= len(before):
+        return False
+    return after[: len(before)] == before
 
 
 def _assert_run_manifest_compatible(settings: LiveSettings) -> None:
@@ -879,9 +893,13 @@ def _assert_run_manifest_compatible(settings: LiveSettings) -> None:
                 allowed.add("unit_bootstrap_sha256")
     if "name_clip" in mismatched and raw.get("name_clip") is None:
         allowed.add("name_clip")
+    if "ml_tilt_digest" in mismatched and _ml_tilt_models_appended(raw, current):
+        allowed.add("ml_tilt_digest")
     if set(mismatched) <= allowed and allowed:
         for key in allowed:
             raw[key] = current[key]
+        if "ml_tilt_digest" in allowed:
+            raw["ml_tilt_models"] = current["ml_tilt_models"]
         durable_write_text(path, json.dumps(raw, indent=2, sort_keys=True))
         return
     key = mismatched[0]

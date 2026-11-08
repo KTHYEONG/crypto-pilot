@@ -69,20 +69,52 @@ def test_unresolvable_stored_id_still_rejected(tmp_path: Path, monkeypatch: pyte
             runner_mod._assert_run_manifest_compatible(settings)
 
 
+def _ml_manifest(definition: str, models: list[list[str]]) -> dict:
+    return {"ml_tilt_digest": f"{definition}:{len(models)}:{models[-1][1] if models else ''}",
+            "ml_tilt_definition": definition, "ml_tilt_models": models}
+
+
+def _seed_ml_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, run_id: str, first: dict):
+    import src.live.runner as runner_mod
+    import src.live.strategy_book as strategy_book
+
+    monkeypatch.setattr(strategy_book, "live_ml_tilt_manifest", lambda _dir: first)
+    settings, _, _, now = _seed_run_cycle_artifact(tmp_path, monkeypatch, run_id)
+    settings.ml_tilt_model_dir = str(tmp_path / "ml_tilt")
+    path = _manifest_path(tmp_path, run_id)
+    path.write_text(json.dumps(runner_mod._current_run_manifest(settings, now), sort_keys=True), encoding="utf-8")
+    return settings, path
+
+
 def test_manifest_ml_digest_mismatch_refuses(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import src.live.runner as runner_mod
     import src.live.strategy_book as strategy_book
 
-    record_run_id = "flow_mom_ml_digest_20261108"
-    monkeypatch.setattr(strategy_book, "live_ml_tilt_digest", lambda _dir: "digest-A")
-    settings, _, _, now = _seed_run_cycle_artifact(tmp_path, monkeypatch, record_run_id)
-    settings.ml_tilt_model_dir = str(tmp_path / "ml_tilt")
-    path = _manifest_path(tmp_path, record_run_id)
-    path.write_text(json.dumps(runner_mod._current_run_manifest(settings, now), sort_keys=True), encoding="utf-8")
+    a = [["2026-09-25", "sha-a"]]
+    settings, _ = _seed_ml_run(tmp_path, monkeypatch, "flow_mom_ml_digest_20261108", _ml_manifest("def-1", a))
+    for current in (
+        _ml_manifest("def-2", [*a, ["2026-12-25", "sha-b"]]),      # definition changed
+        _ml_manifest("def-1", [["2026-09-25", "sha-x"]]),           # model replaced
+        _ml_manifest("def-1", [["2026-12-25", "sha-b"]]),           # model removed
+    ):
+        monkeypatch.setattr(strategy_book, "live_ml_tilt_manifest", lambda _dir, c=current: c)
+        with pytest.raises(DataIntegrityError, match="ml_tilt_digest"):
+            runner_mod._assert_run_manifest_compatible(settings)
 
-    monkeypatch.setattr(strategy_book, "live_ml_tilt_digest", lambda _dir: "digest-B")
-    with pytest.raises(DataIntegrityError, match="ml_tilt_digest"):
-        runner_mod._assert_run_manifest_compatible(settings)
+
+def test_manifest_accepts_appended_boundary_model(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import src.live.runner as runner_mod
+    import src.live.strategy_book as strategy_book
+
+    a = [["2026-09-25", "sha-a"]]
+    settings, path = _seed_ml_run(tmp_path, monkeypatch, "flow_mom_ml_append_20261108", _ml_manifest("def-1", a))
+    grown = _ml_manifest("def-1", [*a, ["2026-12-25", "sha-b"]])
+    monkeypatch.setattr(strategy_book, "live_ml_tilt_manifest", lambda _dir: grown)
+    runner_mod._assert_run_manifest_compatible(settings)
+    stored = json.loads(path.read_text(encoding="utf-8"))
+    assert stored["ml_tilt_digest"] == grown["ml_tilt_digest"]
+    assert stored["ml_tilt_models"] == grown["ml_tilt_models"]
+    assert stored["ml_tilt_definition"] == "def-1"
 
 
 def test_manifest_legacy_without_ml_key_ok_when_off(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

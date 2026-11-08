@@ -15,8 +15,11 @@ services:
       - LIVE_EXECUTION_POLICY=strict_passive_repeg
       - LIVE_PAPER_FILL_MODEL=tape_through
       - LIVE_NOTIONAL_EQUITY_USDT=2100
-      - LIVE_RECORD_RUN_ID=frozen_top20_v2_repeg_fillcap_20261002
+      - LIVE_RECORD_RUN_ID=flow_mom_c1_ml_tilt_paper_20261108
       - LIVE_TAX_COLLECTION_ENABLED=false
+      # flow_mom C1 (ML tilt): paper only; models and the C1 maker unit bootstrap live under data/state/models.
+      - LIVE_ML_TILT_MODEL_DIR=/app/data/state/models/flow_mom_ml_tilt
+      - LIVE_UNIT_BOOTSTRAP_PATH=/app/data/state/models/flow_mom_c1_unit_returns_maker.parquet
     volumes:
       - /home/ubuntu/quant-strategy-store:/run/strategy-store:ro
       - ./data:/app/data
