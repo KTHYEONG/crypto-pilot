@@ -1234,3 +1234,21 @@ def test_ml_tilt_missing_model_halts_before_any_weight_row(layout: dict[str, Pat
     assert not layout["weights"].exists()
     assert not layout["forward"].exists()
     assert not _report_path(layout).exists()
+
+
+def test_ml_tilt_report_discloses_next_boundary_readiness(layout: dict[str, Path], monkeypatch: pytest.MonkeyPatch) -> None:
+    import json
+
+    import src.live.strategy_signal as signal_mod
+
+    real_build = signal_mod.build_live_strategy_book
+    boundary = pd.Timestamp("2026-12-25", tz="UTC")
+    monkeypatch.setattr(signal_mod, "build_live_strategy_book", lambda *a, **k: real_build(*a, **{**k, "ml_tilt_model_dir": None}))
+    monkeypatch.setattr(signal_mod, "live_ml_warmup_days", lambda: 0)
+    monkeypatch.setattr(signal_mod, "ml_tilt_next_boundary_status", lambda model_dir, after: (boundary, False))
+    report = _run(_DAY, layout, ml_tilt_model_dir=layout["weights"].parent / "models")
+    assert report.ml_tilt_next_boundary == boundary
+    assert report.ml_tilt_next_boundary_ready is False
+    payload = json.loads(_report_path(layout).read_text(encoding="utf-8"))
+    assert payload["ml_tilt_next_boundary"] == boundary.isoformat()
+    assert payload["ml_tilt_next_boundary_ready"] is False

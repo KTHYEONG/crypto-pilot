@@ -30,7 +30,7 @@ def _account_request(tmp_path: Path, **overrides) -> AccountReplayRequest:
 def _install_strategy_account_fakes(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *,
     unit_fail: bool = False, unit_liquidated: bool = False, stub_venue: bool = True,
-    unit_intraday: float = 0.05, account_intraday: float = 0.05,
+    unit_intraday: float = 0.05, account_intraday: float = 0.05, ml_tilt_digest: str | None = None,
 ) -> dict:
     import src.market_data.binance.venue_rules as venue_mod
     import src.engine.account_ledger as ledger_mod
@@ -54,6 +54,7 @@ def _install_strategy_account_fakes(
     context = StrategySourceContext(
         census=("AAA",), funding_by_symbol={}, funding_failures={}, root="root",
         budget=MhsMemoryBudget(), daily_close=frame, daily_quote_volume=frame,
+        ml_tilt_digest=ml_tilt_digest,
     )
 
     def _fake_build(request: object) -> tuple:
@@ -111,6 +112,7 @@ def _write_same_book_reference(
     base_cagr: float | None = None, base_mdd: float | None = None,
     evaluation_start: str = "2025-01-01T00:00:00+00:00",
     evaluation_end: str = "2025-02-01T00:00:00+00:00",
+    ml_tilt_digest: str | None = None,
 ) -> dict:
     if name_clip is ...:
         from src.strategy.targets import FLOW_MOM_TOP20_ACCOUNT_UNIT
@@ -128,7 +130,10 @@ def _write_same_book_reference(
     result_dir = tmp_path / run_dir
     result_dir.mkdir(parents=True, exist_ok=True)
     (result_dir / "result.json").write_text(
-        json.dumps({"name_clip": name_clip, "exposure_multiplier": exposure_multiplier}),
+        json.dumps({
+            "name_clip": name_clip, "exposure_multiplier": exposure_multiplier,
+            **({} if ml_tilt_digest is None else {"ml_tilt_digest": ml_tilt_digest}),
+        }),
         encoding="utf-8",
     )
     return row

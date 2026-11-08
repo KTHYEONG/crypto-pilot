@@ -34,6 +34,7 @@ from src.strategy.ml_tilt import (
     member_rank_features,
     ml_scores,
     ml_tilt_signal_digest,
+    next_boundary,
     values_digest,
 )
 from src.strategy.release import strategy_signal_digest
@@ -189,6 +190,18 @@ def live_ml_tilt_digest(model_dir: Path) -> str:
     if not models:
         raise DataIntegrityError(f"ml tilt model set is empty: {model_dir}")
     return ml_tilt_signal_digest(strategy_signal_digest(FLOW_MOM_TOP20), models, values_digest(values))
+
+
+def ml_tilt_next_boundary_status(model_dir: Path, after: pd.Timestamp) -> tuple[pd.Timestamp, bool]:
+    """Next scheduled retrain boundary after ``after`` and whether its digest-valid model is already stored.
+
+    Raises:
+        DataIntegrityError: The store has no ``[ml_tilt]`` section, or a stored model is invalid.
+    """
+    values = _required_ml_tilt_values()
+    boundary = next_boundary(values, after)
+    stored = {model.boundary for model in load_model_set(Path(model_dir), values=values)}
+    return boundary, boundary in stored
 
 
 def _apply_live_ml_tilt(

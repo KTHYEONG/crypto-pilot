@@ -253,6 +253,8 @@ class LiveSettings(BaseSettings):
     venue_fallback_path: str = str(APP_ROOT / "deploy" / "mhs" / "venue_rules_20260921.json")
     # flow_mom ML tilt 모델 디렉터리. 설정하면 페이퍼 전용이며 LIVE_MAINNET은 거부된다.
     ml_tilt_model_dir: str | None = None
+    # 다음 재학습 경계 모델이 이 일수 안으로 다가왔는데 없으면 경보(경계 당일에는 신호가 HALT된다).
+    ml_tilt_retrain_warn_days: int = Field(default=14, ge=1)
     # paper/실거래 기록 실행 단위. 설정하면 전략 의존 기록이 `data/state/runs/<run_id>/`에 저장된다.
     # 전략이나 집행이 바뀌면 새 id를 쓴다. env는 LIVE_RECORD_RUN_ID.
     record_run_id: str | None = None

@@ -78,7 +78,7 @@ def _resolve_account_destination(*, runs_root: Path, start: pd.Timestamp, end: p
 
 def _export_unit_returns(
     *, equity: pd.Series, strategy_id: str, execution: str,
-    start: pd.Timestamp, end: pd.Timestamp, run_dir: Path, dest: Path,
+    start: pd.Timestamp, end: pd.Timestamp, run_dir: Path, dest: Path, ml_tilt_digest: str | None = None,
 ) -> None:
     """Write the unit reference ledger daily returns with run-identity metadata."""
     import pyarrow as pa
@@ -95,6 +95,8 @@ def _export_unit_returns(
         "evaluation_end": end.isoformat(),
         "run_dir": str(run_dir),
     }
+    if ml_tilt_digest is not None:
+        metadata["ml_tilt_digest"] = ml_tilt_digest
     merged = dict(table.schema.metadata or {})
     merged.update({key: str(value) for key, value in metadata.items()})
     table = table.replace_schema_metadata(merged)
@@ -236,7 +238,7 @@ def _account_path_statistics(
     return out
 
 
-def _persist_account_run(request: AccountReplayRequest, strategy: Any, policy: Any, unit: Any, result: Any, reconciliation: dict[str, Any], *, stress: Any, rules_captured_at: str, venue_path: str) -> AccountReplayReport:
+def _persist_account_run(request: AccountReplayRequest, strategy: Any, policy: Any, unit: Any, result: Any, reconciliation: dict[str, Any], *, stress: Any, rules_captured_at: str, venue_path: str, ml_tilt_digest: str | None = None) -> AccountReplayReport:
     """Persist account.json, daily parquet, export and catalog row for one replay."""
     # Headlines are derived before the run directory exists so a degenerate ledger leaves no empty run dir.
     unit_headlines = _account_headlines(unit.daily_equity, ACCOUNT_UNIT_REFERENCE_CAPITAL)
@@ -259,6 +261,9 @@ def _persist_account_run(request: AccountReplayRequest, strategy: Any, policy: A
             strategy=strategy,
         )
         payload["statistics"] = statistics
+        if ml_tilt_digest is not None:
+            payload["ml_tilt_digest"] = ml_tilt_digest
+            payload["signal_digest"] = ml_tilt_digest
         payload["design_data_cutoff"] = strategy.design_data_cutoff.isoformat()
         payload["stress_execution"] = {
             "mode": request.execution,
@@ -285,7 +290,7 @@ def _persist_account_run(request: AccountReplayRequest, strategy: Any, policy: A
             _export_unit_returns(
                 equity=unit.daily_equity, strategy_id=strategy.strategy_id, execution=request.execution,
                 start=request.evaluation_start, end=request.evaluation_end, run_dir=run_dir,
-                dest=Path(request.export_unit_returns),
+                dest=Path(request.export_unit_returns), ml_tilt_digest=ml_tilt_digest,
             )
         if run_dir.parent == request.runs_root:
             append_backtest_index(

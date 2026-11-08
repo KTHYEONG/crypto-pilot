@@ -351,6 +351,14 @@ def _default_venue_capture(settings: LiveSettings, decision_time: pd.Timestamp) 
         return "failed"
 
 
+def _ml_tilt_retrain_due(report: Any, decision_time: pd.Timestamp, warn_days: int) -> bool:
+    """True when the next ML retrain boundary is within ``warn_days`` and its model is not stored yet."""
+    boundary = getattr(report, "ml_tilt_next_boundary", None)
+    if boundary is None or getattr(report, "ml_tilt_next_boundary_ready", None) is not False:
+        return False
+    return bool(boundary - decision_time <= pd.Timedelta(days=int(warn_days)))
+
+
 def _default_strategy_step(target: pd.Timestamp, settings: LiveSettings, weights_path: Path) -> StrategyStepReport:
     from src.live.ledger import default_ledger_path
     from src.live.runner import _assert_run_manifest_compatible, fetch_live_account_equity
@@ -1013,6 +1021,10 @@ def run_daemon(
             continue
         if shutdown is not None and shutdown.requested:
             break
+        if strategy_report is not None and _ml_tilt_retrain_due(strategy_report, target, settings.ml_tilt_retrain_warn_days):
+            _daemon_alert(settings, event="ml_tilt_retrain_due",
+                          detail=f"next_boundary={strategy_report.ml_tilt_next_boundary.date().isoformat()} model=missing",
+                          decision_time=target, now=now_fn())
         if strategy_report is not None and float(getattr(strategy_report, "venue_snapshot_age_days", 0.0) or 0.0) > settings.venue_rules_warn_age_days:
             _daemon_alert(settings, event="venue_rules_stale",
                           detail=f"age_days={float(getattr(strategy_report, 'venue_snapshot_age_days', 0.0)):.1f} snapshot={getattr(strategy_report, 'venue_snapshot', '')}",

@@ -432,3 +432,51 @@ def test_exposure_cli_prints_path_on_success(tmp_path: Path, monkeypatch: pytest
     backtest_mod.run_exposure_scan_command(_parse(["backtest", "exposure", "--run-dir", str(run_dir)]))
     out = capsys.readouterr().out.strip()
     assert out == str(run_dir / "exposure.json")
+
+
+def test_account_ml_tilt_journals_and_records_ml_digest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """--ml-tilt-models journals the holdout look and the trial under the ML digest and threads the models."""
+    import src.engine.strategy_backtest as run_mod
+
+    looks: list = []
+    trials: list = []
+    monkeypatch.setattr(run_mod, "ml_tilt_model_digest", lambda strategy, model_dir: "ml-digest-x")
+    monkeypatch.setattr(backtest_mod, "record_post_design_look", lambda *a, **k: looks.append(k.get("signal_digest_override")))
+    monkeypatch.setattr(backtest_mod, "_record_trial_for_window", lambda *a, **k: trials.append(k.get("spec_digest_override")))
+    seen = _install_account(monkeypatch, tmp_path, ml_tilt_digest="ml-digest-x")
+    backtest_mod.run_account_replay_command(_parse(_account_argv("--ml-tilt-models", str(tmp_path / "models"))))
+    assert seen["request"].ml_tilt_model_dir == tmp_path / "models"
+    assert looks == ["ml-digest-x"]
+    assert trials == ["ml-digest-x"]
+
+
+def test_account_ml_tilt_digest_change_aborts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A replay whose model digest differs from the journaled one exits instead of recording a trial."""
+    import src.engine.strategy_backtest as run_mod
+
+    trials: list = []
+    monkeypatch.setattr(run_mod, "ml_tilt_model_digest", lambda strategy, model_dir: "journaled")
+    monkeypatch.setattr(backtest_mod, "record_post_design_look", lambda *a, **k: None)
+    monkeypatch.setattr(backtest_mod, "_record_trial_for_window", lambda *a, **k: trials.append(k.get("spec_digest_override")))
+    seen = _install_account(monkeypatch, tmp_path, ml_tilt_digest="other")
+    export = tmp_path / "unit.parquet"
+    argv = _account_argv("--ml-tilt-models", str(tmp_path / "models"), "--export-unit-returns", str(export))
+    with pytest.raises(SystemExit, match="models changed"):
+        backtest_mod.run_account_replay_command(_parse(argv))
+    assert trials == ["journaled"]
+    assert seen.get("replays", []) == []
+    assert not export.exists()
+    assert not (tmp_path / "x" / "runs").exists() or not any((tmp_path / "x" / "runs").iterdir())
+
+
+def test_account_ml_tilt_invalid_models_exit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import src.engine.strategy_backtest as run_mod
+    from src.common.errors import DataIntegrityError
+
+    def _bad(strategy, model_dir):
+        raise DataIntegrityError("ml tilt model digest mismatch")
+
+    monkeypatch.setattr(run_mod, "ml_tilt_model_digest", _bad)
+    _install_account(monkeypatch, tmp_path)
+    with pytest.raises(SystemExit, match="invalid ml tilt models"):
+        backtest_mod.run_account_replay_command(_parse(_account_argv("--ml-tilt-models", str(tmp_path / "models"))))

@@ -4064,3 +4064,48 @@ def test_ban_aware_backoff_respects_ban(monkeypatch) -> None:
     assert sched._ban_aware_backoff(300.0, 1_700_000_000.0) == 300.0
     monkeypatch.setattr(sched, "ip_ban_remaining_s", lambda now=None: 100.0)
     assert sched._ban_aware_backoff(300.0, 1_700_000_000.0) == 300.0
+
+
+def test_ml_tilt_retrain_due_alerts_inside_warn_window(tmp_path, monkeypatch) -> None:
+    import pandas as pd
+    import src.live.scheduler as sched
+    from src.live.runner import CycleReport
+    from src.live.settings import LiveSettings
+
+    monkeypatch.setattr(sched, "_strategy_params_present", lambda settings: True, raising=False)
+    monkeypatch.setattr(sched, "_resolve_heartbeat_path", lambda s: tmp_path / "hb.json")
+    monkeypatch.setattr(sched, "prune_old_audit_logs", lambda *a, **k: 0)
+    alerts: list[str] = []
+    monkeypatch.setattr(sched, "_daemon_alert", lambda s, *, event, detail, decision_time, now, **_k: alerts.append(event))
+    target = pd.Timestamp("2026-08-24 00:00Z")
+    monkeypatch.setattr(sched, "run_shadow_cycle", lambda *a, **k: CycleReport(status="COMPLETE", reason=None, decision_time=target, intent_count=0))
+    report = type("R", (), {
+        "venue_snapshot_age_days": 0.0, "venue_snapshot": "v.json", "decision_bar_missing": 0, "venue_gap_excluded": (),
+        "exposure": 0.0, "equity_usdt": 1.0, "unit_observations": 1,
+        "ml_tilt_next_boundary": target + pd.Timedelta(days=10), "ml_tilt_next_boundary_ready": False,
+    })()
+    artifact = tmp_path / "w.parquet"
+    artifact.touch()
+    sched.run_daemon(
+        LiveSettings(heartbeat_path=str(tmp_path / "hb.json"), ml_tilt_retrain_warn_days=14), artifact, tmp_path / "state.json",
+        sleep_fn=lambda s: None, now_fn=lambda: target + sched.DECISION_RELEASE_OFFSET + pd.Timedelta(minutes=20),
+        max_iterations=1, refresh_fn=lambda t: None,
+        signal_step_fn=lambda t: report, prune_fn=lambda: None, venue_fn=lambda t: "captured",
+        prefetch_fn=lambda t: None,
+    )
+    assert "ml_tilt_retrain_due" in alerts
+
+
+def test_ml_tilt_retrain_due_window_and_readiness() -> None:
+    import types
+
+    import pandas as pd
+    import src.live.scheduler as sched
+
+    day = pd.Timestamp("2026-12-01 00:00Z")
+    due = types.SimpleNamespace(ml_tilt_next_boundary=pd.Timestamp("2026-12-10 00:00Z"), ml_tilt_next_boundary_ready=False)
+    assert sched._ml_tilt_retrain_due(due, day, 14) is True
+    assert sched._ml_tilt_retrain_due(due, day, 5) is False
+    ready = types.SimpleNamespace(ml_tilt_next_boundary=pd.Timestamp("2026-12-10 00:00Z"), ml_tilt_next_boundary_ready=True)
+    assert sched._ml_tilt_retrain_due(ready, day, 14) is False
+    assert sched._ml_tilt_retrain_due(types.SimpleNamespace(), day, 14) is False

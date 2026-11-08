@@ -32,6 +32,7 @@ from src.live.strategy_book import (
     crypto_census,
     extend_unit_history,
     live_ml_warmup_days,
+    ml_tilt_next_boundary_status,
     snapshot_gap_blocked_decisions,
     unit_proxy_returns,
 )
@@ -110,6 +111,8 @@ class StrategyStepReport:
     decision_bar_missing: int = 0
     venue_gap_excluded: tuple[str, ...] = ()
     ml_tilt_digest: str | None = None
+    ml_tilt_next_boundary: pd.Timestamp | None = None
+    ml_tilt_next_boundary_ready: bool | None = None
 
 
 def _read_unit_series(path: Path, label: str, *, artifact_key: SecretStr | None = None) -> pd.Series:
@@ -458,6 +461,10 @@ def run_strategy_signal_step(
     levered = unit_row[census_list] * float(exposure)
     gross = float(np.abs(levered.to_numpy(dtype="float64")).sum())
     names = int((levered.to_numpy(dtype="float64") != 0.0).sum())
+    next_boundary_at: pd.Timestamp | None = None
+    next_boundary_ready: bool | None = None
+    if ml_tilt_model_dir is not None:
+        next_boundary_at, next_boundary_ready = ml_tilt_next_boundary_status(Path(ml_tilt_model_dir), day)
     report = StrategyStepReport(
         decision_day=day, exposure=float(exposure), equity_usdt=float(equity),
         gross_weight=gross, names=names, unit_observations=len(past),
@@ -467,6 +474,7 @@ def run_strategy_signal_step(
         venue_snapshot_age_days=float(venue_age_days),
         decision_bar_missing=len(gap_refresh),
         venue_gap_excluded=tuple(sorted(gap_venue)), ml_tilt_digest=book.ml_tilt_digest,
+        ml_tilt_next_boundary=next_boundary_at, ml_tilt_next_boundary_ready=next_boundary_ready,
     )
     existing = load_weights_frame(Path(weights_path), artifact_key=artifact_key)
     if not existing.empty and day in existing.index:
@@ -496,6 +504,8 @@ def run_strategy_signal_step(
         "decision_bar_missing": report.decision_bar_missing,
         "venue_gap_excluded": sorted(report.venue_gap_excluded),
         "ml_tilt_digest": report.ml_tilt_digest,
+        "ml_tilt_next_boundary": None if report.ml_tilt_next_boundary is None else report.ml_tilt_next_boundary.isoformat(),
+        "ml_tilt_next_boundary_ready": report.ml_tilt_next_boundary_ready,
         "written": report.written,
         "created_at": pd.Timestamp.now(tz="UTC").isoformat(),
     }

@@ -146,6 +146,7 @@ def add_backtest_commands(backtest_parser: argparse.ArgumentParser) -> None:
     account.add_argument("--execution", choices=("taker", "maker"), default="taker", help="Order execution model: immediate taker or canonical strict passive maker.")
     account.add_argument("--data-root", default=None, help="Existing OHLCV root override.")
     account.add_argument("--export-unit-returns", default=None, help="Write the unit reference ledger daily returns (sizing bootstrap for the live strategy step).")
+    account.add_argument("--ml-tilt-models", type=Path, default=None, help="Directory of boundary LightGBM models; replays the ML-tilted unit book (C1) instead of C0.")
     account.add_argument("--total-tree-pss-bytes", type=int, default=None, help="Total process-tree PSS ceiling in bytes.")
     account.add_argument("--replay-tree-pss-bytes", type=int, default=None, help="Replay process-tree PSS ceiling in bytes.")
     account.add_argument("--min-available-bytes", type=int, default=None, help="Minimum effective physical headroom in bytes.")
@@ -746,9 +747,22 @@ def run_account_replay_command(args: argparse.Namespace) -> None:
         raise SystemExit(f"--fixed-exposure must be a positive finite exposure, got {raw_fixed!r}")
     if not 0 < capital < float("inf"):
         raise SystemExit(f"--capital must be a positive finite capital, got {getattr(args, 'capital', None)!r}")
-    from src.strategy.targets import FLOW_MOM_TOP20
+    from src.strategy.targets import FLOW_MOM_TOP20, FLOW_MOM_TOP20_ACCOUNT_UNIT
 
-    record_post_design_look("flow_mom_top20", "flow_mom", FLOW_MOM_TOP20, start, end, purpose="account_replay")
+    ml_dir: Path | None = getattr(args, "ml_tilt_models", None)
+    ml_digest: str | None = None
+    if ml_dir is not None:
+        from src.common.errors import DataIntegrityError
+        from src.engine.strategy_backtest import ml_tilt_model_digest
+
+        try:
+            ml_digest = ml_tilt_model_digest(FLOW_MOM_TOP20_ACCOUNT_UNIT, ml_dir)
+        except DataIntegrityError as exc:
+            raise SystemExit(f"invalid ml tilt models: {exc}") from exc
+    record_post_design_look(
+        "flow_mom_top20", "flow_mom", FLOW_MOM_TOP20, start, end, purpose="account_replay",
+        signal_digest_override=ml_digest,
+    )
     from src.application.strategy_account import AccountReplayError, AccountReplayRequest, run_account_replay
 
     raw_venue = getattr(args, "venue_rules", None)
@@ -764,6 +778,8 @@ def run_account_replay_command(args: argparse.Namespace) -> None:
         data_root=Path(args.data_root) if getattr(args, "data_root", None) else None,
         memory_budget=_resolve_budget(args),
         export_unit_returns=Path(export) if (export := getattr(args, "export_unit_returns", None)) is not None else None,
+        ml_tilt_model_dir=ml_dir,
+        expected_ml_tilt_digest=ml_digest,
     )
     try:
         report = run_account_replay(request)
@@ -773,7 +789,7 @@ def run_account_replay_command(args: argparse.Namespace) -> None:
         from src.strategy.targets import FLOW_MOM_TOP20_ACCOUNT_UNIT
 
         with contextlib.suppress(Exception):
-            _record_trial_for_window(FLOW_MOM_TOP20_ACCOUNT_UNIT, start, end, None, 2)
+            _record_trial_for_window(FLOW_MOM_TOP20_ACCOUNT_UNIT, start, end, None, 2, spec_digest_override=ml_digest)
         raise SystemExit(str(exc)) from exc
     try:
         import numpy as np
@@ -784,7 +800,9 @@ def run_account_replay_command(args: argparse.Namespace) -> None:
         sharpe = float(returns.mean() / std) if std > 1e-12 else None
         from src.strategy.targets import FLOW_MOM_TOP20_ACCOUNT_UNIT
 
-        _record_trial_for_window(FLOW_MOM_TOP20_ACCOUNT_UNIT, start, end, sharpe, int(returns.size))
+        _record_trial_for_window(
+            FLOW_MOM_TOP20_ACCOUNT_UNIT, start, end, sharpe, int(returns.size), spec_digest_override=ml_digest,
+        )
     except Exception:
         _logger.exception("[EVAL] account trial ledger append failed")
     _logger.info(

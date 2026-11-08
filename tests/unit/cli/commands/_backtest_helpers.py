@@ -59,13 +59,14 @@ def _account_argv(*extra: str) -> list[str]:
 def _install_account(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *,
     unit_fail: bool = False, unit_liquidated: bool = False, stub_venue: bool = True,
-    unit_intraday: float = 0.05, account_intraday: float = 0.05,
+    unit_intraday: float = 0.05, account_intraday: float = 0.05, ml_tilt_digest: str | None = None,
 ) -> dict:
     from tests.unit.application._strategy_account_helpers import _install_strategy_account_fakes
 
     seen = _install_strategy_account_fakes(
         monkeypatch, tmp_path, unit_fail=unit_fail, unit_liquidated=unit_liquidated,
         stub_venue=stub_venue, unit_intraday=unit_intraday, account_intraday=account_intraday,
+        ml_tilt_digest=ml_tilt_digest,
     )
     monkeypatch.setattr(backtest_mod, "STRATEGY_BACKTESTS_DIR", tmp_path / "x" / "runs")
     return seen

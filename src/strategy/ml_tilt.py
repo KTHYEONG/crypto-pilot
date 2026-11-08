@@ -175,6 +175,26 @@ def ema_warmup_days(values: MlTiltValues) -> int:
     return math.ceil(values.smooth_halflife_days * EMA_WARMUP_HALFLIVES)
 
 
+def label_data_end(values: MlTiltValues, boundary: pd.Timestamp, *, entry_hour_utc: int) -> pd.Timestamp:
+    """Exclusive source end a ``boundary`` model needs: its latest label exit plus one day of refresh slack.
+
+    The latest training decision is ``boundary - purge_days - 1d``; its label exits at ``decision + 1d +
+    entry_hour + horizon_days``. The extra day keeps a lagging per-symbol refresh from freezing a model fit on
+    partially published bars, while still letting the model train before the boundary itself.
+    """
+    cutoff = boundary - pd.Timedelta(days=values.purge_days)
+    return cutoff + pd.Timedelta(days=values.horizon_days, hours=entry_hour_utc) + _DAY
+
+
+def next_boundary(values: MlTiltValues, after: pd.Timestamp) -> pd.Timestamp:
+    """First scheduled boundary strictly after ``after`` (the anchor when ``after`` precedes it)."""
+    if after < values.schedule_anchor:
+        return values.schedule_anchor
+    step = pd.Timedelta(days=values.retrain_days)
+    count = int((after - values.schedule_anchor) // step) + 1
+    return values.schedule_anchor + count * step
+
+
 def boundary_schedule(values: MlTiltValues, until: pd.Timestamp) -> tuple[pd.Timestamp, ...]:
     """Return retrain boundaries ``anchor + k * retrain_days`` that are not after ``until``."""
     if until < values.schedule_anchor:
@@ -264,7 +284,7 @@ def save_model(model: MlTiltModel, directory: Path) -> Path:
 class BoundaryTraining:
     """Outcome of one scheduled boundary: ``trained`` (written), ``exists`` (kept), or ``awaiting_data``.
 
-    ``awaiting_data`` means the observed source ends before the boundary; nothing is written, so a later
+    ``awaiting_data`` means the observed source ends before ``label_data_end``; nothing is written, so a later
     run with complete data trains it instead of freezing a model fitted on a truncated history.
     """
 
@@ -303,7 +323,7 @@ def train_missing_boundaries(
             kept = existing[boundary]
             rows.append(BoundaryTraining(boundary, kept.sha256, kept.n_rows, "exists"))
             continue
-        if data_end is None or data_end < boundary:
+        if data_end is None or data_end < label_data_end(values, boundary, entry_hour_utc=strategy.entry_hour_utc):
             rows.append(BoundaryTraining(boundary, "", 0, "awaiting_data"))
             continue
         cutoff = boundary - pd.Timedelta(days=values.purge_days)

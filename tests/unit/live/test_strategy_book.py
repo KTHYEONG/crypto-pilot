@@ -1201,3 +1201,21 @@ def test_ml_tilt_refuses_without_store_section_or_models(tmp_path: Path, monkeyp
         strategy_book.live_ml_tilt_digest(empty)
     with pytest.raises(DataIntegrityError, match="no ml tilt decision"):
         _live_ml_book(tmp_path, start, start + pd.Timedelta(days=120), empty)
+
+
+def test_ml_tilt_next_boundary_status_reports_stored_model(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import types
+
+    import src.live.strategy_book as strategy_book
+    from src.strategy.ml_tilt import next_boundary
+    from src.strategy.store import EXAMPLE_STORE_ROOT, ml_tilt_values
+
+    values = ml_tilt_values(EXAMPLE_STORE_ROOT)
+    assert values is not None
+    monkeypatch.setattr(strategy_book, "ml_tilt_values", lambda *a, **k: values)
+    day = values.schedule_anchor + pd.Timedelta(days=3)
+    expected = next_boundary(values, day)
+    boundary, ready = strategy_book.ml_tilt_next_boundary_status(tmp_path / "none", day)
+    assert (boundary, ready) == (expected, False)
+    monkeypatch.setattr(strategy_book, "load_model_set", lambda directory, *, values: (types.SimpleNamespace(boundary=expected),))
+    assert strategy_book.ml_tilt_next_boundary_status(tmp_path, day) == (expected, True)

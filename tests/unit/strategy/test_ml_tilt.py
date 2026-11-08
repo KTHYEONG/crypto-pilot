@@ -549,3 +549,15 @@ def test_tilt_all_zero_base_without_scores_stays_zero() -> None:
     _, trade = _scores_and_roster(decisions)
     out = apply_ml_tilt(base, empty, trade, values=_values(), name_clip=0.2, min_rank_symbols=4)
     assert (out == 0.0).all(axis=None)
+
+
+def test_next_boundary_and_label_data_end() -> None:
+    from src.strategy.ml_tilt import label_data_end, next_boundary
+
+    values = _values(schedule_anchor=pd.Timestamp("2022-07-01", tz="UTC"), retrain_days=91, purge_days=5, horizon_days=3)
+    anchor = values.schedule_anchor
+    assert next_boundary(values, anchor - pd.Timedelta(days=3)) == anchor
+    assert next_boundary(values, anchor) == anchor + pd.Timedelta(days=91)
+    assert next_boundary(values, anchor + pd.Timedelta(days=90)) == anchor + pd.Timedelta(days=91)
+    boundary = pd.Timestamp("2026-12-25", tz="UTC")
+    assert label_data_end(values, boundary, entry_hour_utc=0) == pd.Timestamp("2026-12-24", tz="UTC")

@@ -545,3 +545,40 @@ def test_stress_replay_failure_leaves_no_completed_run(tmp_path: Path, monkeypat
     with pytest.raises(app_mod.AccountReplayError, match="stress source broken"):
         run_account_replay(_account_request(tmp_path))
     assert _run_dirs(tmp_path) == []
+
+
+def test_account_ml_tilt_threads_models_and_discloses_digest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An ML account replay builds the tilted unit book, reconciles only against the same ML book, and discloses its digest."""
+    import pyarrow.parquet as pq
+
+    seen = _install_strategy_account_fakes(monkeypatch, tmp_path, ml_tilt_digest="ml-digest-x")
+    index = _write_catalog_index(tmp_path, [])
+    unit_cagr = (105000.0 / 100000.0) ** (365.0 / 3.0) - 1.0
+    _write_same_book_reference(tmp_path, index, run_dir="runs/c0", base_cagr=unit_cagr, base_mdd=0.05)
+    _write_same_book_reference(tmp_path, index, run_dir="runs/ml", base_cagr=unit_cagr, base_mdd=0.05, ml_tilt_digest="ml-digest-x")
+    _write_same_book_reference(tmp_path, index, run_dir="runs/other", base_cagr=unit_cagr, base_mdd=0.05, ml_tilt_digest="other")
+    export = tmp_path / "unit.parquet"
+    models = tmp_path / "models"
+    report = run_account_replay(_account_request(tmp_path, ml_tilt_model_dir=models, export_unit_returns=export))
+    assert seen["request"].ml_tilt_model_dir == models
+    assert report.payload["ml_tilt_digest"] == "ml-digest-x"
+    assert report.payload["signal_digest"] == "ml-digest-x"
+    assert report.payload["reconciliation"]["reference_canonical"]["run_dir"] == "runs/ml"
+    assert pq.read_schema(export).metadata[b"ml_tilt_digest"] == b"ml-digest-x"
+
+
+def test_account_baseline_never_reconciles_against_ml_book(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A C0 replay ignores canonical rows of an ML book and its payload carries no ML digest."""
+    _install_strategy_account_fakes(monkeypatch, tmp_path)
+    index = _write_catalog_index(tmp_path, [])
+    _write_same_book_reference(tmp_path, index, run_dir="runs/ml", base_cagr=0.1, base_mdd=0.05, ml_tilt_digest="ml-digest-x")
+    report = run_account_replay(_account_request(tmp_path))
+    assert report.payload["reconciliation"]["status"] == "missing_reference"
+    assert "ml_tilt_digest" not in report.payload
+
+
+def test_account_request_rejects_non_path_model_dir(tmp_path: Path) -> None:
+    from src.application.strategy_account import validate_account_replay_request
+
+    with pytest.raises(ValueError, match="ml_tilt_model_dir"):
+        validate_account_replay_request(_account_request(tmp_path, ml_tilt_model_dir="models"))

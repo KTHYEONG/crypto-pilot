@@ -98,6 +98,8 @@ class AccountReplayRequest:
     data_root: Path | None = None
     memory_budget: MhsMemoryBudget | None = None
     export_unit_returns: Path | None = None
+    ml_tilt_model_dir: Path | None = None
+    expected_ml_tilt_digest: str | None = None
 
 
 def validate_account_replay_request(request: AccountReplayRequest) -> None:
@@ -126,6 +128,8 @@ def validate_account_replay_request(request: AccountReplayRequest) -> None:
         raise ValueError(f"require source_start < evaluation_start < evaluation_end, got {source} {start} {end}")
     if request.policy not in ("growth", "fixed"):
         raise ValueError(f"policy must be 'growth' or 'fixed', got {request.policy!r}")
+    if request.ml_tilt_model_dir is not None and not isinstance(request.ml_tilt_model_dir, Path):
+        raise ValueError(f"ml_tilt_model_dir must be a Path or None, got {request.ml_tilt_model_dir!r}")
     if request.execution not in ("taker", "maker"):
         raise ValueError(f"execution must be 'taker' or 'maker', got {request.execution!r}")
     if request.policy == "fixed" and request.fixed_exposure is None:
@@ -215,6 +219,7 @@ def _latest_same_book_reference(
     strategy: StrategySpec,
     evaluation_start: pd.Timestamp,
     evaluation_end: pd.Timestamp,
+    ml_tilt_digest: str | None = None,
 ) -> dict[str, Any] | None:
     """Latest canonical strategy backtest run (``mhs_frozen``) of the exact book the account ledger replays.
 
@@ -258,6 +263,8 @@ def _latest_same_book_reference(
         if payload.get("name_clip") != strategy.name_clip:
             continue
         if payload.get("exposure_multiplier") != strategy.exposure_multiplier:
+            continue
+        if payload.get("ml_tilt_digest") != ml_tilt_digest:
             continue
         reference = {**record, "name_clip": payload.get("name_clip"), "exposure_multiplier": payload.get("exposure_multiplier")}
     return reference
@@ -306,6 +313,7 @@ def _build_account_candidate(request: AccountReplayRequest) -> tuple[Any, Any, A
             ),
             data_root=request.data_root, memory_budget=request.memory_budget,
             execution_bound="OHLCV_IMMEDIATE_TAKER",
+            ml_tilt_model_dir=request.ml_tilt_model_dir,
         )
     except (DataIntegrityError, ValueError) as exc:
         raise AccountReplayError(f"invalid account replay request: {exc}") from exc
@@ -314,7 +322,7 @@ def _build_account_candidate(request: AccountReplayRequest) -> tuple[Any, Any, A
         parts = assemble_account_inputs(candidate, context)
     except (DataIntegrityError, ValueError, OSError) as exc:
         raise AccountReplayError(f"account replay failed: {exc}") from exc
-    return strategy_request.strategy, parts, strategy_request
+    return strategy_request.strategy, parts, context.ml_tilt_digest
 
 
 def build_account_replay_inputs(request: AccountReplayRequest) -> tuple[pd.DataFrame, AccountMarkPanels, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DatetimeIndex]:
@@ -368,7 +376,9 @@ def _replay_account_ledgers(request: AccountReplayRequest, parts: Any, rules: An
     return unit, result, stress
 
 
-def _reconcile_account_unit(request: AccountReplayRequest, strategy: Any, unit: Any) -> dict[str, Any]:
+def _reconcile_account_unit(
+    request: AccountReplayRequest, strategy: Any, unit: Any, ml_tilt_digest: str | None = None,
+) -> dict[str, Any]:
     """Reconcile the unit ledger against the latest same-book canonical row."""
     unit_cagr, _, _ = _account_headlines(unit.daily_equity, ACCOUNT_UNIT_REFERENCE_CAPITAL)
     unit_mdd = unit.intraday_max_drawdown
@@ -377,6 +387,7 @@ def _reconcile_account_unit(request: AccountReplayRequest, strategy: Any, unit: 
         reference = _latest_same_book_reference(
             index_path, execution=request.execution, strategy=strategy,
             evaluation_start=request.evaluation_start, evaluation_end=request.evaluation_end,
+            ml_tilt_digest=ml_tilt_digest,
         )
         reconciliation = reconcile_unit_reference(reference, unit_cagr=unit_cagr, unit_mdd=unit_mdd)
         if reconciliation["status"] == "missing_reference":
@@ -429,7 +440,9 @@ def run_account_replay(request: AccountReplayRequest) -> AccountReplayReport:
     """
     validate_account_replay_request(request)
     rules, venue_path = _resolve_account_venue(request)
-    strategy, parts, _ = _build_account_candidate(request)
+    strategy, parts, ml_tilt_digest = _build_account_candidate(request)
+    if request.expected_ml_tilt_digest is not None and ml_tilt_digest != request.expected_ml_tilt_digest:
+        raise AccountReplayError("ml tilt models changed between the holdout journal and the account replay")
     from src.strategy.sizing import account_growth_policy
 
     growth_base = account_growth_policy(impact_y=request.impact_y)
@@ -439,10 +452,11 @@ def run_account_replay(request: AccountReplayRequest) -> AccountReplayReport:
         assert request.fixed_exposure is not None
         policy = dataclasses.replace(growth_base, kind="fixed", exposure_max=request.fixed_exposure)
     unit, result, stress = _replay_account_ledgers(request, parts, rules, policy)
-    reconciliation = _reconcile_account_unit(request, strategy, unit)
+    reconciliation = _reconcile_account_unit(request, strategy, unit, ml_tilt_digest)
     return _persist_account_run(
         request, strategy, policy, unit, result, reconciliation,
         stress=stress, rules_captured_at=rules.captured_at.isoformat(), venue_path=str(venue_path),
+        ml_tilt_digest=ml_tilt_digest,
     )
 
 
