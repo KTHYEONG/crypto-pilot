@@ -1224,3 +1224,13 @@ def test_depth_ranking_filters_nonfinite_values_and_breaks_ties_at_cap() -> None
         valid_from=_DAY, panel_last_bar=_DAY + pd.Timedelta(hours=22),
     )
     assert _rank_depth_candidates(book, _DAY) == [f"C{i:02d}" for i in range(60)]
+
+
+def test_ml_tilt_missing_model_halts_before_any_weight_row(layout: dict[str, Path]) -> None:
+    empty = layout["weights"].parent / "ml_tilt_empty"
+    empty.mkdir(parents=True, exist_ok=True)
+    with pytest.raises(DataIntegrityError):
+        _run(_DAY, layout, ml_tilt_model_dir=empty)
+    assert not layout["weights"].exists()
+    assert not layout["forward"].exists()
+    assert not _report_path(layout).exists()

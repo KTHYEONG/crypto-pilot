@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pytest
 
+from src.common.errors import DataIntegrityError
+
 from tests.unit.live.test_runner import _seed_run_cycle_artifact
 
 
@@ -65,3 +67,32 @@ def test_unresolvable_stored_id_still_rejected(tmp_path: Path, monkeypatch: pyte
         path.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
         with pytest.raises(DataIntegrityError, match=r"run manifest mismatch key=strategy_id"):
             runner_mod._assert_run_manifest_compatible(settings)
+
+
+def test_manifest_ml_digest_mismatch_refuses(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import src.live.runner as runner_mod
+    import src.live.strategy_book as strategy_book
+
+    record_run_id = "flow_mom_ml_digest_20261108"
+    monkeypatch.setattr(strategy_book, "live_ml_tilt_digest", lambda _dir: "digest-A")
+    settings, _, _, now = _seed_run_cycle_artifact(tmp_path, monkeypatch, record_run_id)
+    settings.ml_tilt_model_dir = str(tmp_path / "ml_tilt")
+    path = _manifest_path(tmp_path, record_run_id)
+    path.write_text(json.dumps(runner_mod._current_run_manifest(settings, now), sort_keys=True), encoding="utf-8")
+
+    monkeypatch.setattr(strategy_book, "live_ml_tilt_digest", lambda _dir: "digest-B")
+    with pytest.raises(DataIntegrityError, match="ml_tilt_digest"):
+        runner_mod._assert_run_manifest_compatible(settings)
+
+
+def test_manifest_legacy_without_ml_key_ok_when_off(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import src.live.runner as runner_mod
+
+    record_run_id = "flow_mom_legacy_ml_key_20261108"
+    settings, _, _, now = _seed_run_cycle_artifact(tmp_path, monkeypatch, record_run_id)
+    manifest = runner_mod._current_run_manifest(settings, now)
+    manifest.pop("ml_tilt_digest")
+    path = _manifest_path(tmp_path, record_run_id)
+    path.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
+
+    runner_mod._assert_run_manifest_compatible(settings)

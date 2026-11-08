@@ -521,3 +521,31 @@ def test_tilt_fails_closed_when_held_row_scores_all_nan() -> None:
     scores.loc[decisions[10]] = np.nan
     with pytest.raises(DataIntegrityError, match="scores are missing"):
         apply_ml_tilt(base, scores, trade, values=_values(), name_clip=0.2, min_rank_symbols=4)
+
+
+def test_tilt_rows_independent_of_scoring_window_start_with_near_ties() -> None:
+    """With the finite EMA kernel, rows at least ``ema_warmup_days`` past the window start are window-free."""
+    from src.strategy.ml_tilt import ema_warmup_days
+
+    values = _values(smooth_halflife_days=2.0)
+    span = ema_warmup_days(values)
+    base, decisions = _base_book(n_decisions=3 * span + 10)
+    base.iloc[5] = base.iloc[4]
+    scores, trade = _scores_and_roster(decisions)
+    offset = 7
+    scores.iloc[:, 1] = scores.iloc[:, 0] + 1e-9
+    scores.iloc[:offset, 1] = scores.iloc[:offset, 0] - 5.0
+    trade[:] = True
+    full = apply_ml_tilt(base, scores, trade, values=values, name_clip=0.2, min_rank_symbols=4)
+    late = apply_ml_tilt(base.iloc[offset:], scores.iloc[offset:], trade, values=values, name_clip=0.2, min_rank_symbols=4)
+    common = base.index[offset + span:]
+    pd.testing.assert_frame_equal(full.loc[common], late.loc[common], check_exact=False, atol=1e-12, rtol=0.0)
+
+
+def test_tilt_all_zero_base_without_scores_stays_zero() -> None:
+    base, decisions = _base_book()
+    base.iloc[:] = 0.0
+    empty = pd.DataFrame(index=pd.DatetimeIndex([], tz="UTC"), columns=base.columns, dtype="float64")
+    _, trade = _scores_and_roster(decisions)
+    out = apply_ml_tilt(base, empty, trade, values=_values(), name_clip=0.2, min_rank_symbols=4)
+    assert (out == 0.0).all(axis=None)

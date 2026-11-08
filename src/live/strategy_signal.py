@@ -31,6 +31,7 @@ from src.live.strategy_book import (
     classify_snapshot_gaps,
     crypto_census,
     extend_unit_history,
+    live_ml_warmup_days,
     snapshot_gap_blocked_decisions,
     unit_proxy_returns,
 )
@@ -108,6 +109,7 @@ class StrategyStepReport:
     venue_snapshot_age_days: float = 0.0
     decision_bar_missing: int = 0
     venue_gap_excluded: tuple[str, ...] = ()
+    ml_tilt_digest: str | None = None
 
 
 def _read_unit_series(path: Path, label: str, *, artifact_key: SecretStr | None = None) -> pd.Series:
@@ -206,6 +208,7 @@ def run_strategy_signal_step(
     settlement_price_rtol: float | None = None,
     decision_bar_max_missing_fraction: float | None = None,
     venue_max_age: pd.Timedelta | None = None,
+    ml_tilt_model_dir: Path | None = None,
 ) -> StrategyStepReport:
     """Compute and persist one decision day's levered strategy target row for the runner.
 
@@ -270,6 +273,8 @@ def run_strategy_signal_step(
         bootstrap.index[-1] - pd.Timedelta(days=1)
     )
     panel_start = min(day, first_needed) - pd.Timedelta(days=int(LIVE_SIGNAL_WARMUP_DAYS))
+    if ml_tilt_model_dir is not None:
+        panel_start -= pd.Timedelta(days=live_ml_warmup_days())
     panel_end = day + pd.Timedelta(days=1, hours=int(FLOW_MOM_TOP20.snapshot_hour_utc) + 1)
     listing_history: tuple[VenueListingSnapshot, ...] = ()
     if listing_root is not None:
@@ -365,7 +370,7 @@ def run_strategy_signal_step(
         blocked_callable = _blocked
     book = build_live_strategy_book(
         Path(data_root), census, panel_start=panel_start, panel_end=panel_end,
-        blocked_decisions=blocked_callable,
+        blocked_decisions=blocked_callable, ml_tilt_model_dir=ml_tilt_model_dir,
     )
     if day not in book.unit_weights.index:
         raise DataIntegrityError(f"no book row for {day.date()}")
@@ -461,7 +466,7 @@ def run_strategy_signal_step(
         unit_history_end=history.index[-1], venue_snapshot=venue_name, written=True,
         venue_snapshot_age_days=float(venue_age_days),
         decision_bar_missing=len(gap_refresh),
-        venue_gap_excluded=tuple(sorted(gap_venue)),
+        venue_gap_excluded=tuple(sorted(gap_venue)), ml_tilt_digest=book.ml_tilt_digest,
     )
     existing = load_weights_frame(Path(weights_path), artifact_key=artifact_key)
     if not existing.empty and day in existing.index:
@@ -490,6 +495,7 @@ def run_strategy_signal_step(
         "venue_snapshot_age_days": report.venue_snapshot_age_days,
         "decision_bar_missing": report.decision_bar_missing,
         "venue_gap_excluded": sorted(report.venue_gap_excluded),
+        "ml_tilt_digest": report.ml_tilt_digest,
         "written": report.written,
         "created_at": pd.Timestamp.now(tz="UTC").isoformat(),
     }

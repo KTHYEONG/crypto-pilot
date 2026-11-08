@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -35,6 +36,7 @@ _VOL_WINDOW_BARS: Final = 168
 _VOL_MIN_PERIODS: Final = 84
 _HOURS_PER_DAY: Final = 24
 _DAY: Final = pd.Timedelta(days=1)
+EMA_WARMUP_HALFLIVES: Final = 10
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,6 +162,17 @@ def forward_labels(
     scaled = np.where(denom > 0.0, centered.to_numpy(dtype="float64") / denom, np.nan)
     clipped = np.clip(scaled, -values.label_clip, values.label_clip)
     return pd.Series(clipped, index=features.index, name="label", dtype="float64")
+
+
+def ema_warmup_start(values: MlTiltValues, first_decision: pd.Timestamp) -> pd.Timestamp:
+    """Return the first decision whose score feeds the EMA of ``first_decision``, clamped to the schedule anchor."""
+    lookback = pd.Timedelta(days=math.ceil(values.smooth_halflife_days * EMA_WARMUP_HALFLIVES))
+    return max(values.schedule_anchor, pd.Timestamp(first_decision) - lookback)
+
+
+def ema_warmup_days(values: MlTiltValues) -> int:
+    """Calendar days the EMA warm-up reaches before its first kept decision."""
+    return math.ceil(values.smooth_halflife_days * EMA_WARMUP_HALFLIVES)
 
 
 def boundary_schedule(values: MlTiltValues, until: pd.Timestamp) -> tuple[pd.Timestamp, ...]:
@@ -400,7 +413,7 @@ def apply_ml_tilt(
 
     spread = raw.std(axis=1)
     z = raw.sub(raw.mean(axis=1), axis=0).div(spread.where(spread > 0.0), axis=0)
-    smoothed = z.ewm(halflife=values.smooth_halflife_days, min_periods=1).mean().where(z.notna())
+    smoothed = _truncated_ema(z, values).where(z.notna())
     ml_book = rank_weight_book(smoothed, trade & smoothed.notna(), 1, min_rank_symbols)
     ml_book.index = ml_book.index + entry_offset
     ml_book = ml_book.reindex(index=base_weights.index, columns=columns).fillna(0.0)
@@ -414,6 +427,27 @@ def apply_ml_tilt(
     clipped_gross = np.abs(clipped_values).sum(axis=1)
     scale = np.divide(c0_gross, clipped_gross, out=np.zeros_like(c0_gross), where=clipped_gross > 0.0)
     return pd.DataFrame(clipped_values * scale[:, None], index=base_weights.index, columns=columns)
+
+
+def _truncated_ema(z: pd.DataFrame, values: MlTiltValues) -> pd.DataFrame:
+    """Exponential smoothing over the last ``ema_warmup_days`` rows only (finite kernel).
+
+    A finite kernel makes each smoothed row a function of a fixed trailing window, so a recomputation
+    window that starts anywhere at least that far back (live cycles, backtests) yields identical rows.
+    """
+    if z.empty:
+        return z
+    grid = pd.date_range(z.index.min(), z.index.max(), freq="D")
+    daily = z.reindex(grid)
+    decay = 0.5 ** (1.0 / values.smooth_halflife_days)
+    numerator = pd.DataFrame(0.0, index=grid, columns=z.columns)
+    denominator = pd.DataFrame(0.0, index=grid, columns=z.columns)
+    for lag in range(ema_warmup_days(values) + 1):
+        shifted = daily.shift(lag)
+        weight = decay**lag
+        numerator += shifted.fillna(0.0) * weight
+        denominator += shifted.notna() * weight
+    return numerator.div(denominator.where(denominator > 0.0)).reindex(z.index)
 
 
 def _lookup(frame: pd.DataFrame, times: pd.DatetimeIndex, symbols: pd.Index) -> np.ndarray:

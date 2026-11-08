@@ -353,8 +353,12 @@ def _default_venue_capture(settings: LiveSettings, decision_time: pd.Timestamp) 
 
 def _default_strategy_step(target: pd.Timestamp, settings: LiveSettings, weights_path: Path) -> StrategyStepReport:
     from src.live.ledger import default_ledger_path
-    from src.live.runner import fetch_live_account_equity
+    from src.live.runner import _assert_run_manifest_compatible, fetch_live_account_equity
     from src.live.strategy_signal import run_strategy_signal_step
+
+    # The signal step appends forward unit returns and weight rows to the run; a run recorded under a
+    # different book (e.g. another ML model set) must be refused before anything is written.
+    _assert_run_manifest_compatible(settings)
 
     try:
         raw = json.loads(NON_CRYPTO_SYMBOLS_PATH.read_text(encoding="utf-8"))
@@ -387,6 +391,7 @@ def _default_strategy_step(target: pd.Timestamp, settings: LiveSettings, weights
         settlement_price_rtol=settings.delisting_settlement_price_rtol,
         decision_bar_max_missing_fraction=settings.refresh_decision_bar_max_missing_fraction,
         venue_max_age=pd.Timedelta(days=settings.venue_rules_max_age_days),
+        ml_tilt_model_dir=Path(settings.ml_tilt_model_dir) if settings.ml_tilt_model_dir else None,
     )
 
 

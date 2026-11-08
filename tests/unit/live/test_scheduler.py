@@ -2633,6 +2633,27 @@ def test_default_frozen_step_wires_run_args_and_fails_without_non_crypto_list(mo
         sched._default_strategy_step(target, settings, weights)
 
 
+def test_default_strategy_step_refuses_incompatible_run_before_writing(monkeypatch, tmp_path) -> None:
+    import pandas as pd
+    import pytest
+
+    import src.live.runner as runner_mod
+    import src.live.scheduler as sched
+    from src.common.errors import DataIntegrityError
+    from src.live.settings import LiveSettings
+
+    def _mismatch(settings):
+        raise DataIntegrityError("run manifest mismatch key=ml_tilt_digest")
+
+    def _never(decision_day, **kwargs):
+        raise AssertionError("signal step must not run for an incompatible run manifest")
+
+    monkeypatch.setattr(runner_mod, "_assert_run_manifest_compatible", _mismatch)
+    monkeypatch.setattr("src.live.strategy_signal.run_strategy_signal_step", _never)
+    with pytest.raises(DataIntegrityError, match="ml_tilt_digest"):
+        sched._default_strategy_step(pd.Timestamp("2026-08-24 00:00Z"), LiveSettings(), tmp_path / "w.parquet")
+
+
 def test_default_frozen_step_rejects_malformed_non_crypto_list(monkeypatch, tmp_path) -> None:
     import pandas as pd
     import pytest

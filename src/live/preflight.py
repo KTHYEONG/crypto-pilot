@@ -103,6 +103,10 @@ def release_gate_check(settings: Any, *, root: Path | None = None) -> PreflightC
             passed=True,
             detail="suppressed mode: paper mode is an operational check and is never gated",
         )
+    if getattr(settings, "ml_tilt_model_dir", None) is not None:
+        return PreflightCheck(
+            name="release_gate", passed=False, detail="[RISK] ml tilt has no accepted release",
+        )
     try:
         from src.core.params import ACCOUNT_EXPOSURE_CAP
         from src.live.runner import _unit_bootstrap_sha256

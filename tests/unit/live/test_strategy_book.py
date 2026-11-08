@@ -14,6 +14,7 @@ from src.live.strategy_book import (
     build_live_strategy_book,
     crypto_census,
     extend_unit_history,
+    live_ml_warmup_days,
     unit_proxy_returns,
 )
 from src.strategy.books import clip_names_preserving_gross
@@ -982,3 +983,221 @@ def test_funding_coverage_empty_series_has_no_last_settlement() -> None:
     assert _funding_coverage_ms(pd.Series([], dtype="float64")) == (None, 28800000)
     bad = pd.Series([0.0001], index=["not-a-date"])
     assert _funding_coverage_ms(bad) == (None, 28800000)
+
+
+
+_ML_SYMBOLS = tuple(f"SYM{i:02d}USDT" for i in range(30))
+_ML_CENSUS = list(_ML_SYMBOLS)
+_ML_DAYS = 200
+_ML_ANCHOR = _START + pd.Timedelta(days=120)
+
+
+def _tiny_ml_values(anchor: pd.Timestamp, halflife_days: float = 2.0):
+    import dataclasses
+
+    from src.strategy.store import EXAMPLE_STORE_ROOT, ml_tilt_values
+
+    base = ml_tilt_values(EXAMPLE_STORE_ROOT)
+    assert base is not None
+    return dataclasses.replace(
+        base, tilt=0.25, horizon_days=1, label_clip=3.0, vol_floor_quantile=0.1,
+        smooth_halflife_days=halflife_days, retrain_days=1000, purge_days=1, schedule_anchor=anchor,
+        num_leaves=3, min_child_samples=5, learning_rate=0.1, n_trees=5, subsample=1.0, colsample_bytree=1.0,
+        reg_lambda=0.0, seed=3, min_train_rows=20,
+    )
+
+
+def _research_inputs(root: Path, end: pd.Timestamp):
+    from src.core.panel import load_base_panel
+
+    panel = load_base_panel(
+        str(root / "ohlcv"), "1h", ("close", "quote_vol", "taker_buy_quote"), _START,
+        end - pd.Timedelta(hours=1), partition="all", selection_mode="causal_history",
+    )
+    close = panel["close"][_ML_CENSUS].astype("float64")
+    quote = panel["quote_vol"][_ML_CENSUS].astype("float64")
+    taker = panel["taker_buy_quote"][_ML_CENSUS].astype("float64")
+    completed = (close.index + pd.Timedelta(hours=1)).to_numpy(dtype="datetime64[ns]")
+    available = pd.DataFrame(
+        np.tile(completed[:, None], (1, len(_ML_CENSUS))), index=close.index, columns=_ML_CENSUS,
+    ).apply(lambda col: pd.to_datetime(col).dt.tz_localize("UTC"))
+    panels = {"close": close, "quote_vol": quote, "taker_buy_quote": taker}
+    return panels, available, close, close.resample("1D").last().astype("float64"), \
+        quote.resample("1D").sum(min_count=1).astype("float64")
+
+
+def _train_tiny_models(root: Path, model_dir: Path, values, end: pd.Timestamp) -> None:
+    from src.strategy.ml_tilt import member_rank_features, train_missing_boundaries
+    from src.strategy.targets import FLOW_MOM_TOP20
+
+    panels, available, close, daily_close, daily_qv = _research_inputs(root, end)
+    features = member_rank_features(
+        panels, available, daily_close, daily_qv, tuple(_ML_CENSUS),
+        market_close=close, strategy=FLOW_MOM_TOP20, values=values, blocked_decisions=None,
+    )
+    funding_idx = pd.date_range(_START, end + pd.Timedelta(days=30), freq="8h", tz="UTC")
+    funding = {sym: pd.Series(0.0, index=funding_idx, dtype="float64") for sym in _ML_CENSUS}
+    rows = train_missing_boundaries(
+        features, entry_marks=close.shift(freq=pd.Timedelta(hours=1)), funding_by_symbol=funding,
+        hourly_close=close, until=end, out_dir=model_dir, values=values, strategy=FLOW_MOM_TOP20,
+    )
+    assert [r.status for r in rows] == ["trained"]
+
+
+def _research_tilt(root: Path, end: pd.Timestamp, values, model_dir: Path, first_scored: pd.Timestamp) -> pd.DataFrame:
+    """Long-history research tilt: C0 from full history, EMA warmed from ``first_scored``; indexed by decision."""
+    from src.strategy.ml_tilt import apply_ml_tilt, ema_warmup_start, member_rank_features
+    from src.strategy.store import strategy_values
+    from src.strategy.targets import FLOW_MOM_TOP20
+    from src.strategy.universe import build_pit_roster
+
+    full = build_live_strategy_book(root, _ML_SYMBOLS, panel_start=_START, panel_end=end)
+    warmup = ema_warmup_start(values, first_scored)
+    base_rows = full.unit_weights.loc[full.unit_weights.index >= warmup]
+    base = pd.DataFrame(
+        base_rows.to_numpy(dtype="float64"), index=base_rows.index + pd.Timedelta(days=1), columns=base_rows.columns,
+    )
+    panels, available, close, daily_close, daily_qv = _research_inputs(root, end)
+    features = member_rank_features(
+        panels, available, daily_close, daily_qv, tuple(_ML_CENSUS),
+        market_close=close, strategy=FLOW_MOM_TOP20, values=values, blocked_decisions=None,
+    )
+    features = features.loc[pd.DatetimeIndex(features.index.get_level_values("decision")) >= warmup]
+    scores = ml_scores_for(features, model_dir, values)
+    roster = build_pit_roster(
+        daily_close, daily_qv, tuple(_ML_CENSUS), breadth=FLOW_MOM_TOP20.breadth, blocked_decisions=None,
+    )
+    expected = apply_ml_tilt(
+        base, scores, roster, values=values, name_clip=float(strategy_values().name_clip),
+        min_rank_symbols=FLOW_MOM_TOP20.min_rank_symbols,
+    )
+    return expected.set_axis(expected.index - pd.Timedelta(days=1), axis=0)
+
+
+def ml_scores_for(features: pd.DataFrame, model_dir: Path, values) -> pd.DataFrame:
+    from src.strategy.ml_tilt import load_model_set, ml_scores
+
+    return ml_scores(features, load_model_set(model_dir, values=values), values=values)
+
+
+def _live_ml_book(root: Path, window_start: pd.Timestamp, end: pd.Timestamp, model_dir: Path):
+    """Live book as the signal step builds it: panel_start extended by the EMA warm-up pad."""
+    pad = pd.Timedelta(days=live_ml_warmup_days())
+    return build_live_strategy_book(
+        root, _ML_SYMBOLS, panel_start=window_start - pad, panel_end=end, ml_tilt_model_dir=model_dir,
+    )
+
+
+def test_book_default_unchanged_without_model_dir(tmp_path: Path) -> None:
+    start, end = _write_panel(tmp_path, _ML_SYMBOLS, days=_ML_DAYS)
+    book = build_live_strategy_book(tmp_path, _ML_SYMBOLS, panel_start=start, panel_end=end)
+    assert book.ml_tilt_digest is None
+
+
+def test_book_ml_tilt_applied_and_matches_research(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import src.live.strategy_book as strategy_book
+
+    start, end = _write_panel(tmp_path, _ML_SYMBOLS, days=_ML_DAYS)
+    values = _tiny_ml_values(_ML_ANCHOR)
+    monkeypatch.setattr(strategy_book, "ml_tilt_values", lambda: values)
+    model_dir = tmp_path / "ml_tilt"
+    _train_tiny_models(tmp_path, model_dir, values, end)
+
+    window_start = start + pd.Timedelta(days=70)
+    baseline = build_live_strategy_book(tmp_path, _ML_SYMBOLS, panel_start=window_start, panel_end=end)
+    tilted = _live_ml_book(tmp_path, window_start, end, model_dir)
+    assert tilted.ml_tilt_digest == strategy_book.live_ml_tilt_digest(model_dir)
+    assert tilted.unit_weights.index.equals(baseline.unit_weights.index)
+    gross_base = np.abs(baseline.unit_weights.to_numpy()).sum(axis=1)
+    gross_tilt = np.abs(tilted.unit_weights.to_numpy()).sum(axis=1)
+    np.testing.assert_allclose(gross_tilt, gross_base, rtol=0.0, atol=1e-12)
+    assert not np.allclose(tilted.unit_weights.to_numpy(), baseline.unit_weights.to_numpy(), atol=1e-6)
+
+    expected = _research_tilt(tmp_path, end, values, model_dir, first_scored=baseline.unit_weights.index.min())
+    np.testing.assert_allclose(
+        tilted.unit_weights.to_numpy(dtype="float64"),
+        expected.loc[tilted.unit_weights.index].to_numpy(dtype="float64"),
+        rtol=0.0, atol=1e-12,
+    )
+
+
+def test_live_ema_warm_independent_of_window_start(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import src.live.strategy_book as strategy_book
+
+    start, end = _write_panel(tmp_path, _ML_SYMBOLS, days=_ML_DAYS)
+    values = _tiny_ml_values(_ML_ANCHOR)
+    monkeypatch.setattr(strategy_book, "ml_tilt_values", lambda: values)
+    model_dir = tmp_path / "ml_tilt"
+    _train_tiny_models(tmp_path, model_dir, values, end)
+
+    early = _live_ml_book(tmp_path, start + pd.Timedelta(days=70), end, model_dir).unit_weights
+    late = _live_ml_book(tmp_path, start + pd.Timedelta(days=75), end, model_dir).unit_weights
+    common = early.index.intersection(late.index)
+    assert len(common) > 0
+    assert len(common) < len(early)
+    np.testing.assert_allclose(
+        early.loc[common].to_numpy(dtype="float64"), late.loc[common].to_numpy(dtype="float64"),
+        rtol=0.0, atol=1e-9,
+    )
+
+
+def test_research_live_parity_steady_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import src.live.strategy_book as strategy_book
+
+    start, end = _write_panel(tmp_path, _ML_SYMBOLS, days=_ML_DAYS)
+    values = _tiny_ml_values(_ML_ANCHOR)
+    monkeypatch.setattr(strategy_book, "ml_tilt_values", lambda: values)
+    model_dir = tmp_path / "ml_tilt"
+    _train_tiny_models(tmp_path, model_dir, values, end)
+
+    decision = start + pd.Timedelta(days=190)
+    valid_from = decision - pd.Timedelta(days=2)
+    window_start = valid_from - pd.Timedelta(days=LIVE_SIGNAL_WARMUP_DAYS)
+    live = _live_ml_book(tmp_path, window_start, end, model_dir).unit_weights
+    expected = _research_tilt(
+        tmp_path, end, values, model_dir, first_scored=start + pd.Timedelta(days=LIVE_SIGNAL_WARMUP_DAYS),
+    )
+    np.testing.assert_allclose(
+        live.loc[decision].to_numpy(dtype="float64"), expected.loc[decision].to_numpy(dtype="float64"),
+        rtol=0.0, atol=1e-9,
+    )
+
+
+def test_ema_warmup_start_clamps_anchor() -> None:
+    import pandas as pd_
+
+    from src.strategy.ml_tilt import ema_warmup_days, ema_warmup_start
+
+    anchor = pd_.Timestamp("2021-03-01", tz="UTC")
+    values = _tiny_ml_values(anchor, halflife_days=2.0)
+    assert ema_warmup_days(values) == 20
+    late = pd_.Timestamp("2021-05-01", tz="UTC")
+    assert ema_warmup_start(values, late) == late - pd_.Timedelta(days=20)
+    assert ema_warmup_start(values, anchor + pd_.Timedelta(days=5)) == anchor
+
+
+def test_book_missing_model_halts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import src.live.strategy_book as strategy_book
+
+    start, end = _write_panel(tmp_path, _ML_SYMBOLS, days=_ML_DAYS)
+    monkeypatch.setattr(strategy_book, "ml_tilt_values", lambda: _tiny_ml_values(_ML_ANCHOR))
+    empty = tmp_path / "ml_tilt_empty"
+    empty.mkdir()
+    with pytest.raises(DataIntegrityError):
+        _live_ml_book(tmp_path, start + pd.Timedelta(days=70), end, empty)
+
+
+def test_ml_tilt_refuses_without_store_section_or_models(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import src.live.strategy_book as strategy_book
+
+    start, end = _write_panel(tmp_path, _ML_SYMBOLS, days=_ML_DAYS)
+    empty = tmp_path / "ml_tilt_empty"
+    empty.mkdir()
+    monkeypatch.setattr(strategy_book, "ml_tilt_values", lambda: None)
+    with pytest.raises(DataIntegrityError, match=r"\[ml_tilt\]"):
+        strategy_book.live_ml_tilt_digest(empty)
+    monkeypatch.setattr(strategy_book, "ml_tilt_values", lambda: _tiny_ml_values(_ML_ANCHOR))
+    with pytest.raises(DataIntegrityError, match="model set is empty"):
+        strategy_book.live_ml_tilt_digest(empty)
+    with pytest.raises(DataIntegrityError, match="no ml tilt decision"):
+        _live_ml_book(tmp_path, start, start + pd.Timedelta(days=120), empty)

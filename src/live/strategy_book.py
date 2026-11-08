@@ -26,8 +26,20 @@ from src.market_data.services.futures_collection import (
 )
 from src.strategy.books import clip_names_preserving_gross
 from src.strategy.liquidity import causal_adv_sigma
-from src.strategy.store import strategy_values
+from src.strategy.ml_tilt import (
+    apply_ml_tilt,
+    ema_warmup_days,
+    ema_warmup_start,
+    load_model_set,
+    member_rank_features,
+    ml_scores,
+    ml_tilt_signal_digest,
+    values_digest,
+)
+from src.strategy.release import strategy_signal_digest
+from src.strategy.store import MlTiltValues, ml_tilt_values, strategy_values
 from src.strategy.targets import FLOW_MOM_TOP20, build_strategy_targets
+from src.strategy.universe import build_pit_roster
 
 _REQUIRED_COLUMNS = ("close", "quote_vol", "taker_buy_quote")
 
@@ -57,6 +69,8 @@ class LiveStrategyBook:
     #: requested ``panel_end``, which reaches past real collection at every nightly cycle
     #: since the decision releases before the next midnight bar closes).
     panel_last_bar: pd.Timestamp
+    #: Digest of the ML variant applied to ``unit_weights``; None for the unmodified C0 book.
+    ml_tilt_digest: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,9 +162,92 @@ def _require_utc(day: pd.Timestamp, label: str) -> pd.Timestamp:
     return stamp.tz_convert("UTC")
 
 
+def _required_ml_tilt_values() -> MlTiltValues:
+    values = ml_tilt_values()
+    if values is None:
+        raise DataIntegrityError("ml tilt requires the [ml_tilt] section in the strategy store")
+    return values
+
+
+def live_ml_warmup_days() -> int:
+    """Extra calendar days the live window carries before its kept decisions for the EMA warm-up.
+
+    Raises:
+        DataIntegrityError: The store has no ``[ml_tilt]`` section.
+    """
+    return ema_warmup_days(_required_ml_tilt_values())
+
+
+def live_ml_tilt_digest(model_dir: Path) -> str:
+    """Digest of the ML tilt variant that ``model_dir`` scores for the registered book.
+
+    Raises:
+        DataIntegrityError: The store has no ``[ml_tilt]`` section, or the model set is empty or invalid.
+    """
+    values = _required_ml_tilt_values()
+    models = load_model_set(Path(model_dir), values=values)
+    if not models:
+        raise DataIntegrityError(f"ml tilt model set is empty: {model_dir}")
+    return ml_tilt_signal_digest(strategy_signal_digest(FLOW_MOM_TOP20), models, values_digest(values))
+
+
+def _apply_live_ml_tilt(
+    clipped: pd.DataFrame,
+    *,
+    model_dir: Path,
+    valid_from: pd.Timestamp,
+    hourly_panels: Mapping[str, pd.DataFrame],
+    hourly_available_at: pd.DataFrame,
+    daily_close: pd.DataFrame,
+    daily_quote_volume: pd.DataFrame,
+    census: tuple[str, ...],
+    blocked_frame: pd.DataFrame | None,
+) -> tuple[pd.DataFrame, str]:
+    """Tilt C0 from the EMA warm-up start and return only the rows at or after ``valid_from``.
+
+    The warm-up start is ``ema_warmup_start(values, valid_from)``: the EMA runs over every scored
+    decision from there, so the live book matches a research run that scored the same days. The
+    caller's window carries that warm-up history; a shorter window fails closed in the feature gate.
+
+    Raises:
+        DataIntegrityError: No ML tilt values or models, no decision at or after ``valid_from``,
+            a required boundary model is missing, or a held row lacks scored names.
+    """
+    values = _required_ml_tilt_values()
+    entries = pd.DatetimeIndex(clipped.index).tz_convert("UTC")
+    if not bool(((entries - pd.Timedelta(days=1)) >= valid_from).any()):
+        raise DataIntegrityError("no ml tilt decision inside the live window")
+    warmup = ema_warmup_start(values, valid_from)
+    models = load_model_set(model_dir, values=values)
+    if not models:
+        raise DataIntegrityError(f"ml tilt model set is empty: {model_dir}")
+    census_t = tuple(census)
+    features = member_rank_features(
+        hourly_panels, hourly_available_at, daily_close, daily_quote_volume, census_t,
+        market_close=hourly_panels["close"], strategy=FLOW_MOM_TOP20, values=values,
+        blocked_decisions=blocked_frame,
+    )
+    feature_decisions = pd.DatetimeIndex(features.index.get_level_values("decision")).tz_convert("UTC")
+    features = features.loc[feature_decisions >= warmup]
+    scores = ml_scores(features, models, values=values)
+    roster = build_pit_roster(
+        daily_close, daily_quote_volume, census_t,
+        breadth=FLOW_MOM_TOP20.breadth, blocked_decisions=blocked_frame,
+    )
+    base = clipped.loc[(entries - pd.Timedelta(days=1)) >= warmup]
+    tilted = apply_ml_tilt(
+        base, scores, roster, values=values, name_clip=float(strategy_values().name_clip),
+        min_rank_symbols=FLOW_MOM_TOP20.min_rank_symbols,
+    )
+    tilted_entries = pd.DatetimeIndex(tilted.index).tz_convert("UTC")
+    kept = tilted.loc[(tilted_entries - pd.Timedelta(days=1)) >= valid_from]
+    return kept, ml_tilt_signal_digest(strategy_signal_digest(FLOW_MOM_TOP20), models, values_digest(values))
+
+
 def build_live_strategy_book(
     data_root: Path, census: tuple[str, ...], *, panel_start: pd.Timestamp, panel_end: pd.Timestamp,
     blocked_decisions: Callable[[pd.DatetimeIndex, tuple[str, ...]], pd.DataFrame] | None = None,
+    ml_tilt_model_dir: Path | None = None,
 ) -> LiveStrategyBook:
     """Rebuild the strategy book from ``data_root/ohlcv/1h`` over ``[panel_start, panel_end)``.
 
@@ -224,12 +321,22 @@ def build_live_strategy_book(
         strategy=strategy, blocked_decisions=blocked_frame,
     )
     clipped = clip_names_preserving_gross(candidate.target_weights, strategy_values().name_clip)
+    valid_from = start.normalize() + pd.Timedelta(days=int(LIVE_SIGNAL_WARMUP_DAYS))
+    ml_digest: str | None = None
+    if ml_tilt_model_dir is not None:
+        # The caller extends ``panel_start`` by ``live_ml_warmup_days()``; the kept range stays at the C0 start.
+        valid_from = valid_from + pd.Timedelta(days=ema_warmup_days(_required_ml_tilt_values()))
+        clipped, ml_digest = _apply_live_ml_tilt(
+            clipped, model_dir=Path(ml_tilt_model_dir), valid_from=valid_from,
+            hourly_panels=hourly_panels, hourly_available_at=hourly_available_at,
+            daily_close=daily_close, daily_quote_volume=daily_quote_volume,
+            census=tuple(census_list), blocked_frame=blocked_frame,
+        )
     entries = pd.DatetimeIndex(clipped.index).tz_convert("UTC")
     decisions = entries - pd.Timedelta(days=1)
     unit_weights = pd.DataFrame(
         clipped.to_numpy(dtype="float64"), index=decisions, columns=census_list, dtype="float64",
     )
-    valid_from = start.normalize() + pd.Timedelta(days=int(LIVE_SIGNAL_WARMUP_DAYS))
     keep = decisions >= valid_from
     decisions_kept = decisions[keep]
     unit_weights = unit_weights.loc[decisions_kept]
@@ -250,7 +357,7 @@ def build_live_strategy_book(
     return LiveStrategyBook(
         unit_weights=unit_weights, snapshot_closes=snapshot_closes,
         adv=adv, daily_sigma=daily_sigma,
-        valid_from=valid_from, panel_last_bar=panel_last_bar,
+        valid_from=valid_from, panel_last_bar=panel_last_bar, ml_tilt_digest=ml_digest,
     )
 
 

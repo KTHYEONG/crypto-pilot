@@ -251,6 +251,8 @@ class LiveSettings(BaseSettings):
     # Strategy live 입력: 봉인된 단위수익률 부트스트랩과 베뉴 규칙 폴백 스냅샷.
     unit_bootstrap_path: str = str(APP_ROOT / "deploy" / "mhs" / "frozen_unit_returns_maker.parquet.enc")
     venue_fallback_path: str = str(APP_ROOT / "deploy" / "mhs" / "venue_rules_20260921.json")
+    # flow_mom ML tilt 모델 디렉터리. 설정하면 페이퍼 전용이며 LIVE_MAINNET은 거부된다.
+    ml_tilt_model_dir: str | None = None
     # paper/실거래 기록 실행 단위. 설정하면 전략 의존 기록이 `data/state/runs/<run_id>/`에 저장된다.
     # 전략이나 집행이 바뀌면 새 id를 쓴다. env는 LIVE_RECORD_RUN_ID.
     record_run_id: str | None = None
@@ -588,6 +590,13 @@ class LiveSettings(BaseSettings):
         """The stale-ladder warning must fire strictly before the sizing halt."""
         if not self.venue_rules_warn_age_days < self.venue_rules_max_age_days:
             raise ValueError("venue_rules_warn_age_days must be < venue_rules_max_age_days")
+        return self
+
+    @model_validator(mode="after")
+    def _gate_ml_tilt_mainnet(self) -> LiveSettings:
+        """ML tilt has no accepted release, so it never runs against mainnet."""
+        if self.ml_tilt_model_dir is not None and self.mode is ExecutionMode.LIVE_MAINNET:
+            raise ValueError("ml tilt has no accepted release")
         return self
 
     @model_validator(mode="after")

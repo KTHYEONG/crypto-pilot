@@ -836,9 +836,11 @@ def _unit_bootstrap_sha256(settings: LiveSettings) -> str | None:
 
 
 def _current_run_manifest(settings: LiveSettings, now: pd.Timestamp) -> dict[str, Any]:
+    from src.live.strategy_book import live_ml_tilt_digest  # noqa: PLC0415
     from src.strategy.store import strategy_values  # noqa: PLC0415
     from src.strategy.targets import FLOW_MOM_TOP20  # noqa: PLC0415
 
+    ml_tilt_digest = None if settings.ml_tilt_model_dir is None else live_ml_tilt_digest(Path(settings.ml_tilt_model_dir))
     return {
         "run_id": settings.record_run_id,
         "strategy_id": FLOW_MOM_TOP20.strategy_id,
@@ -848,6 +850,7 @@ def _current_run_manifest(settings: LiveSettings, now: pd.Timestamp) -> dict[str
         "mode": settings.mode.value,
         "seed_equity_usdt": settings.notional_equity_usdt,
         "unit_bootstrap_sha256": _unit_bootstrap_sha256(settings),
+        "ml_tilt_digest": ml_tilt_digest,
         "git_sha": os.environ.get("GIT_SHA"),
         "started_at": now.isoformat(),
     }
@@ -859,7 +862,7 @@ def _assert_run_manifest_compatible(settings: LiveSettings) -> None:
         return
     raw = json.loads(path.read_text(encoding="utf-8"))
     current = _current_run_manifest(settings, pd.Timestamp.now(tz="UTC"))
-    compared = ("strategy_id", "name_clip", "execution_policy", "mode", "unit_bootstrap_sha256")
+    compared = ("strategy_id", "name_clip", "execution_policy", "mode", "unit_bootstrap_sha256", "ml_tilt_digest")
     mismatched = [key for key in compared if raw.get(key) != current.get(key)]
     if not mismatched:
         return

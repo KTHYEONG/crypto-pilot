@@ -563,3 +563,13 @@ def test_gate_fails_closed_on_broken_chain(tmp_path) -> None:
     check = release_gate_check(_mainnet_gate_settings(tmp_path / "broken"), root=root)
     assert check.passed is False
     assert "failed closed" in check.detail
+
+
+def test_release_gate_blocks_mainnet_ml_tilt(tmp_path) -> None:
+    from src.live.preflight import release_gate_check
+
+    settings = _mainnet_gate_settings(tmp_path)
+    settings.ml_tilt_model_dir = str(tmp_path / "ml_tilt")
+    check = release_gate_check(settings, root=tmp_path)
+    assert check.passed is False
+    assert check.detail.startswith("[RISK] ml tilt")

@@ -45,6 +45,7 @@ from src.strategy.liquidity import causal_adv_sigma
 from src.strategy.ml_tilt import (
     MlTiltModel,
     apply_ml_tilt,
+    ema_warmup_start,
     load_model_set,
     member_rank_features,
     ml_scores,
@@ -586,11 +587,12 @@ def build_ml_tilt_features(
 def _ml_tilt_candidate(
     request: StrategyBacktestRequest,
     candidate: StrategyTargets,
+    full_candidate: StrategyTargets,
     source: LoadedStrategySource,
     roster: pd.DataFrame,
     blocked_decisions: pd.DataFrame,
 ) -> tuple[StrategyTargets, str]:
-    """Replace the scored C0 entries with the ML-tilted book; decisions before the anchor fail closed."""
+    """Tilt C0 from the EMA warm-up start and keep the scored entries; decisions before the anchor fail closed."""
     if request.ml_tilt_model_dir is None:
         raise DataIntegrityError("ml tilt candidate requires ml_tilt_model_dir")
     values = _required_ml_tilt_values()
@@ -605,20 +607,30 @@ def _ml_tilt_candidate(
         source.census, market_close=source.hourly_panels["close"], strategy=request.strategy, values=values,
         blocked_decisions=blocked_decisions,
     )
-    scored_decisions = pd.DatetimeIndex(candidate.target_weights.index - entry_offset)
+    scored_entries = pd.DatetimeIndex(candidate.target_weights.index)
+    warmup = ema_warmup_start(values, pd.Timestamp(scored_entries.min() - entry_offset))
+    base_decisions = pd.DatetimeIndex(full_candidate.target_weights.index - entry_offset)
+    last_decision = pd.Timestamp(scored_entries.max() - entry_offset)
+    base = full_candidate.target_weights.loc[
+        np.asarray((base_decisions >= warmup) & (base_decisions <= last_decision), dtype=bool)
+    ]
     feature_decisions = pd.DatetimeIndex(features.index.get_level_values("decision"))
-    features = features.loc[feature_decisions.isin(scored_decisions)]
+    features = features.loc[np.asarray((feature_decisions >= warmup) & (feature_decisions <= last_decision), dtype=bool)]
     name_clip = request.strategy.name_clip
     if name_clip is None:
         raise DataIntegrityError("ml tilt requires a per-name clip")
     scores = ml_scores(features, models, values=values)
     tilted = apply_ml_tilt(
-        candidate.target_weights, scores, roster, values=values,
+        base, scores, roster, values=values,
         name_clip=float(name_clip), min_rank_symbols=request.strategy.min_rank_symbols,
     )
     digest = _ml_tilt_digest(request.strategy, models, values)
     return (
-        StrategyTargets(target_weights=tilted, signal_available_at=candidate.signal_available_at, strategy=request.strategy),
+        StrategyTargets(
+            target_weights=tilted.loc[scored_entries],
+            signal_available_at=candidate.signal_available_at,
+            strategy=request.strategy,
+        ),
         digest,
     )
 
@@ -712,7 +724,7 @@ def build_request_targets(
     )
     ml_digest: str | None = None
     if request.ml_tilt_model_dir is not None:
-        candidate, ml_digest = _ml_tilt_candidate(request, candidate, source, roster, blocked_decisions)
+        candidate, ml_digest = _ml_tilt_candidate(request, candidate, full_candidate, source, roster, blocked_decisions)
     context = StrategySourceContext(
         census=census, funding_by_symbol=funding_by_symbol, funding_failures=funding_failures,
         root=root, budget=budget, daily_close=daily_close, daily_quote_volume=daily_quote_volume,

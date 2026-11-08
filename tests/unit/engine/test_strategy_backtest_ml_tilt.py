@@ -129,3 +129,26 @@ def test_persist_records_ml_digest(tmp_path: Path) -> None:
     assert ml["signal_digest"] == "ml-digest-x"
     assert ml["ml_tilt_digest"] == "ml-digest-x"
     assert ml["signal_digest"] != baseline_digest
+
+
+def test_ml_needs_no_model_after_last_scored_decision(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A boundary after the last scored decision is not required (decisions past the evaluation are ignored)."""
+    vals = dataclasses.replace(ml_test_values(), retrain_days=18)
+    monkeypatch.setattr(run_mod, "ml_tilt_values", lambda *a, **k: vals)
+    req = request(strategy=FLOW_MOM_TOP20_ACCOUNT_UNIT)
+    src = synthetic_source(req)
+    features = run_mod.build_ml_tilt_features(src, req.strategy, req.base_spec, vals)
+    rows = train_missing_boundaries(
+        features,
+        entry_marks=src.hourly_panels["close"].shift(freq=pd.Timedelta(hours=1)),
+        funding_by_symbol=src.funding_by_symbol,
+        hourly_close=src.hourly_panels["close"],
+        until=EVAL_END - pd.Timedelta(days=2),
+        out_dir=tmp_path,
+        values=vals,
+        strategy=req.strategy,
+    )
+    assert [r.boundary for r in rows] == [vals.schedule_anchor]
+    tilted, context = run_mod.build_request_targets(request(ml_tilt_model_dir=tmp_path), source=src)
+    assert context.ml_tilt_digest is not None
+    assert len(tilted.target_weights) > 0
