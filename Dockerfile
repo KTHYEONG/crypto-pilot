@@ -18,9 +18,15 @@ ENV GIT_SHA=${GIT_SHA}
 # 다시 동기화(=dev 의존성까지 재설치)하지 않도록 막는다. 실측(VPS): 이 변수 없이
 # 컨테이너 기동 시마다 mypy/ruff 등 17개 dev 패키지를 네트워크로 재설치했다.
 
+# LightGBM wheels link the system OpenMP runtime (libgomp.so.1), which the slim base lacks.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
 # 의존성 레이어: pyproject/uv.lock 변경 시에만 재설치된다.
 COPY pyproject.toml uv.lock ./
-RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked uv sync --frozen --no-dev --no-install-project
+RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked uv sync --frozen --no-dev --no-install-project \
+    && /app/.venv/bin/python -c "import lightgbm"
 
 COPY . .
 RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked uv sync --frozen --no-dev
