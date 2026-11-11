@@ -1,0 +1,49 @@
+# Config toggle registry enforced by tests/unit/test_flag_policy.py. Rules: .agents/rules/config-flags.md
+
+[[flag]]
+name = "LiveSettings.exec_depth_capture_enabled"
+kind = "component"
+default = true
+reason = "Execution depth capture stream; ON in production."
+exit_condition = ""
+review_by = ""
+
+[[flag]]
+name = "LiveSettings.recorder_watch_enabled"
+kind = "component"
+default = true
+reason = "Recorder watchdog over capture heartbeats; ON in production."
+exit_condition = ""
+review_by = ""
+
+[[flag]]
+name = "LiveSettings.funding_prefetch_enabled"
+kind = "component"
+default = true
+reason = "Funding rate prefetch before the decision bar; ON in production."
+exit_condition = ""
+review_by = ""
+
+[[flag]]
+name = "LiveSettings.derisk_mode_enabled"
+kind = "component"
+default = true
+reason = "Derisk mode under margin pressure; ON in production."
+exit_condition = ""
+review_by = ""
+
+[[flag]]
+name = "LiveSettings.tax_collection_enabled"
+kind = "env_binding"
+default = true
+reason = "Venue tax record collection; mainnet preflight requires it true (src/live/preflight.py). docker-compose sets it false for paper runs."
+exit_condition = ""
+review_by = ""
+
+[[flag]]
+name = "LiveSettings.venue_force_close_auto_adopt"
+kind = "safety_interlock"
+default = false
+reason = "Auto-adopting a venue force-close position is a live-risk action; stays off unless deliberately set."
+exit_condition = ""
+review_by = ""

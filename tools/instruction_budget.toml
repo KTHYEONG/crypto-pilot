@@ -111,3 +111,7 @@ phrase = "Core Quant Invariants"
 [[retention]]
 file = ".agents/rules/domain.md"
 phrase = "Observe Freely, Never Adapt"
+
+[[retention]]
+file = ".agents/rules/config-flags.md"
+phrase = "ships ON"
