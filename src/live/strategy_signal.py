@@ -154,17 +154,18 @@ def _load_live_funding(data_root: Path, census: tuple[str, ...]) -> dict[str, pd
 
 
 def _resolve_venue(
-    venue_dir: Path, fallback: Path, *, decision_day: pd.Timestamp | None = None,
+    venue_dir: Path, fallback: Path, *, as_of: pd.Timestamp | None = None,
     max_age: pd.Timedelta | None = None,
 ) -> tuple[str, VenueRuleSnapshot, float]:
-    """Newest snapshot under ``venue_dir`` (or the fallback), rejected when older than ``max_age``.
+    """Newest snapshot under ``venue_dir`` (or the fallback), rejected when stale or future-dated.
 
-    Age is ``decision_day - snapshot.captured_at``. The deploy fallback is dated too, so an empty
+    Age is ``as_of - snapshot.captured_at``. The deploy fallback is dated too, so an empty
     directory cannot run forever on a stale ladder. ``None`` for both new arguments preserves
     the legacy two-tuple behavior contract with a reported age of 0.0.
 
     Raises:
-        DataIntegrityError: no snapshot at all, or the chosen snapshot is older than ``max_age``.
+        DataIntegrityError: no snapshot at all, the chosen snapshot is older than ``max_age``,
+            or it was captured after ``as_of``.
     """
     candidates = venue_rule_snapshot_paths(Path(venue_dir))
     if candidates:
@@ -175,11 +176,16 @@ def _resolve_venue(
             raise DataIntegrityError("no venue snapshot at all")
     snapshot = load_venue_rule_snapshot(chosen)
     age_days = 0.0
-    if decision_day is not None:
-        day = pd.Timestamp(decision_day)
-        day = day.tz_localize("UTC") if day.tzinfo is None else day.tz_convert("UTC")
-        age = day - snapshot.captured_at.tz_convert("UTC")
+    if as_of is not None:
+        reference = pd.Timestamp(as_of)
+        reference = reference.tz_localize("UTC") if reference.tzinfo is None else reference.tz_convert("UTC")
+        age = reference - snapshot.captured_at.tz_convert("UTC")
         age_days = float(age.total_seconds()) / 86400.0
+        if age < pd.Timedelta(0):
+            raise DataIntegrityError(
+                f"venue snapshot captured after run time (snapshot={chosen.name} "
+                f"captured_at={snapshot.captured_at.isoformat()} as_of={reference.isoformat()})",
+            )
         if max_age is not None and age > max_age:
             max_days = float(pd.Timedelta(max_age).total_seconds()) / 86400.0
             raise DataIntegrityError(
@@ -238,7 +244,7 @@ def run_strategy_signal_step(
     incompleteness past the fraction fails closed (``decision_bar_missing census=<n>/<m>``).
     Otherwise non-held venue-gap symbols are excluded from the ranking with target weight 0
     (their snapshot close stays NaN, never filled) and reported in ``venue_gap_excluded``.
-    ``venue_snapshot_age_days`` is always reported; sizing halts only past ``venue_max_age``.
+    ``venue_snapshot_age_days`` is measured from ``now`` and always reported; sizing halts only past ``venue_max_age``.
     ``None`` for either new argument preserves today's behavior.
 
     Raises:
@@ -247,8 +253,8 @@ def run_strategy_signal_step(
             symbol without a snapshot close, no venue snapshot at all, or non-finite sizing;
             plus a stale or missing listing snapshot, or a held symbol past
             delivery whose settlement price is not yet evidenced ("delisted holding without settlement
-            evidence: <symbols>"); plus a stale venue ladder past ``venue_max_age``, or a
-            missing decision bar per the gate above.
+            evidence: <symbols>"); plus a stale venue ladder past ``venue_max_age``, a venue
+            snapshot captured after ``now``, or a missing decision bar per the gate above.
     """
     day = pd.Timestamp(decision_day)
     day = day.tz_localize("UTC") if day.tzinfo is None else day.tz_convert("UTC")
@@ -440,7 +446,7 @@ def run_strategy_signal_step(
             quantity * float(snap_row[symbol]) for symbol, quantity in positions.items()
         )
     venue_name, rules, venue_age_days = _resolve_venue(
-        Path(venue_rules_dir), Path(fallback_venue_path), decision_day=day, max_age=venue_max_age,
+        Path(venue_rules_dir), Path(fallback_venue_path), as_of=at, max_age=venue_max_age,
     )
     ladders, _ = build_venue_ladders(list(census), rules)
     census_list = list(census)

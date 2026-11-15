@@ -75,7 +75,7 @@ def _bootstrap_vals(seed: int = 11, mean: float = 0.001) -> np.ndarray:
 
 def _write_venue(path: Path, symbols: list[str], *, mmr: float = 0.004, lev: int = 20) -> None:
     payload = {
-        "captured_at": "2026-09-21T00:00:00+00:00",
+        "captured_at": "2021-05-20T00:00:00+00:00",
         "symbols": {
             symbol: {
                 "brackets": [
@@ -1026,6 +1026,42 @@ def test_stale_fallback_snapshot_halts(layout: dict[str, Path], tmp_path: Path) 
             _DAY, {**layout, "venue": empty, "fallback": old_fallback},
             venue_max_age=pd.Timedelta(days=7),
         )
+
+
+def _fresh_venue(tmp_path: Path, captured_at: pd.Timestamp) -> Path:
+    venue = tmp_path / "venue_fresh"
+    _write_venue_at(venue / "20210525.json", [_SYMS[0], _SYMS[1]], captured_at)
+    return venue
+
+
+def test_venue_age_measured_from_run_time(layout: dict[str, Path], tmp_path: Path) -> None:
+    venue = _fresh_venue(tmp_path, _DAY + pd.Timedelta(hours=22, minutes=30))
+    report = _run(_DAY, {**layout, "venue": venue})
+    assert report.venue_snapshot_age_days == pytest.approx(0.5 / 24)
+
+
+def test_venue_age_zero_when_captured_at_now(layout: dict[str, Path], tmp_path: Path) -> None:
+    venue = _fresh_venue(tmp_path, _DAY + pd.Timedelta(hours=23))
+    report = _run(_DAY, {**layout, "venue": venue})
+    assert report.venue_snapshot_age_days == 0.0
+
+
+def test_venue_snapshot_after_run_time_fails_closed(layout: dict[str, Path], tmp_path: Path) -> None:
+    venue = _fresh_venue(tmp_path, _DAY + pd.Timedelta(hours=23, minutes=1))
+    with pytest.raises(DataIntegrityError, match="captured after run time"):
+        _run(_DAY, {**layout, "venue": venue})
+
+
+def test_stale_guard_uses_run_time_not_decision_day(layout: dict[str, Path], tmp_path: Path) -> None:
+    venue = _fresh_venue(tmp_path, _DAY - pd.Timedelta(days=7) + pd.Timedelta(hours=12))
+    with pytest.raises(DataIntegrityError, match="venue snapshot age"):
+        _run(_DAY, {**layout, "venue": venue}, venue_max_age=pd.Timedelta(days=7))
+
+
+def test_venue_age_just_inside_max_age_passes(layout: dict[str, Path], tmp_path: Path) -> None:
+    venue = _fresh_venue(tmp_path, _DAY + pd.Timedelta(hours=23) - pd.Timedelta(days=6))
+    report = _run(_DAY, {**layout, "venue": venue}, venue_max_age=pd.Timedelta(days=7))
+    assert report.venue_snapshot_age_days == pytest.approx(6.0)
 
 
 def test_deployed_nonzero_venue_gap_symbol_fails_closed(tmp_path: Path) -> None:

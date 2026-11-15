@@ -131,7 +131,7 @@ def _write_listing(root: Path) -> None:
 
 def _write_venue(path: Path) -> None:
     payload = {
-        "captured_at": "2021-04-30T00:00:00+00:00",
+        "captured_at": "2021-01-01T00:00:00+00:00",
         "symbols": {
             symbol: {
                 "brackets": [
