@@ -9,7 +9,7 @@ import tempfile
 import threading
 import time
 from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Literal
@@ -21,19 +21,15 @@ import pyarrow.parquet as pq
 from src.common.errors import DataIntegrityError
 from src.common.parquet_io import write_parquet_atomic
 from src.market_data.public_archive import catalog, derive, fetch, store
+from src.market_data.public_archive.planning import CollectionPlan, plan_collection, yesterday_utc
+from src.market_data.public_archive.planning import short_detail as _short_detail
+from src.market_data.public_archive.raw_tier import RawBudget as _RawBudget
+from src.market_data.public_archive.raw_tier import RawStaged as _RawStaged
+from src.market_data.public_archive.raw_tier import stage_raw as _stage_raw
+
+__all__ = ["CollectionPlan", "CollectionReport", "execute_plan", "plan_collection", "plan_raw_backfill"]
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass(frozen=True, slots=True)
-class CollectionPlan:
-    dataset: str
-    symbol: str
-    days: tuple[date, ...]
-    slice_hours: tuple[int, int] | None
-    pending_days: tuple[date, ...] = ()
-    sealed_days: tuple[date, ...] = ()
-    raw_only: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,236 +61,6 @@ class _Skipped:
     kind: str
     detail: str | None
     sha: str | None = None
-
-
-def _yesterday_utc(now: pd.Timestamp) -> date:
-    day: date = (now - timedelta(days=1)).date()
-    return day
-
-
-def _month_starts(start: date, end: date) -> list[date]:
-    months: list[date] = []
-    cursor = date(start.year, start.month, 1)
-    while cursor <= end:
-        months.append(cursor)
-        cursor = date(cursor.year + 1, 1, 1) if cursor.month == 12 else date(cursor.year, cursor.month + 1, 1)
-    return months
-
-
-def _month_prefix(dataset: str, symbol: str, month: date) -> str:
-    return f"data/futures/um/daily/{dataset}/{symbol}/{symbol}-{dataset}-{month.strftime('%Y-%m')}"
-
-
-def _symbol_prefix(dataset: str, symbol: str) -> str:
-    return f"data/futures/um/daily/{dataset}/{symbol}/{symbol}-{dataset}-"
-
-
-def _daily_key_day(key: str) -> date | None:
-    """Day of a daily archive key; None (with a warning) for non-daily names such as ``-unsort.zip``."""
-    try:
-        return catalog.key_day(key)
-    except DataIntegrityError:
-        logger.warning("[DATA] stage=public_archive skipped_non_daily_key key=%s", key)
-        return None
-
-
-class _ListingFailedError(Exception):
-    """A bucket listing failed; the whole plan is abandoned (fail closed)."""
-
-
-def _is_settled(
-    coverage: Mapping[tuple[str, date], store.CoverageRow], symbol: str, day: date, *, retry_defective: bool
-) -> bool:
-    row = coverage.get((symbol, day))
-    return row is not None and (row.status == "ok" or (row.status == "defective" and not retry_defective))
-
-
-def _unmasked_first_day(
-    dataset: str,
-    symbol: str,
-    coverage: Mapping[tuple[str, date], store.CoverageRow],
-    *,
-    start: date | None,
-    end: date,
-    incremental_window_days: int | None,
-) -> date:
-    if start is not None:
-        return start
-    done = [day for (sym, day), row in coverage.items() if sym == symbol and row.status == "ok"]
-    if done:
-        base = max(done) + timedelta(days=1)
-    elif incremental_window_days is not None:
-        base = max(catalog.DATASETS[dataset].first_day, end - timedelta(days=incremental_window_days))
-    else:
-        base = catalog.DATASETS[dataset].first_day
-    return max(catalog.HISTORY_START, base)
-
-
-def _candidate_days(
-    dataset: str,
-    symbol: str,
-    coverage: Mapping[tuple[str, date], store.CoverageRow],
-    allow_map: Mapping[str, Collection[date]] | None,
-    *,
-    start: date | None,
-    end: date,
-    capped_end: date,
-    incremental_window_days: int | None,
-    retry_defective: bool = False,
-) -> list[date]:
-    """Days still to collect for a symbol: allowed (or cursor-derived) days not yet settled."""
-    if allow_map is not None:
-        wanted = set(allow_map.get(symbol, ()))
-        floor = start if start is not None else catalog.MASK_POLICIES[dataset].start
-        if incremental_window_days is not None:
-            floor = max(floor, end - timedelta(days=incremental_window_days))
-        pool = [day for day in wanted if floor <= day <= capped_end]
-    else:
-        first = _unmasked_first_day(
-            dataset,
-            symbol,
-            coverage,
-            start=start,
-            end=end,
-            incremental_window_days=incremental_window_days,
-        )
-        span = (capped_end - first).days + 1
-        pool = [first + timedelta(days=offset) for offset in range(max(span, 0))]
-    return sorted(day for day in pool if not _is_settled(coverage, symbol, day, retry_defective=retry_defective))
-
-
-def _list_days(
-    downloader: object,
-    dataset: str,
-    symbol: str,
-    months: Sequence[date],
-    *,
-    whole_symbol: bool,
-) -> set[date]:
-    """Daily keys present in the bucket for the months (or the whole symbol prefix)."""
-    prefixes = (
-        [_symbol_prefix(dataset, symbol)]
-        if whole_symbol
-        else [_month_prefix(dataset, symbol, month) for month in months]
-    )
-    listed: set[date] = set()
-    for prefix in prefixes:
-        try:
-            keys = downloader.list_object_keys(prefix=prefix)  # type: ignore[attr-defined]
-        except Exception as exc:  # noqa: BLE001
-            logger.error("[DATA] stage=public_archive listing_failed detail=%s", _short_detail(exc))
-            raise _ListingFailedError from exc
-        if keys is None:
-            raise _ListingFailedError
-        for key in keys:
-            if not key.endswith(".zip"):
-                continue
-            day = _daily_key_day(key)
-            if day is not None:
-                listed.add(day)
-    return listed
-
-
-def _plan_symbol(
-    downloader: object,
-    dataset: str,
-    symbol: str,
-    candidates: list[date],
-    capped_end: date,
-    window: tuple[int, int] | None,
-    *,
-    allow_whole_symbol: bool = True,
-) -> CollectionPlan | None:
-    months = sorted({date(day.year, day.month, 1) for day in candidates})
-    listed = _list_days(downloader, dataset, symbol, months, whole_symbol=allow_whole_symbol and len(months) > 3)
-    wanted = set(candidates)
-    days = tuple(day for day in candidates if day in listed)
-    recent_cutoff = _yesterday_utc(pd.Timestamp.now(tz="UTC")) - timedelta(days=2)
-    pending = tuple(
-        day
-        for offset in range(3)
-        if (day := capped_end - timedelta(days=offset)) >= recent_cutoff and day in wanted and day not in listed
-    )
-    if not days and not pending:
-        return None
-    return CollectionPlan(dataset=dataset, symbol=symbol, days=days, slice_hours=window, pending_days=pending)
-
-
-def plan_collection(
-    downloader: object,
-    *,
-    root: Path,
-    datasets: Sequence[str],
-    symbols: Mapping[str, Sequence[str]],
-    start: date | None,
-    end: date,
-    slice_hours: tuple[int, int] = (23, 24),
-    slice_symbols: Collection[str] = (),
-    incremental_window_days: int | None = None,
-    allowed: Mapping[str, Mapping[str, Collection[date]]] | None = None,
-    retry_defective: bool = False,
-) -> list[CollectionPlan] | None:
-    """List missing bucket days per symbol without downloading anything."""
-    for dataset in datasets:
-        if dataset not in catalog.DATASETS:
-            raise DataIntegrityError(f"unknown archive dataset: {dataset!r}")
-    if not (0 <= slice_hours[0] < slice_hours[1] <= 24):
-        raise ValueError("invalid slice window")
-    if incremental_window_days is not None and incremental_window_days < 0:
-        raise ValueError("incremental_window_days must be non-negative")
-    capped_end = min(end, _yesterday_utc(pd.Timestamp.now(tz="UTC")))
-    slice_set = set(slice_symbols)
-    plans: list[CollectionPlan] = []
-    try:
-        for dataset in datasets:
-            coverage = store.load_coverage(root, dataset)
-            sealed = store.sealed_months(root, dataset, coverage)
-            allow_map = allowed[dataset] if allowed is not None and dataset in allowed else None
-            for symbol in sorted(set(symbols.get(dataset, ()))):
-                candidates = _candidate_days(
-                    dataset,
-                    symbol,
-                    coverage,
-                    allow_map,
-                    start=start,
-                    end=end,
-                    capped_end=capped_end,
-                    incremental_window_days=incremental_window_days,
-                    retry_defective=retry_defective,
-                )
-                if not candidates:
-                    continue
-                window = slice_hours if dataset == "aggTrades" and symbol in slice_set else None
-                sliced = window is not None
-                sealed_days: list[date] = []
-                open_candidates: list[date] = []
-                for day in candidates:
-                    month = day.strftime("%Y%m")
-                    if (("derived", symbol, month) in sealed) or (sliced and ("slice", symbol, month) in sealed):
-                        sealed_days.append(day)
-                    else:
-                        open_candidates.append(day)
-                plan = _plan_symbol(
-                    downloader,
-                    dataset,
-                    symbol,
-                    open_candidates,
-                    capped_end,
-                    window,
-                    allow_whole_symbol=not any(
-                        sym == symbol and (kind == "derived" or sliced) for kind, sym, _ in sealed
-                    ),
-                )
-                if plan is None:
-                    if sealed_days:
-                        plans.append(CollectionPlan(dataset, symbol, (), window, sealed_days=tuple(sealed_days)))
-                else:
-                    if sealed_days:
-                        plan = replace(plan, sealed_days=tuple(sealed_days))
-                    plans.append(plan)
-    except _ListingFailedError:
-        return None
-    return plans
 
 
 def _derive_zip(plan: CollectionPlan, day: date, zip_bytes: bytes) -> tuple[pd.DataFrame, pd.DataFrame | None]:
@@ -386,73 +152,6 @@ class _Outcome:
     raw_tier: bool = False
 
 
-@dataclass(frozen=True, slots=True)
-class _RawStaged:
-    path: Path | None  # None when a day has no trade rows: the raw tier is complete without a file
-    report: store.RawWriteReport
-
-
-def _stage_raw(dataset: str, day: date, zip_bytes: bytes, sha: str, staging: Path) -> _RawStaged | None:
-    """Write and verify one day's raw tier inside the month staging dir; nothing is published yet.
-
-    None when the typed trade reader cannot represent the day (the derived path still handles it), so the day
-    is stored without a raw tier rather than failing.
-    """
-    if dataset == "aggTrades":
-        path = staging / f"raw-{day.isoformat()}.parquet"
-        try:
-            report = store.write_raw_agg_trades(
-                path, fetch.iter_agg_trade_batches(zip_bytes), source_zip_sha256=sha
-            )
-        except pa.ArrowInvalid:
-            return None
-        if report.rows == 0:
-            return _RawStaged(path=None, report=report)
-        store.verify_raw_agg_trades(path, fetch.iter_agg_trade_batches(zip_bytes))
-        return _RawStaged(path=path, report=report)
-    csv_bytes = fetch.read_single_csv_bytes(zip_bytes)
-    path = staging / f"raw-{day.isoformat()}.csv.zst"
-    report = store.write_raw_csv(path, csv_bytes, source_zip_sha256=sha)
-    store.verify_raw_csv(path, csv_bytes)
-    return _RawStaged(path=path, report=report)
-
-
-class _RawBudget:
-    """Per-UTC-day cap on new raw bytes; the spend persists in one status file across runs."""
-
-    def __init__(self, root: Path, now: pd.Timestamp) -> None:
-        self._path = Path(root) / "_status" / "raw_backfill_budget.json"
-        self._day = now.strftime("%Y-%m-%d")
-        self._cap = int(catalog.RAW_BACKFILL_MAX_GIB_PER_DAY) * (1 << 30)
-        self._spent = 0
-        self._guard = threading.Lock()
-        if self._path.exists():
-            try:
-                payload = json.loads(self._path.read_text(encoding="utf-8"))
-            except (OSError, ValueError) as exc:
-                raise DataIntegrityError("malformed raw backfill budget") from exc
-            if (
-                not isinstance(payload, dict)
-                or not isinstance(payload.get("utc_day"), str)
-                or type(payload.get("bytes")) is not int
-                or payload["bytes"] < 0
-            ):
-                raise DataIntegrityError("malformed raw backfill budget")
-            self._spent = payload["bytes"] if payload["utc_day"] == self._day else 0
-
-    def exhausted(self) -> bool:
-        with self._guard:
-            return self._spent >= self._cap
-
-    def spend(self, nbytes: int) -> None:
-        with self._guard:
-            self._spent += nbytes
-            self._path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = self._path.with_suffix(".json.tmp")
-            tmp.write_text(json.dumps({"utc_day": self._day, "bytes": self._spent}, sort_keys=True), encoding="utf-8")
-            tmp.replace(self._path)
-
-
 class _PlanRunner:
     """One ``execute_plan`` run: bounded workers share counters, heartbeat and coverage writes."""
 
@@ -478,7 +177,7 @@ class _PlanRunner:
         self.now = now_fn
         self.deadline, self._stop, self._started = deadline, False, 0
         self.started = now_fn()
-        self.recent_cutoff = _yesterday_utc(self.started) - timedelta(days=2)
+        self.recent_cutoff = yesterday_utc(self.started) - timedelta(days=2)
         self.total = sum(len(plan.days) for plan in plans)
         self.state = {
             "done": 0, "ok": 0, "failed": 0, "absent": 0, "defective": 0,
@@ -663,6 +362,40 @@ class _PlanRunner:
             )
         return derived, slices, raws, outcomes
 
+    def _raw_commit_plan(
+        self, plan: CollectionPlan, month: str, raws: Sequence[tuple[date, _RawStaged]]
+    ) -> tuple[list[tuple[date, Path]], list[tuple[Path, Path]], list[Path]]:
+        """(staged files merged into the month file, per-day staged moves, raw target paths) for one commit."""
+        staged = [(day, item.path) for day, item in raws if item.path is not None]
+        if plan.dataset == "aggTrades":
+            if not staged:
+                return [], [], []
+            return staged, [], [store.raw_partition_path(self.root, plan.dataset, plan.symbol, month)]
+        moves = [
+            (source, store.raw_partition_path(self.root, plan.dataset, plan.symbol, day.isoformat()))
+            for day, source in staged
+        ]
+        return [], moves, [target for _, target in moves]
+
+    def _hits_sealed_month(
+        self,
+        plan: CollectionPlan,
+        month: str,
+        derived_path: Path,
+        slice_path: Path,
+        raw_targets: Sequence[Path],
+        has_derived: bool,
+        has_slices: bool,
+    ) -> bool:
+        """True when the commit would create a partition of a sealed (already pruned) month."""
+        if has_derived and not derived_path.exists() and (plan.dataset, "derived", plan.symbol, month) in self._sealed:
+            return True
+        if has_slices and not slice_path.exists() and (plan.dataset, "slice", plan.symbol, month) in self._sealed:
+            return True
+        return any(
+            not target.exists() and (plan.dataset, "raw", plan.symbol, month) in self._sealed for target in raw_targets
+        )
+
     def commit_month(
         self,
         plan: CollectionPlan,
@@ -676,27 +409,8 @@ class _PlanRunner:
         month = days[0].strftime("%Y%m")
         derived_path = store.partition_path(self.root, plan.dataset, plan.symbol, month)
         slice_path = store.partition_path(self.root, plan.dataset, plan.symbol, month, kind="slice")
-        staged = [(day, item.path) for day, item in raws if item.path is not None]
-        raw_merge: list[tuple[date, Path]] = []
-        raw_moves: list[tuple[Path, Path]] = []
-        raw_targets: list[Path] = []
-        if plan.dataset == "aggTrades":
-            if staged:
-                raw_agg = store.raw_partition_path(self.root, plan.dataset, plan.symbol, month)
-                raw_targets.append(raw_agg)
-                raw_merge = staged
-        else:
-            for day, source in staged:
-                target = store.raw_partition_path(self.root, plan.dataset, plan.symbol, day.isoformat())
-                raw_targets.append(target)
-                raw_moves.append((source, target))
-        if derived and not derived_path.exists() and (plan.dataset, "derived", plan.symbol, month) in self._sealed:
-            return "sealed_month"
-        if slices and not slice_path.exists() and (plan.dataset, "slice", plan.symbol, month) in self._sealed:
-            return "sealed_month"
-        if any(
-            not target.exists() and (plan.dataset, "raw", plan.symbol, month) in self._sealed for target in raw_targets
-        ):
+        raw_merge, raw_moves, raw_targets = self._raw_commit_plan(plan, month, raws)
+        if self._hits_sealed_month(plan, month, derived_path, slice_path, raw_targets, bool(derived), bool(slices)):
             return "sealed_month"
         touched: list[Path] = []
         if derived:
@@ -863,8 +577,3 @@ def plan_raw_backfill(
         if days:
             plans.append(CollectionPlan(dataset=dataset, symbol=symbol, days=days, slice_hours=None, raw_only=True))
     return plans
-
-
-def _short_detail(exc: BaseException) -> str:
-    text = f"{type(exc).__name__}: {exc}"
-    return text[:200]

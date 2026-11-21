@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -101,6 +101,28 @@ def _retained_months(
     return retry, job_months
 
 
+def _sweep_dataset(
+    ds_root: Path, dataset: str, pattern: str, prunable: Callable[..., bool], *, raw: bool
+) -> tuple[int, int]:
+    """Unlink prunable ``<symbol>/<file>`` entries under ``ds_root``; (pruned, kept), then drop emptied symbol dirs."""
+    if not ds_root.is_dir():
+        return 0, 0
+    pruned = kept = 0
+    for path in sorted(ds_root.rglob(pattern)):
+        if raw and not path.is_file():
+            continue
+        rel = path.relative_to(ds_root)
+        if len(rel.parts) != 2 or not prunable(dataset, rel.parts[0], path, raw=raw):
+            kept += 1
+            continue
+        path.unlink()
+        pruned += 1
+    for symbol_dir in sorted(ds_root.iterdir()):
+        if symbol_dir.is_dir() and not any(symbol_dir.iterdir()):
+            symbol_dir.rmdir()
+    return pruned, kept
+
+
 def prune_backed_up_archive(
     root: Path,
     *,
@@ -140,36 +162,13 @@ def prune_backed_up_archive(
     pruned = 0
     kept = 0
     for dataset in _ARCHIVE_DATASETS:
-        ds_root = base / dataset
-        if not ds_root.is_dir():
-            continue
-        for path in sorted(ds_root.rglob("*.parquet")):
-            rel = path.relative_to(ds_root)
-            if len(rel.parts) != 2 or not _prunable(dataset, rel.parts[0], path):
-                kept += 1
-                continue
-            path.unlink()
-            pruned += 1
-        for symbol_dir in sorted(ds_root.iterdir()):
-            if symbol_dir.is_dir() and not any(symbol_dir.iterdir()):
-                symbol_dir.rmdir()
-    raw_root = base / "raw"
+        done, left = _sweep_dataset(base / dataset, dataset, "*.parquet", _prunable, raw=False)
+        pruned += done
+        kept += left
     for dataset in catalog_mod.RAW_TIER_DATASETS:
-        ds_root = raw_root / dataset
-        if not ds_root.is_dir():
-            continue
-        for path in sorted(ds_root.rglob("*")):
-            if not path.is_file():
-                continue
-            rel = path.relative_to(ds_root)
-            if len(rel.parts) != 2 or not _prunable(dataset, rel.parts[0], path, raw=True):
-                kept += 1
-                continue
-            path.unlink()
-            pruned += 1
-        for symbol_dir in sorted(ds_root.iterdir()):
-            if symbol_dir.is_dir() and not any(symbol_dir.iterdir()):
-                symbol_dir.rmdir()
+        done, left = _sweep_dataset(base / "raw" / dataset, dataset, "*", _prunable, raw=True)
+        pruned += done
+        kept += left
     return ArchivePruneReport(
         prune_blocked=False,
         blocked_reason=None,
