@@ -27,10 +27,13 @@ class BackfillJob:
     breadth: int | None
     preroll_days: int | None
     created_at: pd.Timestamp
+    raw_only: bool = False
 
     def __post_init__(self) -> None:
         if self.dataset not in catalog.DATASETS:
             raise ValueError(f"unknown archive dataset: {self.dataset!r}")
+        if type(self.raw_only) is not bool:
+            raise ValueError("raw_only must be a bool")
         if self.start > self.end:
             raise ValueError(f"start {self.start} is after end {self.end}")
         if self.start < catalog.MASK_POLICIES[self.dataset].start:
@@ -72,6 +75,7 @@ def _job_to_dict(job: BackfillJob) -> dict[str, object]:
         "breadth": job.breadth,
         "preroll_days": job.preroll_days,
         "created_at": pd.Timestamp(job.created_at).tz_convert("UTC").isoformat(),
+        "raw_only": job.raw_only,
     }
 
 
@@ -80,8 +84,11 @@ def _job_from_dict(obj: object) -> BackfillJob:
         if not isinstance(obj, dict):
             raise ValueError("job must be an object")
         required = {"job_id", "dataset", "start", "end", "census_root", "breadth", "preroll_days", "created_at"}
-        if set(obj) - required - {"summary", "finished_at"} != set() or not required.issubset(set(obj)):
+        if set(obj) - required - {"summary", "finished_at", "raw_only"} != set() or not required.issubset(set(obj)):
             raise ValueError("invalid job schema")
+        raw_only = obj.get("raw_only", False)
+        if type(raw_only) is not bool:
+            raise ValueError("invalid raw_only")
         if any(
             not isinstance(obj[key], str) for key in ("job_id", "dataset", "start", "end", "census_root", "created_at")
         ):
@@ -101,6 +108,7 @@ def _job_from_dict(obj: object) -> BackfillJob:
             breadth=None if breadth is None else int(breadth),
             preroll_days=None if preroll is None else int(preroll),
             created_at=pd.Timestamp(str(obj["created_at"])),
+            raw_only=raw_only,
         )
     except (KeyError, ValueError, TypeError) as exc:
         raise DataIntegrityError(f"malformed backfill job: {obj!r}") from exc

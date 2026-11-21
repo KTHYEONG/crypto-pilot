@@ -128,3 +128,35 @@ def test_job_files_are_readable_by_the_backup_user(tmp_path: Path) -> None:
     assert path.stat().st_mode & 0o044 == 0o044
     done = jobs.finish_job(tmp_path, _job().job_id, summary={"ok": 1})
     assert done.stat().st_mode & 0o044 == 0o044
+
+
+def test_raw_only_job_round_trips_and_legacy_files_load(tmp_path: Path) -> None:
+    raw_job = replace(_job("aggTrades", second=7), raw_only=True)
+    jobs.enqueue_backfill(tmp_path, raw_job)
+    loaded = jobs.pending_jobs(tmp_path)
+    assert [job.raw_only for job in loaded] == [True]
+    legacy = jobs._job_to_dict(_job("metrics", second=8))
+    legacy.pop("raw_only")
+    path = tmp_path / "_jobs" / "pending" / f"{_job('metrics', second=8).job_id}.json"
+    path.write_text(json.dumps(legacy, sort_keys=True), encoding="utf-8")
+    by_id = {job.job_id: job.raw_only for job in jobs.pending_jobs(tmp_path)}
+    assert by_id[_job("metrics", second=8).job_id] is False
+
+
+
+def test_raw_only_flag_must_be_boolean() -> None:
+    with pytest.raises(ValueError, match="raw_only must be a bool"):
+        jobs.BackfillJob(
+            "metrics-2024-01-01-2024-01-02-20240101T000000Z", "metrics", date(2024, 1, 1), date(2024, 1, 2),
+            "/census", None, None, pd.Timestamp("2024-01-01", tz="UTC"), raw_only="yes",  # type: ignore[arg-type]
+        )
+
+
+def test_malformed_raw_only_in_pending_job_fails_closed(tmp_path: Path) -> None:
+    payload = jobs._job_to_dict(_job("metrics", second=9))
+    payload["raw_only"] = "yes"
+    path = tmp_path / "_jobs" / "pending" / f"{_job('metrics', second=9).job_id}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+    with pytest.raises(DataIntegrityError):
+        jobs.pending_jobs(tmp_path)

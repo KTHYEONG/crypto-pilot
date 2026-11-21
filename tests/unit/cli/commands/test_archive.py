@@ -898,3 +898,93 @@ def test_collect_rejects_inverted_mask_range(tmp_path: Path, monkeypatch: pytest
     ns.downloader = FakeDownloader([], [])
     with pytest.raises(ValueError, match=r"first .* is after last"):
         ns.handler(ns)
+
+
+def _raw_backfill_ns(tmp_path: Path, extra: list[str]) -> argparse.Namespace:
+    census = tmp_path / "census"
+    return _collect_ns(tmp_path, ["backfill", "add", "--dataset", "aggTrades", "--census-root", str(census), *extra])
+
+
+def test_backfill_add_raw_only_defaults_to_mask_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    from src.market_data.public_archive import jobs
+
+    _patch_census(monkeypatch, ["BTCUSDT"])
+    ns = _raw_backfill_ns(tmp_path, ["--raw-only"])
+    ns.handler(ns)
+    pending = jobs.pending_jobs(tmp_path)
+    assert len(pending) == 1
+    assert pending[0].raw_only is True
+    assert pending[0].start == date(2023, 1, 1)
+    assert pending[0].job_id in capsys.readouterr().out
+
+
+def test_backfill_add_without_start_or_raw_only_exits_two(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    _patch_census(monkeypatch, ["BTCUSDT"])
+    ns = _raw_backfill_ns(tmp_path, [])
+    with pytest.raises(SystemExit) as exc:
+        ns.handler(ns)
+    assert exc.value.code == 2
+    assert "--start is required" in capsys.readouterr().out
+
+
+def test_drain_raw_only_job_fetches_raw_without_derived_writes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    import src.cli.commands.archive as archive_mod
+    from src.market_data.public_archive import jobs
+    from src.market_data.public_archive import store as store_mod
+
+    day = date(2024, 1, 15)
+    job = jobs.BackfillJob(
+        "metrics-2024-01-15-2024-01-15-20240115T000000Z", "metrics", day, day, "/census", None, None,
+        pd.Timestamp("2024-01-15", tz="UTC"), raw_only=True,
+    )
+    jobs.enqueue_backfill(tmp_path, job)
+    store_mod.append_coverage(tmp_path, store_mod.CoverageRow(
+        dataset="metrics", symbol="BTCUSDT", day=day, status="ok", raw_sha256=None, rows=1,
+        recorded_at=pd.Timestamp("2024-01-16", tz="UTC"), detail=None,
+    ))
+    monkeypatch.setattr(archive_mod, "_bucket_symbols", lambda downloader, dataset: ["BTCUSDT"])
+    monkeypatch.setattr(archive_mod, "_job_allowed", lambda job: {"BTCUSDT": frozenset({day})})
+    downloader = FakeDownloader(["BTCUSDT"], [day])
+    archive_mod._drain_job(tmp_path, downloader, job, pd.Timestamp("2099-01-01", tz="UTC"), 1)
+    assert "status=DONE" in capsys.readouterr().out
+    assert (tmp_path / "raw" / "metrics" / "BTCUSDT" / f"{day.isoformat()}.csv.zst").exists()
+    assert not (tmp_path / "metrics").exists()
+    assert load_coverage(tmp_path, "metrics")[("BTCUSDT", day)].raw_tier is True
+
+
+def test_backfill_add_explicit_start_overrides_mask_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from src.market_data.public_archive import jobs
+
+    _patch_census(monkeypatch, ["BTCUSDT"])
+    ns = _raw_backfill_ns(tmp_path, ["--raw-only", "--start", "2023-06-01"])
+    ns.handler(ns)
+    assert [job.start for job in jobs.pending_jobs(tmp_path)] == [date(2023, 6, 1)]
+
+
+def test_drain_derived_job_uses_plan_collection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    import src.cli.commands.archive as archive_mod
+    from src.market_data.public_archive import jobs
+
+    day = date(2024, 1, 15)
+    job = jobs.BackfillJob(
+        "metrics-2024-01-15-2024-01-15-20240115T000000Z", "metrics", day, day, "/census", None, None,
+        pd.Timestamp("2024-01-15", tz="UTC"),
+    )
+    jobs.enqueue_backfill(tmp_path, job)
+    monkeypatch.setattr(archive_mod, "_bucket_symbols", lambda downloader, dataset: ["BTCUSDT"])
+    monkeypatch.setattr(archive_mod, "_job_allowed", lambda job: {"BTCUSDT": frozenset({day})})
+    downloader = FakeDownloader(["BTCUSDT"], [day])
+    archive_mod._drain_job(tmp_path, downloader, job, pd.Timestamp("2099-01-01", tz="UTC"), 1)
+    assert "status=DONE" in capsys.readouterr().out
+    assert (tmp_path / "metrics" / "BTCUSDT" / "202401.parquet").exists()
+    assert (tmp_path / "raw" / "metrics" / "BTCUSDT" / f"{day.isoformat()}.csv.zst").exists()

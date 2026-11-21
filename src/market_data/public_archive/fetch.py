@@ -176,6 +176,12 @@ def iter_agg_trade_batches(zip_bytes: bytes, *, block_bytes: int = AGG_STREAM_BL
             yield from reader
 
 
+def read_single_csv_bytes(zip_bytes: bytes) -> bytes:
+    """Exact bytes of the single CSV member of a Vision zip."""
+    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+        return zf.read(_single_member(zf))
+
+
 def read_single_csv(zip_bytes: bytes) -> pd.DataFrame:
     """Read the single CSV member of a Vision zip."""
     with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:

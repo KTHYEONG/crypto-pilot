@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import hashlib
 import json
 import logging
 import math
@@ -10,16 +11,19 @@ import shutil
 import socket
 import threading
 import time
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Literal, cast
 
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 from src.common.errors import DataIntegrityError
 from src.common.parquet_io import write_parquet_atomic
+from src.market_data.public_archive import catalog
 
 logger = logging.getLogger(__name__)
 
@@ -134,6 +138,12 @@ def sealed_months(
             root, dataset, symbol, month, kind="slice"
         ).exists():
             sealed.add(("slice", symbol, month))
+    if dataset in catalog.RAW_TIER_DATASETS:
+        for (symbol, day), row in coverage.items():
+            if row.status != "ok" or row.rows <= 0 or not row.raw_tier:
+                continue
+            if not raw_partition_path(root, dataset, symbol, raw_period(dataset, day)).exists():
+                sealed.add(("raw", symbol, day.strftime("%Y%m")))
     return frozenset(sealed)
 
 
@@ -147,6 +157,8 @@ class CoverageRow:
     rows: int
     recorded_at: pd.Timestamp
     detail: str | None
+    raw_sha256_content: str | None = None
+    raw_tier: bool = False
 
 
 def partition_path(
@@ -277,6 +289,8 @@ def _row_to_json(row: CoverageRow) -> str:
         "detail": row.detail,
         "raw_sha256": row.raw_sha256,
         "recorded_at": _as_utc(row.recorded_at).isoformat(),
+        "raw_sha256_content": row.raw_sha256_content,
+        "raw_tier": row.raw_tier,
         "rows": row.rows,
         "status": row.status,
         "symbol": row.symbol,
@@ -310,8 +324,12 @@ def _parse_coverage_line(line: str) -> CoverageRow:
         raise DataIntegrityError(f"malformed coverage line: {line!r}")
     try:
         required = {"dataset", "symbol", "day", "status", "raw_sha256", "rows", "recorded_at", "detail"}
+        optional = {"raw_sha256_content", "raw_tier"}
+        if not required <= set(obj) <= required | optional:
+            raise ValueError("invalid coverage schema")
         if (
-            set(obj) != required
+            not isinstance(obj.get("raw_tier", False), bool)
+            or not (obj.get("raw_sha256_content") is None or isinstance(obj.get("raw_sha256_content"), str))
             or obj["status"] not in ("ok", "absent", "failed", "defective")
             or type(obj["rows"]) is not int
             or obj["rows"] < 0
@@ -328,6 +346,8 @@ def _parse_coverage_line(line: str) -> CoverageRow:
             rows=int(obj["rows"]),
             recorded_at=_as_utc(obj["recorded_at"]),
             detail=None if obj.get("detail") is None else str(obj.get("detail")),
+            raw_sha256_content=obj.get("raw_sha256_content"),
+            raw_tier=bool(obj.get("raw_tier", False)),
         )
     except (KeyError, ValueError, TypeError) as exc:
         raise DataIntegrityError(f"malformed coverage line: {line!r}") from exc
@@ -347,3 +367,136 @@ def load_coverage(root: Path, dataset: str) -> dict[tuple[str, date], CoverageRo
             raise DataIntegrityError("coverage dataset or timestamp mismatch")
         result[(row.symbol, row.day)] = row
     return result
+
+
+_RAW_AGG_INT_COLUMNS: tuple[str, ...] = ("agg_trade_id", "first_trade_id", "last_trade_id", "transact_time")
+_RAW_CSV_HEADER_PREFIX = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+
+@dataclass(frozen=True, slots=True)
+class RawWriteReport:
+    rows: int
+    source_zip_sha256: str
+    content_sha256: str | None
+    bytes_written: int
+
+
+def raw_period(dataset: str, day: date) -> str:
+    return day.strftime("%Y%m") if dataset == "aggTrades" else day.isoformat()
+
+
+def raw_partition_path(root: Path, dataset: str, symbol: str, period: str) -> Path:
+    """Raw tier file: aggTrades monthly parquet, metrics/bookDepth daily zstd CSV."""
+    if dataset not in catalog.RAW_TIER_DATASETS:
+        raise ValueError(f"dataset has no raw tier: {dataset!r}")
+    suffix = "parquet" if dataset == "aggTrades" else "csv.zst"
+    return Path(root) / "raw" / dataset / symbol / f"{period}.{suffix}"
+
+
+def raw_agg_writer_options(schema: pa.Schema) -> dict[str, object]:
+    encoding = {name: "DELTA_BINARY_PACKED" for name in _RAW_AGG_INT_COLUMNS if name in schema.names}
+    return {
+        "compression": "zstd",
+        "compression_level": catalog.RAW_AGG_TRADES_ZSTD_LEVEL,
+        "use_dictionary": False,
+        "column_encoding": encoding,
+    }
+
+
+def _publish(tmp: Path, path: Path) -> None:
+    with open(tmp, "rb") as handle:
+        os.fsync(handle.fileno())
+    os.replace(tmp, path)
+
+
+def write_raw_agg_trades(
+    path: Path, batches: Iterable[pa.RecordBatch], *, source_zip_sha256: str
+) -> RawWriteReport:
+    """Stream typed trade batches into one zstd parquet, atomically; no file is written when there are no rows."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    writer: pq.ParquetWriter | None = None
+    rows = 0
+    try:
+        for batch in batches:
+            if batch.num_rows == 0:
+                continue
+            if writer is None:
+                writer = pq.ParquetWriter(tmp, batch.schema, **raw_agg_writer_options(batch.schema))
+            writer.write_batch(batch)
+            rows += batch.num_rows
+        if writer is None:
+            return RawWriteReport(rows=0, source_zip_sha256=source_zip_sha256, content_sha256=None, bytes_written=0)
+        writer.close()
+        writer = None
+        _publish(tmp, path)
+    except BaseException:
+        if writer is not None:
+            writer.close()
+        tmp.unlink(missing_ok=True)
+        raise
+    return RawWriteReport(
+        rows=rows,
+        source_zip_sha256=source_zip_sha256,
+        content_sha256=None,
+        bytes_written=path.stat().st_size,
+    )
+
+
+def verify_raw_agg_trades(path: Path, batches: Iterable[pa.RecordBatch]) -> None:
+    """Compare the written parquet with the source batches, streaming; DataIntegrityError on any difference."""
+    chunks = pq.ParquetFile(path).iter_batches(batch_size=1 << 16)
+    buffer: pa.Table | None = None
+    for source in batches:
+        need = source.num_rows
+        taken: list[pa.Table] = []
+        got = 0
+        while got < need:
+            if buffer is None or buffer.num_rows == 0:
+                chunk = next(chunks, None)
+                if chunk is None:
+                    raise DataIntegrityError("raw parquet shorter than source")
+                buffer = pa.Table.from_batches([chunk])
+            take = min(need - got, buffer.num_rows)
+            taken.append(buffer.slice(0, take))
+            buffer = buffer.slice(take)
+            got += take
+        expected = pa.Table.from_batches([source])
+        actual = pa.concat_tables(taken) if taken else expected.slice(0, 0)
+        if not actual.cast(expected.schema).equals(expected):
+            raise DataIntegrityError("raw parquet differs from source batch")
+    if (buffer is not None and buffer.num_rows) or next(chunks, None) is not None:
+        raise DataIntegrityError("raw parquet longer than source")
+
+
+def _csv_data_rows(csv_bytes: bytes) -> int:
+    lines = [line for line in csv_bytes.splitlines() if line.strip()]
+    has_header = bool(lines) and lines[0][:1] in {bytes([c]) for c in _RAW_CSV_HEADER_PREFIX}
+    return len(lines) - 1 if has_header else len(lines)
+
+
+def write_raw_csv(path: Path, csv_bytes: bytes, *, source_zip_sha256: str) -> RawWriteReport:
+    """Store the exact CSV bytes as one zstd-19 frame, atomically."""
+    payload = pa.Codec("zstd", compression_level=catalog.RAW_CSV_ZSTD_LEVEL).compress(csv_bytes, asbytes=True)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        tmp.write_bytes(payload)
+        _publish(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+    return RawWriteReport(
+        rows=_csv_data_rows(csv_bytes),
+        source_zip_sha256=source_zip_sha256,
+        content_sha256=hashlib.sha256(csv_bytes).hexdigest(),
+        bytes_written=len(payload),
+    )
+
+
+def verify_raw_csv(path: Path, csv_bytes: bytes) -> None:
+    """Decompress the stored file and require it to equal the source CSV bytes."""
+    with pa.input_stream(str(path), compression="zstd") as stream:
+        stored = stream.read()
+    if stored != csv_bytes:
+        raise DataIntegrityError("raw csv differs from source bytes")

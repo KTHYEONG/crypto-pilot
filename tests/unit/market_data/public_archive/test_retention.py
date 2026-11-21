@@ -390,3 +390,35 @@ def test_malformed_pending_job_blocks_pruning(tmp_path: Path) -> None:
     with pytest.raises(DataIntegrityError):
         prune_backed_up_archive(tmp_path, status=_status(), now=_NOW)
     assert target.exists()
+
+
+def _raw_file(root: Path, dataset: str, symbol: str, name: str, *, mtime: float | None = None) -> Path:
+    path = root / "raw" / dataset / symbol / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"raw-stub")
+    if mtime is not None:
+        os.utime(path, (mtime, mtime))
+    return path
+
+
+def test_raw_partitions_pruned_only_after_backup(tmp_path: Path) -> None:
+    monthly = _raw_file(tmp_path, "aggTrades", "BTCUSDT", "202403.parquet", mtime=_old_mtime())
+    daily = _raw_file(tmp_path, "metrics", "BTCUSDT", "2024-03-05.csv.zst", mtime=_old_mtime())
+    recent = _raw_file(tmp_path, "metrics", "BTCUSDT", "2024-06-10.csv.zst", mtime=_old_mtime())
+    fresh = _raw_file(tmp_path, "bookDepth", "BTCUSDT", "2024-03-05.csv.zst", mtime=time.mktime(
+        pd.Timestamp("2024-06-10T00:00:00Z").to_pydatetime().timetuple()
+    ))
+    report = prune_backed_up_archive(tmp_path, status=_status(), now=_NOW, keep_days=45)
+    assert not report.prune_blocked
+    assert not monthly.exists()
+    assert not daily.exists()
+    assert recent.exists()
+    assert fresh.exists()
+    assert report.pruned_files == 2
+
+
+def test_raw_partition_kept_when_modified_after_backup(tmp_path: Path) -> None:
+    target = _raw_file(tmp_path, "aggTrades", "BTCUSDT", "202403.parquet")
+    report = prune_backed_up_archive(tmp_path, status=_status(finished=_NOW - pd.Timedelta(hours=1)), now=_NOW)
+    assert target.exists()
+    assert report.pruned_files == 0

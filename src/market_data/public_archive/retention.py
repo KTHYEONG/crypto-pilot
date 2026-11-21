@@ -16,6 +16,7 @@ if TYPE_CHECKING:
 
 _ARCHIVE_DATASETS: tuple[str, ...] = ("metrics", "bookDepth", "aggTrades", "aggTrades_slice")
 _MONTH_RE = re.compile(r"^(\d{4})(\d{2})\.parquet$")
+_RAW_DAY_RE = re.compile(r"^(\d{4})-(\d{2})-\d{2}\.csv\.zst$")
 _STATUS_MAX_AGE_S: float = 72 * 3600.0
 
 
@@ -39,6 +40,14 @@ def _covered_month(name: str) -> tuple[int, int] | None:
     match = _MONTH_RE.match(name)
     if match is None:
         return None
+    year, month = int(match.group(1)), int(match.group(2))
+    return (year, month) if 1 <= month <= 12 else None
+
+
+def _raw_covered_month(name: str) -> tuple[int, int] | None:
+    match = _RAW_DAY_RE.match(name)
+    if match is None:
+        return _covered_month(name)
     year, month = int(match.group(1)), int(match.group(2))
     return (year, month) if 1 <= month <= 12 else None
 
@@ -118,14 +127,15 @@ def prune_backed_up_archive(
     sealed_before = _sealed_snapshot(base, coverage)
     retry, job_months = _retained_months(base, coverage, now_utc.date())
 
-    def _prunable(dataset: str, symbol: str, path: Path) -> bool:
-        ym = _covered_month(path.name)
+    def _prunable(dataset: str, symbol: str, path: Path, *, raw: bool = False) -> bool:
+        ym = _raw_covered_month(path.name) if raw else _covered_month(path.name)
         if ym is None or ym in protected:
             return False
         if _next_month_start(*ym) + pd.Timedelta(days=keep_days) >= now_utc or not _backed_up(path, started_ns):
             return False
         cov_dataset = _coverage_dataset(dataset)
-        return (cov_dataset, symbol, path.stem) not in retry and (cov_dataset, path.stem) not in job_months
+        month = f"{ym[0]}{ym[1]:02d}"
+        return (cov_dataset, symbol, month) not in retry and (cov_dataset, month) not in job_months
 
     pruned = 0
     kept = 0
@@ -136,6 +146,23 @@ def prune_backed_up_archive(
         for path in sorted(ds_root.rglob("*.parquet")):
             rel = path.relative_to(ds_root)
             if len(rel.parts) != 2 or not _prunable(dataset, rel.parts[0], path):
+                kept += 1
+                continue
+            path.unlink()
+            pruned += 1
+        for symbol_dir in sorted(ds_root.iterdir()):
+            if symbol_dir.is_dir() and not any(symbol_dir.iterdir()):
+                symbol_dir.rmdir()
+    raw_root = base / "raw"
+    for dataset in catalog_mod.RAW_TIER_DATASETS:
+        ds_root = raw_root / dataset
+        if not ds_root.is_dir():
+            continue
+        for path in sorted(ds_root.rglob("*")):
+            if not path.is_file():
+                continue
+            rel = path.relative_to(ds_root)
+            if len(rel.parts) != 2 or not _prunable(dataset, rel.parts[0], path, raw=True):
                 kept += 1
                 continue
             path.unlink()

@@ -234,6 +234,7 @@ def _job_remaining(root: Path, job: BackfillJob) -> int:
 
 def _run_backfill_add(args: argparse.Namespace) -> None:
     from src.common.errors import DataIntegrityError
+    from src.market_data.public_archive import catalog as catalog_mod
     from src.market_data.public_archive import jobs as jobs_mod
     from src.market_data.public_archive import store as store_mod
     from src.market_data.public_archive.catalog import DATASETS
@@ -254,7 +255,14 @@ def _run_backfill_add(args: argparse.Namespace) -> None:
                 print("archive backfill add status=LAKE_MISSING")  # noqa: T201
                 raise SystemExit(2) from exc
             end = date.fromisoformat(args.end) if getattr(args, "end", None) else span.last_day
-            start = date.fromisoformat(args.start)
+            raw_only = bool(getattr(args, "raw_only", False))
+            if args.start is not None:
+                start = date.fromisoformat(args.start)
+            elif raw_only:
+                start = catalog_mod.MASK_POLICIES[dataset].start
+            else:
+                print("archive backfill add status=USAGE detail=--start is required without --raw-only")  # noqa: T201
+                raise SystemExit(2)
             try:
                 require_census_coverage(span, first=start, last=end)
             except Exception as exc:
@@ -282,6 +290,7 @@ def _run_backfill_add(args: argparse.Namespace) -> None:
                 breadth=getattr(args, "breadth", None),
                 preroll_days=getattr(args, "preroll_days", None),
                 created_at=created,
+                raw_only=raw_only,
             )
             try:
                 jobs_mod.enqueue_backfill(root, job)
@@ -387,18 +396,24 @@ def _drain_job(root: Path, downloader: object, job: BackfillJob, deadline: pd.Ti
     if amap and not listed:
         raise RuntimeError("backfill bucket listing failed")
     symbols = sorted(set(amap) & listed)
-    plans = service.plan_collection(
-        downloader,
-        root=root,
-        datasets=[job.dataset],
-        symbols={job.dataset: symbols},
-        start=job.start,
-        end=job.end,
-        slice_hours=TAPE_SLICE_HOURS,
-        slice_symbols=symbols if job.dataset == "aggTrades" else (),
-        incremental_window_days=None,
-        allowed={job.dataset: {s: amap[s] for s in symbols}},
-    )
+    plans: list[service.CollectionPlan] | None
+    if job.raw_only:
+        plans = service.plan_raw_backfill(
+            root=root, dataset=job.dataset, symbols={s: amap[s] for s in symbols}
+        )
+    else:
+        plans = service.plan_collection(
+            downloader,
+            root=root,
+            datasets=[job.dataset],
+            symbols={job.dataset: symbols},
+            start=job.start,
+            end=job.end,
+            slice_hours=TAPE_SLICE_HOURS,
+            slice_symbols=symbols if job.dataset == "aggTrades" else (),
+            incremental_window_days=None,
+            allowed={job.dataset: {s: amap[s] for s in symbols}},
+        )
     if plans is None:
         raise RuntimeError("backfill day listing failed")
     report = service.execute_plan(downloader, plans, root=root, workers=workers, deadline=deadline)
@@ -631,7 +646,13 @@ def add_archive_commands(archive_parser: argparse.ArgumentParser) -> None:
     backfill_sub = backfill.add_subparsers(dest="backfill_command", required=True)
     add_cmd = backfill_sub.add_parser("add", help="Enqueue a backfill job")
     add_cmd.add_argument("--dataset", choices=["metrics", "bookDepth", "aggTrades"], required=True)
-    add_cmd.add_argument("--start", type=str, required=True)
+    add_cmd.add_argument("--start", type=str, default=None)
+    add_cmd.add_argument(
+        "--raw-only",
+        action="store_true",
+        default=False,
+        help="Backfill only the raw tier of settled days (no re-derivation, derived files untouched)",
+    )
     add_cmd.add_argument("--end", type=str, default=None)
     add_cmd.add_argument("--census-root", type=str, required=True)
     add_cmd.add_argument("--breadth", type=int, default=None)

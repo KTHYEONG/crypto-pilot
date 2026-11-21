@@ -255,3 +255,228 @@ def test_archive_lock_busy_without_readable_holder(tmp_path: Path, monkeypatch) 
     finally:
         proc.terminate()
         proc.wait(timeout=10)
+
+
+# --- raw tier -------------------------------------------------------------------------------------------------------
+
+_RAW_AGG_HEADER = "agg_trade_id,price,quantity,first_trade_id,last_trade_id,transact_time,is_buyer_maker"
+
+
+def _raw_zip(body: str) -> bytes:
+    import io
+    import zipfile
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as zf:
+        zf.writestr("data.csv", body)
+    return buffer.getvalue()
+
+
+def test_raw_partition_paths_and_rejections(tmp_path: Path) -> None:
+    from src.market_data.public_archive import store as store_mod
+
+    assert store_mod.raw_partition_path(tmp_path, "aggTrades", "BTCUSDT", "202401") == (
+        tmp_path / "raw" / "aggTrades" / "BTCUSDT" / "202401.parquet"
+    )
+    assert store_mod.raw_partition_path(tmp_path, "metrics", "BTCUSDT", "2024-01-02") == (
+        tmp_path / "raw" / "metrics" / "BTCUSDT" / "2024-01-02.csv.zst"
+    )
+    with pytest.raises(ValueError, match="no raw tier"):
+        store_mod.raw_partition_path(tmp_path, "klines", "BTCUSDT", "2024-01-02")
+
+
+def test_raw_agg_trades_parquet_table_equal_to_csv(tmp_path: Path) -> None:
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from src.market_data.public_archive import fetch, store as store_mod
+
+    body = f"{_RAW_AGG_HEADER}\n1,100.0,2.5,1,2,1704067200000,true\n2,0.00123456,3.0,3,4,1704067201000,false\n"
+    zip_bytes = _raw_zip(body)
+    path = tmp_path / "raw-day.parquet"
+    report = store_mod.write_raw_agg_trades(
+        path, fetch.iter_agg_trade_batches(zip_bytes), source_zip_sha256="s" * 64
+    )
+    assert report.rows == 2
+    assert report.content_sha256 is None
+    assert report.bytes_written == path.stat().st_size
+    store_mod.verify_raw_agg_trades(path, fetch.iter_agg_trade_batches(zip_bytes))
+    expected = pa.Table.from_batches(list(fetch.iter_agg_trade_batches(zip_bytes)))
+    assert pq.read_table(path).equals(expected)
+    assert pq.ParquetFile(path).metadata.row_group(0).column(0).compression == "ZSTD"
+
+
+def test_raw_prices_round_trip_to_csv_decimals(tmp_path: Path) -> None:
+    import pyarrow.parquet as pq
+
+    from src.market_data.public_archive import fetch, store as store_mod
+
+    prices = ["100.0", "0.00123456", "2.5", "12345.6789"]
+    lines = [f"{i},{p},1.0,{i},{i},1704067200000,true" for i, p in enumerate(prices, start=1)]
+    zip_bytes = _raw_zip("\n".join([_RAW_AGG_HEADER, *lines]) + "\n")
+    path = tmp_path / "raw-day.parquet"
+    store_mod.write_raw_agg_trades(path, fetch.iter_agg_trade_batches(zip_bytes), source_zip_sha256="s" * 64)
+    table = pq.read_table(path)
+    assert [repr(value) for value in table.column("price").to_pylist()] == [repr(float(p)) for p in prices]
+    assert [str(value) for value in table.column("price").to_pylist()] == prices
+
+
+def test_raw_agg_verify_detects_mismatch(tmp_path: Path) -> None:
+    from src.market_data.public_archive import fetch, store as store_mod
+
+    good = _raw_zip(f"{_RAW_AGG_HEADER}\n1,100.0,2.5,1,2,1704067200000,true\n")
+    other = _raw_zip(f"{_RAW_AGG_HEADER}\n1,100.5,2.5,1,2,1704067200000,true\n")
+    path = tmp_path / "raw-day.parquet"
+    store_mod.write_raw_agg_trades(path, fetch.iter_agg_trade_batches(good), source_zip_sha256="s" * 64)
+    with pytest.raises(DataIntegrityError):
+        store_mod.verify_raw_agg_trades(path, fetch.iter_agg_trade_batches(other))
+
+
+def test_raw_agg_empty_source_writes_no_file(tmp_path: Path) -> None:
+    from src.market_data.public_archive import fetch, store as store_mod
+
+    path = tmp_path / "raw-day.parquet"
+    report = store_mod.write_raw_agg_trades(
+        path, fetch.iter_agg_trade_batches(_raw_zip(f"{_RAW_AGG_HEADER}\n")), source_zip_sha256="s" * 64
+    )
+    assert report.rows == 0
+    assert not path.exists()
+
+
+def test_raw_csv_zst_byte_exact(tmp_path: Path) -> None:
+    import hashlib
+
+    import pyarrow as pa
+
+    from src.market_data.public_archive import store as store_mod
+
+    csv_bytes = b"create_time,symbol,x\n2024-01-02 00:00:00,BTCUSDT,1\n2024-01-02 00:05:00,BTCUSDT,2\n"
+    path = tmp_path / "2024-01-02.csv.zst"
+    report = store_mod.write_raw_csv(path, csv_bytes, source_zip_sha256="s" * 64)
+    assert report.rows == 2
+    assert report.content_sha256 == hashlib.sha256(csv_bytes).hexdigest()
+    with pa.input_stream(str(path), compression="zstd") as stream:
+        assert stream.read() == csv_bytes
+    store_mod.verify_raw_csv(path, csv_bytes)
+    with pytest.raises(DataIntegrityError):
+        store_mod.verify_raw_csv(path, csv_bytes + b"x")
+
+
+def test_coverage_rows_backward_compatible(tmp_path: Path) -> None:
+    import dataclasses
+    import json as _json
+
+    from src.market_data.public_archive import store as store_mod
+
+    legacy = {
+        "dataset": "metrics", "day": "2024-01-02", "detail": None, "raw_sha256": "a" * 64,
+        "recorded_at": "2024-01-03T00:00:00+00:00", "rows": 3, "status": "ok", "symbol": "BTCUSDT",
+    }
+    path = store_mod._coverage_path(tmp_path, "metrics")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(_json.dumps(legacy, sort_keys=True) + "\n", encoding="utf-8")
+    loaded = store_mod.load_coverage(tmp_path, "metrics")[("BTCUSDT", date(2024, 1, 2))]
+    assert loaded.raw_tier is False
+    assert loaded.raw_sha256_content is None
+    row = dataclasses.replace(_ok_row(date(2024, 1, 3), rows=4), raw_tier=True, raw_sha256_content="b" * 64)
+    store_mod.append_coverage(tmp_path, row)
+    reloaded = store_mod.load_coverage(tmp_path, "metrics")[("BTCUSDT", date(2024, 1, 3))]
+    assert reloaded.raw_tier is True
+    assert reloaded.raw_sha256_content == "b" * 64
+
+
+def test_sealed_raw_partition_when_absent(tmp_path: Path) -> None:
+    from src.market_data.public_archive import store as store_mod
+
+    row = store_mod.CoverageRow(
+        dataset="aggTrades", symbol="BTCUSDT", day=date(2024, 1, 2), status="ok", raw_sha256="a" * 64,
+        rows=3, recorded_at=pd.Timestamp("2024-01-03", tz="UTC"), detail=None, raw_tier=True,
+    )
+    coverage = {("BTCUSDT", row.day): row}
+    assert ("raw", "BTCUSDT", "202401") in store_mod.sealed_months(tmp_path, "aggTrades", coverage)
+    target = store_mod.raw_partition_path(tmp_path, "aggTrades", "BTCUSDT", "202401")
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"stub")
+    assert ("raw", "BTCUSDT", "202401") not in store_mod.sealed_months(tmp_path, "aggTrades", coverage)
+
+
+def test_streamed_raw_memory_bounded(tmp_path: Path) -> None:
+    import pyarrow as pa
+
+    from src.market_data.public_archive import store as store_mod
+
+    path = tmp_path / "raw.parquet"
+    tmp = path.with_name(path.name + ".tmp")
+    seen_streaming: list[bool] = []
+
+    def batches():
+        for index in range(20):
+            if index:
+                seen_streaming.append(tmp.exists())  # earlier batches already on disk while later ones are produced
+            yield pa.RecordBatch.from_pydict({
+                "agg_trade_id": pa.array([index], pa.int64()),
+                "price": pa.array([100.0], pa.float64()),
+                "quantity": pa.array([1.0], pa.float64()),
+                "first_trade_id": pa.array([index], pa.int64()),
+                "last_trade_id": pa.array([index], pa.int64()),
+                "transact_time": pa.array([1704067200000 + index], pa.int64()),
+                "is_buyer_maker": pa.array([True], pa.bool_()),
+            })
+
+    report = store_mod.write_raw_agg_trades(path, batches(), source_zip_sha256="s" * 64)
+    assert report.rows == 20
+    assert all(seen_streaming)
+
+
+def test_raw_agg_skips_empty_batches_and_fails_on_short_or_long_source(tmp_path: Path) -> None:
+    import pyarrow as pa
+
+    from src.market_data.public_archive import fetch, store as store_mod
+
+    two = _raw_zip(f"{_RAW_AGG_HEADER}\n1,100.0,2.5,1,2,1704067200000,true\n2,100.5,1.0,2,2,1704067201000,false\n")
+    one = _raw_zip(f"{_RAW_AGG_HEADER}\n1,100.0,2.5,1,2,1704067200000,true\n")
+    path = tmp_path / "raw-day.parquet"
+    empty = pa.RecordBatch.from_pylist([], schema=next(fetch.iter_agg_trade_batches(two)).schema)
+    report = store_mod.write_raw_agg_trades(
+        path, [empty, *fetch.iter_agg_trade_batches(one)], source_zip_sha256="s" * 64
+    )
+    assert report.rows == 1
+    with pytest.raises(DataIntegrityError, match="longer than source"):
+        store_mod.verify_raw_agg_trades(path, [])
+    path2 = tmp_path / "raw-two.parquet"
+    store_mod.write_raw_agg_trades(path2, fetch.iter_agg_trade_batches(two), source_zip_sha256="s" * 64)
+    with pytest.raises(DataIntegrityError, match="shorter than source"):
+        store_mod.verify_raw_agg_trades(path2, [*fetch.iter_agg_trade_batches(two), *fetch.iter_agg_trade_batches(one)])
+
+
+def test_raw_agg_write_failure_leaves_no_tmp(tmp_path: Path) -> None:
+    import pyarrow as pa
+
+    from src.market_data.public_archive import fetch, store as store_mod
+
+    good = next(fetch.iter_agg_trade_batches(_raw_zip(f"{_RAW_AGG_HEADER}\n1,100.0,2.5,1,2,1704067200000,true\n")))
+
+    def batches():
+        yield good
+        raise RuntimeError("stream broke")
+
+    path = tmp_path / "raw-day.parquet"
+    with pytest.raises(RuntimeError):
+        store_mod.write_raw_agg_trades(path, batches(), source_zip_sha256="s" * 64)
+    assert not path.exists()
+    assert not path.with_name(path.name + ".tmp").exists()
+    assert pa is not None
+
+
+def test_raw_csv_failed_publish_leaves_no_tmp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from src.market_data.public_archive import store as store_mod
+
+    def fail(tmp, path):
+        raise OSError("publish failed")
+
+    monkeypatch.setattr(store_mod, "_publish", fail)
+    path = tmp_path / "2024-01-02.csv.zst"
+    with pytest.raises(OSError, match="publish failed"):
+        store_mod.write_raw_csv(path, b"a,b\n1,2\n", source_zip_sha256="s" * 64)
+    assert not path.exists()
+    assert not path.with_name(path.name + ".tmp").exists()

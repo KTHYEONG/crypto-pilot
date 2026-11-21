@@ -68,6 +68,13 @@ ARCHIVE_RETRY_HORIZON_DAYS: int = 14
 # Window must contain the live execution window; a cycle crossing 00:00 UTC is not covered and Part 3 must exclude it.
 TAPE_SLICE_HOURS: tuple[int, int] = (23, 24)
 
+# Raw tier: aggTrades keeps the typed trade rows (table-equal to the CSV), metrics/bookDepth keep the exact CSV bytes.
+RAW_TIER_DATASETS: tuple[str, ...] = ("aggTrades", "metrics", "bookDepth")
+RAW_AGG_TRADES_ZSTD_LEVEL: int = 9
+RAW_CSV_ZSTD_LEVEL: int = 19
+# Per-UTC-day cap on new raw bytes drained by raw-only backfill, so each backup run stays inside its window.
+RAW_BACKFILL_MAX_GIB_PER_DAY: int = 20
+
 
 @dataclass(frozen=True, slots=True)
 class MaskPolicy:

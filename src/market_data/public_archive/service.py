@@ -33,6 +33,7 @@ class CollectionPlan:
     slice_hours: tuple[int, int] | None
     pending_days: tuple[date, ...] = ()
     sealed_days: tuple[date, ...] = ()
+    raw_only: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,9 +53,10 @@ class CollectionReport:
 @dataclass(frozen=True, slots=True)
 class _Ready:
     day: date
-    frame: pd.DataFrame
+    frame: pd.DataFrame | None
     sliced: pd.DataFrame | None
     sha: str
+    raw: _RawStaged | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -326,9 +328,8 @@ def _heartbeat_path(root: Path) -> Path:
     return Path(root) / "_status" / "collect_heartbeat.json"
 
 
-def _merge_slice_files(root: Path, dataset: str, symbol: str, batch: list[tuple[date, Path]]) -> None:
-    month = batch[0][0].strftime("%Y%m")
-    path = store.partition_path(root, dataset, symbol, month, kind="slice")
+def _merge_day_files(path: Path, column: str, batch: list[tuple[date, Path]], *, raw: bool = False) -> None:
+    """Replace the batch's days inside one month file, streaming; days are keyed by ``column`` (epoch ms)."""
     path.parent.mkdir(parents=True, exist_ok=True)
     replaced = {day for day, _ in batch}
 
@@ -336,7 +337,7 @@ def _merge_slice_files(root: Path, dataset: str, symbol: str, batch: list[tuple[
         if path.exists():
             for chunk in pq.ParquetFile(path).iter_batches(batch_size=65536):
                 frame = chunk.to_pandas()
-                days = pd.to_datetime(frame["transact_time_ms"], unit="ms", utc=True).dt.date
+                days = pd.to_datetime(frame[column], unit="ms", utc=True).dt.date
                 for day, group in frame.groupby(days, sort=True):
                     if day not in replaced:
                         yield day, pa.Table.from_pandas(group, preserve_index=False)
@@ -346,16 +347,19 @@ def _merge_slice_files(root: Path, dataset: str, symbol: str, batch: list[tuple[
             for chunk in pq.ParquetFile(source).iter_batches(batch_size=65536):
                 yield day, pa.Table.from_batches([chunk])
 
-    tmp = batch[0][1].parent / "month.parquet"
+    def options(schema: pa.Schema) -> dict[str, object]:
+        return store.raw_agg_writer_options(schema) if raw else {"compression": "zstd"}
+
+    tmp = batch[0][1].parent / f"merge-{path.name}"
     writer: pq.ParquetWriter | None = None
     try:
         for _, table in heapq.merge(existing_chunks(), new_chunks(), key=lambda item: item[0]):
             if writer is None:
-                writer = pq.ParquetWriter(tmp, table.schema, compression="zstd")
+                writer = pq.ParquetWriter(tmp, table.schema, **options(table.schema))
             writer.write_table(table)
         if writer is None:
             table = pq.read_table(batch[0][1])
-            writer = pq.ParquetWriter(tmp, table.schema, compression="zstd")
+            writer = pq.ParquetWriter(tmp, table.schema, **options(table.schema))
         writer.close()
         writer = None
         with open(tmp, "rb") as handle:
@@ -366,7 +370,87 @@ def _merge_slice_files(root: Path, dataset: str, symbol: str, batch: list[tuple[
             writer.close()
 
 
-_Outcome = tuple[date, str, "str | None", int]
+def _merge_slice_files(root: Path, dataset: str, symbol: str, batch: list[tuple[date, Path]]) -> None:
+    month = batch[0][0].strftime("%Y%m")
+    path = store.partition_path(root, dataset, symbol, month, kind="slice")
+    _merge_day_files(path, "transact_time_ms", batch)
+
+
+@dataclass(frozen=True, slots=True)
+class _Outcome:
+    day: date
+    status: Literal["ok", "failed"]
+    info: str | None
+    rows: int
+    raw_sha256_content: str | None = None
+    raw_tier: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class _RawStaged:
+    path: Path | None  # None when a day has no trade rows: the raw tier is complete without a file
+    report: store.RawWriteReport
+
+
+def _stage_raw(dataset: str, day: date, zip_bytes: bytes, sha: str, staging: Path) -> _RawStaged | None:
+    """Write and verify one day's raw tier inside the month staging dir; nothing is published yet.
+
+    None when the typed trade reader cannot represent the day (the derived path still handles it), so the day
+    is stored without a raw tier rather than failing.
+    """
+    if dataset == "aggTrades":
+        path = staging / f"raw-{day.isoformat()}.parquet"
+        try:
+            report = store.write_raw_agg_trades(
+                path, fetch.iter_agg_trade_batches(zip_bytes), source_zip_sha256=sha
+            )
+        except pa.ArrowInvalid:
+            return None
+        if report.rows == 0:
+            return _RawStaged(path=None, report=report)
+        store.verify_raw_agg_trades(path, fetch.iter_agg_trade_batches(zip_bytes))
+        return _RawStaged(path=path, report=report)
+    csv_bytes = fetch.read_single_csv_bytes(zip_bytes)
+    path = staging / f"raw-{day.isoformat()}.csv.zst"
+    report = store.write_raw_csv(path, csv_bytes, source_zip_sha256=sha)
+    store.verify_raw_csv(path, csv_bytes)
+    return _RawStaged(path=path, report=report)
+
+
+class _RawBudget:
+    """Per-UTC-day cap on new raw bytes; the spend persists in one status file across runs."""
+
+    def __init__(self, root: Path, now: pd.Timestamp) -> None:
+        self._path = Path(root) / "_status" / "raw_backfill_budget.json"
+        self._day = now.strftime("%Y-%m-%d")
+        self._cap = int(catalog.RAW_BACKFILL_MAX_GIB_PER_DAY) * (1 << 30)
+        self._spent = 0
+        self._guard = threading.Lock()
+        if self._path.exists():
+            try:
+                payload = json.loads(self._path.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as exc:
+                raise DataIntegrityError("malformed raw backfill budget") from exc
+            if (
+                not isinstance(payload, dict)
+                or not isinstance(payload.get("utc_day"), str)
+                or type(payload.get("bytes")) is not int
+                or payload["bytes"] < 0
+            ):
+                raise DataIntegrityError("malformed raw backfill budget")
+            self._spent = payload["bytes"] if payload["utc_day"] == self._day else 0
+
+    def exhausted(self) -> bool:
+        with self._guard:
+            return self._spent >= self._cap
+
+    def spend(self, nbytes: int) -> None:
+        with self._guard:
+            self._spent += nbytes
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._path.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps({"utc_day": self._day, "bytes": self._spent}, sort_keys=True), encoding="utf-8")
+            tmp.replace(self._path)
 
 
 class _PlanRunner:
@@ -404,10 +488,13 @@ class _PlanRunner:
         self.beat_guard = threading.Lock()
         self.last_beat = time.monotonic()
         self._sealed: set[tuple[str, str, str, str]] = set()
+        self._coverage: dict[str, Mapping[tuple[str, date], store.CoverageRow]] = {}
         for dataset in {p.dataset for p in plans}:
             cov = store.load_coverage(root, dataset)
+            self._coverage[dataset] = cov
             for kind, symbol, month in store.sealed_months(root, dataset, cov):
                 self._sealed.add((dataset, kind, symbol, month))
+        self._budget = _RawBudget(root, self.started) if any(p.raw_only for p in plans) else None
 
     def _write_beat(self, force: bool) -> None:
         beat_now = time.monotonic()
@@ -441,6 +528,10 @@ class _PlanRunner:
             self.state[field] += 1
             self.state["done"] += 1
 
+    def _existing_rows(self, plan: CollectionPlan, day: date) -> int:
+        row = self._coverage.get(plan.dataset, {}).get((plan.symbol, day))
+        return 0 if row is None else row.rows
+
     def record(
         self,
         plan: CollectionPlan,
@@ -450,6 +541,8 @@ class _PlanRunner:
         sha: str | None,
         rows: int,
         detail: str | None,
+        raw_tier: bool = False,
+        raw_sha256_content: str | None = None,
     ) -> bool:
         row = store.CoverageRow(
             dataset=plan.dataset,
@@ -460,6 +553,8 @@ class _PlanRunner:
             rows=rows,
             recorded_at=self.now(),
             detail=detail,
+            raw_sha256_content=raw_sha256_content,
+            raw_tier=raw_tier,
         )
         try:
             store.append_coverage(self.root, row)
@@ -473,7 +568,7 @@ class _PlanRunner:
             )
             return False
 
-    def run_unit(self, plan: CollectionPlan, day: date) -> _Ready | _Skipped:
+    def run_unit(self, plan: CollectionPlan, day: date, staging: Path) -> _Ready | _Skipped:
         try:
             fetched = fetch.fetch_verified_zip(
                 self.downloader, catalog.daily_key(plan.dataset, plan.symbol, day)  # type: ignore[arg-type]
@@ -484,49 +579,89 @@ class _PlanRunner:
             return _Skipped(day=day, kind="pending" if day >= self.recent_cutoff else "absent", detail=None)
         zip_bytes, sha = fetched
         del fetched
+        if plan.raw_only:
+            try:
+                raw = _stage_raw(plan.dataset, day, zip_bytes, sha, staging)
+            except Exception as exc:  # noqa: BLE001
+                return _Skipped(day=day, kind="failed", detail=_short_detail(exc))
+            if raw is None:
+                return _Skipped(day=day, kind="failed", detail="raw tier unavailable for typed reader")
+            return _Ready(day=day, frame=None, sliced=None, sha=sha, raw=raw)
         try:
             frame, sliced = _derive_zip(plan, day, zip_bytes)
         except DataIntegrityError as exc:
             return _Skipped(day=day, kind="defective", detail=_short_detail(exc), sha=sha)
         except Exception as exc:  # noqa: BLE001
             return _Skipped(day=day, kind="failed", detail=_short_detail(exc))
-        return _Ready(day=day, frame=frame, sliced=sliced, sha=sha)
+        raw_staged: _RawStaged | None = None
+        if plan.dataset in catalog.RAW_TIER_DATASETS:
+            try:
+                raw_staged = _stage_raw(plan.dataset, day, zip_bytes, sha, staging)
+            except Exception as exc:  # noqa: BLE001
+                return _Skipped(day=day, kind="failed", detail=_short_detail(exc))
+        return _Ready(day=day, frame=frame, sliced=sliced, sha=sha, raw=raw_staged)
 
     def gather_month(
         self,
         plan: CollectionPlan,
         days: list[date],
         staging: Path,
-    ) -> tuple[list[tuple[date, pd.DataFrame]], list[tuple[date, Path]], list[_Outcome]]:
+    ) -> tuple[
+        list[tuple[date, pd.DataFrame]],
+        list[tuple[date, Path]],
+        list[tuple[date, _RawStaged]],
+        list[_Outcome],
+    ]:
         derived: list[tuple[date, pd.DataFrame]] = []
         slices: list[tuple[date, Path]] = []
+        raws: list[tuple[date, _RawStaged]] = []
         outcomes: list[_Outcome] = []
-        for day in days:
-            result = self.run_unit(plan, day)
+        for index, day in enumerate(days):
+            if plan.raw_only and self._budget is not None and self._budget.exhausted():
+                with self.guard:
+                    self._started -= len(days) - index
+                    self._stop = True
+                break
+            result = self.run_unit(plan, day, staging)
             if isinstance(result, _Skipped):
                 kind = result.kind
-                if kind == "defective" and not self.record(
+                if kind == "defective" and not plan.raw_only and not self.record(
                     plan, day, "defective", sha=result.sha, rows=0, detail=result.detail
                 ):
                     kind = "failed"
                 elif kind == "failed":
-                    outcomes.append((result.day, kind, result.detail, 0))
+                    outcomes.append(_Outcome(day=result.day, status="failed", info=result.detail, rows=0))
                 self.bump(kind)
                 self.beat()
                 continue
-            derived.append((result.day, result.frame))
-            if result.sliced is not None:
-                source = staging / f"{result.day.isoformat()}.parquet"
-                try:
-                    write_parquet_atomic(result.sliced, source, compression="zstd")
-                except Exception as exc:  # noqa: BLE001
-                    derived.pop()
-                    outcomes.append((result.day, "failed", _short_detail(exc), 0))
-                    self.bump("failed")
-                    continue
-                slices.append((result.day, source))
-            outcomes.append((result.day, "ok", result.sha, len(result.frame)))
-        return derived, slices, outcomes
+            if result.frame is not None:
+                derived.append((result.day, result.frame))
+                if result.sliced is not None:
+                    source = staging / f"{result.day.isoformat()}.parquet"
+                    try:
+                        write_parquet_atomic(result.sliced, source, compression="zstd")
+                    except Exception as exc:  # noqa: BLE001
+                        derived.pop()
+                        outcomes.append(_Outcome(day=result.day, status="failed", info=_short_detail(exc), rows=0))
+                        self.bump("failed")
+                        continue
+                    slices.append((result.day, source))
+            rows = len(result.frame) if result.frame is not None else self._existing_rows(plan, day)
+            if result.raw is not None:
+                raws.append((result.day, result.raw))
+                if self._budget is not None:
+                    self._budget.spend(result.raw.report.bytes_written)
+            outcomes.append(
+                _Outcome(
+                    day=result.day,
+                    status="ok",
+                    info=result.sha,
+                    rows=rows,
+                    raw_sha256_content=None if result.raw is None else result.raw.report.content_sha256,
+                    raw_tier=result.raw is not None,
+                )
+            )
+        return derived, slices, raws, outcomes
 
     def commit_month(
         self,
@@ -535,37 +670,64 @@ class _PlanRunner:
         staging: Path,
         derived: list[tuple[date, pd.DataFrame]],
         slices: list[tuple[date, Path]],
+        raws: Sequence[tuple[date, _RawStaged]] = (),
     ) -> str | None:
-        """Write the month partitions; None on success, else the failure detail after rollback."""
+        """Publish derived, slice and raw partitions together; None on success, else the failure detail after rollback."""
         month = days[0].strftime("%Y%m")
-        if derived:
-            derived_path = store.partition_path(self.root, plan.dataset, plan.symbol, month)
-            if not derived_path.exists() and (plan.dataset, "derived", plan.symbol, month) in self._sealed:
-                return "sealed_month"
-        if slices:
-            slice_path = store.partition_path(self.root, plan.dataset, plan.symbol, month, kind="slice")
-            if not slice_path.exists() and (plan.dataset, "slice", plan.symbol, month) in self._sealed:
-                return "sealed_month"
-        backups: dict[Path, Path | None] = {}
-        committed: list[Path] = []
         derived_path = store.partition_path(self.root, plan.dataset, plan.symbol, month)
         slice_path = store.partition_path(self.root, plan.dataset, plan.symbol, month, kind="slice")
+        staged = [(day, item.path) for day, item in raws if item.path is not None]
+        raw_merge: list[tuple[date, Path]] = []
+        raw_moves: list[tuple[Path, Path]] = []
+        raw_targets: list[Path] = []
+        if plan.dataset == "aggTrades":
+            if staged:
+                raw_agg = store.raw_partition_path(self.root, plan.dataset, plan.symbol, month)
+                raw_targets.append(raw_agg)
+                raw_merge = staged
+        else:
+            for day, source in staged:
+                target = store.raw_partition_path(self.root, plan.dataset, plan.symbol, day.isoformat())
+                raw_targets.append(target)
+                raw_moves.append((source, target))
+        if derived and not derived_path.exists() and (plan.dataset, "derived", plan.symbol, month) in self._sealed:
+            return "sealed_month"
+        if slices and not slice_path.exists() and (plan.dataset, "slice", plan.symbol, month) in self._sealed:
+            return "sealed_month"
+        if any(
+            not target.exists() and (plan.dataset, "raw", plan.symbol, month) in self._sealed for target in raw_targets
+        ):
+            return "sealed_month"
+        touched: list[Path] = []
+        if derived:
+            touched.append(derived_path)
+        if slices:
+            touched.append(slice_path)
+        touched.extend(raw_targets)
+        if not touched:
+            return None
+        backups: dict[Path, Path | None] = {}
+        committed: list[Path] = []
         try:
-            if slices:
-                for kind, path in (("derived", derived_path), ("slice", slice_path)):
-                    backup = staging / f"{kind}.backup"
-                    if path.exists():
-                        os.link(path, backup)
-                        backups[path] = backup
-                    else:
-                        backups[path] = None
+            for index, path in enumerate(touched):
+                backups[path] = None
+                if path.exists():
+                    backup = staging / f"{index}.backup"
+                    os.link(path, backup)
+                    backups[path] = backup
             if derived:
                 store.merge_day_batch(self.root, plan.dataset, plan.symbol, derived)
-                if slices:
-                    committed.append(derived_path)
+                committed.append(derived_path)
             if slices:
                 _merge_slice_files(self.root, plan.dataset, plan.symbol, slices)
                 committed.append(slice_path)
+            if raw_merge:
+                _merge_day_files(raw_targets[0], "transact_time", raw_merge, raw=True)
+                committed.append(raw_targets[0])
+            for source, target in raw_moves:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(source, target)
+                committed.append(target)
         except Exception as exc:  # noqa: BLE001
             for path in committed:
                 original = backups[path]
@@ -577,16 +739,27 @@ class _PlanRunner:
         return None
 
     def run_month(self, plan: CollectionPlan, days: list[date], staging: Path) -> None:
-        derived, slices, outcomes = self.gather_month(plan, days, staging)
-        detail = self.commit_month(plan, days, staging, derived, slices)
-        for day, status, info, rows in outcomes:
-            if status == "failed":
-                self.record(plan, day, "failed", sha=None, rows=0, detail=str(info))
-            elif status == "ok" and detail is not None:
-                self.record(plan, day, "failed", sha=None, rows=0, detail=detail)
+        derived, slices, raws, outcomes = self.gather_month(plan, days, staging)
+        detail = self.commit_month(plan, days, staging, derived, slices, raws)
+        for outcome in outcomes:
+            if outcome.status == "failed":
+                if not plan.raw_only:
+                    self.record(plan, outcome.day, "failed", sha=None, rows=0, detail=str(outcome.info))
+            elif detail is not None:
+                if not plan.raw_only:
+                    self.record(plan, outcome.day, "failed", sha=None, rows=0, detail=detail)
                 self.bump("failed")
-            elif status == "ok":
-                recorded = self.record(plan, day, "ok", sha=str(info), rows=rows, detail=None)
+            else:
+                recorded = self.record(
+                    plan,
+                    outcome.day,
+                    "ok",
+                    sha=outcome.info,
+                    rows=outcome.rows,
+                    detail=None,
+                    raw_tier=outcome.raw_tier,
+                    raw_sha256_content=outcome.raw_sha256_content,
+                )
                 self.bump("ok" if recorded else "failed")
                 self.beat()
         if detail is not None:
@@ -669,6 +842,27 @@ def execute_plan(
         deadline=deadline,
     )
     return runner.run(workers)
+
+
+def plan_raw_backfill(
+    *, root: Path, dataset: str, symbols: Mapping[str, Collection[date]]
+) -> list[CollectionPlan]:
+    """Raw-only plans for days already settled as ok whose raw tier is still missing; nothing is downloaded."""
+    if dataset not in catalog.RAW_TIER_DATASETS:
+        raise DataIntegrityError(f"dataset has no raw tier: {dataset!r}")
+    coverage = store.load_coverage(root, dataset)
+    plans: list[CollectionPlan] = []
+    for symbol in sorted(symbols):
+        days = tuple(
+            sorted(
+                day
+                for day in set(symbols[symbol])
+                if (row := coverage.get((symbol, day))) is not None and row.status == "ok" and not row.raw_tier
+            )
+        )
+        if days:
+            plans.append(CollectionPlan(dataset=dataset, symbol=symbol, days=days, slice_hours=None, raw_only=True))
+    return plans
 
 
 def _short_detail(exc: BaseException) -> str:
