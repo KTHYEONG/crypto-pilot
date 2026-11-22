@@ -394,7 +394,9 @@ def _run_import(args: argparse.Namespace) -> None:
     )
 
 
-def _drain_job(root: Path, downloader: object, job: BackfillJob, deadline: pd.Timestamp, workers: int) -> None:
+def _drain_job(
+    root: Path, downloader: object, job: BackfillJob, deadline: pd.Timestamp, workers: int, raw_budget: int | None = None
+) -> None:
     from src.market_data.public_archive import jobs, service
     from src.market_data.public_archive.catalog import TAPE_SLICE_HOURS
 
@@ -423,7 +425,7 @@ def _drain_job(root: Path, downloader: object, job: BackfillJob, deadline: pd.Ti
         )
     if plans is None:
         raise RuntimeError("backfill day listing failed")
-    report = service.execute_plan(downloader, plans, root=root, workers=workers, deadline=deadline)
+    report = service.execute_plan(downloader, plans, root=root, workers=workers, deadline=deadline, raw_budget_gib=raw_budget)
     remaining = report.remaining_days + report.failed + report.pending
     done = remaining == 0
     if done:
@@ -452,7 +454,7 @@ def _drain_jobs(
         if pd.Timestamp.now(tz="UTC") >= deadline:
             break
         try:
-            _drain_job(root, downloader, job, deadline, job_workers)
+            _drain_job(root, downloader, job, deadline, job_workers, getattr(args, "raw_budget_gib", None))
         except Exception:
             logger.exception("[DATA] stage=archive_backfill job_failed job=%s", job.job_id)
             print(f"backfill job={job.job_id} ok=0 failed=1 sealed=0 remaining=unknown status=PARTIAL")  # noqa: T201

@@ -958,6 +958,39 @@ def test_drain_raw_only_job_fetches_raw_without_derived_writes(
     assert load_coverage(tmp_path, "metrics")[("BTCUSDT", day)].raw_tier is True
 
 
+def test_drain_jobs_passes_raw_budget_override_to_execute_plan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Given: a pending raw-only job and a collect run with --raw-budget-gib 50
+    import src.cli.commands.archive as archive_mod
+    from src.market_data.public_archive import jobs, service
+
+    day = date(2024, 1, 15)
+    job = jobs.BackfillJob(
+        "metrics-2024-01-15-2024-01-15-20240115T000000Z", "metrics", day, day, "/census", None, None,
+        pd.Timestamp("2024-01-15", tz="UTC"), raw_only=True,
+    )
+    jobs.enqueue_backfill(tmp_path, job)
+    monkeypatch.setattr(archive_mod, "_bucket_symbols", lambda downloader, dataset: ["BTCUSDT"])
+    monkeypatch.setattr(archive_mod, "_job_allowed", lambda job: {"BTCUSDT": frozenset({day})})
+    monkeypatch.setattr(service, "plan_raw_backfill", lambda **kwargs: [])
+    seen: list[int | None] = []
+    real = service.execute_plan
+
+    def spy(*args: object, **kwargs: object) -> object:
+        seen.append(kwargs.get("raw_budget_gib"))  # type: ignore[arg-type]
+        return real(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(service, "execute_plan", spy)
+    args = argparse.Namespace(raw_budget_gib=50)
+
+    # When
+    archive_mod._drain_jobs(args, tmp_path, FakeDownloader(["BTCUSDT"], [day]), pd.Timestamp("2099-01-01", tz="UTC"), 1)
+
+    # Then: the job drain honours the override instead of the catalog default
+    assert seen == [50]
+
+
 def test_backfill_add_explicit_start_overrides_mask_default(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
