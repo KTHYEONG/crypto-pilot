@@ -321,3 +321,34 @@ def test_missing_raw_partition_of_raw_tier_row_seals_month(tmp_path: Path) -> No
         detail = runner.commit_month(plan, [day], Path(staging), [], [], [(day, item)])
     assert detail == "sealed_month"
     assert not store_mod.raw_partition_path(tmp_path, "aggTrades", "BTCUSDT", "202401").exists()
+
+
+def test_raw_budget_override_replaces_catalog_cap_for_one_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from src.market_data.public_archive import catalog as catalog_mod
+
+    day = date(2024, 1, 15)
+    monkeypatch.setattr(catalog_mod, "RAW_BACKFILL_MAX_GIB_PER_DAY", 1)
+    _budget_file(tmp_path, {"utc_day": "2024-02-01", "bytes": 1 << 30})
+    plans = [CollectionPlan("metrics", "BTCUSDT", (day,), None, raw_only=True)]
+    report = execute_plan(_metrics_fake(["BTCUSDT"], [day]), plans, root=tmp_path, now_fn=lambda: _NOW, raw_budget_gib=2)
+    assert report.ok == 1
+
+
+def test_raw_budget_override_still_enforced_when_lower(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from src.market_data.public_archive import catalog as catalog_mod
+
+    day = date(2024, 1, 15)
+    monkeypatch.setattr(catalog_mod, "RAW_BACKFILL_MAX_GIB_PER_DAY", 20)
+    _budget_file(tmp_path, {"utc_day": "2024-02-01", "bytes": 1 << 30})
+    fake = _metrics_fake(["BTCUSDT"], [day])
+    plans = [CollectionPlan("metrics", "BTCUSDT", (day,), None, raw_only=True)]
+    report = execute_plan(fake, plans, root=tmp_path, now_fn=lambda: _NOW, raw_budget_gib=1)
+    assert report.stopped_at_deadline is True
+    assert fake.fetch_calls == []
+
+
+def test_raw_budget_override_below_one_gib_rejected(tmp_path: Path) -> None:
+    day = date(2024, 1, 15)
+    plans = [CollectionPlan("metrics", "BTCUSDT", (day,), None, raw_only=True)]
+    with pytest.raises(ValueError, match="at least 1 GiB"):
+        execute_plan(_metrics_fake(["BTCUSDT"], [day]), plans, root=tmp_path, now_fn=lambda: _NOW, raw_budget_gib=0)

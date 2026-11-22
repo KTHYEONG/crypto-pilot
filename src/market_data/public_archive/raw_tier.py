@@ -47,10 +47,13 @@ def stage_raw(dataset: str, day: date, zip_bytes: bytes, sha: str, staging: Path
 class RawBudget:
     """Per-UTC-day cap on new raw bytes; the spend persists in one status file across runs."""
 
-    def __init__(self, root: Path, now: pd.Timestamp) -> None:
+    def __init__(self, root: Path, now: pd.Timestamp, cap_gib: int | None = None) -> None:
+        if cap_gib is not None and cap_gib < 1:
+            raise ValueError("raw budget cap must be at least 1 GiB")
         self._path = Path(root) / "_status" / "raw_backfill_budget.json"
         self._day = now.strftime("%Y-%m-%d")
-        self._cap = int(catalog.RAW_BACKFILL_MAX_GIB_PER_DAY) * (1 << 30)
+        gib = catalog.RAW_BACKFILL_MAX_GIB_PER_DAY if cap_gib is None else cap_gib
+        self._cap = int(gib) * (1 << 30)
         self._spent = 0
         self._guard = threading.Lock()
         if self._path.exists():

@@ -164,6 +164,7 @@ class _PlanRunner:
         heartbeat_s: float,
         now_fn: Callable[[], pd.Timestamp],
         deadline: pd.Timestamp | None = None,
+        raw_budget_gib: int | None = None,
     ) -> None:
         if deadline is not None:
             stamp = pd.Timestamp(deadline)
@@ -193,7 +194,9 @@ class _PlanRunner:
             self._coverage[dataset] = cov
             for kind, symbol, month in store.sealed_months(root, dataset, cov):
                 self._sealed.add((dataset, kind, symbol, month))
-        self._budget = _RawBudget(root, self.started) if any(p.raw_only for p in plans) else None
+        self._budget = (
+            _RawBudget(root, self.started, raw_budget_gib) if any(p.raw_only for p in plans) else None
+        )
 
     def _write_beat(self, force: bool) -> None:
         beat_now = time.monotonic()
@@ -543,8 +546,12 @@ def execute_plan(
     heartbeat_s: float = 60.0,
     now_fn: Callable[[], pd.Timestamp] | None = None,
     deadline: pd.Timestamp | None = None,
+    raw_budget_gib: int | None = None,
 ) -> CollectionReport:
-    """Fetch, derive, merge, and record every planned day with bounded workers."""
+    """Fetch, derive, merge, and record every planned day with bounded workers.
+
+    ``raw_budget_gib`` overrides the per-UTC-day raw-only byte cap for this run; None keeps the catalog default.
+    """
     if workers < 1 or workers > 8:
         raise ValueError("workers must be between 1 and 8")
     runner = _PlanRunner(
@@ -554,6 +561,7 @@ def execute_plan(
         heartbeat_s=heartbeat_s,
         now_fn=now_fn or (lambda: pd.Timestamp.now(tz="UTC")),
         deadline=deadline,
+        raw_budget_gib=raw_budget_gib,
     )
     return runner.run(workers)
 

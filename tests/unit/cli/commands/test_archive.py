@@ -988,3 +988,51 @@ def test_drain_derived_job_uses_plan_collection(
     assert "status=DONE" in capsys.readouterr().out
     assert (tmp_path / "metrics" / "BTCUSDT" / "202401.parquet").exists()
     assert (tmp_path / "raw" / "metrics" / "BTCUSDT" / f"{day.isoformat()}.csv.zst").exists()
+
+
+def test_raw_budget_gib_defaults_to_none() -> None:
+    parser = argparse.ArgumentParser()
+    add_archive_commands(parser)
+    assert parser.parse_args(["collect"]).raw_budget_gib is None
+
+
+def test_raw_budget_gib_parsed_as_int() -> None:
+    parser = argparse.ArgumentParser()
+    add_archive_commands(parser)
+    assert parser.parse_args(["collect", "--raw-budget-gib", "3"]).raw_budget_gib == 3
+
+
+@pytest.mark.parametrize("raw", ["0", "-2", "abc", "1.5"])
+def test_raw_budget_gib_rejects_invalid(raw: str, capsys: pytest.CaptureFixture) -> None:
+    parser = argparse.ArgumentParser()
+    add_archive_commands(parser)
+    with pytest.raises(SystemExit) as exc:
+        parser.parse_args(["collect", "--raw-budget-gib", raw])
+    assert exc.value.code == 2
+    assert "--raw-budget-gib" in capsys.readouterr().err
+
+
+def test_raw_budget_gib_passed_through_to_execute_plan(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from types import SimpleNamespace
+
+    from src.market_data.public_archive import service
+
+    captured: dict[str, object] = {}
+
+    def capture(*args: object, **kwargs: object) -> SimpleNamespace:
+        captured.update(kwargs)
+        return SimpleNamespace(planned_days=0, ok=0, failed=0, absent=0, pending=0, sealed=0, defective=0)
+
+    monkeypatch.setattr(service, "execute_plan", capture)
+    base = ["collect", "--dataset", "metrics", "--symbols", "BTCUSDT", "--start", "2024-01-15", "--end", "2024-01-15",
+            "--execute"]
+    ns = _collect_ns(tmp_path, [*base, "--raw-budget-gib", "4"])
+    ns.downloader = FakeDownloader(["BTCUSDT"], [date(2024, 1, 15)])
+    ns.handler(ns)
+    assert captured["raw_budget_gib"] == 4
+
+    captured.clear()
+    ns = _collect_ns(tmp_path, base)
+    ns.downloader = FakeDownloader(["BTCUSDT"], [date(2024, 1, 15)])
+    ns.handler(ns)
+    assert captured["raw_budget_gib"] is None

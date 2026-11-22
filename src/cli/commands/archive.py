@@ -40,6 +40,13 @@ def _downloader(args: argparse.Namespace) -> object:
     return BinanceVisionDownloader()
 
 
+def _positive_gib(raw: str) -> int:
+    value = int(raw)
+    if value < 1:
+        raise argparse.ArgumentTypeError("must be at least 1")
+    return value
+
+
 def _parse_day(raw: str | None, default: date) -> date:
     return date.fromisoformat(raw) if raw else default
 
@@ -510,7 +517,13 @@ def _collect_under_lock(args: argparse.Namespace) -> None:
     _print_plan(root, datasets, plans, allowed, span)
     if not args.execute:
         return
-    report = service_mod.execute_plan(downloader, plans, root=root, workers=args.workers)
+    report = service_mod.execute_plan(
+        downloader,
+        plans,
+        root=root,
+        workers=args.workers,
+        raw_budget_gib=getattr(args, "raw_budget_gib", None),
+    )
     print(  # noqa: T201
         f"collect planned={report.planned_days} ok={report.ok} "
         f"failed={report.failed} absent={report.absent} pending={report.pending} sealed={report.sealed} "
@@ -629,6 +642,12 @@ def add_archive_commands(archive_parser: argparse.ArgumentParser) -> None:
     collect.add_argument("--lock-wait-s", type=float, default=1800.0)
     collect.add_argument("--drain-jobs-until", type=str, default=None)
     collect.add_argument("--job-workers", type=int, default=None)
+    collect.add_argument(
+        "--raw-budget-gib",
+        type=_positive_gib,
+        default=None,
+        help="Override the per-UTC-day raw backfill byte cap (GiB) for this run; default is the catalog constant.",
+    )
     collect.set_defaults(handler=_run_collect)
 
     status = subparsers.add_parser("status", help="Show archive coverage per dataset")
