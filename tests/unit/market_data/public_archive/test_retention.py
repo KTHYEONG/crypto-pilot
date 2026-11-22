@@ -472,3 +472,24 @@ def test_raw_only_job_holds_only_months_still_missing_raw(tmp_path: Path) -> Non
     # Then: the finished month is freed; the month that will still receive raw days stays local
     assert not done.exists()
     assert owing.exists()
+
+
+def test_raw_only_job_holds_per_symbol_not_whole_month(tmp_path: Path) -> None:
+    # Given: in March, BTCUSDT raw is complete while ETHUSDT still owes a raw day
+    from src.market_data.public_archive import store
+
+    _raw_only_job(tmp_path, "aggTrades")
+    _ok_day(tmp_path, "aggTrades", "2024-03-05", raw_tier=True)
+    store.append_coverage(tmp_path, store.CoverageRow(
+        dataset="aggTrades", symbol="ETHUSDT", day=pd.Timestamp("2024-03-05").date(), status="ok",
+        raw_sha256="0" * 64, rows=1, recorded_at=_NOW - pd.Timedelta(days=30), detail=None, raw_tier=False,
+    ))
+    btc = _raw_file(tmp_path, "aggTrades", "BTCUSDT", "202403.parquet", mtime=_old_mtime())
+    eth = _raw_file(tmp_path, "aggTrades", "ETHUSDT", "202403.parquet", mtime=_old_mtime())
+
+    # When
+    prune_backed_up_archive(tmp_path, status=_status(), now=_NOW)
+
+    # Then: raw files are per symbol-month, so only the symbol still being written is kept
+    assert not btc.exists()
+    assert eth.exists()

@@ -78,8 +78,8 @@ def _sealed_snapshot(base: Path, coverage: Mapping[str, Mapping[tuple[str, date]
 
 def _retained_months(
     base: Path, coverage: Mapping[str, Mapping[tuple[str, date], CoverageRow]], now_date: date
-) -> tuple[set[tuple[str, str, str]], set[tuple[str, str]], set[tuple[str, str]]]:
-    """Months to keep local: retry-owing (dataset, symbol, YYYYMM), derived-job (dataset, YYYYMM), raw-owing (dataset, YYYYMM).
+) -> tuple[set[tuple[str, str, str]], set[tuple[str, str]], set[tuple[str, str, str]]]:
+    """Months to keep local: retry-owing and raw-owing (dataset, symbol, YYYYMM), derived-job (dataset, YYYYMM).
 
     Sealing such a month would make the collector skip its missing days forever, so they stay local. A raw-only
     job never writes derived files, so it only holds raw months that still have an ok day without a raw tier.
@@ -103,9 +103,9 @@ def _retained_months(
     }
     raw_datasets = {job.dataset for job in pending if job.raw_only}
     raw_months = {
-        (dataset, day.strftime("%Y%m"))
+        (dataset, symbol, day.strftime("%Y%m"))
         for dataset in raw_datasets
-        for (_symbol, day), row in coverage.get(dataset, {}).items()
+        for (symbol, day), row in coverage.get(dataset, {}).items()
         if row.status == "ok" and not row.raw_tier
     }
     return retry, job_months, raw_months
@@ -167,8 +167,9 @@ def prune_backed_up_archive(
             return False
         cov_dataset = _coverage_dataset(dataset)
         month = f"{ym[0]}{ym[1]:02d}"
-        held = raw_months if raw else job_months
-        return (cov_dataset, symbol, month) not in retry and (cov_dataset, month) not in held
+        if raw:
+            return (cov_dataset, symbol, month) not in retry and (cov_dataset, symbol, month) not in raw_months
+        return (cov_dataset, symbol, month) not in retry and (cov_dataset, month) not in job_months
 
     pruned = 0
     kept = 0
