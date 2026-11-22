@@ -422,3 +422,53 @@ def test_raw_partition_kept_when_modified_after_backup(tmp_path: Path) -> None:
     report = prune_backed_up_archive(tmp_path, status=_status(finished=_NOW - pd.Timedelta(hours=1)), now=_NOW)
     assert target.exists()
     assert report.pruned_files == 0
+
+
+def _raw_only_job(root: Path, dataset: str) -> None:
+    from datetime import date
+
+    from src.market_data.public_archive import jobs
+
+    jobs.enqueue_backfill(root, jobs.BackfillJob(
+        f"{dataset}-2024-01-01-2024-04-30-20240601T000000Z", dataset, date(2024, 1, 1), date(2024, 4, 30),
+        "/c", None, None, _NOW, raw_only=True,
+    ))
+
+
+def _ok_day(root: Path, dataset: str, day: str, *, raw_tier: bool) -> None:
+    from src.market_data.public_archive import store
+
+    store.append_coverage(root, store.CoverageRow(
+        dataset=dataset, symbol="BTCUSDT", day=pd.Timestamp(day).date(), status="ok", raw_sha256="0" * 64,
+        rows=1, recorded_at=_NOW - pd.Timedelta(days=30), detail=None, raw_tier=raw_tier,
+    ))
+
+
+def test_raw_only_job_does_not_hold_derived_months(tmp_path: Path) -> None:
+    # Given: a pending raw-only aggTrades job spanning 2024-01..04 and an old backed-up derived partition
+    derived = _partition(tmp_path, "aggTrades", "BTCUSDT", "202402", mtime=_old_mtime())
+    _raw_only_job(tmp_path, "aggTrades")
+
+    # When
+    report = prune_backed_up_archive(tmp_path, status=_status(), now=_NOW)
+
+    # Then: raw-only jobs never write derived files, so the derived month is pruned
+    assert not derived.exists()
+    assert report.pruned_files == 1
+
+
+def test_raw_only_job_holds_only_months_still_missing_raw(tmp_path: Path) -> None:
+    # Given: Feb raw is complete, Mar still has an ok day without a raw tier
+    _raw_only_job(tmp_path, "aggTrades")
+    _ok_day(tmp_path, "aggTrades", "2024-02-05", raw_tier=True)
+    _ok_day(tmp_path, "aggTrades", "2024-03-05", raw_tier=True)
+    _ok_day(tmp_path, "aggTrades", "2024-03-06", raw_tier=False)
+    done = _raw_file(tmp_path, "aggTrades", "BTCUSDT", "202402.parquet", mtime=_old_mtime())
+    owing = _raw_file(tmp_path, "aggTrades", "BTCUSDT", "202403.parquet", mtime=_old_mtime())
+
+    # When
+    prune_backed_up_archive(tmp_path, status=_status(), now=_NOW)
+
+    # Then: the finished month is freed; the month that will still receive raw days stays local
+    assert not done.exists()
+    assert owing.exists()

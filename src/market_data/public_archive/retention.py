@@ -78,10 +78,11 @@ def _sealed_snapshot(base: Path, coverage: Mapping[str, Mapping[tuple[str, date]
 
 def _retained_months(
     base: Path, coverage: Mapping[str, Mapping[tuple[str, date], CoverageRow]], now_date: date
-) -> tuple[set[tuple[str, str, str]], set[tuple[str, str]]]:
-    """(dataset, symbol, YYYYMM) months that still owe a retry, and (dataset, YYYYMM) months a pending job spans.
+) -> tuple[set[tuple[str, str, str]], set[tuple[str, str]], set[tuple[str, str]]]:
+    """Months to keep local: retry-owing (dataset, symbol, YYYYMM), derived-job (dataset, YYYYMM), raw-owing (dataset, YYYYMM).
 
-    Sealing such a month would make the collector skip its missing days forever, so they stay local.
+    Sealing such a month would make the collector skip its missing days forever, so they stay local. A raw-only
+    job never writes derived files, so it only holds raw months that still have an ok day without a raw tier.
     """
     from src.market_data.public_archive import catalog as catalog_mod
     from src.market_data.public_archive import jobs as jobs_mod
@@ -93,12 +94,21 @@ def _retained_months(
         for (symbol, day), row in rows.items()
         if row.status == "failed" or (row.status != "ok" and 0 <= (now_date - day).days <= horizon)
     }
+    pending = jobs_mod.pending_jobs(base)
     job_months = {
         (job.dataset, month.strftime("%Y%m"))
-        for job in jobs_mod.pending_jobs(base)
+        for job in pending
+        if not job.raw_only
         for month in pd.date_range(job.start.replace(day=1), job.end, freq="MS")
     }
-    return retry, job_months
+    raw_datasets = {job.dataset for job in pending if job.raw_only}
+    raw_months = {
+        (dataset, day.strftime("%Y%m"))
+        for dataset in raw_datasets
+        for (_symbol, day), row in coverage.get(dataset, {}).items()
+        if row.status == "ok" and not row.raw_tier
+    }
+    return retry, job_months, raw_months
 
 
 def _sweep_dataset(
@@ -147,7 +157,7 @@ def prune_backed_up_archive(
     base = Path(root)
     coverage = {dataset: store_mod.load_coverage(base, dataset) for dataset in catalog_mod.DEFAULT_DATASETS}
     sealed_before = _sealed_snapshot(base, coverage)
-    retry, job_months = _retained_months(base, coverage, now_utc.date())
+    retry, job_months, raw_months = _retained_months(base, coverage, now_utc.date())
 
     def _prunable(dataset: str, symbol: str, path: Path, *, raw: bool = False) -> bool:
         ym = _raw_covered_month(path.name) if raw else _covered_month(path.name)
@@ -157,7 +167,8 @@ def prune_backed_up_archive(
             return False
         cov_dataset = _coverage_dataset(dataset)
         month = f"{ym[0]}{ym[1]:02d}"
-        return (cov_dataset, symbol, month) not in retry and (cov_dataset, month) not in job_months
+        held = raw_months if raw else job_months
+        return (cov_dataset, symbol, month) not in retry and (cov_dataset, month) not in held
 
     pruned = 0
     kept = 0
