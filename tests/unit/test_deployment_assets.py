@@ -1126,3 +1126,11 @@ def test_workflow_ships_fixup_before_recreate() -> None:
     assert 'deploy/crypto-ownership-fixup.sh "$REMOTE_USER@$HOST:~/crypto-pilot/deploy/crypto-ownership-fixup.sh.new"' in workflow
     promote = workflow.index("mv -f ~/crypto-pilot/deploy/crypto-ownership-fixup.sh.new ~/crypto-pilot/deploy/crypto-ownership-fixup.sh")
     assert promote < workflow.index("compose_recreate.sh '$IMAGE:latest'")
+
+
+def test_public_archive_timer_night() -> None:
+    timer = (ROOT / "deploy" / "public-archive" / "crypto-pilot-public-archive.timer").read_text(encoding="utf-8")
+    service = (ROOT / "deploy" / "public-archive" / "crypto-pilot-public-archive.service").read_text(encoding="utf-8")
+    assert "OnCalendar=*-*-* 13:30:00 UTC" in timer.splitlines()
+    assert "TimeoutStartSec=9h" in service.splitlines()
+    assert "OnFailure=kca-alert@%n.service" in service.splitlines()
