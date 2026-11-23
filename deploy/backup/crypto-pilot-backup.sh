@@ -5,6 +5,9 @@
 # 왜 _versions/<날짜>에 30일 보관인가: 덮어쓴 원본을 날짜 폴더로 피신시켜 오복구를 가능하게 한다.
 # 왜 폴더명으로 prune하는가: rclone이 원본 mtime을 유지하므로 --min-age는 오늘 옮긴 옛 파일을 즉시 지운다.
 # 왜 공용 락을 잡는가: 모든 Drive 작성자가 같은 flock에서 직렬화되어야 경합 복사가 사라진다.
+# 왜 로컬 운영 로그를 여기서 정리하는가: 운영 로그는 VPS 사후 진단용일 뿐 Drive에 올리지 않으며,
+#   일일 파일 3종(backup/liveness/public-archive)이 무한 증가하지 않도록 매일 파일명 날짜 기준으로 자른다.
+#   ~/logs는 다른 도구도 쓰므로 정확한 파일명 패턴 외에는 절대 건드리지 않는다.
 set -uo pipefail
 
 CRYPTO_PILOT_ROOT="${CRYPTO_PILOT_ROOT:-$HOME/crypto-pilot}"
@@ -14,6 +17,7 @@ QUANT_GDRIVE_LOCK="${QUANT_GDRIVE_LOCK:-/run/user/$(id -u)/quant-gdrive.lock}"
 LOCK_WAIT_SEC="${LOCK_WAIT_SEC:-7200}"
 VERSION_RETENTION_DAYS="${VERSION_RETENTION_DAYS:-30}"
 ARCHIVE_VERSION_RETENTION_DAYS="${ARCHIVE_VERSION_RETENTION_DAYS:-7}"
+OPS_LOG_RETENTION_DAYS="${OPS_LOG_RETENTION_DAYS:-30}"
 BACKUP_TODAY_UTC="${BACKUP_TODAY_UTC:-$(date -u +%F)}"
 LOG_DIR="${LOG_DIR:-$HOME/logs}"
 LOG_FILE="${LOG_DIR}/crypto-pilot-backup-${BACKUP_TODAY_UTC}.log"
@@ -25,6 +29,45 @@ touch "$QUANT_GDRIVE_LOCK"
 log_line() {
   printf '%s\n' "$1" >> "$LOG_FILE"
 }
+
+# Step: log_retention (local only, before the Drive lock so a stuck lock never stops pruning).
+# Keys on the YYYY-MM-DD in the file name, never mtime; only the three exact daily families
+# directly under LOG_DIR; regular files only (symlinks and directories are never touched).
+prune_ops_logs() {
+  local cutoff family path base day normalized failed=0 summary=""
+  local -a families=(backup liveness public-archive)
+  if ! [[ "$OPS_LOG_RETENTION_DAYS" =~ ^[0-9]+$ ]] ||
+    ! cutoff="$(date -u -d "$BACKUP_TODAY_UTC - $OPS_LOG_RETENTION_DAYS days" +%F)"; then
+    log_line "[SYS] stage=gdrive_backup step=log_retention status=failed rc=1 reason=invalid_retention"
+    return 1
+  fi
+  for family in "${families[@]}"; do
+    local removed=0
+    for path in "$LOG_DIR"/crypto-pilot-"$family"-[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9].log; do
+      [ -f "$path" ] && [ ! -L "$path" ] || continue
+      base="${path##*/}"
+      [[ "$base" =~ ^crypto-pilot-${family}-([0-9]{4}-[0-9]{2}-[0-9]{2})\.log$ ]] || continue
+      day="${BASH_REMATCH[1]}"
+      normalized="$(date -u -d "$day" +%F 2>/dev/null)" || continue
+      [ "$normalized" = "$day" ] || continue
+      [ "$day" \< "$cutoff" ] || continue
+      if rm -f -- "$path"; then
+        removed=$((removed + 1))
+      else
+        failed=1
+      fi
+    done
+    summary="$summary removed_${family//-/_}=$removed"
+  done
+  if [ "$failed" -eq 0 ]; then
+    log_line "[SYS] stage=gdrive_backup step=log_retention status=ok rc=0 cutoff=$cutoff$summary"
+    return 0
+  fi
+  log_line "[SYS] stage=gdrive_backup step=log_retention status=failed rc=1 cutoff=$cutoff$summary"
+  return 1
+}
+LOG_RETENTION_FAILED=0
+prune_ops_logs || LOG_RETENTION_FAILED=1
 
 exec {LOCK_FD}>"$QUANT_GDRIVE_LOCK"
 if ! flock -w "$LOCK_WAIT_SEC" "$LOCK_FD"; then
@@ -166,6 +209,10 @@ if [ "$FAILED" -eq 0 ]; then
   log_line "[SYS] stage=gdrive_backup step=status status=ok"
   if [ "$ARCHIVE_FAILED" -ne 0 ] || [ "$ARCHIVE_PRUNE_FAILED" -ne 0 ]; then
     log_line "[SYS] stage=gdrive_backup status=failed reason=archive"
+    exit 1
+  fi
+  if [ "$LOG_RETENTION_FAILED" -ne 0 ]; then
+    log_line "[SYS] stage=gdrive_backup status=failed reason=log_retention"
     exit 1
   fi
   log_line "[SYS] stage=gdrive_backup status=ok"

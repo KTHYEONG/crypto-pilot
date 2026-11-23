@@ -443,3 +443,104 @@ def test_archive_marker_write_failure_keeps_live_marker(tmp_path: Path, failure:
     assert marker.read_text() == "previous"
     assert (status_dir / "last_success.json").exists()
     assert "step=archive_status status=failed" in _log_text(base)
+
+
+_OPS_LOG_FAMILIES = ("backup", "liveness", "public-archive")
+
+
+def _write_log(log_dir: Path, name: str) -> Path:
+    path = log_dir / name
+    path.write_text("x\n", encoding="utf-8")
+    return path
+
+
+def test_ops_log_retention_keys_on_file_name_date(tmp_path: Path) -> None:
+    base = _setup_base(tmp_path, with_orders=False)
+    log_dir = Path(base["log_dir"])
+    # TODAY=2026-09-23, 30 days -> cutoff 2026-08-24: strictly older names go, the cutoff day stays.
+    expired = [_write_log(log_dir, f"crypto-pilot-{f}-2026-08-23.log") for f in _OPS_LOG_FAMILIES]
+    expired.append(_write_log(log_dir, "crypto-pilot-liveness-2025-01-01.log"))
+    kept = [_write_log(log_dir, f"crypto-pilot-{f}-2026-08-24.log") for f in _OPS_LOG_FAMILIES]
+    # A fresh mtime on an old name is still expired; an ancient mtime on a recent name is kept.
+    recent_old_mtime = _write_log(log_dir, "crypto-pilot-backup-2026-09-20.log")
+    os.utime(recent_old_mtime, (0, 0))
+    kept.append(recent_old_mtime)
+    result = _run(base, tmp_path, {"FAKE_LSF_RC": "3"})
+    assert result.returncode == 0
+    for path in expired:
+        assert not path.exists(), path
+    for path in kept:
+        assert path.exists(), path
+    log = _log_text(base)
+    assert (
+        "step=log_retention status=ok rc=0 cutoff=2026-08-24 "
+        "removed_backup=1 removed_liveness=2 removed_public_archive=1"
+    ) in log
+    assert log.splitlines()[-1].endswith("status=ok")
+
+
+def test_ops_log_retention_never_touches_other_files(tmp_path: Path) -> None:
+    base = _setup_base(tmp_path, with_orders=True)
+    log_dir = Path(base["log_dir"])
+    foreign_names = [
+        "kca-backup-2026-01-01.log",
+        "crypto-pilot-capture-2026-01-01.log",
+        "crypto-pilot-backup-2026-01-01.log.gz",
+        "crypto-pilot-backup-2026-01-01.txt",
+        "xcrypto-pilot-backup-2026-01-01.log",
+        "crypto-pilot-backup-2026-02-30.log",
+        "crypto-pilot-backup-2026-13-01.log",
+        "crypto-pilot-backup-26-01-01.log",
+        "crypto-pilot-backup-2026-01-01-extra.log",
+        "crypto-pilot-public_archive-2026-01-01.log",
+    ]
+    foreign = [_write_log(log_dir, name) for name in foreign_names]
+    nested = log_dir / "sub"
+    nested.mkdir()
+    foreign.append(_write_log(nested, "crypto-pilot-backup-2026-01-01.log"))
+    target = tmp_path / "outside.log"
+    target.write_text("keep\n", encoding="utf-8")
+    link = log_dir / "crypto-pilot-liveness-2026-01-01.log"
+    link.symlink_to(target)
+    as_dir = log_dir / "crypto-pilot-public-archive-2026-01-01.log"
+    as_dir.mkdir()
+    orders_ledger = Path(base["root"]) / "logs" / "live" / "orders" / "2026-09-22.jsonl"
+    result = _run(base, tmp_path, {"FAKE_LSF_RC": "3"})
+    assert result.returncode == 0
+    for path in foreign:
+        assert path.exists(), path
+    assert link.is_symlink()
+    assert target.read_text(encoding="utf-8") == "keep\n"
+    assert as_dir.is_dir()
+    assert orders_ledger.exists()
+    assert "removed_backup=0 removed_liveness=0 removed_public_archive=0" in _log_text(base)
+
+
+def test_ops_log_retention_runs_when_drive_lock_is_held(tmp_path: Path) -> None:
+    base = _setup_base(tmp_path, with_orders=False)
+    expired = _write_log(Path(base["log_dir"]), "crypto-pilot-liveness-2026-08-01.log")
+    holder = subprocess.Popen(  # noqa: S603 - fixed argv: flock + lock path in hermetic test
+        ["/usr/bin/flock", base["lock"], "sleep", "10"]
+    )
+    try:
+        time.sleep(0.5)
+        result = _run(base, tmp_path, {"LOCK_WAIT_SEC": "1"})
+        assert result.returncode == 75
+        assert not expired.exists()
+        assert Path(base["record"]).read_text(encoding="utf-8").strip() == ""
+    finally:
+        holder.terminate()
+        holder.wait(timeout=10)
+
+
+def test_invalid_ops_log_retention_fails_closed_without_deleting(tmp_path: Path) -> None:
+    base = _setup_base(tmp_path, with_orders=False)
+    old = _write_log(Path(base["log_dir"]), "crypto-pilot-backup-2020-01-01.log")
+    result = _run(base, tmp_path, {"FAKE_LSF_RC": "3", "OPS_LOG_RETENTION_DAYS": "-30"})
+    assert result.returncode == 1
+    assert old.exists()
+    status_dir = Path(base["root"]) / "deploy" / "backup" / "status"
+    assert (status_dir / "last_success.json").exists()
+    log = _log_text(base)
+    assert "step=log_retention status=failed rc=1 reason=invalid_retention" in log
+    assert log.splitlines()[-1].endswith("status=failed reason=log_retention")
