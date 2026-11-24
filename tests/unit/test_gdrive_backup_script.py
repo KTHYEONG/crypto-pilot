@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -43,9 +44,18 @@ if sub == "lsf":
     sys.exit(rc)
 if sub == "copy":
     joined = " ".join(args)
+    if os.path.basename(args[1]).startswith("crypto-pilot-coverage."):
+        files = {n: open(os.path.join(args[1], n), encoding="utf-8").read() for n in sorted(os.listdir(args[1]))}
+        with open(os.environ["FAKE_RECORD"] + ".snapshot", "w", encoding="utf-8") as f:
+            json.dump({"src": args[1], "files": files}, f)
+        sys.exit(int(os.environ.get("FAKE_COVERAGE_UPLOAD_RC", "0")))
     if "logs/live/orders" in joined:
         sys.exit(int(os.environ.get("FAKE_ORDERS_RC", "0")))
     if "public_archive" in joined:
+        late = os.environ.get("FAKE_APPEND_DURING_BULK")
+        if late:
+            with open(late, "a", encoding="utf-8") as f:
+                f.write("late\\n")
         with open(os.environ["FAKE_RECORD"] + ".archive_started", "w") as f:
             f.write(datetime.datetime.now(datetime.timezone.utc).isoformat())
         sys.exit(int(os.environ.get("FAKE_ARCHIVE_RC", "0")))
@@ -89,10 +99,12 @@ def _setup_base(tmp_path: Path, *, with_orders: bool) -> dict[str, str]:
 def _run(
     base: dict[str, str], tmp_path: Path, extra_env: dict[str, str] | None = None
 ) -> subprocess.CompletedProcess[str]:
-    _ = tmp_path
+    snapshot_tmp = tmp_path / "tmp"
+    snapshot_tmp.mkdir(exist_ok=True)
     env = os.environ.copy()
     env.update(
         {
+            "TMPDIR": str(snapshot_tmp),
             "CRYPTO_PILOT_ROOT": base["root"],
             "RCLONE_BIN": base["fake"],
             "REMOTE_ROOT": REMOTE_ROOT,
@@ -247,7 +259,108 @@ def _setup_with_archive(tmp_path: Path, *, with_orders: bool = False) -> dict[st
 
 
 def _archive_calls(base: dict[str, str]) -> list[list[str]]:
-    return [c for c in _calls(base) if c and c[0] == "copy" and any("public_archive" in t for t in c)]
+    archive_src = f"{base['root']}/data/public_archive"
+    return [c for c in _calls(base) if c and c[0] == "copy" and c[1] == archive_src]
+
+
+def _setup_with_coverage(tmp_path: Path, content: str = '{"day":"2026-09-22"}\n') -> dict[str, str]:
+    base = _setup_with_archive(tmp_path)
+    archive = Path(base["root"]) / "data" / "public_archive"
+    (archive / "_coverage").mkdir()
+    (archive / "_coverage" / "metrics.jsonl").write_text(content, encoding="utf-8")
+    (archive / "_status").mkdir()
+    (archive / "_status" / "collect_heartbeat.json").write_text("{}", encoding="utf-8")
+    return base
+
+
+def _snapshot_record(base: dict[str, str]) -> dict[str, object]:
+    return json.loads(Path(base["record"] + ".snapshot").read_text(encoding="utf-8"))
+
+
+_NO_PRUNE = {"FAKE_LSF_RC": "3", "FAKE_LSF_ARCHIVE_RC": "3"}
+
+
+def test_archive_bulk_excludes_status_and_coverage(tmp_path: Path) -> None:
+    base = _setup_with_coverage(tmp_path)
+    result = _run(base, tmp_path, _NO_PRUNE)
+    assert result.returncode == 0
+    (bulk,) = _archive_calls(base)
+    assert "_status/**" in bulk
+    assert "_coverage/**" in bulk
+
+
+def test_coverage_uploaded_from_snapshot_after_bulk(tmp_path: Path) -> None:
+    base = _setup_with_coverage(tmp_path, '{"a":1}\n{"b":2}\n')
+    result = _run(base, tmp_path, _NO_PRUNE)
+    assert result.returncode == 0
+    calls = _calls(base)
+    bulk_index = calls.index(_archive_calls(base)[0])
+    upload = next(c for c in calls if c[0] == "copy" and c[2] == f"{REMOTE_ROOT}/data/public_archive/_coverage")
+    assert calls.index(upload) > bulk_index
+    live_coverage = f"{base['root']}/data/public_archive/_coverage"
+    assert upload[1] != live_coverage
+    assert f"{REMOTE_ROOT}/_versions_archive/{TODAY}/public_archive/_coverage" in upload
+    snapshot = _snapshot_record(base)
+    assert snapshot["files"] == {"metrics.jsonl": '{"a":1}\n{"b":2}\n'}
+    assert not Path(str(snapshot["src"])).exists()
+    assert "step=coverage_upload status=ok" in _log_text(base)
+
+
+@pytest.mark.parametrize("rc", ["1", "10"])
+def test_coverage_not_uploaded_when_bulk_fails_or_partial(tmp_path: Path, rc: str) -> None:
+    base = _setup_with_coverage(tmp_path)
+    result = _run(base, tmp_path, {**_NO_PRUNE, "FAKE_ARCHIVE_RC": rc})
+    assert result.returncode == (1 if rc == "1" else 0)
+    assert not Path(base["record"] + ".snapshot").exists()
+    status_dir = Path(base["root"]) / "deploy" / "backup" / "status"
+    assert not (status_dir / "last_archive_success.json").exists()
+
+
+def test_coverage_upload_failure_is_fail_closed(tmp_path: Path) -> None:
+    base = _setup_with_coverage(tmp_path)
+    result = _run(base, tmp_path, {**_NO_PRUNE, "FAKE_COVERAGE_UPLOAD_RC": "1"})
+    assert result.returncode == 1
+    log = _log_text(base)
+    assert "step=coverage_upload status=failed rc=1" in log
+    assert "step=public_archive status=failed" in log
+    status_dir = Path(base["root"]) / "deploy" / "backup" / "status"
+    assert (status_dir / "last_success.json").exists()
+    assert not (status_dir / "last_archive_success.json").exists()
+
+
+def test_coverage_snapshot_waits_for_appender_lock(tmp_path: Path) -> None:
+    base = _setup_with_coverage(tmp_path, "first\n")
+    coverage_file = Path(base["root"]) / "data" / "public_archive" / "_coverage" / "metrics.jsonl"
+    holder_src = (
+        "import fcntl, sys, time\n"
+        "with open(sys.argv[1], 'a') as f:\n"
+        "    fcntl.flock(f, fcntl.LOCK_EX)\n"
+        "    print('ready', flush=True)\n"
+        "    time.sleep(1.0)\n"
+        "    f.write('second\\n')\n"
+        "    f.flush()\n"
+    )
+    holder = subprocess.Popen(  # noqa: S603 - fixed argv: hermetic lock holder
+        [sys.executable, "-c", holder_src, str(coverage_file)], stdout=subprocess.PIPE, text=True
+    )
+    try:
+        assert holder.stdout is not None
+        assert holder.stdout.readline().strip() == "ready"
+        result = _run(base, tmp_path, _NO_PRUNE)
+    finally:
+        holder.wait(timeout=30)
+    assert result.returncode == 0
+    assert _snapshot_record(base)["files"] == {"metrics.jsonl": "first\nsecond\n"}
+
+
+def test_missing_coverage_dir_skips_upload(tmp_path: Path) -> None:
+    base = _setup_with_archive(tmp_path)
+    result = _run(base, tmp_path, _NO_PRUNE)
+    assert result.returncode == 0
+    assert "step=coverage_upload status=skipped" in _log_text(base)
+    assert not Path(base["record"] + ".snapshot").exists()
+    status_dir = Path(base["root"]) / "deploy" / "backup" / "status"
+    assert (status_dir / "last_archive_success.json").exists()
 
 
 def test_archive_step_has_own_backup_dir(tmp_path: Path) -> None:
@@ -544,3 +657,33 @@ def test_invalid_ops_log_retention_fails_closed_without_deleting(tmp_path: Path)
     log = _log_text(base)
     assert "step=log_retention status=failed rc=1 reason=invalid_retention" in log
     assert log.splitlines()[-1].endswith("status=failed reason=log_retention")
+
+
+def test_coverage_snapshot_is_taken_before_bulk_copy(tmp_path: Path) -> None:
+    base = _setup_with_coverage(tmp_path, "early\n")
+    live = Path(base["root"]) / "data" / "public_archive" / "_coverage" / "metrics.jsonl"
+    result = _run(base, tmp_path, {**_NO_PRUNE, "FAKE_APPEND_DURING_BULK": str(live)})
+    assert result.returncode == 0
+    assert live.read_text(encoding="utf-8") == "early\nlate\n"
+    assert _snapshot_record(base)["files"] == {"metrics.jsonl": "early\n"}
+
+
+def test_coverage_snapshot_failure_is_fail_closed(tmp_path: Path) -> None:
+    base = _setup_with_coverage(tmp_path)
+    result = _run(base, tmp_path, {**_NO_PRUNE, "TMPDIR": str(tmp_path / "missing")})
+    assert result.returncode == 1
+    assert _archive_calls(base) == []
+    assert "step=coverage_snapshot status=failed" in _log_text(base)
+    status_dir = Path(base["root"]) / "deploy" / "backup" / "status"
+    assert not (status_dir / "last_archive_success.json").exists()
+
+
+def test_coverage_symlink_is_never_followed(tmp_path: Path) -> None:
+    base = _setup_with_coverage(tmp_path)
+    coverage = Path(base["root"]) / "data" / "public_archive" / "_coverage"
+    secret = tmp_path / "secret.txt"
+    secret.write_text("secret", encoding="utf-8")
+    (coverage / "linked.jsonl").symlink_to(secret)
+    result = _run(base, tmp_path, _NO_PRUNE)
+    assert result.returncode == 0
+    assert set(_snapshot_record(base)["files"]) == {"metrics.jsonl"}

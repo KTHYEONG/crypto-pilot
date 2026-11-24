@@ -113,44 +113,99 @@ else
   log_line "[SYS] stage=gdrive_backup step=orders status=skipped rc=0 reason=absent"
 fi
 
+# The collector appends to _coverage/*.jsonl while it runs, so a live upload fails rclone's hash
+# check on every retry. Each file is copied under a shared lock on the file the appender locks
+# exclusively, which yields whole lines only; the immutable copy is uploaded after the bulk data.
+snapshot_archive_coverage() {
+  local src_root="$1" snap_dir="$2" coverage_file
+  [ -d "$src_root/_coverage" ] || return 0
+  [ -r "$src_root/_coverage" ] && [ -x "$src_root/_coverage" ] || return 1
+  for coverage_file in "$src_root"/_coverage/*.jsonl; do
+    [ -f "$coverage_file" ] && [ ! -L "$coverage_file" ] || continue
+    flock -s -- "$coverage_file" cp -p -- "$coverage_file" "$snap_dir/" || return 1
+  done
+}
+
+COVERAGE_SNAP=""
+cleanup_coverage_snapshot() {
+  [ -n "$COVERAGE_SNAP" ] && [ -d "$COVERAGE_SNAP" ] || return 0
+  rm -f -- "$COVERAGE_SNAP"/*.jsonl
+  rmdir -- "$COVERAGE_SNAP" 2>/dev/null || true
+}
+trap cleanup_coverage_snapshot EXIT
+
 # Step: public_archive (copy-only, dedicated short-retention versions, own marker).
 # rclone exit code 10 is DurationExceeded (--max-duration reached): partial, not failure.
+# _status/** is local runtime state; _coverage/** goes via the snapshot so Drive coverage never
+# runs ahead of Drive data.
 ARCHIVE_FAILED=0
 ARCHIVE_SRC="$CRYPTO_PILOT_ROOT/data/public_archive"
 if [ ! -d "$ARCHIVE_SRC" ]; then
   log_line "[SYS] stage=gdrive_backup step=public_archive status=skipped rc=0 reason=absent"
 else
   ARCHIVE_STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  ARCHIVE_RC=0
-  "$RCLONE_BIN" copy "$ARCHIVE_SRC" "$REMOTE_ROOT/data/public_archive" \
-    --exclude ".archive-*/**" \
-    --exclude ".import-*" \
-    --exclude ".import-*/**" \
-    --exclude ".job-*" \
-    --exclude "_status/archive.lock" \
-    --exclude "*.tmp" \
-    --exclude "*.tmp-*" \
-    --exclude "*.partial" \
-    --backup-dir "$REMOTE_ROOT/_versions_archive/$BACKUP_TODAY_UTC/public_archive" \
-    --max-duration "${ARCHIVE_MAX_DURATION:-2h}" \
-    --fast-list --transfers 4 -v || ARCHIVE_RC=$?
-  if [ "$ARCHIVE_RC" -eq 0 ]; then
-    log_line "[SYS] stage=gdrive_backup step=public_archive status=ok rc=0"
-    ARCHIVE_STATUS_DIR="$CRYPTO_PILOT_ROOT/deploy/backup/status"
-    ARCHIVE_FINISHED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    ARCHIVE_PARTIAL="$ARCHIVE_STATUS_DIR/last_archive_success.json.partial"
-    if ! { mkdir -p "$ARCHIVE_STATUS_DIR" &&
-      printf '{"started_at": "%s", "finished_at": "%s", "rc": 0}' "$ARCHIVE_STARTED_AT" "$ARCHIVE_FINISHED_AT" > "$ARCHIVE_PARTIAL" &&
-      sync &&
-      mv -f "$ARCHIVE_PARTIAL" "$ARCHIVE_STATUS_DIR/last_archive_success.json"; }; then
-      log_line "[SYS] stage=gdrive_backup step=archive_status status=failed"
+  SNAP_RC=0
+  COVERAGE_SNAP="$(mktemp -d "${TMPDIR:-/tmp}/crypto-pilot-coverage.XXXXXX")" || SNAP_RC=$?
+  if [ "$SNAP_RC" -eq 0 ]; then
+    snapshot_archive_coverage "$ARCHIVE_SRC" "$COVERAGE_SNAP" || SNAP_RC=$?
+  fi
+  if [ "$SNAP_RC" -ne 0 ]; then
+    log_line "[SYS] stage=gdrive_backup step=coverage_snapshot status=failed rc=$SNAP_RC"
+    log_line "[SYS] stage=gdrive_backup step=public_archive status=failed rc=$SNAP_RC"
+    ARCHIVE_FAILED=1
+  else
+    log_line "[SYS] stage=gdrive_backup step=coverage_snapshot status=ok rc=0"
+    ARCHIVE_RC=0
+    "$RCLONE_BIN" copy "$ARCHIVE_SRC" "$REMOTE_ROOT/data/public_archive" \
+      --exclude ".archive-*/**" \
+      --exclude ".import-*" \
+      --exclude ".import-*/**" \
+      --exclude ".job-*" \
+      --exclude "_status/archive.lock" \
+      --exclude "_status/**" \
+      --exclude "_coverage/**" \
+      --exclude "*.tmp" \
+      --exclude "*.tmp-*" \
+      --exclude "*.partial" \
+      --backup-dir "$REMOTE_ROOT/_versions_archive/$BACKUP_TODAY_UTC/public_archive" \
+      --max-duration "${ARCHIVE_MAX_DURATION:-2h}" \
+      --fast-list --transfers 4 -v || ARCHIVE_RC=$?
+    if [ "$ARCHIVE_RC" -eq 0 ]; then
+      UPLOAD_RC=0
+      if find "$COVERAGE_SNAP" -maxdepth 1 -name '*.jsonl' -print -quit | grep -q .; then
+        "$RCLONE_BIN" copy "$COVERAGE_SNAP" "$REMOTE_ROOT/data/public_archive/_coverage" \
+          --backup-dir "$REMOTE_ROOT/_versions_archive/$BACKUP_TODAY_UTC/public_archive/_coverage" \
+          --transfers 4 -v || UPLOAD_RC=$?
+        if [ "$UPLOAD_RC" -eq 0 ]; then
+          log_line "[SYS] stage=gdrive_backup step=coverage_upload status=ok rc=0"
+        else
+          log_line "[SYS] stage=gdrive_backup step=coverage_upload status=failed rc=$UPLOAD_RC"
+        fi
+      else
+        log_line "[SYS] stage=gdrive_backup step=coverage_upload status=skipped rc=0 reason=empty"
+      fi
+      if [ "$UPLOAD_RC" -eq 0 ]; then
+        log_line "[SYS] stage=gdrive_backup step=public_archive status=ok rc=0"
+        ARCHIVE_STATUS_DIR="$CRYPTO_PILOT_ROOT/deploy/backup/status"
+        ARCHIVE_FINISHED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        ARCHIVE_PARTIAL="$ARCHIVE_STATUS_DIR/last_archive_success.json.partial"
+        if ! { mkdir -p "$ARCHIVE_STATUS_DIR" &&
+          printf '{"started_at": "%s", "finished_at": "%s", "rc": 0}' "$ARCHIVE_STARTED_AT" "$ARCHIVE_FINISHED_AT" > "$ARCHIVE_PARTIAL" &&
+          sync &&
+          mv -f "$ARCHIVE_PARTIAL" "$ARCHIVE_STATUS_DIR/last_archive_success.json"; }; then
+          log_line "[SYS] stage=gdrive_backup step=archive_status status=failed"
+          ARCHIVE_FAILED=1
+        fi
+      else
+        log_line "[SYS] stage=gdrive_backup step=public_archive status=failed rc=$UPLOAD_RC"
+        ARCHIVE_FAILED=1
+      fi
+    elif [ "$ARCHIVE_RC" -eq 10 ]; then
+      log_line "[SYS] stage=gdrive_backup step=public_archive status=partial rc=10"
+    else
+      log_line "[SYS] stage=gdrive_backup step=public_archive status=failed rc=$ARCHIVE_RC"
       ARCHIVE_FAILED=1
     fi
-  elif [ "$ARCHIVE_RC" -eq 10 ]; then
-    log_line "[SYS] stage=gdrive_backup step=public_archive status=partial rc=10"
-  else
-    log_line "[SYS] stage=gdrive_backup step=public_archive status=failed rc=$ARCHIVE_RC"
-    ARCHIVE_FAILED=1
   fi
 fi
 

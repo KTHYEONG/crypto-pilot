@@ -1134,3 +1134,27 @@ def test_public_archive_timer_night() -> None:
     assert "OnCalendar=*-*-* 14:00:00 UTC" in timer.splitlines()
     assert "TimeoutStartSec=8h30min" in service.splitlines()
     assert "OnFailure=kca-alert@%n.service" in service.splitlines()
+
+
+def test_archive_window_ends_before_next_backup_slot() -> None:
+    import re
+
+    timer = (ROOT / "deploy" / "public-archive" / "crypto-pilot-public-archive.timer").read_text(encoding="utf-8")
+    service = (ROOT / "deploy" / "public-archive" / "crypto-pilot-public-archive.service").read_text(encoding="utf-8")
+    backup_timer = (ROOT / "deploy" / "backup" / "crypto-pilot-backup.timer").read_text(encoding="utf-8")
+    starts = [
+        int(h) * 60 + int(m)
+        for h, m in re.findall(r"OnCalendar=\*-\*-\* (\d\d):(\d\d):00 UTC", timer)
+    ]
+    timeout = re.search(r"TimeoutStartSec=(\d+)h(?:(\d+)min)?", service)
+    slots = [
+        int(h) * 60 + int(m)
+        for h, m in re.findall(r"OnCalendar=\*-\*-\* (\d\d):(\d\d):00 UTC", backup_timer)
+    ]
+    assert starts
+    assert timeout
+    assert slots
+    window = int(timeout.group(1)) * 60 + int(timeout.group(2) or 0)
+    for start_min in starts:
+        assert start_min + window < 24 * 60 + min(slots)
+        assert all(slot < start_min or slot >= start_min + window for slot in slots)
