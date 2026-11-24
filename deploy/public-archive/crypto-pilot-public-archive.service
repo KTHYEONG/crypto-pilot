@@ -5,4 +5,4 @@ OnFailure=kca-alert@%n.service
 [Service]
 Type=oneshot
 ExecStart=%h/crypto-pilot/deploy/public-archive/run.sh
-TimeoutStartSec=9h
+TimeoutStartSec=8h30min

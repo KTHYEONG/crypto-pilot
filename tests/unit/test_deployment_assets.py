@@ -1131,6 +1131,6 @@ def test_workflow_ships_fixup_before_recreate() -> None:
 def test_public_archive_timer_night() -> None:
     timer = (ROOT / "deploy" / "public-archive" / "crypto-pilot-public-archive.timer").read_text(encoding="utf-8")
     service = (ROOT / "deploy" / "public-archive" / "crypto-pilot-public-archive.service").read_text(encoding="utf-8")
-    assert "OnCalendar=*-*-* 13:30:00 UTC" in timer.splitlines()
-    assert "TimeoutStartSec=9h" in service.splitlines()
+    assert "OnCalendar=*-*-* 14:00:00 UTC" in timer.splitlines()
+    assert "TimeoutStartSec=8h30min" in service.splitlines()
     assert "OnFailure=kca-alert@%n.service" in service.splitlines()
