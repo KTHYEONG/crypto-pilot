@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 import time
+from datetime import datetime, UTC
 from pathlib import Path
 
 import pytest
@@ -16,6 +17,10 @@ SCRIPT = ROOT / "deploy" / "backup" / "crypto-pilot-backup.sh"
 
 TODAY = "2026-09-23"
 REMOTE_ROOT = "testremote:root"
+
+
+def _utc_epoch(hour: int) -> int:
+    return int(datetime(2026, 9, 23, hour, tzinfo=UTC).timestamp())
 
 FAKE_RCLONE_SRC = """#!/usr/bin/env python3
 import datetime, fcntl, json, os, sys
@@ -102,6 +107,7 @@ def _run(
     snapshot_tmp = tmp_path / "tmp"
     snapshot_tmp.mkdir(exist_ok=True)
     env = os.environ.copy()
+    env.pop("ARCHIVE_MAX_DURATION", None)
     env.update(
         {
             "TMPDIR": str(snapshot_tmp),
@@ -111,9 +117,9 @@ def _run(
             "QUANT_GDRIVE_LOCK": base["lock"],
             "LOG_DIR": base["log_dir"],
             "BACKUP_TODAY_UTC": TODAY,
+            "BACKUP_NOW_EPOCH": str(_utc_epoch(6)),
             "VERSION_RETENTION_DAYS": "30",
             "ARCHIVE_VERSION_RETENTION_DAYS": "7",
-            "ARCHIVE_MAX_DURATION": "2h",
             "LOCK_WAIT_SEC": "10",
             "FAKE_RECORD": base["record"],
         }
@@ -365,7 +371,7 @@ def test_missing_coverage_dir_skips_upload(tmp_path: Path) -> None:
 
 def test_archive_step_has_own_backup_dir(tmp_path: Path) -> None:
     base = _setup_with_archive(tmp_path)
-    result = _run(base, tmp_path, {"FAKE_LSF_RC": "3", "FAKE_LSF_ARCHIVE_RC": "3"})
+    result = _run(base, tmp_path, {"FAKE_LSF_RC": "3", "FAKE_LSF_ARCHIVE_RC": "3", "ARCHIVE_MAX_DURATION": "2h"})
     assert result.returncode == 0
     calls = _archive_calls(base)
     assert len(calls) == 1
@@ -387,6 +393,50 @@ def test_archive_step_has_own_backup_dir(tmp_path: Path) -> None:
     assert "*.tmp-*" in call
     for c in _calls(base):
         assert c[0] != "sync"
+
+
+def test_archive_deferred_after_deadline(tmp_path: Path) -> None:
+    base = _setup_with_archive(tmp_path)
+    result = _run(base, tmp_path, {**_NO_PRUNE, "BACKUP_NOW_EPOCH": str(_utc_epoch(13))})
+    assert result.returncode == 0
+    assert _archive_calls(base) == []
+    assert not Path(base["record"] + ".snapshot").exists()
+    calls = _calls(base)
+    assert any(c and c[0] == "copy" and f"{REMOTE_ROOT}/data" in c for c in calls)
+    assert "step=public_archive status=deferred rc=0 reason=after_deadline" in _log_text(base)
+
+
+def test_archive_max_duration_capped_by_deadline(tmp_path: Path) -> None:
+    base = _setup_with_archive(tmp_path)
+    result = _run(
+        base, tmp_path,
+        {**_NO_PRUNE, "BACKUP_NOW_EPOCH": str(_utc_epoch(11)), "ARCHIVE_MAX_DURATION": "4h"},
+    )
+    assert result.returncode == 0
+    (call,) = _archive_calls(base)
+    assert call[call.index("--max-duration") + 1] == "3600s"
+
+
+def test_archive_default_max_duration_4h(tmp_path: Path) -> None:
+    base = _setup_with_archive(tmp_path)
+    result = _run(base, tmp_path, _NO_PRUNE)
+    assert result.returncode == 0
+    (call,) = _archive_calls(base)
+    assert call[call.index("--max-duration") + 1] == "4h"
+
+
+def test_rclone_calls_are_quiet(tmp_path: Path) -> None:
+    base = _setup_with_coverage(tmp_path)
+    orders = Path(base["root"]) / "logs" / "live" / "orders"
+    orders.mkdir(parents=True)
+    (orders / "2026-09-22.jsonl").write_text('{"o":1}\n', encoding="utf-8")
+    result = _run(base, tmp_path, _NO_PRUNE)
+    assert result.returncode == 0
+    copies = [c for c in _calls(base) if c and c[0] == "copy"]
+    assert len(copies) >= 4
+    for call in copies:
+        assert "-v" not in call
+        assert "--stats-one-line" in call
 
 
 def test_data_step_never_receives_archive(tmp_path: Path) -> None:

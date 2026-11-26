@@ -356,7 +356,7 @@ def test_backup_service_alerts_on_failure_and_outlives_lock_wait() -> None:
     assert "OnFailure=kca-alert@%n.service" in service
     assert "Type=oneshot" in service
     assert "ExecStart=%h/crypto-pilot/deploy/backup/crypto-pilot-backup.sh" in service
-    assert "TimeoutStartSec=3h" in service
+    assert "TimeoutStartSec=5h" in service
 
 
 def test_deploy_workflow_installs_and_enables_backup_unit() -> None:

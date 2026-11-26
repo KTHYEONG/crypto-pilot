@@ -19,6 +19,9 @@ VERSION_RETENTION_DAYS="${VERSION_RETENTION_DAYS:-30}"
 ARCHIVE_VERSION_RETENTION_DAYS="${ARCHIVE_VERSION_RETENTION_DAYS:-7}"
 OPS_LOG_RETENTION_DAYS="${OPS_LOG_RETENTION_DAYS:-30}"
 BACKUP_TODAY_UTC="${BACKUP_TODAY_UTC:-$(date -u +%F)}"
+ARCHIVE_DEADLINE_UTC="${ARCHIVE_DEADLINE_UTC:-12:00}"
+ARCHIVE_MIN_WINDOW_S="${ARCHIVE_MIN_WINDOW_S:-600}"
+ARCHIVE_MAX_DURATION="${ARCHIVE_MAX_DURATION:-4h}"
 LOG_DIR="${LOG_DIR:-$HOME/logs}"
 LOG_FILE="${LOG_DIR}/crypto-pilot-backup-${BACKUP_TODAY_UTC}.log"
 
@@ -28,6 +31,39 @@ touch "$QUANT_GDRIVE_LOCK"
 
 log_line() {
   printf '%s\n' "$1" >> "$LOG_FILE"
+}
+
+# 왜 archive 창을 계산하는가: 야간(21:30 KST) 실행이 public_archive를 밀어 공용 락을 오래 잡으면
+#   kca-backup이 대기한다. 업로드는 낮 실행에만 허용하고, 마감 이후에는 건너뛴다.
+duration_seconds() {
+  local value="$1" n
+  [[ "$value" =~ ^([0-9]+)([smh])$ ]] || return 1
+  n="${BASH_REMATCH[1]}"
+  case "${BASH_REMATCH[2]}" in
+    s) echo "$n" ;;
+    m) echo $((n * 60)) ;;
+    h) echo $((n * 3600)) ;;
+  esac
+}
+
+# Sets ARCHIVE_WINDOW (rclone --max-duration). Returns 0 ok, 2 deferred (past deadline), 1 invalid config.
+archive_window() {
+  local deadline_epoch max_s remaining_s now_epoch
+  # Clock read here, not at start: the lock wait and data step can take hours. BACKUP_NOW_EPOCH pins it in tests.
+  now_epoch="${BACKUP_NOW_EPOCH:-$(date -u +%s)}"
+  [[ "$ARCHIVE_DEADLINE_UTC" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]] || return 1
+  deadline_epoch="$(date -u -d "${BACKUP_TODAY_UTC}T${ARCHIVE_DEADLINE_UTC}:00Z" +%s 2>/dev/null)" || return 1
+  [[ "$deadline_epoch" =~ ^[0-9]+$ ]] || return 1
+  max_s="$(duration_seconds "$ARCHIVE_MAX_DURATION")" || return 1
+  remaining_s=$((deadline_epoch - now_epoch))
+  if [ "$remaining_s" -lt "$ARCHIVE_MIN_WINDOW_S" ]; then
+    return 2
+  fi
+  if [ "$remaining_s" -lt "$max_s" ]; then
+    ARCHIVE_WINDOW="${remaining_s}s"
+  else
+    ARCHIVE_WINDOW="$ARCHIVE_MAX_DURATION"
+  fi
 }
 
 # Step: log_retention (local only, before the Drive lock so a stuck lock never stops pruning).
@@ -87,7 +123,7 @@ DATA_RC=0
   --exclude "*.key" \
   --exclude "*_key.txt" \
   --backup-dir "$REMOTE_ROOT/_versions/$BACKUP_TODAY_UTC/data" \
-  --fast-list --transfers 4 -v || DATA_RC=$?
+  --fast-list --transfers 4 --stats 10m --stats-one-line --stats-log-level NOTICE || DATA_RC=$?
 if [ "$DATA_RC" -eq 0 ]; then
   log_line "[SYS] stage=gdrive_backup step=data status=ok rc=0"
 else
@@ -102,7 +138,7 @@ if [ -d "$ORDERS_SRC" ]; then
   "$RCLONE_BIN" copy "$ORDERS_SRC" "$REMOTE_ROOT/logs/live/orders" \
     --include "*.jsonl" \
     --backup-dir "$REMOTE_ROOT/_versions/$BACKUP_TODAY_UTC/logs/live/orders" \
-    --fast-list -v || ORDERS_RC=$?
+    --fast-list --stats 10m --stats-one-line --stats-log-level NOTICE || ORDERS_RC=$?
   if [ "$ORDERS_RC" -eq 0 ]; then
     log_line "[SYS] stage=gdrive_backup step=orders status=ok rc=0"
   else
@@ -140,8 +176,15 @@ trap cleanup_coverage_snapshot EXIT
 # runs ahead of Drive data.
 ARCHIVE_FAILED=0
 ARCHIVE_SRC="$CRYPTO_PILOT_ROOT/data/public_archive"
+ARCHIVE_WINDOW_RC=0
+archive_window || ARCHIVE_WINDOW_RC=$?
 if [ ! -d "$ARCHIVE_SRC" ]; then
   log_line "[SYS] stage=gdrive_backup step=public_archive status=skipped rc=0 reason=absent"
+elif [ "$ARCHIVE_WINDOW_RC" -eq 2 ]; then
+  log_line "[SYS] stage=gdrive_backup step=public_archive status=deferred rc=0 reason=after_deadline"
+elif [ "$ARCHIVE_WINDOW_RC" -ne 0 ]; then
+  log_line "[SYS] stage=gdrive_backup step=public_archive status=failed rc=1 reason=invalid_window"
+  ARCHIVE_FAILED=1
 else
   ARCHIVE_STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   SNAP_RC=0
@@ -168,14 +211,14 @@ else
       --exclude "*.tmp-*" \
       --exclude "*.partial" \
       --backup-dir "$REMOTE_ROOT/_versions_archive/$BACKUP_TODAY_UTC/public_archive" \
-      --max-duration "${ARCHIVE_MAX_DURATION:-2h}" \
-      --fast-list --transfers 4 -v || ARCHIVE_RC=$?
+      --max-duration "$ARCHIVE_WINDOW" \
+      --fast-list --transfers 4 --stats 10m --stats-one-line --stats-log-level NOTICE || ARCHIVE_RC=$?
     if [ "$ARCHIVE_RC" -eq 0 ]; then
       UPLOAD_RC=0
       if find "$COVERAGE_SNAP" -maxdepth 1 -name '*.jsonl' -print -quit | grep -q .; then
         "$RCLONE_BIN" copy "$COVERAGE_SNAP" "$REMOTE_ROOT/data/public_archive/_coverage" \
           --backup-dir "$REMOTE_ROOT/_versions_archive/$BACKUP_TODAY_UTC/public_archive/_coverage" \
-          --transfers 4 -v || UPLOAD_RC=$?
+          --transfers 4 --stats 10m --stats-one-line --stats-log-level NOTICE || UPLOAD_RC=$?
         if [ "$UPLOAD_RC" -eq 0 ]; then
           log_line "[SYS] stage=gdrive_backup step=coverage_upload status=ok rc=0"
         else

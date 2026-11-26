@@ -1,5 +1,5 @@
 [Unit]
-Description=crypto-pilot Drive backup timer (00:15 and 12:30 UTC)
+Description=crypto-pilot Drive backup timer (00:15 UTC full, 12:30 UTC data; archive upload deadline 12:00 UTC)
 
 [Timer]
 OnCalendar=*-*-* 00:15:00 UTC
