@@ -1,10 +1,11 @@
 [Unit]
-Description=Run crypto-pilot archive mirror upload daily at 07:45 UTC, between the backup and the evening jobs
+Description=Run crypto-pilot archive mirror sessions after each quiet window (00:15 and 06:45 UTC)
 
 [Timer]
-OnCalendar=*-*-* 07:45:00 UTC
+OnCalendar=*-*-* 00:15:00 UTC
+OnCalendar=*-*-* 06:45:00 UTC
 Persistent=false
-AccuracySec=5min
+AccuracySec=1min
 Unit=crypto-pilot-archive-mirror.service
 
 [Install]

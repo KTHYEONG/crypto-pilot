@@ -124,6 +124,8 @@ services:
     image: ghcr.io/kthyeong/crypto-pilot-live:latest
     user: "1001:1001"
     container_name: archive-mirror
+    # Python as PID 1 would ignore SIGTERM, so a session timeout could not stop a running build.
+    init: true
     profiles: ["archive"]
     restart: "no"
     mem_limit: 3g

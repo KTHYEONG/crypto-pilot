@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Archive mirror night upload: builds a bounded chunk per pass and copies it to Drive immutably.
+# Archive mirror session (runs all day outside the quiet windows): builds a bounded chunk per pass and copies it to Drive immutably.
 # Drive writes run only under the shared gdrive lock and never during a container run; nothing here deletes remote files.
 set -uo pipefail
 
@@ -10,8 +10,17 @@ RCLONE_BIN="${RCLONE_BIN:-$(command -v rclone 2>/dev/null || echo "$HOME/.local/
 MIRROR_REMOTE="${MIRROR_REMOTE:-gdrive:quant-lake/live/crypto-pilot/archive_mirror}"
 DRIVE_ABOUT_REMOTE="${DRIVE_ABOUT_REMOTE:-gdrive:}"
 QUANT_GDRIVE_LOCK="${QUANT_GDRIVE_LOCK:-/run/user/$(id -u)/quant-gdrive.lock}"
-LOCK_WAIT_SEC="${LOCK_WAIT_SEC:-3600}"
-MIRROR_DEADLINE_UTC="${MIRROR_DEADLINE_UTC:-11:00}"
+# Upper bound on a Drive lock wait; the session's own end bounds it too.
+LOCK_WAIT_SEC="${LOCK_WAIT_SEC:-57600}"
+# No work inside these UTC windows (start-end, may wrap midnight): KRX order jobs on this host and the live daily cycle.
+MIRROR_QUIET_UTC="${MIRROR_QUIET_UTC:-06:10-06:45 22:55-00:15}"
+# Empty means "until the next quiet window"; an explicit HH:MM overrides the windows for a supervised run.
+MIRROR_DEADLINE_UTC="${MIRROR_DEADLINE_UTC:-}"
+MIRROR_NOW_UTC="${MIRROR_NOW_UTC:-}"
+# A build or upload still running this long after the session end is terminated (resumable next session).
+MIRROR_OVERRUN_GRACE_SEC="${MIRROR_OVERRUN_GRACE_SEC:-300}"
+# One upload never keeps the shared Drive lock longer than this; other backups give up after a 2 h wait.
+MIRROR_MAX_LOCK_HOLD_SEC="${MIRROR_MAX_LOCK_HOLD_SEC:-1800}"
 MIRROR_MAX_CONFIRM_AGE_H="${MIRROR_MAX_CONFIRM_AGE_H:-72}"
 # Optional space-separated subset for a supervised run; empty means the mirror's default datasets.
 MIRROR_DATASETS="${MIRROR_DATASETS:-}"
@@ -30,6 +39,8 @@ SEEN_STALE=0
 SEEN_UPLOAD=0
 SEEN_FAILED=0
 HARD_RC=0
+# Set when the Drive lock or the session end cut the work short: deferred to the next session, not a failure.
+DEFERRED=0
 
 log_line() { printf '%s\n' "$1" >> "$LOG_FILE"; }
 log_rc() { log_line "[SYS] stage=archive_mirror step=$1 rc=$2"; }
@@ -48,20 +59,78 @@ finish() {
   exit "$code"
 }
 
-deadline_passed() { [ "$((10#$(date -u +%H%M)))" -ge "$((10#${MIRROR_DEADLINE_UTC//:/}))" ]; }
+now_hhmm() { if [ -n "$MIRROR_NOW_UTC" ]; then echo "$MIRROR_NOW_UTC"; else date -u +%H:%M; fi; }
+
+# Minutes after midnight; fails on anything but HH:MM.
+minutes_of() {
+  [[ "$1" =~ ^([01][0-9]|2[0-3]):([0-5][0-9])$ ]] || return 1
+  echo $((10#${BASH_REMATCH[1]} * 60 + 10#${BASH_REMATCH[2]}))
+}
+
+# Prints the session end (HH:MM), or "quiet" inside a quiet window; fails on a malformed setting.
+session_end() {
+  local now window start end start_text best=1439 best_text="23:59"
+  now="$(minutes_of "$(now_hhmm)")" || return 1
+  for window in $MIRROR_QUIET_UTC; do
+    start_text="${window%-*}"
+    start="$(minutes_of "$start_text")" || return 1
+    end="$(minutes_of "${window#*-}")" || return 1
+    if { [ "$start" -lt "$end" ] && [ "$now" -ge "$start" ] && [ "$now" -lt "$end" ]; } ||
+      { [ "$start" -gt "$end" ] && { [ "$now" -ge "$start" ] || [ "$now" -lt "$end" ]; }; }; then
+      echo quiet
+      return 0
+    fi
+    if [ "$start" -gt "$now" ] && [ "$start" -lt "$best" ]; then
+      best="$start"
+      best_text="$start_text"
+    fi
+  done
+  echo "$best_text"
+}
+
+seconds_left() {
+  local now end
+  now="$(minutes_of "$(now_hhmm)")" && end="$(minutes_of "$MIRROR_DEADLINE_UTC")" || { echo 0; return; }
+  echo $(((end - now) * 60))
+}
+
+deadline_passed() { [ "$(seconds_left)" -le 0 ]; }
+
+# Hard bound for one container pass or upload: the time left plus the overrun grace.
+step_budget() {
+  local left
+  left="$(seconds_left)"
+  [ "$left" -gt 0 ] || left=0
+  echo $((left + MIRROR_OVERRUN_GRACE_SEC))
+}
+
+upload_budget() {
+  local budget
+  budget="$(step_budget)"
+  [ "$budget" -lt "$MIRROR_MAX_LOCK_HOLD_SEC" ] || budget="$MIRROR_MAX_LOCK_HOLD_SEC"
+  echo "$budget"
+}
 
 mirror_cmd() {
   docker compose --profile archive run --rm --no-deps archive-mirror \
     /app/.venv/bin/python -m src.cli.main archive mirror "$@"
 }
 
-# Runs the given command while holding the shared Drive lock; returns the command's status or 1 when the lock times out.
+# Runs the given command while holding the shared Drive lock; 75 when another backup holds it past the session.
 with_drive_lock() {
-  local rc=0
+  local rc=0 wait
+  wait="$(seconds_left)"
+  [ "$wait" -lt "$LOCK_WAIT_SEC" ] || wait="$LOCK_WAIT_SEC"
+  [ "$wait" -ge 1 ] || wait=1
   exec {DRIVE_FD}>"$QUANT_GDRIVE_LOCK" || return 1
-  if ! flock -w "$LOCK_WAIT_SEC" "$DRIVE_FD"; then
+  if ! flock -w "$wait" "$DRIVE_FD"; then
     exec {DRIVE_FD}>&-
-    return 1
+    return 75
+  fi
+  # The wait may have run into a quiet window.
+  if [ $(($(seconds_left) + MIRROR_OVERRUN_GRACE_SEC)) -le 0 ]; then
+    exec {DRIVE_FD}>&-
+    return 75
   fi
   "$@" || rc=$?
   exec {DRIVE_FD}>&-
@@ -70,9 +139,15 @@ with_drive_lock() {
 
 sync_index() {
   local rc=0
-  with_drive_lock "$RCLONE_BIN" copy "$MIRROR_REMOTE/index" "$ARCHIVE_ROOT/index" --immutable --fast-list \
-    --stats 10m --stats-one-line --stats-log-level NOTICE >> "$LOG_FILE" 2>&1 || rc=$?
+  # Reads Drive only, so it does not queue behind other writers.
+  "$RCLONE_BIN" copy "$MIRROR_REMOTE/index" "$ARCHIVE_ROOT/index" --immutable --fast-list \
+    --max-duration "$(step_budget)s" --stats 10m --stats-one-line --stats-log-level NOTICE >> "$LOG_FILE" 2>&1 || rc=$?
   log_rc index_sync "$rc"
+  # An index cut short must not be built against (everything missing would be uploaded again).
+  if [ "$rc" -eq 10 ]; then
+    log_line "[SYS] stage=archive_mirror step=deferred rc=0"
+    exit 0
+  fi
   [ "$rc" -eq 0 ] || [ "$rc" -eq 3 ]
 }
 
@@ -88,6 +163,10 @@ upload_format_doc() {
   fi
   rm -f "$tmp"
   log_rc format_doc "$rc"
+  if [ "$rc" -eq 75 ]; then
+    # Retried by the next session; uploads below wait for the same lock anyway.
+    return 0
+  fi
   [ "$rc" -eq 0 ]
 }
 
@@ -109,8 +188,9 @@ list_complete_pairs() {
 
 upload_outbox() {
   "$RCLONE_BIN" copy "$OUTBOX/objects" "$MIRROR_REMOTE/objects" --files-from "$1" --immutable --transfers 4 \
-    --stats 10m --stats-one-line --stats-log-level NOTICE || return $?
+    --max-duration "$(upload_budget)s" --stats 10m --stats-one-line --stats-log-level NOTICE || return $?
   "$RCLONE_BIN" copy "$OUTBOX/index" "$MIRROR_REMOTE/index" --files-from "$2" --immutable \
+    --max-duration "$(upload_budget)s" \
     --stats 10m --stats-one-line --stats-log-level NOTICE
 }
 
@@ -126,6 +206,11 @@ flush() {
   [ -s "$index_list" ] || return 0
   with_drive_lock upload_outbox "$objects_list" "$index_list" >> "$LOG_FILE" 2>&1 || rc=$?
   log_rc upload_outbox "$rc"
+  # 75: lock held elsewhere; 10: rclone stopped at --max-duration. The outbox is kept for the next session.
+  if [ "$rc" -eq 75 ] || [ "$rc" -eq 10 ]; then
+    DEFERRED=1
+    return 1
+  fi
   if [ "$rc" -eq 0 ]; then
     { sed 's|^|objects/|' "$objects_list" && sed 's|^|index/|' "$index_list"; } > "$list" || rc=$?
     if [ "$rc" -eq 0 ] && ! "$RCLONE_BIN" lsjson -R --hash --files-only --fast-list --files-from "$list" "$MIRROR_REMOTE" \
@@ -167,7 +252,7 @@ build_loop() {
   while ! deadline_passed; do
     round=$((round + 1))
     if ! flush; then
-      SEEN_UPLOAD=1
+      [ "$DEFERRED" -eq 1 ] || SEEN_UPLOAD=1
       return 0
     fi
     if ! remote=$(remote_bytes) || ! free=$(drive_free); then
@@ -178,9 +263,16 @@ build_loop() {
     rc=0
     local -a dataset_args=()
     [ -z "$MIRROR_DATASETS" ] || read -r -a dataset_args <<< "--datasets $MIRROR_DATASETS"
-    out=$(mirror_cmd build --execute --remote-bytes "$remote" --drive-free-bytes "$free" \
-      --deadline "$MIRROR_DEADLINE_UTC" "${dataset_args[@]}" 2>>"$LOG_FILE" | tee -a "$LOG_FILE") || rc=$?
+    out=$(timeout --signal=TERM --kill-after=60 "$(step_budget)" \
+      docker compose --profile archive run --rm --no-deps archive-mirror \
+      /app/.venv/bin/python -m src.cli.main archive mirror build --execute --remote-bytes "$remote" \
+      --drive-free-bytes "$free" --deadline "$MIRROR_DEADLINE_UTC" "${dataset_args[@]}" \
+      2>>"$LOG_FILE" | tee -a "$LOG_FILE") || rc=$?
     log_line "[SYS] stage=archive_mirror step=build round=$round rc=$rc"
+    if [ "$rc" -eq 124 ]; then
+      DEFERRED=1
+      return 0
+    fi
     case "$rc" in
       0) ;;
       3) SEEN_FAILED=1 ;;
@@ -194,7 +286,7 @@ build_loop() {
       return 0
     fi
     if ! flush; then
-      SEEN_UPLOAD=1
+      [ "$DEFERRED" -eq 1 ] || SEEN_UPLOAD=1
       return 0
     fi
     if [ "$more" != true ] || [ "$built" -eq 0 ]; then
@@ -220,8 +312,24 @@ if ! flock -n "$RUN_FD"; then
   exit 75
 fi
 
+if [ -z "$MIRROR_DEADLINE_UTC" ]; then
+  if ! MIRROR_DEADLINE_UTC="$(session_end)"; then
+    log_line "[SYS] stage=archive_mirror step=window status=invalid rc=1"
+    exit 1
+  fi
+  if [ "$MIRROR_DEADLINE_UTC" = quiet ]; then
+    log_line "[SYS] stage=archive_mirror step=window status=quiet rc=0"
+    exit 0
+  fi
+elif ! minutes_of "$MIRROR_DEADLINE_UTC" >/dev/null; then
+  log_line "[SYS] stage=archive_mirror step=window status=invalid rc=1"
+  exit 1
+fi
+log_line "[SYS] stage=archive_mirror step=window status=open until=$MIRROR_DEADLINE_UTC"
+
 sync_index || { SEEN_UPLOAD=1; finish; }
 upload_format_doc || { SEEN_UPLOAD=1; finish; }
 build_loop
+[ "$DEFERRED" -eq 0 ] || log_line "[SYS] stage=archive_mirror step=deferred rc=0"
 run_status
 finish

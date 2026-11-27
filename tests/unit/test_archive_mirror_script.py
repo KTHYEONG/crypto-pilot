@@ -7,6 +7,7 @@ import json
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -36,6 +37,9 @@ if sub == "format-doc":
     print("FORMAT")
     sys.exit(0)
 if sub == "build":
+    if os.environ.get("FAKE_BUILD_SLEEP"):
+        import time
+        time.sleep(float(os.environ["FAKE_BUILD_SLEEP"]))
     counter = os.path.join(os.environ["FAKE_STATE"], "build_count")
     count = int(open(counter).read()) if os.path.exists(counter) else 0
     with open(counter, "w") as handle:
@@ -72,7 +76,7 @@ sub = args[0]
 joined = " ".join(args)
 rules = [item.split("=", 1) for item in os.environ.get("FAKE_RCLONE_FAIL", "").split(";") if item]
 rc = next((int(code) for needle, code in rules if needle in joined), 0)
-if sub in ("copy", "copyto"):
+if sub in ("copy", "copyto") and args[2].startswith("testremote:"):
     with open(os.environ["QUANT_GDRIVE_LOCK"], "a") as lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -321,3 +325,79 @@ def test_never_deletes_remote(harness: dict[str, Path]) -> None:
     _stage_outbox(harness["root"])
     _, calls = _run(harness, FAKE_BUILD_SEQ="5|3|true;0|2|false")
     assert not [a for a in _argv(calls, "rclone") if a[0] in DESTRUCTIVE]
+
+
+@pytest.mark.parametrize("now", ["22:55", "23:30", "00:00", "00:14", "06:10", "06:44"])
+def test_quiet_window_does_nothing(harness: dict[str, Path], now: str) -> None:
+    result, calls = _run(harness, MIRROR_DEADLINE_UTC="", MIRROR_NOW_UTC=now)
+    assert result.returncode == 0
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    ("now", "end"), [("00:15", "06:10"), ("06:09", "06:10"), ("06:45", "22:55"), ("13:40", "22:55"), ("22:54", "22:55")]
+)
+def test_session_ends_at_the_next_quiet_window(harness: dict[str, Path], now: str, end: str) -> None:
+    result, calls = _run(harness, MIRROR_DEADLINE_UTC="", MIRROR_NOW_UTC=now, FAKE_BUILD_SEQ="0|0|false")
+    assert result.returncode == 0, result.stdout + result.stderr
+    (build,) = _builds(calls)
+    assert build[build.index("--deadline") + 1] == end
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"MIRROR_DEADLINE_UTC": "", "MIRROR_QUIET_UTC": "6-7"},
+        {"MIRROR_DEADLINE_UTC": "25:00"},
+        {"MIRROR_DEADLINE_UTC": "", "MIRROR_NOW_UTC": "noon"},
+    ],
+)
+def test_malformed_window_fails_closed(harness: dict[str, Path], override: dict[str, str]) -> None:
+    result, calls = _run(harness, **override)
+    assert result.returncode == 1
+    assert calls == []
+
+
+def test_busy_drive_lock_defers_without_failing_or_confirming(harness: dict[str, Path]) -> None:
+    _stage_outbox(harness["root"])
+    with open(harness["lock"], "a") as held:
+        fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        result, calls = _run(harness, LOCK_WAIT_SEC="1")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not [a for a in _argv(calls, "rclone") if a[0] in ("copy", "copyto") and a[2].startswith(REMOTE)]
+    assert not [a for a in _argv(calls, "docker") if "confirm" in a]
+    assert _builds(calls) == []
+
+
+def test_upload_cut_at_max_duration_is_deferred(harness: dict[str, Path]) -> None:
+    _stage_outbox(harness["root"])
+    result, calls = _run(harness, FAKE_RCLONE_FAIL="outbox/objects=10")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not [a for a in _argv(calls, "docker") if "confirm" in a]
+    upload = next(a for a in _argv(calls, "rclone") if a[0] == "copy" and a[1].endswith("outbox/objects"))
+    assert upload[upload.index("--max-duration") + 1].endswith("s")
+
+
+def test_overrunning_build_is_terminated_and_deferred(harness: dict[str, Path]) -> None:
+    started = time.monotonic()
+    result, calls = _run(
+        harness, MIRROR_NOW_UTC="10:00", MIRROR_DEADLINE_UTC="10:01", MIRROR_OVERRUN_GRACE_SEC="-57",
+        FAKE_BUILD_SLEEP="60",
+    )
+    assert time.monotonic() - started < 40
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert len(_builds(calls)) == 1
+
+
+def test_one_upload_never_holds_the_drive_lock_past_the_cap(harness: dict[str, Path]) -> None:
+    _stage_outbox(harness["root"])
+    _, calls = _run(harness, MIRROR_NOW_UTC="07:00", MIRROR_DEADLINE_UTC="22:55")
+    uploads = [a for a in _argv(calls, "rclone") if a[0] == "copy" and "outbox" in a[1]]
+    assert uploads
+    assert {a[a.index("--max-duration") + 1] for a in uploads} == {"1800s"}
+
+
+def test_cut_index_sync_builds_nothing(harness: dict[str, Path]) -> None:
+    result, calls = _run(harness, FAKE_RCLONE_FAIL="archive/index=10")
+    assert result.returncode == 0
+    assert _builds(calls) == []

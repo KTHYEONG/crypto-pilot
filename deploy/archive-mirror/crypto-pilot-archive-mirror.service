@@ -6,4 +6,5 @@ OnFailure=kca-alert@%n.service
 Type=oneshot
 Nice=10
 ExecStart=%h/crypto-pilot/deploy/archive-mirror/run.sh
-TimeoutStartSec=3h45min
+# The longest session starts 06:45 UTC; this ends it before the 23:03 live cycle.
+TimeoutStartSec=16h12min

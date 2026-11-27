@@ -1165,21 +1165,31 @@ def test_archive_mirror_service_isolated() -> None:
     assert "profiles: [\"archive\"]" in block
     assert "env_file" not in block
     assert "cpu_shares: 128" in block
+    assert "init: true" in block
     volumes = [line.strip() for line in block.splitlines() if line.strip().startswith("- ./")]
     assert volumes == ["- ./data/archive_mirror:/app/data/archive_mirror", "- ./logs:/app/logs"]
 
 
-def test_archive_mirror_window_avoids_other_jobs() -> None:
-    timer = (ROOT / "deploy" / "archive-mirror" / "crypto-pilot-archive-mirror.timer").read_text(encoding="utf-8")
-    service = (ROOT / "deploy" / "archive-mirror" / "crypto-pilot-archive-mirror.service").read_text(encoding="utf-8")
-    assert "OnCalendar=*-*-* 07:45:00 UTC" in timer
+def test_archive_mirror_sessions_avoid_quiet_windows() -> None:
+    import re
+
+    base = ROOT / "deploy" / "archive-mirror"
+    timer = (base / "crypto-pilot-archive-mirror.timer").read_text(encoding="utf-8")
+    service = (base / "crypto-pilot-archive-mirror.service").read_text(encoding="utf-8")
+    script = (base / "run.sh").read_text(encoding="utf-8")
     assert "Persistent=false" in timer
-    timeout = service.split("TimeoutStartSec=", 1)[1].splitlines()[0]
-    assert timeout == "3h45min"
-    start_min = 7 * 60 + 45
-    end_min = start_min + 3 * 60 + 45
-    assert start_min > 4 * 60 + 30
-    assert end_min < 12 * 60
+    starts = [int(h) * 60 + int(m) for h, m in re.findall(r"OnCalendar=\*-\*-\* (\d\d):(\d\d):00 UTC", timer)]
+    quiet = re.search(r'MIRROR_QUIET_UTC="\$\{MIRROR_QUIET_UTC:-([^}]+)\}"', script)
+    assert quiet is not None
+    windows = [
+        tuple(int(part[:2]) * 60 + int(part[3:]) for part in window.split("-")) for window in quiet.group(1).split()
+    ]
+    assert windows == [(370, 405), (1375, 15)]
+    assert sorted(starts) == sorted(end for _, end in windows), "each session starts as a quiet window ends"
+    timeout = re.search(r"TimeoutStartSec=(\d+)h(\d+)min", service)
+    assert timeout is not None
+    live_cycle_start = 23 * 60 + 3
+    assert max(starts) + int(timeout.group(1)) * 60 + int(timeout.group(2)) + 1 < live_cycle_start
 
 
 def test_workflow_ships_archive_mirror() -> None:
