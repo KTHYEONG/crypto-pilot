@@ -120,3 +120,23 @@ services:
       options:
         max-size: "10m"
         max-file: "5"
+  archive-mirror:
+    image: ghcr.io/kthyeong/crypto-pilot-live:latest
+    user: "1001:1001"
+    container_name: archive-mirror
+    profiles: ["archive"]
+    restart: "no"
+    mem_limit: 3g
+    cpus: 1.0
+    cpu_shares: 128
+    environment:
+      - HOME=/tmp
+    volumes:
+      - ./data/archive_mirror:/app/data/archive_mirror
+      - ./logs:/app/logs
+    command: ["/app/.venv/bin/python", "-m", "src.cli.main", "archive", "mirror", "status"]
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"

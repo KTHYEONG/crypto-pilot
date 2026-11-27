@@ -41,3 +41,11 @@ def test_transient_exclusions_stay_first() -> None:
     archive = rules.index("- /public_archive/**")
     for pattern in ("- *.tmp", "- *.tmp-*", "- *.partial"):
         assert rules.index(pattern) < archive
+
+
+def test_archive_mirror_excluded_from_data_step() -> None:
+    rules = _rules()
+    excluded = rules.index("- /archive_mirror/**")
+    assert excluded == rules.index("- /public_archive/**") + 1
+    assert excluded < rules.index("- **")
+    assert not [r for r in rules if r.startswith("+ /archive_mirror")]

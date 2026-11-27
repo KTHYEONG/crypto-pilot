@@ -1107,7 +1107,7 @@ def _compose_service_block(name: str) -> str:
 
 
 def test_compose_runs_all_services_as_host_user() -> None:
-    services = ("mhs-live", "capture-blue", "capture-green", "market-normalizer", "public-archive")
+    services = ("mhs-live", "capture-blue", "capture-green", "market-normalizer", "public-archive", "archive-mirror")
     for name in services:
         block = _compose_service_block(name)
         assert 'user: "1001:1001"' in block, name
@@ -1158,3 +1158,34 @@ def test_archive_window_ends_before_next_backup_slot() -> None:
     for start_min in starts:
         assert start_min + window < 24 * 60 + min(slots)
         assert all(slot < start_min or slot >= start_min + window for slot in slots)
+
+
+def test_archive_mirror_service_isolated() -> None:
+    block = _compose_service_block("archive-mirror")
+    assert "profiles: [\"archive\"]" in block
+    assert "env_file" not in block
+    assert "cpu_shares: 128" in block
+    volumes = [line.strip() for line in block.splitlines() if line.strip().startswith("- ./")]
+    assert volumes == ["- ./data/archive_mirror:/app/data/archive_mirror", "- ./logs:/app/logs"]
+
+
+def test_archive_mirror_window_avoids_other_jobs() -> None:
+    timer = (ROOT / "deploy" / "archive-mirror" / "crypto-pilot-archive-mirror.timer").read_text(encoding="utf-8")
+    service = (ROOT / "deploy" / "archive-mirror" / "crypto-pilot-archive-mirror.service").read_text(encoding="utf-8")
+    assert "OnCalendar=*-*-* 07:45:00 UTC" in timer
+    assert "Persistent=false" in timer
+    timeout = service.split("TimeoutStartSec=", 1)[1].splitlines()[0]
+    assert timeout == "3h45min"
+    start_min = 7 * 60 + 45
+    end_min = start_min + 3 * 60 + 45
+    assert start_min > 4 * 60 + 30
+    assert end_min < 12 * 60
+
+
+def test_workflow_ships_archive_mirror() -> None:
+    workflow = (ROOT / ".github" / "workflows" / "deploy.yml").read_text(encoding="utf-8")
+    assert 'deploy/archive-mirror/run.sh "$REMOTE_USER@$HOST:~/crypto-pilot/deploy/archive-mirror/run.sh.new"' in workflow
+    assert "deploy/archive-mirror/crypto-pilot-archive-mirror.timer" in workflow
+    enable = workflow.index("systemctl --user enable --now crypto-pilot-archive-mirror.timer")
+    assert enable > workflow.index("vps_verify_stable")
+

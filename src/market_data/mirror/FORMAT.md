@@ -11,9 +11,19 @@ stored this way are kept as the untouched official zip (`verbatim` objects).
 
 ## Object layout
 
-One Parquet file per dataset bucket, such as one month of one dataset. Rows of
-several source CSVs may be packed into the same object. Each source is
-identified by `__source`.
+All paths are relative to the mirror root. Nothing is ever overwritten: a later
+object only adds sources.
+
+- `objects/<dataset>/<YYYY-MM>/<partition>-<id>.parquet`: columnar objects.
+  `partition` is the symbol for `bookDepth` and `aggTrades`, and `ALL` (many
+  symbols packed together) for the other datasets. A month may have several
+  objects.
+- `objects/verbatim/<dataset>/<YYYY-MM>/<zip name>-<id>.zip`: untouched official zips.
+- `index/<same path without objects/, extension replaced by .json.zst>`: one
+  index file (sidecar) per object. An object without a sidecar is an incomplete
+  upload and can be ignored.
+
+Each source CSV inside a columnar object is identified by `__source`.
 
 Fixed leading columns:
 
@@ -84,11 +94,27 @@ mismatch means the object is corrupt.
 
 ## Sidecar index
 
-Part 2 of the mirror stores one index record per source alongside the objects.
-It records the source key, the upstream ETag, the official zip sha256, the
-source index, the storage kind (`columnar` or `verbatim`), the header line, the
-trailing newline flag, the CSV sha256 and the CSV byte count. Those fields are
-needed to rebuild and verify each source without reading unrelated sources.
+A sidecar is zstd-compressed JSON.
+
+Object fields: `format_version`, `dataset`, `month`, `object_path`,
+`object_bytes`, `object_md5`, `object_sha256`, `created_at`, `sources`.
+
+Each entry of `sources`:
+
+| field | meaning |
+|---|---|
+| `key` | Binance Vision bucket key of the official zip |
+| `etag` | upstream ETag when it was mirrored; one key can appear again with a newer ETag |
+| `zip_sha256` | sha256 of the official zip |
+| `symbol`, `period` | symbol and `YYYY-MM-DD` or `YYYY-MM` |
+| `source_index` | value of `__source` for this CSV inside the object |
+| `storage` | `columnar` or `verbatim` |
+| `header_line` | CSV header line, or null for a headerless CSV |
+| `trailing_newline` | whether the CSV ended with a newline |
+| `csv_sha256`, `csv_bytes` | checksum and size of the original CSV |
+
+The last four fields are null for `verbatim` entries. To find a file, search the
+sidecars of its dataset and month for its `key`.
 
 ## Verbatim objects
 

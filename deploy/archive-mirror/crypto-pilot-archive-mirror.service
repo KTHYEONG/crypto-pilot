@@ -1,0 +1,9 @@
+[Unit]
+Description=crypto-pilot archive mirror upload (one-shot, low priority)
+OnFailure=kca-alert@%n.service
+
+[Service]
+Type=oneshot
+Nice=10
+ExecStart=%h/crypto-pilot/deploy/archive-mirror/run.sh
+TimeoutStartSec=3h45min

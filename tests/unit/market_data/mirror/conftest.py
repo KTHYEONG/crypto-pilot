@@ -16,8 +16,10 @@ def md5_hex(data: bytes) -> str:
 
 def zip_of(csv_body: bytes, name: str = "part.csv") -> bytes:
     buffer = io.BytesIO()
-    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        archive.writestr(name, csv_body)
+    member = zipfile.ZipInfo(name, date_time=(2024, 1, 1, 0, 0, 0))
+    member.compress_type = zipfile.ZIP_DEFLATED
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr(member, csv_body)
     return buffer.getvalue()
 
 

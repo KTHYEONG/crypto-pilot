@@ -217,6 +217,10 @@ jobs:
           ssh $SSH_OPTS "$REMOTE_USER@$HOST" "mkdir -p ~/crypto-pilot/deploy/public-archive"
           scp $SSH_OPTS deploy/public-archive/run.sh "$REMOTE_USER@$HOST:~/crypto-pilot/deploy/public-archive/run.sh.new"
           scp $SSH_OPTS deploy/public-archive/crypto-pilot-public-archive.service deploy/public-archive/crypto-pilot-public-archive.timer "$REMOTE_USER@$HOST:~/.config/systemd/user/"
+          # 아카이브 미러(호스트 타이머): 공개 아카이브 원본을 무손실 열 코덱으로 Drive에 증분 업로드.
+          ssh $SSH_OPTS "$REMOTE_USER@$HOST" "mkdir -p ~/crypto-pilot/deploy/archive-mirror ~/crypto-pilot/data/archive_mirror"
+          scp $SSH_OPTS deploy/archive-mirror/run.sh "$REMOTE_USER@$HOST:~/crypto-pilot/deploy/archive-mirror/run.sh.new"
+          scp $SSH_OPTS deploy/archive-mirror/crypto-pilot-archive-mirror.service deploy/archive-mirror/crypto-pilot-archive-mirror.timer "$REMOTE_USER@$HOST:~/.config/systemd/user/"
 
           # PAT/USER는 로컬에서 확장해 원격 스크립트에 주입(GitHub PAT 문자셋은 셸 안전).
           STAGE=remote
@@ -237,6 +241,8 @@ jobs:
           chmod +x ~/crypto-pilot/deploy/liveness/crypto-pilot-liveness.sh
           mv -f ~/crypto-pilot/deploy/public-archive/run.sh.new ~/crypto-pilot/deploy/public-archive/run.sh
           chmod +x ~/crypto-pilot/deploy/public-archive/run.sh
+          mv -f ~/crypto-pilot/deploy/archive-mirror/run.sh.new ~/crypto-pilot/deploy/archive-mirror/run.sh
+          chmod +x ~/crypto-pilot/deploy/archive-mirror/run.sh
           systemctl --user daemon-reload
           systemctl --user enable --now crypto-pilot-backup.timer
           systemctl --user enable --now crypto-pilot-liveness.timer
@@ -249,4 +255,5 @@ jobs:
           vps_stage verify
           vps_verify_stable 45 mhs-live-daemon market-normalizer
           systemctl --user enable --now crypto-pilot-public-archive.timer
+          systemctl --user enable --now crypto-pilot-archive-mirror.timer
           EOF

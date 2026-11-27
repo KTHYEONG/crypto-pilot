@@ -21,6 +21,8 @@
 + /live_capture/**
 # Derived public-archive mirror: dedicated 7-day-versioned step, never the data step.
 - /public_archive/**
+# The archive mirror has its own immutable uploader.
+- /archive_mirror/**
 # Exclude re-downloadable market data (ohlcv, funding) and any retired legacy feed dirs.
 - /futures/**
 # Exclude everything else by default.

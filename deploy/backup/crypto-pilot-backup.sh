@@ -71,7 +71,7 @@ archive_window() {
 # directly under LOG_DIR; regular files only (symlinks and directories are never touched).
 prune_ops_logs() {
   local cutoff family path base day normalized failed=0 summary=""
-  local -a families=(backup liveness public-archive)
+  local -a families=(backup liveness public-archive archive-mirror)
   if ! [[ "$OPS_LOG_RETENTION_DAYS" =~ ^[0-9]+$ ]] ||
     ! cutoff="$(date -u -d "$BACKUP_TODAY_UTC - $OPS_LOG_RETENTION_DAYS days" +%F)"; then
     log_line "[SYS] stage=gdrive_backup step=log_retention status=failed rc=1 reason=invalid_retention"
