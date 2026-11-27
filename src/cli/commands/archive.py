@@ -696,3 +696,5 @@ def add_archive_commands(archive_parser: argparse.ArgumentParser) -> None:
     imp.add_argument("--root", type=str, default=None)
     imp.add_argument("--lock-wait-s", type=float, default=1800.0)
     imp.set_defaults(handler=_run_import)
+    from src.cli.commands.archive_mirror import add_archive_mirror_commands
+    add_archive_mirror_commands(subparsers.add_parser("mirror", help="Lossless full-universe insurance mirror"))

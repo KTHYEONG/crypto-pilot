@@ -6,6 +6,7 @@ import zipfile
 import pandas as pd
 import pytest
 
+import src.market_data.binance.vision as vision_module
 from src.market_data.binance.vision import BinanceVisionDownloader
 
 
@@ -87,8 +88,8 @@ def test_s3_listing_parses_symbols(downloader, monkeypatch) -> None:
     ns = "http://s3.amazonaws.com/doc/2006-03-01/"
     body = (
         f'<ListBucketResult xmlns="{ns}">'.encode()
-        + b'<CommonPrefixes><Prefix>data/futures/um/daily/klines/ETHUSDT/</Prefix></CommonPrefixes>'
-        + b'</ListBucketResult>'
+        + b"<CommonPrefixes><Prefix>data/futures/um/daily/klines/ETHUSDT/</Prefix></CommonPrefixes>"
+        + b"</ListBucketResult>"
     )
     monkeypatch.setattr(downloader, "_read_url_bytes", lambda url, timeout=None: body)
     assert downloader.list_all_symbols() == ["ETHUSDT"]
@@ -153,9 +154,7 @@ def test_s3_listing_second_page_failure_returns_empty(downloader, monkeypatch) -
 
 def test_s3_listing_skips_foreign_and_empty_prefixes(downloader, monkeypatch) -> None:
     prefix = "data/futures/um/daily/klines/"
-    body = _vision_page(
-        [f"{prefix}AAAUSDT/", "data/futures/um/monthly/klines/BBBUSDT/", prefix], False
-    )
+    body = _vision_page([f"{prefix}AAAUSDT/", "data/futures/um/monthly/klines/BBBUSDT/", prefix], False)
     monkeypatch.setattr(downloader, "_read_url_bytes", lambda url, timeout=None: body)
     assert downloader.list_all_symbols() == ["AAAUSDT"]
 
@@ -190,3 +189,229 @@ def test_read_url_bytes_retries_then_succeeds(downloader, monkeypatch) -> None:
 
     assert downloader._read_url_bytes("https://data.binance.vision/x") == b"ok"
     assert attempts == 2
+
+
+_LISTING_NS = 'xmlns="http://s3.amazonaws.com/doc/2006-03-01/"'
+
+
+def test_list_objects_parses_etag_size(downloader, monkeypatch) -> None:
+    body = (
+        f"<ListBucketResult {_LISTING_NS}><IsTruncated>false</IsTruncated>"
+        "<Contents><Key>data/a.zip</Key><ETag>&quot;0123&quot;</ETag><Size>42</Size></Contents>"
+        "</ListBucketResult>"
+    ).encode()
+    monkeypatch.setattr(downloader, "_read_url_bytes", lambda url, timeout=None: body)
+
+    objects = downloader.list_objects(prefix="data/")
+
+    assert objects is not None
+    assert [(o.key, o.etag, o.size) for o in objects] == [("data/a.zip", "0123", 42)]
+
+
+def test_list_objects_fails_closed_on_missing_field(downloader, monkeypatch) -> None:
+    body = (
+        f"<ListBucketResult {_LISTING_NS}><IsTruncated>false</IsTruncated>"
+        "<Contents><Key>data/a.zip</Key><Size>42</Size></Contents>"
+        "</ListBucketResult>"
+    ).encode()
+    monkeypatch.setattr(downloader, "_read_url_bytes", lambda url, timeout=None: body)
+
+    assert downloader.list_objects(prefix="data/") is None
+
+
+class _FailingStream:
+    def __init__(self) -> None:
+        self._chunks = [b"abc", None]
+
+    def read(self, _size: int) -> bytes:
+        chunk = self._chunks.pop(0)
+        if chunk is None:
+            raise OSError("connection reset")
+        return chunk
+
+    def __enter__(self) -> _FailingStream:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+
+def test_download_object_atomic(downloader, monkeypatch, tmp_path) -> None:
+    import urllib.request
+
+    monkeypatch.setattr(downloader, "max_retries", 0)
+    monkeypatch.setattr(urllib.request, "urlopen", lambda url, timeout=None: _FailingStream())
+    dest = tmp_path / "obj.zip"
+
+    with pytest.raises(OSError, match="connection reset"):
+        downloader.download_object(key="data/futures/um/x y.zip", dest=dest)
+
+    assert not dest.exists()
+    assert not dest.with_name(dest.name + ".partial").exists()
+
+
+def test_download_object_404_false(downloader, monkeypatch, tmp_path) -> None:
+    import urllib.error
+    import urllib.request
+
+    def _missing(url, timeout=None):  # type: ignore[no-untyped-def]
+        raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
+
+    monkeypatch.setattr(urllib.request, "urlopen", _missing)
+    dest = tmp_path / "obj.zip"
+
+    assert downloader.download_object(key="data/missing.zip", dest=dest) is False
+    assert not dest.exists()
+
+
+class _Body:
+    def __init__(self, chunks: list[bytes | Exception]) -> None:
+        self._chunks = chunks
+
+    def read(self, _size: int) -> bytes:
+        item = self._chunks.pop(0) if self._chunks else b""
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    def __enter__(self) -> _Body:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+
+def test_download_object_streams_full_body(downloader, monkeypatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    import urllib.request
+
+    monkeypatch.setattr(urllib.request, "urlopen", lambda url, timeout=None: _Body([b"ab", b"cd"]))
+    dest = tmp_path / "nested" / "obj.zip"
+
+    assert downloader.download_object(key="data/futures/um/x y/z.zip", dest=dest) is True
+    assert dest.read_bytes() == b"abcd"
+    assert not dest.with_name(dest.name + ".partial").exists()
+
+
+def test_download_object_retries_retryable_http_error(downloader, monkeypatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    import urllib.error
+    import urllib.request
+
+    monkeypatch.setattr(downloader, "max_retries", 2)
+    monkeypatch.setattr(vision_module.time, "sleep", lambda seconds: None)
+    responses = [urllib.error.HTTPError("u", 503, "busy", {}, None), _Body([b"ok"])]
+
+    def _urlopen(url, timeout=None):  # type: ignore[no-untyped-def]
+        item = responses.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    monkeypatch.setattr(urllib.request, "urlopen", _urlopen)
+    dest = tmp_path / "obj.zip"
+
+    assert downloader.download_object(key="data/a.zip", dest=dest) is True
+    assert dest.read_bytes() == b"ok"
+
+
+def test_download_object_non_retryable_error_propagates(downloader, monkeypatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    import urllib.error
+    import urllib.request
+
+    def _forbidden(url, timeout=None):  # type: ignore[no-untyped-def]
+        raise urllib.error.HTTPError(url, 403, "Forbidden", {}, None)
+
+    monkeypatch.setattr(urllib.request, "urlopen", _forbidden)
+    with pytest.raises(urllib.error.HTTPError):
+        downloader.download_object(key="data/a.zip", dest=tmp_path / "a.zip")
+
+
+def test_list_object_keys_returns_sorted_keys(downloader, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    body = (
+        f"<ListBucketResult {_LISTING_NS}><IsTruncated>false</IsTruncated>"
+        "<Contents><Key>b.zip</Key></Contents><Contents><Key>a.zip</Key></Contents>"
+        "</ListBucketResult>"
+    ).encode()
+    monkeypatch.setattr(downloader, "_read_url_bytes", lambda url, timeout=None: body)
+
+    assert downloader.list_object_keys(prefix="") == ["a.zip", "b.zip"]
+
+
+def test_list_object_keys_failure_returns_none(downloader, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setattr(downloader, "_read_url_bytes", lambda url, timeout=None: b"<not-xml")
+    assert downloader.list_object_keys(prefix="") is None
+
+
+def test_list_objects_rejects_negative_size(downloader, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    body = (
+        f"<ListBucketResult {_LISTING_NS}><IsTruncated>false</IsTruncated>"
+        "<Contents><Key>a</Key><ETag>&quot;1&quot;</ETag><Size>-1</Size></Contents>"
+        "</ListBucketResult>"
+    ).encode()
+    monkeypatch.setattr(downloader, "_read_url_bytes", lambda url, timeout=None: body)
+    assert downloader.list_objects(prefix="") is None
+
+
+def test_list_objects_follows_pages_by_marker_and_last_key(downloader, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    pages = [
+        (
+            f"<ListBucketResult {_LISTING_NS}><IsTruncated>true</IsTruncated>"
+            "<Contents><Key>a.zip</Key><ETag>&quot;1&quot;</ETag><Size>1</Size></Contents>"
+            "</ListBucketResult>"
+        ).encode(),
+        (
+            f"<ListBucketResult {_LISTING_NS}><IsTruncated>true</IsTruncated>"
+            "<NextMarker>c.zip</NextMarker>"
+            "<Contents><Key>b.zip</Key><ETag>&quot;2&quot;</ETag><Size>2</Size></Contents>"
+            "</ListBucketResult>"
+        ).encode(),
+        (
+            f"<ListBucketResult {_LISTING_NS}><IsTruncated>false</IsTruncated>"
+            "<Contents><Key>c.zip</Key><ETag>&quot;3&quot;</ETag><Size>3</Size></Contents>"
+            "</ListBucketResult>"
+        ).encode(),
+    ]
+    urls: list[str] = []
+
+    def _read(url, timeout=None):  # type: ignore[no-untyped-def]
+        urls.append(url)
+        return pages.pop(0)
+
+    monkeypatch.setattr(downloader, "_read_url_bytes", _read)
+
+    objects = downloader.list_objects(prefix="")
+
+    assert objects is not None
+    assert [o.key for o in objects] == ["a.zip", "b.zip", "c.zip"]
+    assert "marker=a.zip" in urls[1]
+    assert "marker=c.zip" in urls[2]
+
+
+def test_list_objects_stalled_marker_fails_closed(downloader, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    page = (
+        f"<ListBucketResult {_LISTING_NS}><IsTruncated>true</IsTruncated>"
+        "<Contents><Key>a.zip</Key><ETag>&quot;1&quot;</ETag><Size>1</Size></Contents>"
+        "</ListBucketResult>"
+    ).encode()
+    monkeypatch.setattr(downloader, "_read_url_bytes", lambda url, timeout=None: page)
+    assert downloader.list_objects(prefix="") is None
+
+
+def test_download_object_retries_network_error(downloader, monkeypatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    import urllib.error
+    import urllib.request
+
+    monkeypatch.setattr(downloader, "max_retries", 1)
+    monkeypatch.setattr(vision_module.time, "sleep", lambda seconds: None)
+    responses: list[object] = [urllib.error.URLError("reset"), _Body([b"ok"])]
+
+    def _urlopen(url, timeout=None):  # type: ignore[no-untyped-def]
+        item = responses.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    monkeypatch.setattr(urllib.request, "urlopen", _urlopen)
+    dest = tmp_path / "obj.zip"
+
+    assert downloader.download_object(key="data/a.zip", dest=dest) is True
+    assert dest.read_bytes() == b"ok"

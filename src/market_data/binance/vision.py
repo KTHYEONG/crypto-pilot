@@ -1,3 +1,4 @@
+import http.client
 import io
 import logging
 import os
@@ -7,12 +8,35 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
+from collections.abc import Iterator
+from dataclasses import dataclass
 from datetime import datetime
 from email.utils import parsedate_to_datetime
+from pathlib import Path
 from typing import cast
 from xml.etree import ElementTree
 
 import pandas as pd
+
+_S3_NS = "{http://s3.amazonaws.com/doc/2006-03-01/}"
+_DOWNLOAD_CHUNK_BYTES = 1 << 20
+
+
+@dataclass(frozen=True, slots=True)
+class BucketObject:
+    key: str
+    etag: str
+    size: int
+
+
+def _child_text(element: ElementTree.Element, tag: str) -> str:
+    node = element.find(tag)
+    return (node.text or "").strip() if node is not None else ""
+
+
+def _is_truncated(root: ElementTree.Element) -> bool:
+    node = root.find(f".//{_S3_NS}IsTruncated")
+    return node is not None and (node.text or "").strip().lower() == "true"
 
 
 class BinanceVisionDownloader:
@@ -233,45 +257,109 @@ class BinanceVisionDownloader:
 
     def list_object_keys(self, *, prefix: str, timeout: int | None = None) -> list[str] | None:
         """List all object keys, returning None on listing failure."""
-        ns = "{http://s3.amazonaws.com/doc/2006-03-01/}"
-        keys: list[str] = []
-        marker: str | None = None
+        ns = _S3_NS
         try:
-            while True:
-                params: dict[str, str] = {"prefix": prefix}
-                if marker is not None:
-                    params["marker"] = marker
-                query = urllib.parse.urlencode(params)
-                url = f"{self.S3_LISTING_URL}?{query}"
-                body = self._read_url_bytes(url, timeout=timeout)
-                root = ElementTree.fromstring(body)  # noqa: S314
-                page_keys: list[str] = [
-                    (node.text or "").strip()
-                    for node in root.findall(f".//{ns}Key")
-                    if (node.text or "").strip()
-                ]
-                keys.extend(page_keys)
-                truncated_node = root.find(f".//{ns}IsTruncated")
-                is_truncated = (
-                    truncated_node is not None
-                    and (truncated_node.text or "").strip().lower() == "true"
-                )
-                if not is_truncated:
-                    break
-                next_marker_node = root.find(f".//{ns}NextMarker")
-                next_marker = (
-                    (next_marker_node.text or "").strip()
-                    if next_marker_node is not None and next_marker_node.text
-                    else ""
-                )
-                candidate = next_marker or (page_keys[-1] if page_keys else "")
-                if not candidate or (marker is not None and candidate <= marker):
-                    return None
-                marker = candidate
+            keys = [
+                (node.text or "").strip()
+                for root in self._listing_pages(prefix=prefix, timeout=timeout)
+                for node in root.findall(f".//{ns}Key")
+                if (node.text or "").strip()
+            ]
             return sorted(set(keys))
         except (urllib.error.URLError, OSError, ElementTree.ParseError, ValueError) as e:
             self.logger.warning("Failed to list object keys for prefix %s: %s", prefix, e)
             return None
+
+    def list_objects(self, *, prefix: str, timeout: int | None = None) -> list[BucketObject] | None:
+        """List objects with ETag and size, returning None on any listing or entry failure."""
+        ns = _S3_NS
+        try:
+            objects: set[BucketObject] = set()
+            for root in self._listing_pages(prefix=prefix, timeout=timeout):
+                for contents in root.findall(f".//{ns}Contents"):
+                    key = _child_text(contents, f"{ns}Key")
+                    etag = _child_text(contents, f"{ns}ETag").strip('"')
+                    size_text = _child_text(contents, f"{ns}Size")
+                    if not key or not etag or not size_text:
+                        raise ValueError(f"incomplete listing entry for {prefix}")
+                    size = int(size_text)
+                    if size < 0:
+                        raise ValueError(f"negative size for {key}")
+                    objects.add(BucketObject(key=key, etag=etag, size=size))
+            return sorted(objects, key=lambda obj: obj.key)
+        except (urllib.error.URLError, OSError, ElementTree.ParseError, ValueError, http.client.HTTPException) as e:
+            self.logger.warning("Failed to list objects for prefix %s: %s", prefix, e)
+            return None
+
+    def download_object(self, *, key: str, dest: Path, timeout: int | None = None) -> bool:
+        """Stream one bucket object to ``dest``; returns False when the key does not exist."""
+        url = f"{self.S3_LISTING_URL}/{'/'.join(urllib.parse.quote(part) for part in key.split('/'))}"
+        partial = dest.with_name(dest.name + ".partial")
+        timeout_seconds = timeout or self.DEFAULT_TIMEOUT_SECONDS
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        attempt = 0
+        while True:
+            try:
+                with self._request_semaphore:
+                    self._wait_for_turn()
+                    with (
+                        urllib.request.urlopen(url, timeout=timeout_seconds) as response,  # noqa: S310
+                        partial.open("wb") as out,
+                    ):
+                        while chunk := response.read(_DOWNLOAD_CHUNK_BYTES):
+                            out.write(chunk)
+                os.replace(partial, dest)
+                return True
+            except urllib.error.HTTPError as http_error:
+                partial.unlink(missing_ok=True)
+                if http_error.code == 404:
+                    return False
+                if not self._is_retryable_http_error(http_error) or attempt >= self.max_retries:
+                    raise
+                backoff = self._compute_backoff_seconds(attempt, http_error=http_error)
+                self.logger.warning(
+                    "Retryable HTTP error %s for %s (attempt %s/%s), backoff %.2fs",
+                    http_error.code,
+                    url,
+                    attempt + 1,
+                    self.max_retries + 1,
+                    backoff,
+                )
+            except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException):
+                partial.unlink(missing_ok=True)
+                if attempt >= self.max_retries:
+                    raise
+                backoff = self._compute_backoff_seconds(attempt)
+                self.logger.warning(
+                    "Network error streaming %s (attempt %s/%s); backoff %.2fs",
+                    url,
+                    attempt + 1,
+                    self.max_retries + 1,
+                    backoff,
+                )
+            attempt += 1
+            time.sleep(backoff)
+
+    def _listing_pages(self, *, prefix: str, timeout: int | None) -> Iterator[ElementTree.Element]:
+        """Yield each S3 ListObjects page for ``prefix``; raises on a transport or stalled-marker failure."""
+        marker: str | None = None
+        while True:
+            params: dict[str, str] = {"prefix": prefix}
+            if marker is not None:
+                params["marker"] = marker
+            url = f"{self.S3_LISTING_URL}?{urllib.parse.urlencode(params)}"
+            root = ElementTree.fromstring(self._read_url_bytes(url, timeout=timeout))  # noqa: S314
+            yield root
+            if not _is_truncated(root):
+                return
+            next_marker_node = root.find(f".//{_S3_NS}NextMarker")
+            candidate = (next_marker_node.text or "").strip() if next_marker_node is not None else ""
+            if not candidate:
+                page_keys = [(node.text or "").strip() for node in root.findall(f".//{_S3_NS}Key")]
+                candidate = next((key for key in reversed(page_keys) if key), "")
+            if not candidate or (marker is not None and candidate <= marker):
+                raise ValueError(f"listing marker did not advance for prefix {prefix}")
+            marker = candidate
 
     def list_symbols_from_s3_xml_listing(
         self,
@@ -305,14 +393,11 @@ class BinanceVisionDownloader:
                 for prefix in page_prefixes:
                     if not prefix.startswith(dataset_prefix):
                         continue
-                    remain = prefix[len(dataset_prefix):].strip("/")
+                    remain = prefix[len(dataset_prefix) :].strip("/")
                     if remain:
                         symbols.add(remain.split("/")[0])
                 truncated_node = root.find(f".//{ns}IsTruncated")
-                is_truncated = (
-                    truncated_node is not None
-                    and (truncated_node.text or "").strip().lower() == "true"
-                )
+                is_truncated = truncated_node is not None and (truncated_node.text or "").strip().lower() == "true"
                 if not is_truncated or not page_prefixes:
                     break
                 next_marker_node = root.find(f".//{ns}NextMarker")
