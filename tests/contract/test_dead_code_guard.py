@@ -226,7 +226,8 @@ RETIRED_SYMBOLS: Final[tuple[tuple[str, str], ...]] = (
     ("src.lab.mhs.pipeline.stages.committee", "QUALIFICATION_END"),
 )
 RETIRED_LITERALS: Final[tuple[tuple[str, frozenset[str]], ...]] = (
-    ("markPriceKlines", frozenset({"src/application/ops/gdrive_cleanup.py"})),
+    # The insurance mirror names the upstream Vision dataset; it does not revive the retired mark dependency.
+    ("markPriceKlines", frozenset({"src/application/ops/gdrive_cleanup.py", "src/market_data/mirror/datasets.py"})),
 )
 CROSS_PACKAGE_PRIVATE_ALLOWLIST: Final[frozenset[tuple[str, str, str]]] = frozenset(
     {
