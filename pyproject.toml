@@ -8,14 +8,14 @@ dependencies = [
     "numpy>=2.0.0",
     "pandas>=2.2.0",
     "pyarrow>=15.0.0",
-    "ccxt>=4.5.0",
+    "ccxt>=4.5.94",
     "python-dotenv>=1.0.0",
     "scipy>=1.13.0",
     "tenacity>=8.5.0",
     "psutil>=6.0.0",
     "tqdm>=4.67.0",
-    "pydantic>=2.0.0",
-    "pydantic-settings>=2.0.0",
+    "pydantic>=2.14.4",
+    "pydantic-settings>=2.16.3",
     "cryptography>=42.0.0",
     "lightgbm>=4.5,<5",
 ]
@@ -140,9 +140,9 @@ filterwarnings = [
 
 [dependency-groups]
 dev = [
-    "mypy>=2.0.0",
+    "mypy>=2.4.1",
     "pytest-cov>=7.1.0",
     "pytest-timeout>=2.4.0",
     "pytest-xdist>=3.8.0",
-    "ruff>=0.15.12",
+    "ruff>=0.17.6",
 ]
