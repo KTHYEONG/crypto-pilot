@@ -20,6 +20,7 @@ IMAGE="${CRYPTO_IMAGE:-ghcr.io/kthyeong/crypto-pilot-live:latest}"
 UID_N="$(id -u)"
 GID_N="$(id -g)"
 OWNED_PATHS=(data logs deploy/mhs)
+FIND_ATTEMPTS=3
 
 if [ "$UID_N" = "0" ]; then
   echo "crypto-ownership-fixup mode=${MODE} status=refused reason=root_caller" >&2
@@ -33,14 +34,20 @@ existing_paths() {
   done
 }
 
+# Live writers delete temp entries mid-walk, so a failed walk is retried and only a successful walk's
+# output counts. Do not add -ignore_readdir_race: a vanished entry then matches "! -user" (false foreign).
 has_foreign() {
-  local out rc=0
-  out="$(find "$1" \( ! -user "$UID_N" -o ! -group "$GID_N" \) -print -quit 2>/dev/null)" || rc=$?
-  if [ "$rc" -ne 0 ]; then
-    echo "crypto-ownership-fixup mode=${MODE} status=error reason=find_failed" >&2
-    exit 2
-  fi
-  [ -n "$out" ]
+  local out rc attempt
+  for ((attempt = 1; attempt <= FIND_ATTEMPTS; attempt++)); do
+    rc=0
+    out="$(find "$1" \( ! -user "$UID_N" -o ! -group "$GID_N" \) -print -quit 2>/dev/null)" || rc=$?
+    if [ "$rc" -eq 0 ]; then
+      [ -n "$out" ]
+      return
+    fi
+  done
+  echo "crypto-ownership-fixup mode=${MODE} status=error reason=find_failed" >&2
+  exit 2
 }
 
 foreign_paths() {
